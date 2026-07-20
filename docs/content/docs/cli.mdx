@@ -20,7 +20,19 @@ brew tap t8y2/dbx
 brew install dbx-cli
 ```
 
-Requires Node.js 22.13.0 or newer.
+Node.js 18.18.0 or newer is required for the npm launcher. The CLI itself does not depend on `better-sqlite3` or a Node.js native-module ABI. Homebrew users do not need to manage Node.js separately.
+
+### Standalone native binary
+
+The `packages-v*` GitHub Release provides native CLI archives for macOS, Linux, and Windows. Download the archive matching your platform, verify it with `CLI-SHA256SUMS`, extract it, and run `dbx` directly. Standalone binaries do not require Node.js.
+
+```bash
+tar -xzf dbx-cli-linux-x64-gnu.tar.gz
+chmod +x dbx
+./dbx --version
+```
+
+Set `DBX_DATA_DIR` when using a custom or portable DBX data directory.
 
 Check the installed version:
 
@@ -54,13 +66,7 @@ dbx doctor
 dbx doctor --json
 ```
 
-If `dbx doctor` reports a `NODE_MODULE_VERSION` mismatch after switching Node.js versions, rebuild the native dependencies with the Node.js version you use to run `dbx`:
-
-```bash
-pnpm rebuild better-sqlite3 keytar --pending
-```
-
-For global npm installs, reinstall the CLI with the same Node.js version:
+If the optional platform package was not installed, reinstall without `--no-optional`:
 
 ```bash
 npm uninstall -g @dbx-app/cli
@@ -74,7 +80,7 @@ dbx capabilities
 dbx capabilities --json
 ```
 
-Direct execution currently supports PostgreSQL/Redshift, MySQL-compatible databases (MySQL, Doris, StarRocks), and SQLite. Other database types use the DBX Desktop bridge until their drivers are added to `@dbx-app/node-core`.
+Direct execution currently supports PostgreSQL/Redshift, MySQL-compatible databases (MySQL, Doris, StarRocks), and SQLite. Other database types use the DBX Desktop bridge or DBX Agent/JDBC infrastructure.
 
 ## Default Connection
 

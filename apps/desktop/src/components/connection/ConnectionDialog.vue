@@ -21,7 +21,7 @@ import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stor
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
-import { connectionEditDraftSyncAction } from "./connectionEditDraftSync";
+import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from "./connectionEditDraftSync";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -1364,12 +1364,35 @@ function applySuccessfulConnectionTest(result: ConnectionTestResult, config: Con
   testedGeneratedName.value = config.name;
 }
 
-async function persistSuccessfulConnectionTest(result: ConnectionTestResult, config: ConnectionConfig, sourceName: string) {
+async function persistSuccessfulConnectionTest(result: ConnectionTestResult, config: ConnectionConfig, sourceName: string, runId: number) {
   if (!editingId.value || !result.databaseInfo || !savedConnectionConfigFingerprint.value) return;
   const fingerprint = connectionConfigFingerprint(config, sourceName);
-  if (fingerprint !== savedConnectionConfigFingerprint.value) return;
+  let currentDraftFingerprint: string;
   try {
-    await store.updateConnectionDatabaseInfo(editingId.value, result.databaseInfo);
+    const currentDraft = connectionConfigForSubmit(editingId.value, form.value.name);
+    currentDraftFingerprint = connectionConfigFingerprint(currentDraft, form.value.name);
+  } catch {
+    return;
+  }
+  // An in-flight test must not publish its saved snapshot after the user edits,
+  // switches, or closes the draft that initiated it.
+  if (
+    !canPersistConnectionTestResult({
+      testConfigId: config.id,
+      activeDraftId: editingId.value,
+      testRunId: runId,
+      activeTestRunId: testRunId,
+      submittedFingerprint: fingerprint,
+      savedFingerprint: savedConnectionConfigFingerprint.value,
+      currentDraftFingerprint,
+    })
+  ) {
+    return;
+  }
+  const persistedDraftId = editingId.value;
+  try {
+    await store.updateConnectionDatabaseInfo(persistedDraftId, result.databaseInfo);
+    if (runId !== testRunId || editingId.value !== persistedDraftId) return;
     savedDatabaseInfo.value = { ...result.databaseInfo };
     savedDatabaseInfoFingerprint.value = fingerprint;
   } catch {
@@ -2442,7 +2465,7 @@ async function testConnection() {
       successfulConfig = connectionConfigForSubmit(config.id, config.name);
     }
     applySuccessfulConnectionTest(result, successfulConfig, submittedSourceName);
-    void persistSuccessfulConnectionTest(result, successfulConfig, submittedSourceName);
+    void persistSuccessfulConnectionTest(result, successfulConfig, submittedSourceName, runId);
     clearEditedConnectionErrorAfterSuccessfulTest();
   } catch (e: any) {
     if (runId !== testRunId) return;
@@ -2456,7 +2479,7 @@ async function testConnection() {
     }
     if (fallback) {
       applySuccessfulConnectionTest(fallback.result, fallback.config, submittedSourceName);
-      void persistSuccessfulConnectionTest(fallback.result, fallback.config, submittedSourceName);
+      void persistSuccessfulConnectionTest(fallback.result, fallback.config, submittedSourceName, runId);
       clearEditedConnectionErrorAfterSuccessfulTest();
     } else {
       clearTestedConnectionInfo();

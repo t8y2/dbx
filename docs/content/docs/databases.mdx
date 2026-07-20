@@ -87,6 +87,10 @@ The connection dialog exposes ready-to-use profiles with default ports and drive
 
 <Callout type="info">SQLite, DuckDB, Access, and JDBC profiles use port `0` in the saved connection model when a network port is not part of the connection.</Callout>
 
+## Local database test environments
+
+DBX maintains pinned, reproducible Docker Compose recipes for ClickHouse, MariaDB, MongoDB, MySQL, PostgreSQL, and Redis. Use them when you need a clean local instance to test a connection, driver behavior, or a bug fix. See the [Database Test Lab](/en/docs/database-lab) for commands, safe defaults, and the supported versions.
+
 ## Feature Matrix
 
 DBX intentionally enables advanced workflows only where the app has enough metadata and SQL-generation support.

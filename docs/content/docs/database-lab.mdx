@@ -1,0 +1,109 @@
+---
+title: Database Test Lab
+description: Start reproducible, local database instances for DBX development and verification.
+---
+
+The Database Test Lab provides small, pinned Docker Compose environments for testing DBX against real database versions. Every recipe uses a named data volume, a health check, initialization data or smoke data created during verification, and listens on `127.0.0.1` by default.
+
+<Callout type="warning">The default password is `123456`, but ports are accessible only from the local host by default. To allow remote access, explicitly set `DB_BIND_ADDRESS=0.0.0.0`, change `DB_PASSWORD`, and apply your normal firewall controls. These environments are for development, not production deployment.</Callout>
+
+## Available recipes
+
+| Database | Version directory | Official Docker Hub image | CNB image used by Compose | Default host port | Container name |
+| --- | --- | --- | --- | ---: | --- |
+| ClickHouse | `clickhouse/24.8` | `clickhouse/clickhouse-server:24.8.14.39` | `docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39` | `8124` | `dbx-clickhouse-24.8` |
+| MariaDB | `mariadb/10.11` | `mariadb:10.11.11` | `docker.cnb.cool/znb/images/mariadb:10.11.11` | `3307` | `dbx-mariadb-10.11` |
+| MongoDB | `mongodb/5.0` | `mongo:5.0.5` | `docker.cnb.cool/znb/images/mongo:5.0.5` | `27018` | `dbx-mongodb-5.0` |
+| MongoDB | `mongodb/8.2` | `mongo:8.2.3-noble` | `docker.cnb.cool/znb/images/mongo:8.2.3-noble` | `27018` | `dbx-mongodb-8.2` |
+| MySQL | `mysql/5.7` | `mysql:5.7.44` | `docker.cnb.cool/znb/images/mysql:5.7.44` | `3307` | `dbx-mysql-5.7` |
+| MySQL | `mysql/8.4` | `mysql:8.4.6` | `docker.cnb.cool/znb/images/mysql:8.4.6` | `3307` | `dbx-mysql-8.4` |
+| PostgreSQL | `postgresql/14.23` | `postgres:14.23` | `docker.cnb.cool/znb/images/postgres:14.23` | `5433` | `dbx-postgresql-14.23` |
+| PostgreSQL | `postgresql/17.4` | `postgres:17.4` | `docker.cnb.cool/znb/images/postgres:17.4` | `5433` | `dbx-postgresql-17.4` |
+| Redis | `redis/3.0.7` | `redis:3.0.7-alpine` | `docker.cnb.cool/znb/images/redis:3.0.7-alpine` | `6380` | `dbx-redis-3.0.7` |
+| Redis | `redis/7.4` | `redis:7.4.9-alpine` | `docker.cnb.cool/znb/images/redis:7.4.9-alpine` | `6380` | `dbx-redis-7.4` |
+
+Every network recipe uses a host port one greater than the database standard port, and the recipe validator enforces that contract. The default password is `123456`, and the default database is `dbx`. Redis has no named databases, so it uses DB 0 with a `dbx:` smoke-key prefix. Compose uses the CNB image column; the Docker Hub column preserves the official upstream reference for provenance and direct pulls. Redis 3.0.7 is amd64-only; on arm64 hosts the command prints an architecture warning and Docker uses emulation. Every other recipe supports both amd64 and arm64.
+
+Redis 3.0.7 and Redis 7.4.9 intentionally cover the compatibility endpoints. Redis 3 predates ACLs, RESP3, Streams, and many modern commands, while Redis 7 covers the current protocol and command set. Keeping 6.2 and 7.4 together would provide less compatibility coverage for this lab.
+
+Versions of the same product intentionally share that default host port. Start them one at a time, or give one version another port when comparing versions concurrently:
+
+```bash
+DB_PORT=13307 make db DB=mysql@5.7
+make db DB=mysql@8.4
+```
+
+## Start and verify an environment
+
+Run commands from the repository root. List the available recipes, then choose a database and version:
+
+```bash
+make db
+make db-list
+make db DB=postgresql@17.4
+make db-verify DB=postgresql@17.4
+```
+
+`make db` without parameters prints every currently supported copy-and-paste start command, plus optional parameters. With `DB=product@version`, it waits for the Compose health check and prints the DBX connection fields. `db-verify` also runs the recipe's smoke command inside the database container and checks its expected output. It is the preferred command before reporting a database-specific fix.
+
+## Commands and variables
+
+| Make target | Purpose |
+| --- | --- |
+| `make db-list` | List database versions, images, and supported platforms |
+| `make db DB=product@version` | Create, wait for, and print the connection fields |
+| `make db-verify DB=product@version` | Start and run smoke checks |
+| `make db-down DB=product@version` | Stop the environment while keeping its data volume |
+| `make db-reset DB=product@version CONFIRM=1` | Delete the environment and its data volume |
+| `make db-check` | Validate every recipe and Compose file |
+
+`DB_BIND_ADDRESS` changes the host-side bind address, `DB_PORT` changes the host-side port, and `DB_PASSWORD` changes the default password. For example:
+
+```bash
+DB_PORT=13306 DB_PASSWORD=local-secret make db-verify DB=mysql@8.4
+```
+
+Remote access must be enabled explicitly:
+
+```bash
+DB_BIND_ADDRESS=0.0.0.0 DB_PASSWORD=local-secret make db DB=mysql@8.4
+```
+
+`db-reset` is intentionally guarded: it will not remove a named volume unless `CONFIRM=1` is set. Redis has no image initialization-directory convention; its `init/README.md` documents the smoke key created and read by `verify`. The lower-level `info`, `status`, `logs`, and `shell` commands remain available as `pnpm db:env -- <command> <product> <version>` when needed for diagnosis.
+
+## Tab completion
+
+The repository includes dynamic completion for Make targets and `DB=product@version` values. It reads the current recipe directories, so newly added versions appear without editing the completion scripts.
+
+```bash
+# Bash
+source deploy/database/completion/dbx-make.bash
+
+# Zsh
+autoload -Uz compinit && compinit
+source deploy/database/completion/_dbx-make.zsh
+
+# PowerShell
+. .\deploy\database\completion\Dbx.Make.ps1
+```
+
+Run `make db-completion` to print these commands. After sourcing the appropriate file, press Tab after `make db DB=` to select a recipe. The Make targets themselves avoid POSIX-shell conditionals, so they work with GNU Make in PowerShell, Git Bash, or WSL; Docker Desktop and Node.js/pnpm must be available.
+
+## Add a recipe
+
+Add a directory under `deploy/database/<product>/<version>/` containing:
+
+```text
+recipe.json
+compose.yaml
+init/
+```
+
+`recipe.json` supplies the DBX connection fields and smoke command array. Do not use a shell string for smoke checks: commands execute as argument arrays. Compose files must pin an image, use a named volume and health check, default port bindings to `${DB_BIND_ADDRESS:-127.0.0.1}`, and set `container_name` to `dbx-<product>-<version>`.
+
+Finish by running:
+
+```bash
+pnpm test:db-env
+make db-check
+```

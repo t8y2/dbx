@@ -182,6 +182,19 @@ pnpm tauri dev -- --no-default-features
 
 如果端口 `1420` 已被占用，先关闭旧的 DBX/Vite 开发进程再重新启动。
 
+## 本地数据库测试环境
+
+涉及数据库驱动、连接流程、元数据查询或数据库专用 UI 的改动，应尽可能通过真实实例验证。仓库为此提供了固定版本的本地 Docker Compose 配方：
+
+```bash
+make db-list
+make db DB=mysql@8.4
+make db-verify DB=mysql@8.4
+make db-down DB=mysql@8.4
+```
+
+服务端口默认监听 `127.0.0.1`；在共享网络中暴露主机前，请设置 `DB_BIND_ADDRESS=0.0.0.0`、使用强 `DB_PASSWORD` 并配置防火墙。所有支持的配方、覆盖变量和重置安全要求请参阅[数据库测试实验室](/cn/docs/database-lab)。
+
 ## 5. 认识项目结构
 
 | 路径 | 适合修改的内容 |

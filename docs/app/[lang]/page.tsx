@@ -594,7 +594,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
 
       {/* Contributors */}
       <RevealSection className="max-w-[1180px] mx-auto px-7 pt-[70px] pb-1 max-[760px]:px-[18px]">
-        <ContributorsWallContent contributors={contributors} title={t.contributorsTitle} desc={t.contributorsDesc} />
+        <ContributorsWallContent contributors={contributors} title={t.contributorsTitle} desc={t.contributorsDesc} lang={l} />
       </RevealSection>
 
       {/* Updates */}

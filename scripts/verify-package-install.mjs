@@ -5,8 +5,6 @@ import { spawnSync } from "node:child_process";
 
 const packageDirectory = resolve(process.argv[2] ?? "/tmp/dbx-pack-check");
 const expectedPackages = [
-  "@dbx-app/mongo-shell",
-  "@dbx-app/node-core",
   "@dbx-app/cli",
   "@dbx-app/mcp-server",
 ];

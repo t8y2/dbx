@@ -64,7 +64,7 @@ For a real local Java agent test, build the target `shadowJar`, back up and repl
 | `crates/dbx-web/` | Docker / Web HTTP backend |
 | `packages/cli/` | `@dbx-app/cli` |
 | `packages/mcp-server/` | `@dbx-app/mcp-server` |
-| `packages/node-core/` | Shared Node.js bridge and direct-query logic |
+| `packages/mongo-shell/` | Private MongoDB editor parsing helpers |
 | `docs/` | Official documentation site |
 | `examples/` | Sample configs and automation scripts |
 | `agents/` | JDBC agent driver projects |

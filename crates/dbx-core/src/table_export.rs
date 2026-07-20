@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::connection::MysqlMode;
 use crate::connection::{config_for_pool_key, task_client_session_id, AppState, PoolKind};
-use crate::csv_export::{escape_csv, format_csv, format_tsv, format_tsv_rows, value_to_csv_text};
+use crate::csv_export::{format_csv, format_tsv, format_tsv_rows, push_csv_text_value};
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
     build_export_insert_statements, is_export_cancelled, is_internal_export_column, BuildExportInsertStatementsOptions,
@@ -75,10 +75,21 @@ pub struct TableExportProgress {
 /// Format rows as CSV text without a header row.
 /// Used for streaming subsequent pagination batches.
 fn format_csv_rows(rows: &[Vec<Value>]) -> String {
-    rows.iter()
-        .map(|row| row.iter().map(|cell| escape_csv(&value_to_csv_text(cell))).collect::<Vec<_>>().join(","))
-        .collect::<Vec<_>>()
-        .join("\n")
+    // 注意：该无表头批次路径的 Null 输出为 ""（带引号空串），与查询结果导出
+    // 及首批 format_csv 的裸空单元格语义不同，直写化必须保留该差异
+    let mut out = String::with_capacity(crate::csv_export::estimated_rows_capacity(rows));
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index > 0 {
+            out.push('\n');
+        }
+        for (cell_index, cell) in row.iter().enumerate() {
+            if cell_index > 0 {
+                out.push(',');
+            }
+            push_csv_text_value(&mut out, cell);
+        }
+    }
+    out
 }
 
 fn export_column_types(request: &TableExportRequest) -> Vec<String> {

@@ -338,6 +338,13 @@ make docs
 
 DBX 官网文档位于 `docs/` 目录。如果你想贡献官网内容或文档页面，请修改 `docs/` 下的文件，并运行 `make docs` 在本地预览文档站。
 
+需要干净、可重复创建的本地数据库实例时，可使用 [`deploy/database/`](deploy/database/README.zh-CN.md) 下的带版本 Docker Compose 配方：
+
+```bash
+make db-list
+make db-verify DB=mysql@8.4
+```
+
 JDBC Agent 驱动开发工程位于 `agents/` 目录：
 
 ```bash
@@ -368,6 +375,7 @@ make package
 ## 文档
 
 - [官方文档](https://dbxio.com/cn/docs/what-is-dbx) — 功能说明与使用教程
+- [数据库测试实验室](https://dbxio.com/cn/docs/database-lab) — 用于开发和验证的本地数据库配方
 - [贡献指南](CONTRIBUTING.zh-CN.md) — 如何认领 Issue 并提交 PR
 - [Web API 参考](docs/content/docs/web-api.cn.mdx) — Docker/Web 部署的 HTTP API
 - [示例代码](examples/) — CLI、MCP、Docker 与 API 示例

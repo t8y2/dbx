@@ -7,11 +7,16 @@ use crate::types::{
 use futures::{FutureExt, TryStreamExt};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tiberius::{AuthMethod, Client, ColumnData, Config, FromSql, QueryItem, QueryStream, SqlBrowser};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
+use tracing_subscriber::Layer;
 
 pub type SqlServerClient = Client<Compat<TcpStream>>;
 pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
@@ -198,6 +203,98 @@ fn sqlserver_column_type_name(column: &tiberius::Column) -> String {
 
 fn column_types_from_metadata(metadata: &tiberius::ResultMetadata) -> Vec<String> {
     metadata.columns().iter().map(sqlserver_column_type_name).collect()
+}
+
+const SQLSERVER_MESSAGE_COLUMN: &str = "Message";
+// Tiberius 0.12.3 emits both user-visible INFO tokens and internal ENVCHANGE
+// tokens at the same tracing target/level. Keep only the TokenInfo callsite;
+// update this guard together with the pinned driver when Tiberius is upgraded.
+const TIBERIUS_INFO_TOKEN_EVENT_LINE: u32 = 194;
+
+#[derive(Clone, Default)]
+struct SqlServerMessageLayer {
+    messages: StdArc<StdMutex<Vec<String>>>,
+}
+
+impl<S> Layer<S> for SqlServerMessageLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
+        let metadata = event.metadata();
+        if metadata.level() != &Level::INFO
+            || metadata.target() != "tiberius::tds::stream::token"
+            || metadata.line() != Some(TIBERIUS_INFO_TOKEN_EVENT_LINE)
+        {
+            return;
+        }
+
+        let mut visitor = SqlServerMessageVisitor::default();
+        event.record(&mut visitor);
+        if let Some(message) = visitor.message.filter(|message| !message.trim().is_empty()) {
+            if let Ok(mut messages) = self.messages.lock() {
+                messages.push(message);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct SqlServerMessageVisitor {
+    message: Option<String>,
+}
+
+impl tracing::field::Visit for SqlServerMessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{value:?}").trim_matches('"').to_string());
+        }
+    }
+}
+
+async fn capture_sqlserver_messages<F, T>(future: F) -> (T, Vec<String>)
+where
+    F: Future<Output = T>,
+{
+    let layer = SqlServerMessageLayer::default();
+    let messages = layer.messages.clone();
+    // Tiberius consumes TDS INFO tokens internally and exposes them only as
+    // tracing events. Scope collection to this future to isolate connections.
+    let output = future.with_subscriber(tracing_subscriber::registry().with(layer)).await;
+    let messages = messages.lock().map(|messages| messages.clone()).unwrap_or_default();
+    (output, messages)
+}
+
+fn query_result_with_server_messages(mut result: QueryResult, messages: Vec<String>) -> QueryResult {
+    if messages.is_empty() || !result.columns.is_empty() || !result.rows.is_empty() {
+        return result;
+    }
+
+    result.columns = vec![SQLSERVER_MESSAGE_COLUMN.to_string()];
+    result.column_types = vec!["nvarchar".to_string()];
+    result.rows = messages.into_iter().map(|message| vec![serde_json::Value::String(message)]).collect();
+    result
+}
+
+fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option<QueryResult> {
+    if messages.is_empty() {
+        return None;
+    }
+
+    Some(query_result_with_server_messages(
+        QueryResult {
+            columns: vec![],
+            column_types: vec![],
+            column_sortables: vec![],
+            rows: vec![],
+            affected_rows: 0,
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        },
+        messages,
+    ))
 }
 
 async fn collect_first_result_limited(
@@ -1688,37 +1785,52 @@ pub async fn execute_query_with_max_rows(
             Ok(Some(sql)) => sql,
             Ok(None) | Err(_) => sql.to_string(),
         };
-        let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
-        let mut result = sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await?;
+        let (result, messages) = capture_sqlserver_messages(async {
+            let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
+            sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await
+        })
+        .await;
+        let mut result = query_result_with_server_messages(result?, messages);
         strip_dbx_sqlserver_row_number_column(&mut result, sql);
         Ok(result)
     } else if requires_simple_query_batch(sql) || contains_transaction_control(sql) {
-        let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
-        let _ = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
-        Ok(QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            rows: vec![],
-            affected_rows: 0,
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
+        let (result, messages) = capture_sqlserver_messages(async {
+            let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
+            sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await
         })
+        .await;
+        let _ = result?;
+        Ok(query_result_with_server_messages(
+            QueryResult {
+                columns: vec![],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows: vec![],
+                affected_rows: 0,
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            },
+            messages,
+        ))
     } else {
-        let result = sqlserver_driver_result(client.execute(sql, &[])).await?;
-        Ok(QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            rows: vec![],
-            affected_rows: result.rows_affected().iter().sum::<u64>(),
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
-        })
+        let (result, messages) = capture_sqlserver_messages(sqlserver_driver_result(client.execute(sql, &[]))).await;
+        let result = result?;
+        Ok(query_result_with_server_messages(
+            QueryResult {
+                columns: vec![],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows: vec![],
+                affected_rows: result.rows_affected().iter().sum::<u64>(),
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            },
+            messages,
+        ))
     }
 }
 
@@ -1733,29 +1845,36 @@ pub async fn execute_batch_with_max_rows(
 ) -> Result<Vec<QueryResult>, String> {
     let start = Instant::now();
     if sqlserver_batch_can_use_execute(sql) {
-        let result = sqlserver_driver_result(client.execute(sql, &[])).await?;
-        return Ok(vec![QueryResult {
-            columns: vec![],
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            rows: vec![],
-            affected_rows: result.rows_affected().iter().sum::<u64>(),
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
-        }]);
+        let (result, messages) = capture_sqlserver_messages(sqlserver_driver_result(client.execute(sql, &[]))).await;
+        let result = result?;
+        return Ok(vec![query_result_with_server_messages(
+            QueryResult {
+                columns: vec![],
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                rows: vec![],
+                affected_rows: result.rows_affected().iter().sum::<u64>(),
+                execution_time_ms: start.elapsed().as_millis(),
+                truncated: false,
+                session_id: None,
+                has_more: false,
+            },
+            messages,
+        )]);
     }
 
     if is_single_sqlserver_select(sql) {
         if let Ok(Some(query_sql)) = sqlserver_unsafe_type_query(client, sql).await {
-            let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
-            return sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await.map(
-                |mut result| {
-                    strip_dbx_sqlserver_row_number_column(&mut result, sql);
-                    vec![result]
-                },
-            );
+            let (result, messages) = capture_sqlserver_messages(async {
+                let stream = sqlserver_driver_result(client.query(query_sql.as_str(), &[])).await?;
+                sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows)).await
+            })
+            .await;
+            return result.map(|result| {
+                let mut result = query_result_with_server_messages(result, messages);
+                strip_dbx_sqlserver_row_number_column(&mut result, sql);
+                vec![result]
+            });
         }
     }
     execute_simple_batch_with_max_rows(client, sql, max_rows).await
@@ -1772,13 +1891,19 @@ pub async fn execute_simple_batch_with_max_rows(
     max_rows: Option<usize>,
 ) -> Result<Vec<QueryResult>, String> {
     let start = Instant::now();
-    let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
-    let mut results = sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await?;
+    let (results, messages) = capture_sqlserver_messages(async {
+        let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
+        sqlserver_driver_result(collect_result_sets_limited(stream, start, max_rows)).await
+    })
+    .await;
+    let mut results = results?;
     for result in &mut results {
         strip_dbx_sqlserver_row_number_column(result, sql);
     }
 
-    if results.is_empty() {
+    if let Some(message_result) = server_messages_query_result(messages, start) {
+        results.push(message_result);
+    } else if results.is_empty() {
         results.push(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -1958,13 +2083,13 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_sqlserver_unsafe_type_query, format_sqlserver_numeric, is_sqlserver_spatial_column,
-        is_sqlserver_variant_column, requires_simple_query_batch, sqlserver_batch_can_use_execute,
-        sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
-        sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
-        sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_table_comment_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerResultSet,
+        build_sqlserver_unsafe_type_query, capture_sqlserver_messages, format_sqlserver_numeric,
+        is_sqlserver_spatial_column, is_sqlserver_variant_column, query_result_with_server_messages,
+        requires_simple_query_batch, sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
+        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names,
+        sqlserver_indexes_sql, sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
+        sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerResultSet,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -1972,6 +2097,50 @@ mod tests {
     use chrono::NaiveDate;
     use std::{borrow::Cow, time::Instant};
     use tiberius::{ColumnData, IntoSql};
+
+    #[tokio::test]
+    async fn sqlserver_ignores_non_info_tiberius_events() {
+        let (_, messages) = capture_sqlserver_messages(async {
+            tracing::event!(target: "tiberius::tds::stream::token", tracing::Level::ERROR, "permission denied");
+            tracing::event!(target: "dbx_core::db::sqlserver", tracing::Level::INFO, "not a TDS token");
+        })
+        .await;
+
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn sqlserver_server_messages_fill_only_empty_results() {
+        let empty = QueryResult {
+            columns: vec![],
+            column_types: vec![],
+            column_sortables: vec![],
+            rows: vec![],
+            affected_rows: 0,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+        let result = query_result_with_server_messages(empty, vec!["DBCC execution completed".to_string()]);
+        assert_eq!(result.columns, vec!["Message"]);
+        assert_eq!(result.rows, vec![vec![serde_json::json!("DBCC execution completed")]]);
+
+        let select = QueryResult {
+            columns: vec!["id".to_string()],
+            column_types: vec!["int".to_string()],
+            column_sortables: vec![],
+            rows: vec![vec![serde_json::json!(1)]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+        let result = query_result_with_server_messages(select, vec!["informational".to_string()]);
+        assert_eq!(result.columns, vec!["id"]);
+        assert_eq!(result.rows, vec![vec![serde_json::json!(1)]]);
+    }
 
     #[test]
     fn sqlserver_endpoint_splits_named_instance_hosts() {

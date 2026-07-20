@@ -40,11 +40,14 @@ sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+json5 = "0.4"
 regex = "1"
 rayon = "1"
 percent-encoding = "2"
 encoding_rs = "0.8"
 log = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }

@@ -1,35 +1,42 @@
 # DBX MCP Server
 
-MCP server for [DBX](https://github.com/t8y2/dbx) — lets AI agents (Claude Code, Cursor, etc.) query your databases using connections already configured in DBX.
+Rust-powered Model Context Protocol server for [DBX](https://github.com/t8y2/dbx). It lets MCP-compatible AI agents inspect schemas and run safe database operations using connections configured in DBX.
 
-[中文](#中文说明) | English
+[中文说明](#中文说明) | [npm](https://www.npmjs.com/package/@dbx-app/mcp-server) | [Native releases](https://github.com/t8y2/dbx/releases?q=packages-v)
+
+## Architecture
+
+```text
+@dbx-app/mcp-server
+└── small Node.js launcher
+    └── platform-specific Rust dbx-mcp binary
+        └── dbx-core database and agent infrastructure
+```
+
+The MCP protocol, connection loading, SQL safety, schema access, Redis support, MongoDB shell parsing, Web backend access, and database execution are implemented in Rust. Node.js is used only by the npm launcher so existing `npm`, `npx`, and MCP client configurations continue to work.
 
 ## Features
 
-- **Zero config** — Automatically reads your DBX connections (including passwords from system keyring)
-- **9 tools** — List/add/remove connections, list tables, describe table, get schema context, execute SQL, execute Redis commands, open table in DBX UI
-- **Connection pooling** — Reuses database connections across queries
-- **Direct execution** — PostgreSQL, MySQL, SQLite, and compatible databases (Doris, StarRocks, etc.) can run without opening DBX
-- **Writes enabled by default** — regular `INSERT` / `UPDATE` / `DELETE` statements work out of the box, while dangerous SQL stays blocked unless explicitly enabled
-- **DBX UI integration** — Open tables directly in the DBX desktop app from your AI agent
+- **10 MCP tools** for connections, schemas, SQL, Redis, and DBX UI integration
+- **Precompiled native binaries** with no local Rust, Cargo, Python, or C/C++ build requirement
+- **No `better-sqlite3` runtime dependency** and no Node native-addon ABI coupling
+- **Local, Web, and Docker modes** using the same tool interface
+- **Direct native execution** for supported SQL, Redis, and MongoDB connections
+- **Agent/JDBC database support** through DBX agent infrastructure when the required agent and JRE are installed
+- **SQL safety controls** for writes, destructive SQL, Redis commands, and MongoDB mutations
+- **Connection scoping** for limiting an MCP server to one connection or database
+- **Offline execution** through downloadable native binaries
+- **Optional desktop integration** for opening tables and displaying query results in DBX
 
-## Quick Start
+## Installation
 
-### 1. Install
+### npm global install
 
 ```bash
 npm install -g @dbx-app/mcp-server
 ```
 
-Or run directly:
-
-```bash
-npx @dbx-app/mcp-server
-```
-
-### 2. Configure Claude Code
-
-Add to your project's `.mcp.json`:
+Then configure the MCP client to run:
 
 ```json
 {
@@ -41,7 +48,157 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-For Windows portable builds, set `DBX_DATA_DIR` to the portable data directory that contains `dbx.db`:
+### npx
+
+No global installation is required:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "npx",
+      "args": ["-y", "@dbx-app/mcp-server"]
+    }
+  }
+}
+```
+
+The npm package automatically installs the native package matching the current operating system and CPU. Do not install with `--no-optional`, because npm optional dependencies carry the platform binary.
+
+### Native binary / offline install
+
+Every package release publishes native archives and `SHA256SUMS` in [GitHub Releases](https://github.com/t8y2/dbx/releases?q=packages-v):
+
+| Platform | Release asset | npm platform package |
+| --- | --- | --- |
+| macOS Apple Silicon | `dbx-mcp-darwin-arm64.tar.gz` | `@dbx-app/mcp-darwin-arm64` |
+| macOS Intel | `dbx-mcp-darwin-x64.tar.gz` | `@dbx-app/mcp-darwin-x64` |
+| Linux glibc ARM64 | `dbx-mcp-linux-arm64-gnu.tar.gz` | `@dbx-app/mcp-linux-arm64-gnu` |
+| Linux glibc x64 | `dbx-mcp-linux-x64-gnu.tar.gz` | `@dbx-app/mcp-linux-x64-gnu` |
+| Windows ARM64 | `dbx-mcp-win32-arm64.zip` | `@dbx-app/mcp-win32-arm64` |
+| Windows x64 | `dbx-mcp-win32-x64.zip` | `@dbx-app/mcp-win32-x64` |
+
+Verify a Unix archive before extracting it:
+
+```bash
+sha256sum --check SHA256SUMS
+tar -xzf dbx-mcp-linux-x64-gnu.tar.gz
+chmod +x dbx-mcp
+```
+
+On macOS, use `shasum -a 256` if `sha256sum` is unavailable. On Windows, use `certutil -hashfile <archive> SHA256` and compare the value with `SHA256SUMS`.
+
+Configure the MCP client to run the extracted file directly:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "/absolute/path/to/dbx-mcp"
+    }
+  }
+}
+```
+
+Direct native execution does not require Node.js. GitHub package releases are intentionally not marked as the repository's latest release, so they do not replace the latest DBX desktop release.
+
+## Requirements
+
+### npm installation
+
+- Node.js 18.18.0 or newer
+- A supported operating system and CPU from the platform table
+- npm optional dependencies enabled
+
+### Native installation
+
+- No Node.js or npm requirement
+- Linux builds currently require glibc; Alpine/musl is not supported yet
+
+### Database configuration
+
+DBX MCP reads connection profiles from DBX storage. DBX does not need to remain open for native connections. However:
+
+- the connection must already exist in DBX storage, unless it is added through `dbx_add_connection`;
+- DBX Agent/JDBC databases require the matching agent, JDBC driver, and JRE to be installed;
+- `dbx_open_table` and `dbx_execute_and_show` require a running DBX desktop application;
+- DBX Web mode requires a reachable DBX Web server.
+
+## Usage Examples
+
+Ask the MCP client to:
+
+- "List my DBX connections"
+- "Show tables in the production PostgreSQL connection"
+- "Describe the `orders` table"
+- "Build schema context for the billing database"
+- "Count orders created in the last seven days"
+- "Run `INFO memory` on the Redis connection"
+- "Find the latest MongoDB documents in the events collection"
+- "Open the orders table in DBX"
+
+## Tools
+
+| Tool | Description |
+| --- | --- |
+| `dbx_list_connections` | List connections visible to the MCP session |
+| `dbx_add_connection` | Add a connection to local DBX storage |
+| `dbx_remove_connection` | Remove a connection from local DBX storage |
+| `dbx_list_tables` | List tables, views, or collections |
+| `dbx_describe_table` | Return columns and table metadata |
+| `dbx_get_schema_context` | Return compact schema context suitable for an AI model |
+| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
+| `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_open_table` | Open a table in the running DBX desktop application |
+| `dbx_execute_and_show` | Execute a query and display the result in the DBX desktop application |
+
+When connection scoping is enabled, mutating connection tools and desktop UI tools are hidden.
+
+## Execution Modes
+
+### Local native mode
+
+This is the default. MCP reads DBX connection storage and executes supported connections locally in the Rust process.
+
+Common native paths include PostgreSQL, MySQL, SQLite, compatible SQL databases, Redis standalone, and MongoDB. SSH, cluster, vendor-specific, or Agent/JDBC connections may require additional DBX infrastructure.
+
+DBX connection storage defaults to:
+
+- macOS: `~/Library/Application Support/com.dbx.app/dbx.db`
+- Linux: `~/.local/share/com.dbx.app/dbx.db`
+- Windows: `%APPDATA%\com.dbx.app\dbx.db`
+
+Override the directory with `DBX_DATA_DIR`.
+
+### Agent/JDBC databases
+
+Databases such as Dameng, Kingbase, Oracle, DB2, Hive, Trino, Snowflake, SAP HANA, and other DBX Agent profiles use DBX's Java agent infrastructure rather than a Node.js database driver.
+
+The native npm/GitHub binary does not bundle every proprietary JDBC driver or JRE. Install the database agent through DBX first, or provide a compatible agent installation under the DBX agent directory. Availability depends on the installed driver and license terms of the database vendor.
+
+### DBX Web / Docker mode
+
+Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local desktop storage:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_WEB_URL": "https://dbx.example.com",
+        "DBX_WEB_PASSWORD": "your-web-login-password"
+      }
+    }
+  }
+}
+```
+
+`DBX_WEB_PASSWORD` is the password used on the DBX Web login page. Desktop-local mode does not use it. Desktop UI tools are hidden in Web mode.
+
+### Windows portable DBX
+
+Point `DBX_DATA_DIR` at the portable `data` directory containing `dbx.db`:
 
 ```json
 {
@@ -56,33 +213,127 @@ For Windows portable builds, set `DBX_DATA_DIR` to the portable data directory t
 }
 ```
 
-Or for development (from source):
+## Connection Scoping
+
+Restrict one MCP server to a connection or database:
 
 ```json
 {
   "mcpServers": {
-    "dbx": {
-      "command": "npx",
-      "args": ["tsx", "packages/mcp-server/src/index.ts"],
-      "cwd": "/path/to/dbx"
+    "dbx-production-readonly": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_MCP_SCOPE_CONNECTION_NAME": "production-postgres",
+        "DBX_MCP_SCOPE_DATABASE": "analytics",
+        "DBX_MCP_ALLOW_WRITES": "0"
+      }
     }
   }
 }
 ```
 
-### 3. Use
+Use either `DBX_MCP_SCOPE_CONNECTION_ID` or `DBX_MCP_SCOPE_CONNECTION_NAME`. The scoped database is optional.
 
-In Claude Code, just ask:
+## Safety
 
-- "List my database connections"
-- "Show the tables in my local-pg connection"
-- "Describe the users table"
-- "Query the average salary from employees"
-- "Open the orders table in DBX"
+Regular writes are enabled by default. Force a read-only session with:
 
-## CLI
+```bash
+DBX_MCP_ALLOW_WRITES=0
+```
 
-For terminal, script, and Codex workflows, install the dedicated CLI package:
+Dangerous operations such as `DROP`, `TRUNCATE`, `ALTER`, Redis `FLUSHALL`, or dangerous MongoDB mutations remain blocked unless explicitly enabled:
+
+```bash
+DBX_MCP_ALLOW_DANGEROUS_SQL=1
+```
+
+MongoDB update/delete operations require a non-empty filter unless dangerous operations are enabled. Aggregation stages such as `$out` and `$merge` are treated as writes.
+
+SQL text is not included in normal MCP errors or logged by default. Enable temporary diagnostics with `DBX_MCP_DEBUG_SQL=1` and disable it after troubleshooting.
+
+## Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `DBX_DATA_DIR` | Override the local DBX data directory |
+| `DBX_WEB_URL` | Use a DBX Web/Docker backend |
+| `DBX_WEB_PASSWORD` | Authenticate to the DBX Web backend |
+| `DBX_MCP_ALLOW_WRITES` | Set to `0` to force read-only execution |
+| `DBX_MCP_ALLOW_DANGEROUS_SQL` | Set to `1` to allow dangerous SQL, Redis, and MongoDB operations |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | Restrict tools to one connection ID |
+| `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict tools to one connection name |
+| `DBX_MCP_SCOPE_DATABASE` | Restrict tools to one database |
+| `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
+| `DBX_MCP_BINARY` | Override the native binary used by the npm launcher |
+
+## Troubleshooting
+
+### Optional platform package was not installed
+
+Reinstall without `--no-optional`:
+
+```bash
+npm uninstall -g @dbx-app/mcp-server
+npm install -g @dbx-app/mcp-server@latest
+```
+
+Verify the current Node platform:
+
+```bash
+node -p 'process.platform + "-" + process.arch'
+```
+
+### Unsupported Linux distribution
+
+The published Linux packages target glibc. Alpine Linux uses musl by default and is not currently supported.
+
+### `dbx.db` cannot be found
+
+Set `DBX_DATA_DIR` to the directory containing `dbx.db`, not to the database file itself.
+
+### Desktop action says DBX is not running
+
+Database queries can run without the desktop application when the connection is supported locally. `dbx_open_table` and `dbx_execute_and_show` intentionally require DBX desktop to be running.
+
+### Agent/JDBC database cannot start
+
+Open DBX Driver Manager and install/update the matching database agent and JRE. The standalone MCP binary does not redistribute every proprietary JDBC driver.
+
+### `better-sqlite3` or Node ABI error
+
+The Rust MCP runtime does not depend on `better-sqlite3`. This error normally indicates an older MCP version or the separate TypeScript-based `@dbx-app/cli` package. Upgrade MCP with:
+
+```bash
+npm install -g @dbx-app/mcp-server@latest
+```
+
+## Development
+
+Run the Rust server from source:
+
+```bash
+cargo run -p dbx-mcp --no-default-features
+```
+
+Run tests:
+
+```bash
+cargo test -p dbx-mcp --no-default-features
+pnpm --filter @dbx-app/mcp-server test
+```
+
+Build a release binary:
+
+```bash
+cargo build --release -p dbx-mcp --no-default-features
+```
+
+The previous TypeScript MCP implementation remains in `packages/mcp-server/src` for migration tests and compatibility reference; it is not the npm runtime entrypoint.
+
+## DBX CLI
+
+`@dbx-app/cli` is a separate terminal-oriented package and currently remains TypeScript/Node.js based:
 
 ```bash
 npm install -g @dbx-app/cli
@@ -90,90 +341,7 @@ dbx connections list --json
 dbx query local "select 1" --json
 ```
 
-See the [DBX CLI README](../cli/README.md) for command details.
-
-## Tools
-
-| Tool                        | Description                                          |
-| --------------------------- | ---------------------------------------------------- |
-| `dbx_list_connections`      | List all database connections configured in DBX      |
-| `dbx_add_connection`        | Add a new database connection                        |
-| `dbx_remove_connection`     | Remove a database connection                         |
-| `dbx_list_tables`           | List tables and views for a connection               |
-| `dbx_describe_table`        | Get column definitions for a table                   |
-| `dbx_get_schema_context`    | Get compact table and column context for writing SQL |
-| `dbx_execute_query`         | Execute a SQL query (max 100 rows)                   |
-| `dbx_execute_redis_command` | Execute a Redis command on a Redis connection        |
-| `dbx_open_table`            | Open a table in DBX desktop app UI                   |
-
-## SQL Safety
-
-`dbx_execute_query` accepts multiple SQL statements and executes them one at a time after checking each statement. Regular write statements such as `INSERT`, `UPDATE`, and `DELETE ... WHERE ...` are allowed by default.
-
-If you need to force a read-only MCP session, set:
-
-```bash
-DBX_MCP_ALLOW_WRITES=0
-```
-
-Dangerous statements such as `DROP`, `TRUNCATE`, and `ALTER` remain blocked unless you also set:
-
-```bash
-DBX_MCP_ALLOW_DANGEROUS_SQL=1
-```
-
-Redis connections use `dbx_execute_redis_command` instead of `dbx_execute_query`. Redis write commands honor `DBX_MCP_ALLOW_WRITES`; dangerous Redis commands such as `KEYS`, `FLUSHALL`, and `EVAL` require `DBX_MCP_ALLOW_DANGEROUS_SQL=1`.
-
-## SQL Diagnostics Privacy
-
-SQL statements are not included in normal MCP errors and are not logged by default. To enable temporary diagnostics, set `DBX_MCP_DEBUG_SQL=1` (or `DBX_SQL_DEBUG=1`). Diagnostic statements redact quoted literals and common secret assignments, and are truncated to 512 characters. Do not enable this setting unless the resulting diagnostic metadata is appropriate for the environment.
-
-## How It Works
-
-```
-AI Agent → MCP Server → Database
-                ↓
-         DBX SQLite database (dbx.db)
-```
-
-The MCP server reads your database connections from DBX's SQLite database:
-
-- **macOS**: `~/Library/Application Support/com.dbx.app/dbx.db`
-- **Linux**: `~/.local/share/com.dbx.app/dbx.db`
-- **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
-
-Windows portable builds store data next to `DBX.exe`, usually in `data\dbx.db`. Set `DBX_DATA_DIR` to that `data` folder instead of copying `dbx.db` into the default directory.
-
-## DBX Web / Docker Mode
-
-When connecting MCP to a deployed DBX Web instance, set `DBX_WEB_URL` instead of reading local desktop storage:
-
-```json
-{
-  "mcpServers": {
-    "dbx": {
-      "command": "dbx-mcp-server",
-      "env": {
-        "DBX_WEB_URL": "https://dbx.example.com",
-        "DBX_WEB_PASSWORD": "your-web-password"
-      }
-    }
-  }
-}
-```
-
-If the Web instance has password protection enabled, `DBX_WEB_PASSWORD` is required. Use the same password you enter on the DBX Web login page, including the password created by the first-run setup screen. You do not need to set `DBX_PASSWORD` on the DBX Web server just for MCP; `DBX_PASSWORD` is only a server-side environment override. Without `DBX_WEB_PASSWORD`, MCP calls fail before any connection data is returned. Desktop local mode does not use `DBX_WEB_PASSWORD`.
-
-## DBX UI Integration
-
-The `dbx_open_table` tool communicates with the running DBX app to open tables directly in the UI. This requires DBX to be running. If DBX is not running, the tool will return an error message.
-
-PostgreSQL, MySQL, SQLite, Doris, StarRocks, and Redshift queries run directly from the MCP server. Redis standalone command execution also runs directly. Other database types, plus Redis Sentinel/Cluster or SSH-backed Redis connections, still use the DBX desktop bridge unless `DBX_WEB_URL` is configured.
-
-## Requirements
-
-- [DBX](https://github.com/t8y2/dbx) installed with at least one connection configured
-- Node.js 22.13.0 或更高版本
+See the [CLI README](../cli/README.md).
 
 ## License
 
@@ -183,34 +351,39 @@ Apache-2.0
 
 ## 中文说明
 
-[DBX](https://github.com/t8y2/dbx) 的 MCP Server，让 AI 编程助手（Claude Code、Cursor 等）直接使用 DBX 中已配置的数据库连接查询数据。
+DBX MCP Server 是 [DBX](https://github.com/t8y2/dbx) 的 Rust MCP 服务，让 Claude Code、Cursor、Windsurf 等兼容 MCP 的 AI 工具使用 DBX 中已有的连接查询数据库。
 
-### 特性
+[npm](https://www.npmjs.com/package/@dbx-app/mcp-server) | [原生版本下载](https://github.com/t8y2/dbx/releases?q=packages-v)
 
-- **零配置** — 自动读取 DBX 的连接配置
-- **9 个工具** — 列出/添加/删除连接、列出表、查看表结构、获取 Schema 上下文、执行 SQL、执行 Redis 命令、在 DBX 中打开表
-- **连接池** — 跨查询复用数据库连接
-- **直接执行** — PostgreSQL、MySQL、SQLite 及兼容数据库（Doris、StarRocks 等）无需打开 DBX 即可查询
-- **默认允许常规写入** — `INSERT` / `UPDATE` / `DELETE` 可直接执行，危险语句仍需显式开启
-- **DBX UI 联动** — 从 AI 助手直接在 DBX 桌面端打开表
+### 架构
 
-### 快速开始
+```text
+@dbx-app/mcp-server
+└── 轻量 Node.js 启动器
+    └── 当前平台的 Rust dbx-mcp 二进制
+        └── dbx-core 数据库和 Agent 基础设施
+```
 
-#### 1. 安装
+MCP 协议、连接读取、SQL 安全检查、Schema、Redis、MongoDB、Web 后端和数据库执行均由 Rust 实现。Node.js 只用于保持原有 npm/npx 安装入口不变。
+
+### 主要能力
+
+- 10 个 MCP 工具
+- 不依赖 `better-sqlite3`，没有 Node 原生模块 ABI 问题
+- 支持本地 DBX、DBX Web 和 Docker
+- 支持预编译原生二进制和离线运行
+- 支持常见 SQL、Redis、MongoDB 直连
+- 支持达梦、金仓、Oracle、DB2、Hive 等 Agent/JDBC 数据库
+- 支持只读、危险操作、连接和数据库作用域限制
+- DBX 桌面端未启动时仍可执行支持本地运行的连接
+
+### npm 安装
 
 ```bash
 npm install -g @dbx-app/mcp-server
 ```
 
-或直接运行：
-
-```bash
-npx @dbx-app/mcp-server
-```
-
-#### 2. 配置 Claude Code
-
-在项目的 `.mcp.json` 中添加：
+MCP 配置：
 
 ```json
 {
@@ -222,88 +395,80 @@ npx @dbx-app/mcp-server
 }
 ```
 
-Windows 便携版需要在 MCP 配置中设置 `DBX_DATA_DIR`，指向包含 `dbx.db` 的便携版数据目录：
+也可以直接使用 npx：
 
 ```json
 {
   "mcpServers": {
     "dbx": {
-      "command": "dbx-mcp-server",
-      "env": {
-        "DBX_DATA_DIR": "D:\\DBX_x64-portable\\data"
-      }
+      "command": "npx",
+      "args": ["-y", "@dbx-app/mcp-server"]
     }
   }
 }
 ```
 
-#### 3. 使用
+不要使用 `--no-optional`，平台二进制通过 npm `optionalDependencies` 自动安装。
 
-在 Claude Code 中直接说：
+### 原生二进制和离线安装
 
-- "列出我的数据库连接"
-- "查看 local-pg 上有哪些表"
-- "查看 users 表的结构"
-- "查询最近 7 天的订单数量"
-- "打开 orders 表"
+每个 packages 版本会在 [GitHub Releases](https://github.com/t8y2/dbx/releases?q=packages-v) 发布以下文件：
 
-### CLI
+| 平台 | 文件 |
+| --- | --- |
+| macOS Apple Silicon | `dbx-mcp-darwin-arm64.tar.gz` |
+| macOS Intel | `dbx-mcp-darwin-x64.tar.gz` |
+| Linux glibc ARM64 | `dbx-mcp-linux-arm64-gnu.tar.gz` |
+| Linux glibc x64 | `dbx-mcp-linux-x64-gnu.tar.gz` |
+| Windows ARM64 | `dbx-mcp-win32-arm64.zip` |
+| Windows x64 | `dbx-mcp-win32-x64.zip` |
 
-终端、脚本和 Codex 工作流请安装独立 CLI 包：
+下载后使用 `SHA256SUMS` 校验，并直接配置：
 
-```bash
-npm install -g @dbx-app/cli
-dbx connections list --json
-dbx query local "select 1" --json
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "/绝对路径/dbx-mcp"
+    }
+  }
+}
 ```
 
-命令详情见 [DBX CLI README](../cli/README.md)。
+直接运行原生文件不需要 Node.js。Linux 当前只支持 glibc，暂不支持 Alpine/musl。
+
+### 系统要求
+
+- npm 安装需要 Node.js 18.18.0 或更高版本
+- 原生二进制不需要 Node.js、Rust、Cargo、Python 或本地编译环境
+- 连接配置需要存在于 DBX 存储中，或通过 `dbx_add_connection` 添加
+- Agent/JDBC 数据库需要提前安装对应 Agent、JDBC Driver 和 JRE
+- `dbx_open_table`、`dbx_execute_and_show` 需要 DBX 桌面端正在运行
 
 ### 工具列表
 
-| 工具                        | 说明                                  |
-| --------------------------- | ------------------------------------- |
-| `dbx_list_connections`      | 列出 DBX 中所有已配置的数据库连接     |
-| `dbx_add_connection`        | 添加新的数据库连接                    |
-| `dbx_remove_connection`     | 删除数据库连接                        |
-| `dbx_list_tables`           | 列出指定连接的表和视图                |
-| `dbx_describe_table`        | 获取表的列定义                        |
-| `dbx_get_schema_context`    | 获取适合 AI 写 SQL 的紧凑表结构上下文 |
-| `dbx_execute_query`         | 执行 SQL 查询（最多返回 100 行）      |
-| `dbx_execute_redis_command` | 在 Redis 连接上执行 Redis 命令        |
-| `dbx_open_table`            | 在 DBX 桌面端打开指定表               |
+| 工具 | 说明 |
+| --- | --- |
+| `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
+| `dbx_add_connection` | 添加本地连接配置 |
+| `dbx_remove_connection` | 删除本地连接配置 |
+| `dbx_list_tables` | 列出表、视图或集合 |
+| `dbx_describe_table` | 获取字段和表结构 |
+| `dbx_get_schema_context` | 获取适合 AI 使用的紧凑 Schema 上下文 |
+| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB Shell 命令，最多返回 100 行 |
+| `dbx_execute_redis_command` | 执行 Redis 命令 |
+| `dbx_open_table` | 在 DBX 桌面端打开表 |
+| `dbx_execute_and_show` | 执行查询并在 DBX 桌面端展示结果 |
 
-### SQL 安全
+### 本地数据目录
 
-`dbx_execute_query` 支持多条 SQL 语句，会逐条完成安全检查并依次执行。默认允许常规写操作，例如 `INSERT`、`UPDATE`、`DELETE ... WHERE ...`。
+- macOS：`~/Library/Application Support/com.dbx.app/dbx.db`
+- Linux：`~/.local/share/com.dbx.app/dbx.db`
+- Windows：`%APPDATA%\com.dbx.app\dbx.db`
 
-如果你希望 MCP 会话强制退回只读，可设置：
+通过 `DBX_DATA_DIR` 覆盖默认目录。Windows 便携版应指向 `DBX.exe` 同级、包含 `dbx.db` 的 `data` 文件夹。
 
-```bash
-DBX_MCP_ALLOW_WRITES=0
-```
-
-`DROP`、`TRUNCATE`、`ALTER` 等危险语句仍会被拦截，除非额外设置：
-
-```bash
-DBX_MCP_ALLOW_DANGEROUS_SQL=1
-```
-
-Redis 连接使用 `dbx_execute_redis_command`，不通过 `dbx_execute_query` 执行。Redis 写命令遵循 `DBX_MCP_ALLOW_WRITES`；`KEYS`、`FLUSHALL`、`EVAL` 等危险 Redis 命令需要设置 `DBX_MCP_ALLOW_DANGEROUS_SQL=1`。
-
-### 工作原理
-
-MCP Server 从 DBX 的 SQLite 数据库读取连接信息：
-
-- **macOS**: `~/Library/Application Support/com.dbx.app/dbx.db`
-- **Linux**: `~/.local/share/com.dbx.app/dbx.db`
-- **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
-
-Windows 便携版的数据通常在 `DBX.exe` 同级的 `data\dbx.db`。请把 `DBX_DATA_DIR` 设置为这个 `data` 文件夹，不要手工复制 `dbx.db` 到默认目录。
-
-### DBX Web / Docker 模式
-
-如果 MCP 连接的是已部署的 DBX Web 实例，请设置 `DBX_WEB_URL`，不要读取本机桌面端存储：
+### DBX Web / Docker
 
 ```json
 {
@@ -312,22 +477,120 @@ Windows 便携版的数据通常在 `DBX.exe` 同级的 `data\dbx.db`。请把 `
       "command": "dbx-mcp-server",
       "env": {
         "DBX_WEB_URL": "https://dbx.example.com",
-        "DBX_WEB_PASSWORD": "你的 Web 访问密码"
+        "DBX_WEB_PASSWORD": "Web 登录密码"
       }
     }
   }
 }
 ```
 
-当 Web 实例启用了密码保护时，必须提供 `DBX_WEB_PASSWORD`。这里填写的就是 DBX Web 登录页使用的密码，也包括首次打开 Web 页面时通过 setup 设置的密码。为了让 MCP 可用，不需要在启动 DBX Web 时额外设置 `DBX_PASSWORD`；`DBX_PASSWORD` 只是服务端环境变量覆盖。未提供 `DBX_WEB_PASSWORD` 时，MCP 调用会在返回任何连接数据前失败。桌面本地模式不使用 `DBX_WEB_PASSWORD`。
+Web 模式不会读取本机 DBX 桌面存储，也不会暴露桌面 UI 工具。
 
-### DBX UI 联动
+### Agent/JDBC 数据库
 
-`dbx_open_table` 工具通过本地 HTTP 接口与运行中的 DBX 应用通信，直接在 UI 中打开表。需要 DBX 正在运行。
+达梦、人大金仓、Oracle、DB2、Hive、Trino、Snowflake、SAP HANA 等数据库通过 DBX Java Agent/JDBC 基础设施运行，而不是通过 Node.js 数据库驱动运行。
 
-PostgreSQL、MySQL、SQLite、Doris、StarRocks、Redshift 查询可由 MCP Server 直接执行。Redis standalone 命令执行也会直接连接。其他数据库类型，以及 Redis Sentinel/Cluster 或 SSH Redis 连接，仍会走 DBX 桌面端 bridge，除非配置了 `DBX_WEB_URL` 使用 Web 后端。
+npm 和 GitHub Release 中的原生 MCP 文件不会捆绑所有厂商的专有 JDBC Driver。请先通过 DBX Driver Manager 安装对应 Agent 和 JRE，或提供兼容的 DBX Agent 目录。
 
-### 系统要求
+### 连接作用域和只读模式
 
-- 已安装 [DBX](https://github.com/t8y2/dbx) 并配置了至少一个数据库连接
-- Node.js 22.13.0 or newer
+```json
+{
+  "mcpServers": {
+    "dbx-production-readonly": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_MCP_SCOPE_CONNECTION_NAME": "production-postgres",
+        "DBX_MCP_SCOPE_DATABASE": "analytics",
+        "DBX_MCP_ALLOW_WRITES": "0"
+      }
+    }
+  }
+}
+```
+
+作用域模式会隐藏连接增删和桌面 UI 工具。
+
+### SQL 和命令安全
+
+默认允许常规 `INSERT`、`UPDATE`、`DELETE ... WHERE ...`。强制只读：
+
+```bash
+DBX_MCP_ALLOW_WRITES=0
+```
+
+允许 `DROP`、`TRUNCATE`、`ALTER`、Redis `FLUSHALL` 或危险 MongoDB 操作：
+
+```bash
+DBX_MCP_ALLOW_DANGEROUS_SQL=1
+```
+
+MongoDB 更新和删除默认要求非空 filter；`$out`、`$merge` 聚合阶段按写操作处理。
+
+### 环境变量
+
+| 变量 | 用途 |
+| --- | --- |
+| `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
+| `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
+| `DBX_WEB_PASSWORD` | DBX Web 登录密码 |
+| `DBX_MCP_ALLOW_WRITES` | 设置为 `0` 强制只读 |
+| `DBX_MCP_ALLOW_DANGEROUS_SQL` | 设置为 `1` 允许危险操作 |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | 限制到指定连接 ID |
+| `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制到指定连接名称 |
+| `DBX_MCP_SCOPE_DATABASE` | 限制到指定数据库 |
+| `DBX_MCP_DEBUG_SQL` | 临时输出 SQL 诊断信息 |
+| `DBX_MCP_BINARY` | 覆盖 npm 启动器使用的原生文件 |
+
+### 常见问题
+
+**提示平台 optional package 未安装**
+
+重新安装并确保没有使用 `--no-optional`：
+
+```bash
+npm uninstall -g @dbx-app/mcp-server
+npm install -g @dbx-app/mcp-server@latest
+```
+
+**提示找不到 `dbx.db`**
+
+将 `DBX_DATA_DIR` 设置为包含 `dbx.db` 的目录，而不是数据库文件路径。
+
+**提示 DBX 未运行**
+
+普通数据库查询不一定需要启动 DBX；只有桌面 UI 工具和仍需 bridge 的连接需要 DBX 运行。
+
+**Agent 数据库无法启动**
+
+通过 DBX Driver Manager 安装或更新对应数据库 Agent、JDBC Driver 和 JRE。
+
+**出现 `better-sqlite3` 或 Node ABI 错误**
+
+Rust MCP 不依赖 `better-sqlite3`。请升级 MCP；如果错误来自 `@dbx-app/cli`，则属于当前仍为 TypeScript 的独立 CLI 包。
+
+### 开发和测试
+
+```bash
+cargo run -p dbx-mcp --no-default-features
+cargo test -p dbx-mcp --no-default-features
+pnpm --filter @dbx-app/mcp-server test
+cargo build --release -p dbx-mcp --no-default-features
+```
+
+旧 TypeScript MCP 源码仍保留在 `packages/mcp-server/src`，用于迁移测试和兼容参考，不再是 npm 的运行入口。
+
+### DBX CLI
+
+`@dbx-app/cli` 是独立的终端包，目前仍使用 TypeScript/Node.js：
+
+```bash
+npm install -g @dbx-app/cli
+dbx connections list --json
+```
+
+详见 [CLI README](../cli/README.md)。
+
+### License
+
+Apache-2.0

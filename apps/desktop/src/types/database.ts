@@ -851,6 +851,11 @@ export interface QueryTab {
     primaryKeys: string[];
   };
   tableMetaUpdatedAt?: number;
+  /** 冷缓存打开表数据时元数据仍在途：行标识未知，编辑/保存必须等待其落地 */
+  tableMetaPending?: boolean;
+  /** 取消请求单调计数：isCancelling 是瞬态的（取消失败/查询先完成会被清），
+   * 需要跨越 executeTabSql 生命周期判断"执行期间用户是否请求过停止"时比对它 */
+  cancelRequestCount?: number;
   tableInfoTab?: TableInfoTab;
   queryAnalysis?: {
     catalog?: string;

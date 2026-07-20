@@ -461,7 +461,7 @@ export const useConnectionStore = defineStore("connection", () => {
     bumpConnectionStateRevision(connectionId);
     activeLocalConnectionAttempts.set(connectionId, attempt);
     connectingIds.value.add(connectionId);
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (node) node.isLoading = true;
     return attempt;
   }
@@ -704,7 +704,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function clearConnectionNodeLoading(connectionId: string) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (node) node.isLoading = false;
   }
 
@@ -1828,7 +1828,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearConnectionHealthCheck(config.id);
     invalidateCompletionCache(config.id);
     clearLoadedChildrenCache(config.id);
-    const node = findNode(treeNodes.value, config.id);
+    const node = findConnectionNode(config.id);
     if (node?.isExpanded) {
       await reloadConnectionDatabaseChildren(config.id);
     }
@@ -2057,7 +2057,7 @@ export const useConnectionStore = defineStore("connection", () => {
       clearConnectionError(config.id);
       if (id !== config.id) clearConnectionError(id);
 
-      const existing = findNode(treeNodes.value, id);
+      const existing = findConnectionNode(id);
       if (existing) {
         existing.label = config.name;
         existing.type = "connection";
@@ -2116,7 +2116,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearConnectionIdentifierQuote(connectionId);
     forgetSuccessfulLocalConnectionAttempt(connectionId);
     clearConnectionHealthCheck(connectionId);
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (node) {
       node.isLoading = false;
       node.isExpanded = false;
@@ -2261,7 +2261,7 @@ export const useConnectionStore = defineStore("connection", () => {
         driverProfile: metadataDriverProfile(configForScope),
       },
       async () => {
-        const node = findNode(treeNodes.value, connectionId);
+        const node = findConnectionNode(connectionId);
         if (!node) return;
         node.isLoading = true;
         try {
@@ -2414,7 +2414,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
     if (!config || ["redis", "etcd", "zookeeper", "mongodb", "elasticsearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
     if (metadataLoadCoordinator.has(scope)) return;
@@ -2430,7 +2430,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadRedisDatabases(connectionId: string) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -2473,7 +2473,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadEtcdRoot(connectionId: string) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -2507,7 +2507,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadZooKeeperRoot(connectionId: string) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -2541,7 +2541,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadMqTenants(connectionId: string, options?: LoadTreeOptions) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -2587,7 +2587,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadNacosNamespaces(connectionId: string, options?: LoadTreeOptions) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -2643,7 +2643,7 @@ export const useConnectionStore = defineStore("connection", () => {
   // key trees under expanded db nodes are preserved. Used after a Redis write command so the
   // `dbN (count)` labels reflect the new reality without a manual refresh.
   async function refreshRedisDbKeyCounts(connectionId: string) {
-    const connNode = findNode(treeNodes.value, connectionId);
+    const connNode = findConnectionNode(connectionId);
     if (!connNode) return;
     try {
       await ensureConnected(connectionId);
@@ -2657,7 +2657,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadMongoDatabases(connectionId: string) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -2692,7 +2692,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadElasticsearchIndices(connectionId: string) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -2724,7 +2724,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadMilvusDatabases(connectionId: string) {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -2761,7 +2761,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const isMilvus = config?.db_type === "milvus";
     const effectiveDb = database || config?.database || "default";
     // Milvus groups collections under a per-database node; other vector stores stay flat under the connection.
-    const node = isMilvus && database ? findNode(treeNodes.value, `${connectionId}:${database}`) : findNode(treeNodes.value, connectionId);
+    const node = isMilvus && database ? findNode(treeNodes.value, `${connectionId}:${database}`) : findConnectionNode(connectionId);
     if (!node) return;
 
     node.isLoading = true;
@@ -3991,7 +3991,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
-    } else if (node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages") {
+    } else if (objectTypesForGroupNode(node.type)) {
       await loadObjectGroupChildren(node, options);
     } else if (node.type === "group-partitions") {
       node.isExpanded = true;
@@ -4434,7 +4434,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function databaseNamesFromTree(connectionId: string): string[] {
-    const node = findNode(treeNodes.value, connectionId);
+    const node = findConnectionNode(connectionId);
     if (!node?.children) return [];
     const seen = new Set<string>();
     const names: string[] = [];
@@ -4863,6 +4863,24 @@ export const useConnectionStore = defineStore("connection", () => {
       if (node.id === id) return node;
       if (node.children) {
         const found = findNode(node.children, id);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  /** 查连接根节点：沿 connection-group 层级下钻但不穿透连接的整棵子树
+   * （原通用 DFS 找第 N 个连接前要完整遍历前 N-1 个连接的数千个表/列节点）。
+   * 不能用"同层优先"版 findNode 代替通用 DFS——节点 id 并非全树唯一
+   * （如数据库 "a:b" 与数据库 "a" 下 schema "b" 同为 connectionId:a:b，
+   * 见 pinnedItems 对 colliding node IDs 的处理），改变遍历顺序会让深层
+   * 调用选中错误节点；连接根节点的 id 就是 connectionId，且只出现在
+   * 顶层或连接组内，无歧义。 */
+  function findConnectionNode(connectionId: string, nodes: TreeNode[] = treeNodes.value): TreeNode | null {
+    for (const node of nodes) {
+      if (node.id === connectionId && node.type !== "connection-group") return node;
+      if (node.type === "connection-group" && node.children) {
+        const found = findConnectionNode(connectionId, node.children);
         if (found) return found;
       }
     }

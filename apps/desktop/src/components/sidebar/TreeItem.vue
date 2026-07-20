@@ -44,7 +44,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
-import { canTreeNodeShowExpander, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { canTreeNodeShowExpander, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -68,11 +68,21 @@ const labelRef = ref<HTMLElement>();
 
 const rowRef = ref<HTMLElement>();
 
+const trailingCommentLayoutRef = ref<HTMLElement>();
+
+const trailingCommentLeadingRef = ref<HTMLElement>();
+
+const trailingCommentMaxWidth = ref(0);
+
 const labelOverflowing = ref(false);
 
 let labelResizeObserver: ResizeObserver | null = null;
 
+let trailingCommentResizeObserver: ResizeObserver | null = null;
+
 let labelMeasureFrame = 0;
+
+let trailingCommentMeasureFrame = 0;
 
 function cancelLabelOverflowMeasure() {
   if (!labelMeasureFrame) return;
@@ -163,10 +173,6 @@ const stopPasteHandlerRegistration = watch(
 );
 
 const activeNode = shallowRef<TreeNode>(props.node);
-
-const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.value.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll));
-
-const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 
 const showProductionBadge = computed(() => {
   const connectionId = activeNode.value.connectionId;
@@ -542,17 +548,72 @@ const isNodeDefaultDatabase = computed(
   () => (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
 );
 
-const columnComment = computed(() => (!settingsStore.editorSettings.sidebarHideTableComments && activeNode.value.type === "column" && activeNode.value.meta && "comment" in activeNode.value.meta ? (activeNode.value.meta as any).comment : null));
+const trailingComment = computed(() => {
+  if (settingsStore.editorSettings.sidebarHideTableComments) return null;
+  if (activeNode.value.type === "column" && activeNode.value.meta && "comment" in activeNode.value.meta) return (activeNode.value.meta as any).comment || null;
+  if ((activeNode.value.type === "schema" || activeNode.value.type === "table" || activeNode.value.type === "view" || activeNode.value.type === "mongo-collection" || activeNode.value.type === "vector-collection" || activeNode.value.type === "elasticsearch-index") && activeNode.value.comment) {
+    return activeNode.value.comment;
+  }
+  return null;
+});
 
-const tableComment = computed(() =>
-  !settingsStore.editorSettings.sidebarHideTableComments &&
-  (activeNode.value.type === "schema" || activeNode.value.type === "table" || activeNode.value.type === "view" || activeNode.value.type === "mongo-collection" || activeNode.value.type === "vector-collection" || activeNode.value.type === "elasticsearch-index") &&
-  activeNode.value.comment
-    ? activeNode.value.comment
-    : null,
-);
+function cancelTrailingCommentMeasure() {
+  if (!trailingCommentMeasureFrame) return;
+  window.cancelAnimationFrame(trailingCommentMeasureFrame);
+  trailingCommentMeasureFrame = 0;
+}
 
-const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: !!columnComment.value || !!tableComment.value }));
+function measureTrailingCommentLayout() {
+  const container = trailingCommentLayoutRef.value;
+  const leading = trailingCommentLeadingRef.value;
+  if (!trailingComment.value || !container || !leading) {
+    trailingCommentMaxWidth.value = 0;
+    return;
+  }
+
+  // The leading group keeps the complete table name ahead of the comment.
+  // Only the width remaining after that name and the fixed gap may be used
+  // by the comment; once it reaches zero, the comment is hidden.
+  trailingCommentMaxWidth.value = trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth);
+}
+
+function scheduleTrailingCommentMeasure() {
+  if (typeof window === "undefined") {
+    measureTrailingCommentLayout();
+    return;
+  }
+  cancelTrailingCommentMeasure();
+  trailingCommentMeasureFrame = window.requestAnimationFrame(() => {
+    trailingCommentMeasureFrame = 0;
+    measureTrailingCommentLayout();
+  });
+}
+
+function refreshTrailingCommentMeasurement() {
+  trailingCommentResizeObserver?.disconnect();
+  trailingCommentResizeObserver = null;
+
+  if (!trailingComment.value || !trailingCommentLayoutRef.value || !trailingCommentLeadingRef.value) {
+    trailingCommentMaxWidth.value = 0;
+    return;
+  }
+
+  scheduleTrailingCommentMeasure();
+  if (typeof ResizeObserver !== "undefined") {
+    trailingCommentResizeObserver = new ResizeObserver(scheduleTrailingCommentMeasure);
+    trailingCommentResizeObserver.observe(trailingCommentLayoutRef.value);
+  }
+}
+
+// Keep comment rows constrained to the sidebar. When space is tight, the
+// comment truncates before the table name instead of creating a large gap.
+const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.value.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll, !!trailingComment.value));
+
+const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
+
+const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: !!trailingComment.value }));
+
+watch(() => [trailingComment.value, visibleLabel(activeNode.value), trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 
@@ -605,6 +666,7 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
+    paddingRight: trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.18 : 0.12),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
@@ -859,6 +921,8 @@ watch(
 onBeforeUnmount(() => {
   stopPasteHandlerRegistration();
   handleMouseLeave();
+  trailingCommentResizeObserver?.disconnect();
+  cancelTrailingCommentMeasure();
   finishTableReferenceDrag();
 });
 
@@ -951,7 +1015,7 @@ function onKeydown(event: KeyboardEvent) {
     <LightTooltip :text="displayLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="0" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
-        class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer relative outline-none"
+        class="group flex items-center gap-2 py-1 px-2 cursor-pointer relative outline-none"
         style="contain: layout style"
         :class="[
           rowWidthClass,
@@ -994,31 +1058,41 @@ function onKeydown(event: KeyboardEvent) {
         <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
         <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
         <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
-        <input
-          v-if="isRenamingGroup"
-          ref="renameInputRef"
-          v-model="renameInput"
-          class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"
-          @blur="finishRenameGroup"
-          @keydown.enter.prevent="finishRenameGroup"
-          @keydown.escape.prevent="isRenamingGroup = false"
-          @click.stop
-        />
-        <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
-        <ProductionContextBadge v-if="showProductionBadge" compact />
-        <span
-          v-if="
-            (node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-materialized-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') &&
-            node.objectCount != null
-          "
-          class="text-muted-foreground text-[10px] shrink-0"
-          >{{ node.objectCount }}</span
-        >
-        <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
-          {{ t("editor.defaultDatabase") }}
-        </Badge>
-        <span v-if="columnComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ columnComment }}</span>
-        <span v-if="tableComment" class="sidebar-object-comment ml-auto max-w-[20%] shrink-0 truncate text-right" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ tableComment }}</span>
+        <div ref="trailingCommentLayoutRef" :class="trailingComment ? 'flex flex-1 min-w-0 items-center' : 'contents'">
+          <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : 'contents'">
+            <input
+              v-if="isRenamingGroup"
+              ref="renameInputRef"
+              v-model="renameInput"
+              class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"
+              @blur="finishRenameGroup"
+              @keydown.enter.prevent="finishRenameGroup"
+              @keydown.escape.prevent="isRenamingGroup = false"
+              @click.stop
+            />
+            <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+            <ProductionContextBadge v-if="showProductionBadge" compact />
+            <span
+              v-if="
+                (node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-materialized-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') &&
+                node.objectCount != null
+              "
+              class="text-muted-foreground text-[10px] shrink-0"
+              >{{ node.objectCount }}</span
+            >
+            <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
+              {{ t("editor.defaultDatabase") }}
+            </Badge>
+          </div>
+          <span v-if="trailingComment && trailingCommentMaxWidth > 0" class="min-w-0 flex-1" aria-hidden="true" />
+          <span
+            v-if="trailingComment && trailingCommentMaxWidth > 0"
+            class="sidebar-object-comment min-w-0 shrink-0 truncate text-left"
+            :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }"
+            :style="{ marginLeft: `${trailingCommentGapPx}px`, maxWidth: `${trailingCommentMaxWidth}px` }"
+            >{{ trailingComment }}</span
+          >
+        </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
@@ -1071,6 +1145,11 @@ function onKeydown(event: KeyboardEvent) {
   font-size: 10px;
   line-height: 1rem;
   opacity: 0.6;
+  /* Use the comment's natural width whenever the row has room for it. */
+  width: max-content;
+  max-width: 100%;
+  /* Preserve table names when a narrow row needs to truncate its comment. */
+  flex-shrink: 999;
   /* Sidebar rows repaint on hover; avoid heavier font shaping and fallback here. */
   text-rendering: auto;
 }

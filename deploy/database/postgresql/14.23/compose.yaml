@@ -1,0 +1,19 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/postgres:14.23
+    container_name: dbx-postgresql-14.23
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-5433}:5432"
+    environment:
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-123456}"
+      POSTGRES_DB: dbx
+    volumes:
+      - data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dbx"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+volumes:
+  data:

@@ -193,7 +193,127 @@ fn builds_xugu_type_change_with_native_syntax() {
 
     assert_eq!(
         postgres_result.statements,
-        vec!["ALTER TABLE \"public\".\"info_x\" ALTER COLUMN \"code\" TYPE integer;"]
+        vec!["ALTER TABLE \"public\".\"info_x\" ALTER COLUMN \"code\" TYPE integer USING \"code\"::integer;"]
+    );
+}
+
+#[test]
+fn builds_postgres_explicit_type_cast_for_renamed_column() {
+    let mut code = column("new code");
+    code.data_type = "bigint".to_string();
+    code.original = Some(ColumnInfo {
+        name: "old code".to_string(),
+        data_type: "character varying(20)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "items".to_string(),
+        column: code,
+    });
+
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"public\".\"items\" RENAME COLUMN \"old code\" TO \"new code\";",
+            "ALTER TABLE \"public\".\"items\" ALTER COLUMN \"new code\" TYPE bigint USING \"new code\"::bigint;",
+        ]
+    );
+}
+
+#[test]
+fn builds_postgres_atomic_type_change_with_existing_default() {
+    let mut code = column("code");
+    code.data_type = "varchar(20)".to_string();
+    code.default_value = "7".to_string();
+    code.original = Some(ColumnInfo {
+        name: "code".to_string(),
+        data_type: "integer".to_string(),
+        is_nullable: true,
+        column_default: Some("7".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "items".to_string(),
+        column: code,
+    });
+
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"public\".\"items\" ALTER COLUMN \"code\" DROP DEFAULT, ALTER COLUMN \"code\" TYPE varchar(20) USING \"code\"::varchar(20), ALTER COLUMN \"code\" SET DEFAULT '7';"]
+    );
+}
+
+#[test]
+fn builds_postgres_type_change_that_drops_default() {
+    let mut code = column("code");
+    code.data_type = "bigint".to_string();
+    code.original = Some(ColumnInfo {
+        name: "code".to_string(),
+        data_type: "character varying".to_string(),
+        is_nullable: true,
+        column_default: Some("'7'::character varying".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: None,
+        table_name: "items".to_string(),
+        column: code,
+    });
+
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"items\" ALTER COLUMN \"code\" DROP DEFAULT, ALTER COLUMN \"code\" TYPE bigint USING \"code\"::bigint;"]
+    );
+}
+
+#[test]
+fn builds_postgres_array_and_domain_type_casts_without_affecting_xugu() {
+    let mut tags = column("tags");
+    tags.data_type = "text[]".to_string();
+    tags.original = Some(ColumnInfo {
+        name: "tags".to_string(),
+        data_type: "varchar(20)[]".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let postgres = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("catalog".to_string()),
+        table_name: "items".to_string(),
+        column: tags,
+    });
+    assert_eq!(
+        postgres.statements,
+        vec!["ALTER TABLE \"catalog\".\"items\" ALTER COLUMN \"tags\" TYPE text[] USING \"tags\"::text[];"]
+    );
+
+    let mut status = column("status");
+    status.data_type = "catalog.status_domain".to_string();
+    status.original = Some(ColumnInfo {
+        name: "status".to_string(),
+        data_type: "text".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let postgres = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("catalog".to_string()),
+        table_name: "items".to_string(),
+        column: status,
+    });
+    assert_eq!(
+        postgres.statements,
+        vec!["ALTER TABLE \"catalog\".\"items\" ALTER COLUMN \"status\" TYPE catalog.status_domain USING \"status\"::catalog.status_domain;"]
     );
 }
 
@@ -1581,6 +1701,125 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         result.statements[3],
         "ALTER TABLE [core].[products] ADD CONSTRAINT [DF_products_active] DEFAULT 1 FOR [active];"
     );
+}
+
+#[test]
+fn sqlserver_type_change_preserves_existing_default_constraint() {
+    let mut check_value = column("check_value");
+    check_value.data_type = "decimal(18,2)".to_string();
+    check_value.is_nullable = false;
+    check_value.default_value = "0".to_string();
+    check_value.original = Some(ColumnInfo {
+        name: "check_value".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: false,
+        column_default: Some("0".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "issue_3714".to_string(),
+        column: check_value,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements.len(), 1);
+    let sql = &result.statements[0];
+    let capture = sql.find("= dc.name").unwrap();
+    let drop = sql.find("DROP CONSTRAINT").unwrap();
+    let alter = sql.find("ALTER COLUMN [check_value] decimal(18,2) NOT NULL").unwrap();
+    let restore = sql.rfind("ADD CONSTRAINT").unwrap();
+    assert!(capture < drop && drop < alter && alter < restore);
+    assert!(sql.contains("= dc.definition"));
+    assert!(sql.contains("QUOTENAME(@dbx_default_sql_"));
+    assert!(sql.contains("+ N' DEFAULT ' + @dbx_default_sql_"));
+    assert!(sql.contains("+ N' FOR [check_value]'"));
+}
+
+#[test]
+fn sqlserver_type_and_default_change_drops_before_alter_and_adds_new_default() {
+    let mut quantity = column("quantity");
+    quantity.data_type = "decimal(12,3)".to_string();
+    quantity.is_nullable = false;
+    quantity.default_value = "1.5".to_string();
+    quantity.original = Some(ColumnInfo {
+        name: "quantity".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: false,
+        column_default: Some("0".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "inventory".to_string(),
+        column: quantity,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements.len(), 3);
+    assert!(result.statements[0].contains("DROP CONSTRAINT"));
+    assert_eq!(result.statements[1], "ALTER TABLE [dbo].[inventory] ALTER COLUMN [quantity] decimal(12,3) NOT NULL;");
+    assert_eq!(
+        result.statements[2],
+        "ALTER TABLE [dbo].[inventory] ADD CONSTRAINT [DF_inventory_quantity] DEFAULT 1.5 FOR [quantity];"
+    );
+}
+
+#[test]
+fn sqlserver_rename_and_nullability_change_restores_default_on_new_column_name() {
+    let mut renamed = column("is_enabled");
+    renamed.data_type = "bit".to_string();
+    renamed.is_nullable = false;
+    renamed.default_value = "1".to_string();
+    renamed.original = Some(ColumnInfo {
+        name: "enabled".to_string(),
+        data_type: "bit".to_string(),
+        is_nullable: true,
+        column_default: Some("1".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "settings".to_string(),
+        column: renamed,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements.len(), 2);
+    assert_eq!(result.statements[0], "EXEC sp_rename '[dbo].[settings].[enabled]', 'is_enabled', 'COLUMN';");
+    assert!(result.statements[1].contains("N'is_enabled', 'ColumnId'"));
+    assert!(result.statements[1].contains("ALTER COLUMN [is_enabled] bit NOT NULL"));
+    assert!(result.statements[1].contains("FOR [is_enabled]"));
+}
+
+#[test]
+fn sqlserver_type_change_without_default_keeps_direct_alter_behavior() {
+    let mut value = column("value");
+    value.data_type = "bigint".to_string();
+    value.is_nullable = false;
+    value.original = Some(ColumnInfo {
+        name: "value".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: false,
+        column_default: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "metrics".to_string(),
+        column: value,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[metrics] ALTER COLUMN [value] bigint NOT NULL;"]);
 }
 
 #[test]

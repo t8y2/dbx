@@ -1051,12 +1051,16 @@ async fn stream_query_rows_text_on_client(
 }
 
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, String> {
+    let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+    connect_with_local_timezone(url, fallback_timeout, &timezone).await
+}
+
+async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, timezone: &str) -> Result<Pool, String> {
     let url_with_keepalive = inject_postgres_keepalive_params(url);
     let postgres_url = postgres_connection_url(&url_with_keepalive)?;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let tz = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
 
     super::with_connection_timeout("PostgreSQL", timeout, async {
         let pg_config = tokio_postgres::Config::from_str(&postgres_url.url)
@@ -1089,20 +1093,76 @@ pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, Stri
             .build()
             .map_err(|e| format!("Failed to create PostgreSQL pool: {e}"))?;
 
-        // Verify connectivity and set timezone. Only set timezone if the user
-        // hasn't already specified one via connection parameters (e.g. options=-c timezone=...)
+        // Verify connectivity and set timezone. Explicit connection options are
+        // handled by PostgreSQL during startup and must remain strict.
         let client =
             pool.get().await.map_err(|e| format!("PostgreSQL connection failed: {}", pg_pool_error_to_string(e)))?;
         if !pg_url_has_timezone_setting(url) {
-            client
-                .execute(&format!("SET timezone = '{}'", tz.replace('\'', "''")), &[])
-                .await
-                .map_err(|e| format!("PostgreSQL SET timezone failed: {e}"))?;
+            set_automatic_postgres_timezone(&client, timezone).await?;
         }
 
         Ok(pool)
     })
     .await
+}
+
+async fn set_automatic_postgres_timezone(client: &deadpool_postgres::Client, timezone: &str) -> Result<(), String> {
+    let candidates = postgres_timezone_candidates(timezone);
+    for (index, candidate) in candidates.iter().enumerate() {
+        let sql = format!("SET timezone = '{}'", candidate.replace('\'', "''"));
+        match client.execute(&sql, &[]).await {
+            Ok(_) => {
+                if *candidate != timezone {
+                    log::warn!(
+                        "PostgreSQL does not recognize local timezone '{timezone}'; using compatible alias '{candidate}'"
+                    );
+                }
+                return Ok(());
+            }
+            Err(error) if postgres_timezone_error_is_nonfatal(&error) => {
+                let detail = pg_error_to_string(error);
+                if index + 1 == candidates.len() {
+                    // A connected server may have older tzdata or only partial PostgreSQL compatibility.
+                    // Keep its session default rather than making optional local display alignment fatal.
+                    log::warn!(
+                        "PostgreSQL connected, but automatic local timezone '{timezone}' was rejected; \
+                         keeping the server default timezone: {detail}"
+                    );
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                return Err(format!("PostgreSQL SET timezone failed after connecting: {}", pg_error_to_string(error)));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn postgres_timezone_error_is_nonfatal(error: &tokio_postgres::Error) -> bool {
+    let Some(db_error) = error.as_db_error() else {
+        return false;
+    };
+    // SET failures reported as ordinary SQL errors are optional session setup.
+    // FATAL/PANIC responses mean the connection itself is not safe to return.
+    !matches!(
+        db_error.parsed_severity(),
+        Some(tokio_postgres::error::Severity::Fatal | tokio_postgres::error::Severity::Panic)
+    ) && !matches!(db_error.severity().to_ascii_uppercase().as_str(), "FATAL" | "PANIC")
+}
+
+fn postgres_timezone_candidates(timezone: &str) -> Vec<&str> {
+    let legacy_alias = match timezone {
+        "Asia/Saigon" => Some("Asia/Ho_Chi_Minh"),
+        "Asia/Ho_Chi_Minh" => Some("Asia/Saigon"),
+        "Europe/Kyiv" => Some("Europe/Kiev"),
+        "Europe/Kiev" => Some("Europe/Kyiv"),
+        "Asia/Calcutta" => Some("Asia/Kolkata"),
+        "Asia/Kolkata" => Some("Asia/Calcutta"),
+        _ => None,
+    };
+    std::iter::once(timezone).chain(legacy_alias).collect()
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1458,17 +1518,23 @@ impl ServerCertVerifier for PostgresCaOnlyCertVerification {
 /// Check whether the user's connection URL already specifies a timezone via
 /// the `options` parameter so we don't overwrite it with the local timezone.
 fn pg_url_has_timezone_setting(url: &str) -> bool {
-    let lower = url.to_lowercase();
-    // Match "timezone=" anywhere after the query string, covering:
-    //   ?options=-c timezone=Asia/Shanghai
-    //   ?options=--timezone=UTC
-    // Also handles URL-encoded forms like timezone%3D
-    if let Some(query) = lower.split('?').nth(1) {
-        if query.contains("timezone=") || query.contains("timezone%3d") {
-            return true;
+    let Some(query) = url.split_once('?').map(|(_, query)| query.split('#').next().unwrap_or(query)) else {
+        return false;
+    };
+
+    query.split('&').any(|parameter| {
+        let (raw_key, raw_value) = parameter.split_once('=').unwrap_or((parameter, ""));
+        let key = percent_decode_str(raw_key).decode_utf8_lossy();
+        if !key.eq_ignore_ascii_case("options") {
+            return false;
         }
-    }
-    false
+
+        let options = percent_decode_str(raw_value).decode_utf8_lossy().to_ascii_lowercase();
+        options.split_ascii_whitespace().any(|token| {
+            let option = token.trim_start_matches('-');
+            option.starts_with("timezone=") || option.starts_with("time_zone=")
+        })
+    })
 }
 
 #[cfg(test)]
@@ -3243,6 +3309,53 @@ pub async fn list_extensions(pool: &Pool, schema: &str) -> Result<Vec<ExtensionI
         .collect())
 }
 
+fn list_extension_member_objects_sql() -> &'static str {
+    "SELECT 'RELATION'::text AS object_kind, c.relname, ''::text AS signature \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 \
+       AND EXISTS ( \
+         SELECT 1 FROM pg_catalog.pg_depend d \
+         WHERE d.classid = 'pg_catalog.pg_class'::regclass \
+           AND d.objid = c.oid \
+           AND d.refclassid = 'pg_catalog.pg_extension'::regclass \
+           AND d.deptype = 'e' \
+       ) \
+     UNION ALL \
+     SELECT 'FUNCTION'::text, p.proname, pg_get_function_identity_arguments(p.oid) \
+     FROM pg_catalog.pg_proc p \
+     JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+     WHERE n.nspname = $1 \
+       AND EXISTS ( \
+         SELECT 1 FROM pg_catalog.pg_depend d \
+         WHERE d.classid = 'pg_catalog.pg_proc'::regclass \
+           AND d.objid = p.oid \
+           AND d.refclassid = 'pg_catalog.pg_extension'::regclass \
+           AND d.deptype = 'e' \
+       )"
+}
+
+pub async fn list_extension_member_objects(pool: &Pool, schema: &str) -> Result<Vec<(String, String, String)>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = match postgres_query_cached(&client, list_extension_member_objects_sql(), &[&schema]).await {
+        Ok(rows) => rows,
+        Err(primary_error) => {
+            // PostgreSQL-compatible servers before the identity-argument
+            // formatter can still be filtered using their legacy formatter.
+            let fallback_sql = list_extension_member_objects_sql()
+                .replace("pg_get_function_identity_arguments(p.oid)", "pg_get_function_arguments(p.oid)");
+            postgres_query_cached(&client, &fallback_sql, &[&schema])
+                .await
+                .map_err(|fallback_error| format!("{primary_error}; legacy fallback failed: {fallback_error}"))?
+        }
+    };
+
+    Ok(rows
+        .iter()
+        .map(|row| (pg_row_try_string(row, 0), pg_row_try_string(row, 1), pg_row_try_string(row, 2)))
+        .collect())
+}
+
 pub async fn list_available_extensions(pool: &Pool) -> Result<Vec<ExtensionInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let rows = postgres_query_cached(
@@ -3972,6 +4085,18 @@ mod tests {
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("regclass"));
     }
 
+    #[test]
+    fn extension_member_query_filters_only_owned_relations_and_routines() {
+        let sql = list_extension_member_objects_sql();
+
+        assert!(sql.contains("d.classid = 'pg_catalog.pg_class'::regclass"));
+        assert!(sql.contains("d.classid = 'pg_catalog.pg_proc'::regclass"));
+        assert!(sql.contains("d.refclassid = 'pg_catalog.pg_extension'::regclass"));
+        assert!(sql.contains("d.deptype = 'e'"));
+        assert!(sql.contains("pg_get_function_identity_arguments(p.oid)"));
+        assert!(!sql.contains("d.deptype = 'x'"));
+    }
+
     #[tokio::test]
     async fn postgres_column_metadata_query_returns_enum_values_against_real_postgres() {
         let Some(container) = start_docker_postgres().await else {
@@ -4297,6 +4422,64 @@ mod tests {
     #[test]
     fn url_with_uppercase_timezone_returns_true() {
         assert!(pg_url_has_timezone_setting("postgres://localhost/db?options=--TimeZone=UTC"));
+    }
+
+    #[test]
+    fn unrelated_timezone_text_is_not_treated_as_explicit() {
+        assert!(!pg_url_has_timezone_setting("postgres://localhost/db?timezone=UTC"));
+        assert!(!pg_url_has_timezone_setting(
+            "postgres://localhost/db?application_name=timezone%3DUTC&options=-c%20search_path%3Dpublic"
+        ));
+    }
+
+    #[test]
+    fn postgres_timezone_candidates_include_known_tzdata_aliases() {
+        assert_eq!(postgres_timezone_candidates("Europe/Kyiv"), vec!["Europe/Kyiv", "Europe/Kiev"]);
+        assert_eq!(postgres_timezone_candidates("Asia/Kolkata"), vec!["Asia/Kolkata", "Asia/Calcutta"]);
+        assert_eq!(postgres_timezone_candidates("America/New_York"), vec!["America/New_York"]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn automatic_invalid_timezone_keeps_connected_server_default() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect_with_local_timezone(&url, Duration::from_secs(5), "Invalid/DBX_Timezone")
+            .await
+            .expect("automatic local timezone rejection must not reject a valid connection");
+        let client = pool.get().await.expect("checkout postgres");
+        let timezone: String = client.query_one("SHOW timezone", &[]).await.unwrap().get(0);
+        assert_ne!(timezone, "Invalid/DBX_Timezone");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn explicit_timezone_remains_strict_and_overrides_local_timezone() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let explicit_url = format!("{url}{separator}options=-c%20TimeZone%3DAsia%2FShanghai");
+        let pool = connect_with_local_timezone(&explicit_url, Duration::from_secs(5), "UTC")
+            .await
+            .expect("valid explicit timezone");
+        let client = pool.get().await.expect("checkout postgres");
+        let timezone: String = client.query_one("SHOW timezone", &[]).await.unwrap().get(0);
+        assert_eq!(timezone, "Asia/Shanghai");
+
+        let invalid_url = format!("{url}{separator}options=-c%20TimeZone%3DInvalid%2FDBX_Timezone");
+        let error = connect_with_local_timezone(&invalid_url, Duration::from_secs(5), "UTC")
+            .await
+            .expect_err("invalid explicit timezone must remain a connection error");
+        assert!(error.contains("Invalid/DBX_Timezone") || error.contains("time zone"), "{error}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn valid_automatic_timezone_is_applied_normally() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool =
+            connect_with_local_timezone(&url, Duration::from_secs(5), "UTC").await.expect("valid automatic timezone");
+        let client = pool.get().await.expect("checkout postgres");
+        let timezone: String = client.query_one("SHOW timezone", &[]).await.unwrap().get(0);
+        assert_eq!(timezone, "UTC");
     }
 
     #[test]

@@ -1,4 +1,6 @@
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { isSystemDatabaseName } from "@/lib/database/visibleDatabases";
+import type { DatabaseType } from "@/types/database";
 
 export const DATABASE_BACKUP_SCHEDULES_STORAGE_KEY = "dbx-database-backup-schedules";
 export const DATABASE_BACKUP_RUNS_STORAGE_KEY = "dbx-database-backup-runs";
@@ -8,6 +10,7 @@ export const MAX_DATABASE_BACKUP_HISTORY = 200;
 export type DatabaseBackupFrequency = "hourly" | "daily" | "weekly";
 export type DatabaseBackupRunStatus = "running" | "success" | "failed" | "cancelled";
 export type DatabaseBackupRunTrigger = "manual" | "scheduled";
+export type DatabaseBackupTableFilterMode = "all" | "include" | "exclude";
 
 const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres"]);
 
@@ -15,9 +18,9 @@ export function supportsScheduledDatabaseBackup(databaseType: string | undefined
   return !!databaseType && CONSISTENT_BACKUP_DATABASE_TYPES.has(databaseType);
 }
 
-export function resolveScheduledDatabaseBackupTargets(configuredDatabases: readonly string[], availableDatabases: readonly string[]): string[] {
+export function resolveScheduledDatabaseBackupTargets(configuredDatabases: readonly string[], availableDatabases: readonly string[], databaseType?: DatabaseType): string[] {
   const available = [...new Set(availableDatabases.map((database) => database.trim()).filter(Boolean))];
-  if (configuredDatabases.length === 0) return available;
+  if (configuredDatabases.length === 0) return available.filter((database) => !isSystemDatabaseName(databaseType, database));
 
   const missing = configuredDatabases.filter((database) => !available.includes(database));
   if (missing.length > 0) {
@@ -26,12 +29,64 @@ export function resolveScheduledDatabaseBackupTargets(configuredDatabases: reado
   return [...configuredDatabases];
 }
 
+export interface DatabaseBackupTableScope {
+  includedTables: string[];
+  selectedTables?: string[];
+  excludedTables?: string[];
+}
+
+export function normalizeDatabaseBackupTablePatterns(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,;\n]+/) : [];
+  return [...new Set(values.map((pattern) => stringValue(pattern).trim()).filter(Boolean))];
+}
+
+function tablePatternRegex(pattern: string, caseSensitive: boolean): RegExp {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`, caseSensitive ? "u" : "iu");
+}
+
+export function databaseBackupTableMatchesPattern(table: string, patterns: readonly string[], database = "", schema = "", caseSensitive = true): boolean {
+  const candidates = [table];
+  if (schema) candidates.push(`${schema}.${table}`);
+  if (database && schema && database !== schema) candidates.push(`${database}.${schema}.${table}`);
+  return patterns.some((pattern) => {
+    const matcher = tablePatternRegex(pattern, caseSensitive);
+    return candidates.some((candidate) => matcher.test(candidate));
+  });
+}
+
+export function databaseBackupTableNamesAreCaseSensitive(databaseType: DatabaseType | undefined, mysqlLowerCaseTableNames: unknown): boolean {
+  if (databaseType !== "mysql") return true;
+  const value = typeof mysqlLowerCaseTableNames === "number" ? mysqlLowerCaseTableNames : typeof mysqlLowerCaseTableNames === "string" ? Number(mysqlLowerCaseTableNames.trim()) : Number.NaN;
+  return value !== 1 && value !== 2;
+}
+
+export function resolveScheduledDatabaseBackupTableScope(mode: DatabaseBackupTableFilterMode, patterns: readonly string[], availableTables: readonly string[], database = "", schema = "", caseSensitive = true): DatabaseBackupTableScope {
+  const available = [...new Set(availableTables.map((table) => table.trim()).filter(Boolean))];
+  if (mode === "all") return { includedTables: available };
+
+  const normalizedPatterns = normalizeDatabaseBackupTablePatterns(patterns);
+  const matching = available.filter((table) => databaseBackupTableMatchesPattern(table, normalizedPatterns, database, schema, caseSensitive));
+  if (mode === "include") return { includedTables: matching, selectedTables: matching };
+
+  const matchingSet = new Set(matching);
+  return {
+    includedTables: available.filter((table) => !matchingSet.has(table)),
+    excludedTables: matching,
+  };
+}
+
 export interface DatabaseBackupSchedule {
   id: string;
   name: string;
   enabled: boolean;
   connectionId: string;
   databases: string[];
+  tableFilterMode: DatabaseBackupTableFilterMode;
+  tablePatterns: string[];
   destinationDirectory: string;
   frequency: DatabaseBackupFrequency;
   intervalHours: number;
@@ -119,6 +174,8 @@ export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()
     enabled: booleanValue(input.enabled, true),
     connectionId,
     databases: Array.isArray(input.databases) ? [...new Set(input.databases.map((database) => stringValue(database).trim()).filter(Boolean))] : [],
+    tableFilterMode: input.tableFilterMode === "include" || input.tableFilterMode === "exclude" ? input.tableFilterMode : "all",
+    tablePatterns: normalizeDatabaseBackupTablePatterns(input.tablePatterns),
     destinationDirectory,
     frequency,
     intervalHours: boundedInteger(input.intervalHours, 6, 1, 168),

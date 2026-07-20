@@ -1,0 +1,21 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/mongo:5.0.5
+    container_name: dbx-mongodb-5.0
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-27018}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: "${DB_PASSWORD:-123456}"
+      MONGO_INITDB_DATABASE: dbx
+    volumes:
+      - data:/data/db
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --username root --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+volumes:
+  data:

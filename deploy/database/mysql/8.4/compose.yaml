@@ -1,0 +1,20 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/mysql:8.4.6
+    container_name: dbx-mysql-8.4
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-3307}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: "${DB_PASSWORD:-123456}"
+      MYSQL_DATABASE: dbx
+    volumes:
+      - data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+volumes:
+  data:

@@ -31,6 +31,7 @@ pub mod history;
 pub mod jdbc;
 pub mod models;
 pub mod mongo_ops;
+pub mod mongo_shell;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 pub mod nacos;

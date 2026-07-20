@@ -11,7 +11,7 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["packages/app-tests/*.test.ts", "packages/node-core/tests/*.test.ts", "apps/desktop/src/**/*.spec.ts", "docs/lib/*.test.ts"],
+    include: ["packages/app-tests/*.test.ts", "apps/desktop/src/**/*.spec.ts", "docs/lib/*.test.ts"],
     globalSetup: "packages/test-globals.ts",
     // Large store modules are dynamically imported in many specs. Limiting
     // concurrency prevents those imports from starving timers and making

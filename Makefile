@@ -3,7 +3,15 @@
 PNPM ?= pnpm
 TAURI_DEV_PORT ?= 1420
 
-.PHONY: help install docs-install check-tauri-dev-port dev dev-fast dev-web dev-backend build package docs docs-build check test cargo-check-fast cargo-test-fast
+.PHONY: help install docs-install check-tauri-dev-port dev dev-fast dev-web dev-backend build package docs docs-build check test cargo-check-fast cargo-test-fast db db-list db-verify db-down db-reset db-check db-completion
+
+export DB
+export DB_VERSION
+export DB_BIND_ADDRESS
+export DB_PORT
+export DB_PASSWORD
+export FOLLOW
+export CONFIRM
 
 node_modules/.modules.yaml: package.json pnpm-lock.yaml
 	$(PNPM) install --frozen-lockfile
@@ -33,6 +41,15 @@ help:
 	@printf '  %-23s %s\n' 'make test' 'Run project tests'
 	@printf '  %-23s %s\n' 'make cargo-check-fast' 'Run Rust check without default features'
 	@printf '  %-23s %s\n' 'make cargo-test-fast' 'Run Rust tests without default features'
+	@printf '%s\n' ''
+	@printf '%s\n' 'Database test environments:'
+	@printf '  %-23s %s\n' 'make db-list' 'List available database versions'
+	@printf '  %-23s %s\n' 'make db DB=mysql@8.4' 'Start and print DBX connection fields'
+	@printf '  %-23s %s\n' 'make db-verify DB=mysql@8.4' 'Start and run smoke checks'
+	@printf '  %-23s %s\n' 'make db-down DB=mysql@8.4' 'Stop an environment'
+	@printf '  %-23s %s\n' 'make db-reset DB=mysql@8.4 CONFIRM=1' 'Delete containers and data'
+	@printf '  %-23s %s\n' 'make db-check' 'Validate every recipe and Compose file'
+	@printf '  %-23s %s\n' 'make db-completion' 'Show Bash/Zsh completion setup'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Setup:'
 	@printf '  %-23s %s\n' 'make install' 'Install root project dependencies'
@@ -88,3 +105,24 @@ cargo-check-fast:
 
 cargo-test-fast:
 	cargo test --no-default-features
+
+db-list:
+	@$(PNPM) db:env -- list
+
+db:
+	@$(PNPM) db:env -- start
+
+db-verify:
+	@$(PNPM) db:env -- verify
+
+db-down:
+	@$(PNPM) db:env -- down
+
+db-reset:
+	@$(PNPM) db:env -- reset
+
+db-check:
+	@$(PNPM) db:env -- check
+
+db-completion:
+	@$(PNPM) db:env -- completion

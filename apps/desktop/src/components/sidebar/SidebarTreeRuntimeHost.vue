@@ -64,6 +64,8 @@ import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/d
 import * as api from "@/lib/backend/api";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { objectTypesForGroupNode } from "@/lib/table/tableTree";
+import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
 import {
@@ -493,7 +495,10 @@ async function toggle() {
     return;
   }
 
-  const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
+  // Keep the click path aligned with every object-group definition. In
+  // particular, schema-level trigger/type groups have no tableName, so they
+  // must use the generic object loader rather than the table-trigger loader.
+  const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
@@ -509,6 +514,11 @@ async function toggle() {
   }
 
   try {
+    if (await loadSidebarObjectGroup(node, connectionStore)) {
+      emit("node-toggled", node, wasExpanded);
+      return;
+    }
+
     if (node.type === "connection" && node.connectionId) {
       const config = connectionStore.getConfig(node.connectionId);
       if (config?.db_type === "redis") {
@@ -619,10 +629,6 @@ async function toggle() {
       await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-fkeys" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
-    } else if (node.type === "group-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
-      await connectionStore.loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
-    } else if (databaseObjectGroup) {
-      await connectionStore.loadObjectGroupChildren(node);
     }
     emit("node-toggled", node, wasExpanded);
   } catch (e: any) {

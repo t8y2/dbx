@@ -455,6 +455,7 @@ export const mongoDropDatabase = forward("mongoDropDatabase");
 export const mongoDropCollection = forward("mongoDropCollection");
 export const documentFindDocuments = forward("documentFindDocuments");
 export const mongoFindDocuments = forward("mongoFindDocuments");
+export const mongoParseShellCommand = forward("mongoParseShellCommand");
 export const mongoFindOne = forward("mongoFindOne");
 export const mongoCountDocuments = forward("mongoCountDocuments");
 export const mongoServerVersion = forward("mongoServerVersion");

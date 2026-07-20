@@ -18,7 +18,19 @@ brew tap t8y2/dbx
 brew install dbx-cli
 ```
 
-需要 Node.js 22.13.0 或更高版本。
+通过 npm 安装时需要 Node.js 18.18.0 或更高版本。CLI 本身不依赖 `better-sqlite3`，也不受 Node.js native module ABI 影响。Homebrew 用户不需要单独管理 Node.js。
+
+### 独立原生版本
+
+`packages-v*` GitHub Release 会提供适用于 macOS、Linux 和 Windows 的 CLI 原生压缩包。下载对应平台的压缩包后，使用 `CLI-SHA256SUMS` 校验，解压即可直接运行 `dbx`，不需要 Node.js。
+
+```bash
+tar -xzf dbx-cli-linux-x64-gnu.tar.gz
+chmod +x dbx
+./dbx --version
+```
+
+如果使用自定义或便携版 DBX 数据目录，可以设置 `DBX_DATA_DIR`。
 
 查看版本：
 
@@ -52,13 +64,7 @@ dbx doctor
 dbx doctor --json
 ```
 
-如果切换 Node.js 版本后，`dbx doctor` 报 `NODE_MODULE_VERSION` 不匹配，请用运行 `dbx` 的同一个 Node.js 版本重建 native 依赖：
-
-```bash
-pnpm rebuild better-sqlite3 keytar --pending
-```
-
-如果是全局 npm 安装，使用同一个 Node.js 版本重新安装 CLI：
+如果 npm 没有安装当前平台包，请不要使用 `--no-optional`，重新安装：
 
 ```bash
 npm uninstall -g @dbx-app/cli
@@ -72,7 +78,7 @@ dbx capabilities
 dbx capabilities --json
 ```
 
-当前直接执行支持 PostgreSQL/Redshift、MySQL 兼容数据库（MySQL、Doris、StarRocks）和 SQLite。其它数据库类型在对应驱动加入 `@dbx-app/node-core` 前，会使用 DBX 桌面端 bridge。
+当前直接执行支持 PostgreSQL/Redshift、MySQL 兼容数据库（MySQL、Doris、StarRocks）和 SQLite。其它数据库类型会使用 DBX 桌面端 bridge 或 DBX Agent/JDBC 基础设施。
 
 ## 默认连接
 

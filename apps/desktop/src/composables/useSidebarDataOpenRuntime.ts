@@ -14,6 +14,7 @@ import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
+import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
 
 const DATA_TAB_METADATA_TTL_MS = TABLE_METADATA_CACHE_TTL_MS;
 
@@ -113,6 +114,8 @@ export function useSidebarDataOpenRuntime() {
           metadataMs: Math.round(performance.now() - metadataStartedAt),
         });
       } catch (error) {
+        // 元数据加载失败：行标识仍然未知，保持只读（tableMetaPending 不清除），
+        // 不回退到整行 WHERE 写入；刷新或重开表会重试加载并恢复
         openDataLog("warn", "metadata:error", { traceId, tabId: targetTabId, elapsed: elapsed(), error });
       }
     };
@@ -145,6 +148,9 @@ export function useSidebarDataOpenRuntime() {
       queryStore.switchTab(existingSameTableTab.id);
       logPhase("existing-tab-activated", { table: node.label });
       if (dataTabMetadataNeedsRefresh(existingSameTableTab, DATA_TAB_METADATA_TTL_MS)) {
+        // 真实列缺失时行标识未知：启动刷新的同时必须挂起编辑门控（所有
+        // "真实列缺失且启动刷新"的入口统一置 pending）
+        if (!existingSameTableTab.tableMeta?.columns.length) existingSameTableTab.tableMetaPending = true;
         void refreshTableMetaInBackground(existingSameTableTab.id, true);
         logPhase("metadata-started", { tabId: existingSameTableTab.id, reason: "existing-tab-stale" });
       }
@@ -161,13 +167,25 @@ export function useSidebarDataOpenRuntime() {
     })();
     openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
     logPhase("tab-created", { tabId });
+    // 接管该 tab：登记本次导航代次，作废在途的 openTableTarget/openData 旧代次
+    // ——旧导航即使目标身份相同（同表不同 whereInput）也不得再落地
+    const navigationToken = beginDataTabNavigation(tabId);
 
     // Cancel any previous execution on this tab before starting a new one
     const existingTab = queryStore.tabs.find((t) => t.id === tabId);
     if (existingTab?.isExecuting && existingTab.executionId) {
       await queryStore.cancelTabExecution(tabId);
       logPhase("previous-execution-cancelled", { tabId });
+      // 取消等待期间可能有更晚的导航（openTableTarget/openData）接管本 tab：
+      // 本代次已作废，不得再写占位元数据/executionId 覆盖新导航
+      if (!isCurrentDataTabNavigation(tabId, navigationToken)) {
+        logPhase("superseded-during-cancel", { tabId });
+        return;
+      }
     }
+    // 取消窗口之后由 executionId 比对（isActive）保护，代次使命完成即注销；
+    // 已作废的旧 token 不因删除而复活（比对按 token 同一性）
+    endDataTabNavigation(tabId, navigationToken);
 
     const openDataId = uuid();
     // Clear previous result so DataGrid doesn't show its internal loading overlay (without stop button)
@@ -194,9 +212,12 @@ export function useSidebarDataOpenRuntime() {
       existingTableMeta?.tableName === node.label && (existingTableMeta.catalog || "") === (node.catalog || "") && existingTableMeta.schema === tableSchema && existingTableMeta.tableType === tableType && existingTableMeta.columns.length > 0 && existingTableMetaAgeMs < DATA_TAB_METADATA_TTL_MS
         ? existingTableMeta
         : undefined;
-    const cachedTableMeta = sharedCachedTableMeta ? tableMetadataToDataTabMeta(sharedCachedTableMeta.metadata, tableSchema) : tabCachedTableMeta;
-    const cachedTableMetaAgeMs = sharedCachedTableMeta?.ageMs ?? existingTableMetaAgeMs;
-    const cachedTableMetaSource = sharedCachedTableMeta ? "shared" : tabCachedTableMeta ? "tab" : undefined;
+    // 空列的共享缓存条目不算暖缓存：columns=[] 无法区分"表确实无列"与
+    // 占位/异常态，按暖缓存跳过 pending 与刷新会让整行 WHERE 保存路径
+    // 在行标识未知时重新可用（#3727 审查意见）
+    const cachedTableMeta = sharedCachedTableMeta?.metadata.columns.length ? tableMetadataToDataTabMeta(sharedCachedTableMeta.metadata, tableSchema) : tabCachedTableMeta;
+    const cachedTableMetaAgeMs = sharedCachedTableMeta?.metadata.columns.length ? sharedCachedTableMeta.ageMs : existingTableMetaAgeMs;
+    const cachedTableMetaSource = sharedCachedTableMeta?.metadata.columns.length ? "shared" : tabCachedTableMeta ? "tab" : undefined;
     queryStore.setTableMeta(
       tabId,
       cachedTableMeta ?? {
@@ -209,6 +230,13 @@ export function useSidebarDataOpenRuntime() {
         primaryKeys: [],
       },
     );
+    if (!cachedTableMeta) {
+      // 冷缓存：占位元数据的 primaryKeys 为空但真实主键未知。挂起行标识
+      // 等待，元数据落地（setTableMeta）或加载失败前编辑/保存保持禁用，
+      // 防止数据查询先返回时整行 WHERE 保存路径短暂可用（#3727）
+      const pendingTab = queryStore.tabs.find((item) => item.id === tabId);
+      if (pendingTab) pendingTab.tableMetaPending = true;
+    }
     queryStore.setExecutingWithId(tabId, openDataId);
     request?.registerCancel(async () => {
       const current = queryStore.tabs.find((item) => item.id === tabId);
@@ -240,6 +268,8 @@ export function useSidebarDataOpenRuntime() {
 
       const limit = tableOpenPageLimit();
       const shouldRefreshTableMeta = !cachedTableMeta;
+      // Dameng metadata calls must remain serialized behind the table query.
+      const deferTableMetaRefresh = effectiveDbType === "dameng";
       if (cachedTableMeta) {
         openDataLog("info", "metadata:cache-hit", {
           traceId,
@@ -250,8 +280,11 @@ export function useSidebarDataOpenRuntime() {
           ageMs: Math.round(cachedTableMetaAgeMs),
           elapsed: elapsed(),
         });
-      } else {
+      } else if (deferTableMetaRefresh) {
         logPhase("metadata-deferred", { tabId });
+      } else {
+        void refreshTableMetaInBackground(tabId);
+        logPhase("metadata-started", { tabId });
       }
 
       // Check if superseded by a newer openData call
@@ -276,6 +309,12 @@ export function useSidebarDataOpenRuntime() {
         limit,
         includeRowId,
       });
+      // SQL 构建是异步后端调用：期间更晚的导航（openData/openTableTarget）
+      // 接管会替换 executionId，旧流程不得再覆盖 SQL/启动查询
+      if (!isActive()) {
+        logPhase("superseded-after-build-sql", { tabId });
+        return;
+      }
       openDataLog("info", "sql-built", {
         traceId,
         primaryKeyCount: primaryKeys.length,
@@ -295,7 +334,7 @@ export function useSidebarDataOpenRuntime() {
       });
       openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
       logPhase("execute-tab-sql", { tabId });
-      if (shouldRefreshTableMeta && canApplyTableMetadata(tabId)) {
+      if (shouldRefreshTableMeta && deferTableMetaRefresh && canApplyTableMetadata(tabId)) {
         void refreshTableMetaInBackground(tabId);
         logPhase("metadata-started", { tabId });
       }

@@ -1,7 +1,8 @@
 {
   "name": "@dbx-app/mongo-shell",
-  "version": "0.4.32",
-  "description": "Pure MongoDB shell JSON/argument parsing shared by desktop and node-core",
+  "version": "0.4.36",
+  "private": true,
+  "description": "MongoDB shell parsing helpers used by the DBX desktop editor",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
@@ -11,10 +12,6 @@
       "default": "./dist/index.js"
     }
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "scripts": {
     "build": "tsc",
     "prepare": "tsc"

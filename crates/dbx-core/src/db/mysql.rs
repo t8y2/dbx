@@ -13,7 +13,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
-use crate::sql::starts_with_executable_sql_keyword;
+use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
@@ -73,21 +73,27 @@ where
     row.get_opt::<T, I>(index).and_then(|result| result.ok())
 }
 
+/// 字节转 String：合法 UTF-8（绝大多数场景）时直接复用入参缓冲零拷贝，
+/// 仅在非法序列时退化为 lossy 替换。from_utf8_lossy(&b).to_string() 即使
+/// 对合法输入也会多一次分配+拷贝。
+fn bytes_to_string_lossy(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+}
+
 fn get_str(row: &mysql_async::Row, idx: usize) -> String {
     row_get::<String, _>(row, idx)
-        .or_else(|| row_get::<Vec<u8>, _>(row, idx).map(|b| String::from_utf8_lossy(&b).to_string()))
+        .or_else(|| row_get::<Vec<u8>, _>(row, idx).map(bytes_to_string_lossy))
         .unwrap_or_default()
 }
 
 fn get_str_by_name(row: &mysql_async::Row, name: &str) -> String {
     row_get::<String, _>(row, name)
-        .or_else(|| row_get::<Vec<u8>, _>(row, name).map(|b| String::from_utf8_lossy(&b).to_string()))
+        .or_else(|| row_get::<Vec<u8>, _>(row, name).map(bytes_to_string_lossy))
         .unwrap_or_default()
 }
 
 fn get_opt_str(row: &mysql_async::Row, name: &str) -> Option<String> {
-    row_get::<String, _>(row, name)
-        .or_else(|| row_get::<Vec<u8>, _>(row, name).map(|b| String::from_utf8_lossy(&b).to_string()))
+    row_get::<String, _>(row, name).or_else(|| row_get::<Vec<u8>, _>(row, name).map(bytes_to_string_lossy))
 }
 
 /// First non-empty string value among the named columns (e.g. Doris `CatalogName`
@@ -279,7 +285,7 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
             .map(serde_json::Value::String)
             .unwrap_or_else(|| super::binary_value_to_json(&bytes));
     }
-    serde_json::Value::String(String::from_utf8_lossy(&bytes).to_string())
+    serde_json::Value::String(bytes_to_string_lossy(bytes))
 }
 
 /// Map a MySQL column to a user-facing type name for the result-grid header.
@@ -3198,8 +3204,11 @@ fn prefers_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
 }
 
 fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
-    starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH", "CALL"])
-        || dialect.supports_admin_show_results && is_admin_show_query(sql)
+    starts_with_executable_sql_keyword_for_database(
+        sql,
+        &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH", "CALL"],
+        DatabaseType::Mysql,
+    ) || dialect.supports_admin_show_results && is_admin_show_query(sql)
 }
 
 fn requires_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
@@ -3207,12 +3216,11 @@ fn requires_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
         return true;
     }
 
-    if !starts_with_executable_sql_keyword(sql, &["SHOW"]) {
+    if !starts_with_executable_sql_keyword_for_database(sql, &["SHOW"], DatabaseType::Mysql) {
         return false;
     }
 
-    let tokens =
-        sql.trim().trim_end_matches(';').split_whitespace().map(|token| token.to_ascii_lowercase()).collect::<Vec<_>>();
+    let tokens = leading_sql_word_tokens(sql, 3);
     if tokens.len() >= 2 && tokens[0] == "show" && tokens[1] == "grants" {
         return true;
     }
@@ -3362,11 +3370,7 @@ pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str
     let row = rows.first().ok_or("DDL not found")?;
     row.get_opt::<String, usize>(1)
         .and_then(|result| result.ok())
-        .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(1)
-                .and_then(|result| result.ok())
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-        })
+        .or_else(|| row.get_opt::<Vec<u8>, usize>(1).and_then(|result| result.ok()).map(bytes_to_string_lossy))
         .ok_or_else(|| "Failed to read DDL".to_string())
 }
 
@@ -3549,11 +3553,7 @@ pub async fn show_create_table_ddl_from(
     let row = rows.first().ok_or("DDL not found")?;
     row.get_opt::<String, usize>(1)
         .and_then(|result| result.ok())
-        .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(1)
-                .and_then(|result| result.ok())
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-        })
+        .or_else(|| row.get_opt::<Vec<u8>, usize>(1).and_then(|result| result.ok()).map(bytes_to_string_lossy))
         .ok_or_else(|| "Failed to read DDL".to_string())
 }
 
@@ -3909,6 +3909,15 @@ mod tests {
     use mysql_async::consts::ColumnFlags;
 
     #[test]
+    fn bytes_to_string_reuses_valid_utf8_and_falls_back_lossy() {
+        assert_eq!(super::bytes_to_string_lossy("héllo 世界".as_bytes().to_vec()), "héllo 世界");
+        assert_eq!(super::bytes_to_string_lossy(vec![]), "");
+        // 非法 UTF-8 序列退化为替换字符，与 from_utf8_lossy 语义一致
+        let invalid = vec![0x66, 0x6f, 0xff, 0x6f];
+        assert_eq!(super::bytes_to_string_lossy(invalid.clone()), String::from_utf8_lossy(&invalid));
+    }
+
+    #[test]
     fn mysql_column_type_names_map_to_friendly_names() {
         use mysql_async::consts::ColumnType::*;
         let utf8 = 45u16;
@@ -3985,6 +3994,16 @@ mod tests {
     fn mysql_with_queries_are_treated_as_result_sets() {
         let sql = "WITH RECURSIVE org_tree AS (SELECT 1 AS id) SELECT id FROM org_tree";
         assert!(is_result_set_query(sql, MySqlQueryDialect::default()));
+    }
+
+    #[test]
+    fn mysql_hash_comments_before_queries_preserve_result_sets_per_issue_3830() {
+        let dialect = MySqlQueryDialect::default();
+
+        assert!(is_result_set_query("# 注释\nSELECT NOW()", dialect));
+        assert!(prefers_text_protocol_query("# 注释\nSELECT NOW()", dialect));
+        assert!(requires_text_protocol_query("# inspect sessions\nSHOW PROCESSLIST", dialect));
+        assert!(!is_result_set_query("# update row\nUPDATE users SET name = 'Ada' WHERE id = 1", dialect));
     }
 
     #[test]

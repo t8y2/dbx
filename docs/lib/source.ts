@@ -10,6 +10,7 @@ const pageIcons: Record<string, keyof typeof icons> = {
   "getting-started": "Rocket",
   "1panel": "PanelsTopLeft",
   databases: "Database",
+  "database-lab": "FlaskConical",
   "query-editor": "SquareTerminal",
   "data-grid": "Table2",
   "schema-browser": "Network",

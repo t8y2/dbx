@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/dbx-core", "crates/dbx-web"]
+members = ["src-tauri", "crates/dbx-core", "crates/dbx-web", "crates/dbx-mcp", "crates/dbx-cli"]
 
 [patch.crates-io]
 tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }

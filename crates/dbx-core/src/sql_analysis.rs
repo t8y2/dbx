@@ -10,8 +10,9 @@ use sqlparser::ast::{
 use sqlparser::dialect::{
     ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
 };
-use sqlparser::parser::Parser;
-use sqlparser::tokenizer::Span;
+use sqlparser::keywords::Keyword;
+use sqlparser::parser::{Parser, ParserError};
+use sqlparser::tokenizer::{Span, Token, TokenWithSpan, Tokenizer};
 
 use crate::sql::{starts_with_duckdb_result_sql_keyword, starts_with_executable_sql_keyword};
 
@@ -99,7 +100,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
         "mysql" => Parser::parse_sql(&MySqlDialect {}, &parser_sql),
         "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
-        "sqlserver" => Parser::parse_sql(&MsSqlDialect {}, &parser_sql),
+        "sqlserver" => parse_sqlserver(&parser_sql),
         "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, &parser_sql),
         "duckdb" => Parser::parse_sql(&DuckDbDialect {}, &parser_sql),
         _ => Parser::parse_sql(&GenericDialect {}, &parser_sql),
@@ -112,6 +113,57 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     }
 
     Ok(SqlReferenceAnalysis { tables: analyzer.tables, columns: analyzer.columns, scopes: analyzer.scopes })
+}
+
+fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
+    let dialect = MsSqlDialect {};
+    let mut tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+    normalize_sqlserver_create_proc_tokens(&mut tokens);
+    Parser::new(&dialect).with_tokens_with_locations(tokens).parse_statements()
+}
+
+fn normalize_sqlserver_create_proc_tokens(tokens: &mut [TokenWithSpan]) {
+    let significant_indexes: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect();
+
+    for (position, index) in significant_indexes.iter().copied().enumerate() {
+        if token_keyword(&tokens[index]) != Some(Keyword::CREATE) {
+            continue;
+        }
+
+        let mut proc_position = position + 1;
+        if significant_indexes.get(proc_position).and_then(|index| token_keyword(&tokens[*index])) == Some(Keyword::OR)
+        {
+            proc_position += 1;
+            if significant_indexes.get(proc_position).and_then(|index| token_keyword(&tokens[*index]))
+                != Some(Keyword::ALTER)
+            {
+                continue;
+            }
+            proc_position += 1;
+        }
+
+        let Some(proc_index) = significant_indexes.get(proc_position).copied() else {
+            continue;
+        };
+        let Token::Word(word) = &mut tokens[proc_index].token else {
+            continue;
+        };
+        // SQL Server documents PROC as a contextual synonym for PROCEDURE after CREATE.
+        if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("proc") {
+            word.keyword = Keyword::PROCEDURE;
+        }
+    }
+}
+
+fn token_keyword(token: &TokenWithSpan) -> Option<Keyword> {
+    match &token.token {
+        Token::Word(word) => Some(word.keyword),
+        _ => None,
+    }
 }
 
 fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {

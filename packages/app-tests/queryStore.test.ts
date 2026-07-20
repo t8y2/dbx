@@ -5,6 +5,7 @@ import { isReactive } from "vue";
 import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
 import { analyzeEditableQueryEditability } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 import { resultSqlForGrid } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
+import { parseMongoCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
@@ -90,6 +91,21 @@ function withConnectionHealthMock(handler: typeof fetch): typeof fetch {
   return async (input, init) => {
     if (String(input) === "/api/connection/check-health") {
       return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (String(input) === "/api/mongo/parse-shell-command") {
+      const source = JSON.parse(String(init?.body ?? "{}")).source as string;
+      const parsed = parseMongoCommand(source)?.command;
+      if (!parsed) return new Response("invalid MongoDB command", { status: 400 });
+      let command: Record<string, unknown> = parsed as unknown as Record<string, unknown>;
+      if (parsed.kind === "countDocuments") {
+        const { mode, ...rest } = parsed;
+        command = { ...rest, kind: "countDocuments", accurate: mode === "accurate" };
+      } else if (parsed.kind === "dropIndex") {
+        command = { kind: "dropIndexes", collection: parsed.collection, indexes: parsed.index, single: true };
+      } else if (parsed.kind === "dropIndexes") {
+        command = { ...parsed, single: false };
+      }
+      return new Response(JSON.stringify(command), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     return handler(input, init);
   };
@@ -3495,7 +3511,7 @@ test("mongo multi-command execution reconnects before running commands", async (
   });
   connectionStore.connectedIds.delete("mongo-1");
 
-  globalThis.fetch = async (input, init) => {
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
     const url = String(input);
     if (url === "/api/connection/connect") {
       requests.push(url);
@@ -3514,7 +3530,7 @@ test("mongo multi-command execution reconnects before running commands", async (
       });
     }
     return new Response("unexpected request", { status: 500 });
-  };
+  });
 
   try {
     const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
@@ -3592,10 +3608,10 @@ test("mongo use-only execution updates the tab without reconnecting", async () =
   });
   connectionStore.connectedIds.delete("mongo-1");
 
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = withConnectionHealthMock(async (input) => {
     requests.push(String(input));
     return new Response("unexpected request", { status: 500 });
-  };
+  });
 
   try {
     const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");

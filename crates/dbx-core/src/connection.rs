@@ -199,10 +199,23 @@ pub struct AppState {
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
 
-#[derive(Clone, Copy)]
+/// 活跃时间以进程内单调时钟的相对毫秒存储（AtomicU64）：热路径每条查询都要
+/// 更新它，读锁 + 原子写让并发查询不再在全局写锁上串行化。
+/// 基准偏移让测试能构造"过去"的时间点（否则进程刚启动时相对毫秒接近 0）。
+const POOL_ACTIVITY_BASE_MS: u64 = 86_400_000;
+
+fn pool_activity_epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+fn pool_activity_now_ms() -> u64 {
+    POOL_ACTIVITY_BASE_MS + pool_activity_epoch().elapsed().as_millis() as u64
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 struct PoolActivity {
-    last_used_at: Instant,
+    last_used_at_ms: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy)]
@@ -213,7 +226,29 @@ struct ConnectionAttemptState {
 
 impl PoolActivity {
     fn now() -> Self {
-        Self { last_used_at: Instant::now() }
+        Self { last_used_at_ms: std::sync::atomic::AtomicU64::new(pool_activity_now_ms()) }
+    }
+
+    fn touch(&self) {
+        // fetch_max 防止"先算后写"交错导致时间戳倒退（A 算得 100 被挂起，
+        // B 写入 200 后 A 再写 100）
+        self.last_used_at_ms.fetch_max(pool_activity_now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn elapsed(&self) -> Duration {
+        Duration::from_millis(
+            pool_activity_now_ms().saturating_sub(self.last_used_at_ms.load(std::sync::atomic::Ordering::Relaxed)),
+        )
+    }
+
+    #[cfg(test)]
+    fn idle_for(idle: Duration) -> Self {
+        Self {
+            last_used_at_ms: std::sync::atomic::AtomicU64::new(
+                pool_activity_now_ms().saturating_sub(idle.as_millis() as u64),
+            ),
+        }
     }
 }
 
@@ -231,6 +266,10 @@ impl Drop for PoolActivityTouch {
         let pool_activity = self.pool_activity.clone();
         self.task_supervisor.spawn_replace(format!("pool-activity:{pool_key}"), move |_| async move {
             if !connections.read().await.contains_key(&pool_key) {
+                return;
+            }
+            if let Some(activity) = pool_activity.read().await.get(&pool_key) {
+                activity.touch();
                 return;
             }
             pool_activity.write().await.insert(pool_key, PoolActivity::now());
@@ -983,6 +1022,11 @@ impl AppState {
     }
 
     pub async fn touch_pool_activity(&self, pool_key: &str) {
+        // 热路径：读锁下原子更新；仅条目缺失（首次/已被清理）才退化为写锁插入
+        if let Some(activity) = self.pool_activity.read().await.get(pool_key) {
+            activity.touch();
+            return;
+        }
         self.pool_activity.write().await.insert(pool_key.to_string(), PoolActivity::now());
     }
 
@@ -1044,6 +1088,7 @@ impl AppState {
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
         let db_type = Some(config.db_type);
+        let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
 
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
         let pool_key = session_scoped_pool_key_for(Some(&config), base_pool_key, client_session_id);
@@ -1053,7 +1098,7 @@ impl AppState {
             drop(conns);
             if self.remove_pool_if_duckdb_isolation_mismatch(&pool_key).await {
                 // Recreate below using the current DuckDB isolation mode.
-            } else if !self.remove_stale_connection_pool(&pool_key).await {
+            } else if !validate_existing_pool || !self.remove_stale_connection_pool(&pool_key).await {
                 self.touch_pool_activity(&pool_key).await;
                 return Ok(pool_key);
             }
@@ -3237,6 +3282,13 @@ fn uses_agent_connection_pool(db_type: &DatabaseType) -> bool {
     matches!(*db_type, agent_connection_pool_database_type!())
 }
 
+fn should_validate_existing_pool_before_reuse(db_type: DatabaseType) -> bool {
+    // PostgreSQL uses deadpool's Fast recycling and the query executor's
+    // ReconnectAndRetry path. An eager SELECT 1 here would add a network
+    // round-trip before every query without improving recovery behavior.
+    !matches!(db_type, DatabaseType::Postgres)
+}
+
 #[cfg(test)]
 fn uses_bare_mysql_pool(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
@@ -3600,6 +3652,12 @@ mod tests {
         assert!(!uses_bare_mysql_pool(&DatabaseType::Databend));
         assert!(database_capabilities::is_agent_type(&DatabaseType::Databend));
         assert!(super::uses_agent_connection_pool(&DatabaseType::ZooKeeper));
+    }
+
+    #[test]
+    fn postgres_pool_reuse_skips_eager_validation_query() {
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Postgres));
+        assert!(super::should_validate_existing_pool_before_reuse(DatabaseType::Mysql));
     }
 
     #[test]
@@ -4285,7 +4343,7 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable"
         );
     }
 
@@ -4708,16 +4766,17 @@ mod tests {
         let pool_key = "conn:session:tab-1";
 
         state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(pool));
-        state.pool_activity.write().await.insert(
-            pool_key.to_string(),
-            super::PoolActivity { last_used_at: std::time::Instant::now() - std::time::Duration::from_secs(10) },
-        );
+        state
+            .pool_activity
+            .write()
+            .await
+            .insert(pool_key.to_string(), super::PoolActivity::idle_for(std::time::Duration::from_secs(10)));
 
         {
             let _touch = state.pool_activity_touch(pool_key);
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let elapsed = state.pool_activity.read().await.get(pool_key).unwrap().last_used_at.elapsed();
+        let elapsed = state.pool_activity.read().await.get(pool_key).unwrap().elapsed();
         assert!(elapsed < std::time::Duration::from_secs(10));
 
         {
@@ -4731,6 +4790,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn pool_activity_touch_never_moves_backwards() {
+        let activity = super::PoolActivity::idle_for(std::time::Duration::from_secs(0));
+        let newer = u64::MAX;
+        activity.last_used_at_ms.store(newer, std::sync::atomic::Ordering::Relaxed);
+        // touch 的当前时间早于已存值：不得倒退
+        activity.touch();
+        assert_eq!(activity.last_used_at_ms.load(std::sync::atomic::Ordering::Relaxed), newer);
+    }
+
     #[tokio::test]
     async fn session_scoped_pool_is_not_closed_by_idle_timeout() {
         let (state, dir) = test_app_state().await;
@@ -4741,10 +4810,11 @@ mod tests {
         config.keepalive_interval_secs = 0;
 
         state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(pool));
-        state.pool_activity.write().await.insert(
-            pool_key.to_string(),
-            super::PoolActivity { last_used_at: std::time::Instant::now() - std::time::Duration::from_secs(10) },
-        );
+        state
+            .pool_activity
+            .write()
+            .await
+            .insert(pool_key.to_string(), super::PoolActivity::idle_for(std::time::Duration::from_secs(10)));
         let pool = super::clone_pool_kind(state.connections.read().await.get(pool_key).unwrap());
         state.start_keepalive_task(pool_key, &pool, &config).await;
 

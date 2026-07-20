@@ -10,6 +10,7 @@ import {
   mongoDistinctToQueryResult,
   mongoDocumentsToQueryResult,
   mongoIndexesToQueryResult,
+  normalizeRustMongoCommand,
   parseMongoAggregateCommand,
   parseMongoCollectionStatsCommand,
   parseMongoCommand,
@@ -37,6 +38,21 @@ test("parseMongoFindCommand parses db collection find with an empty JSON filter"
     limit: 100,
     sort: undefined,
   });
+});
+
+test("normalizeRustMongoCommand preserves the desktop command contract", () => {
+  assert.deepEqual(
+    normalizeRustMongoCommand({ kind: "countDocuments", collection: "users", filter: "{}", accurate: false }),
+    { kind: "countDocuments", collection: "users", filter: "{}", mode: "legacy" },
+  );
+  assert.deepEqual(
+    normalizeRustMongoCommand({ kind: "dropIndexes", collection: "users", indexes: '"email_1"', single: true }),
+    { kind: "dropIndex", collection: "users", index: '"email_1"' },
+  );
+  assert.deepEqual(
+    normalizeRustMongoCommand({ kind: "findOne", collection: "users", filter: "{}", projection: null, options: null }),
+    { kind: "findOne", collection: "users", filter: "{}" },
+  );
 });
 
 test("parseMongoFindCommand parses getCollection find with chained sort skip and limit", () => {
@@ -286,6 +302,33 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
     update: '{"$set": {"stock": 3}}',
     many: false,
   });
+});
+
+test("parseMongoWriteCommand accepts legacy insert commands", () => {
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.getCollection("accounting_reconciliations").insert({
+      "accountId": 999,
+      "status": "done"
+    });`),
+    {
+      kind: "insert",
+      collection: "accounting_reconciliations",
+      docsJson: '{\n      "accountId": 999,\n      "status": "done"\n    }',
+    },
+  );
+  assert.deepEqual(parseMongoWriteCommand("db.products.insert([{name: 'first'}, {name: 'second'}])"), {
+    kind: "insert",
+    collection: "products",
+    docsJson: '[{"name": "first"}, {"name": "second"}]',
+  });
+  assert.deepEqual(parseMongoWriteCommand("db.products.insertMany([{name: 'first'}, {name: 'second'}])"), {
+    kind: "insert",
+    collection: "products",
+    docsJson: '[{"name": "first"}, {"name": "second"}]',
+  });
+  assert.equal(parseMongoWriteCommand("db.products.insert({name: 'demo'}, {writeConcern: {w: 1}})"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert()"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert('demo')"), null);
 });
 
 test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {

@@ -1,9 +1,11 @@
 import type { AiConfig, AiConfigItem } from "@/types/ai";
+import { uuid } from "@/lib/common/utils";
 
 export type { AiConfigItem };
 
 export function generateId(): string {
-  return crypto.randomUUID();
+  // Non-secure web deployments may expose crypto without randomUUID; the shared helper preserves a UUID-shaped fallback.
+  return uuid();
 }
 
 export function getConfigKey(config: AiConfig): string {

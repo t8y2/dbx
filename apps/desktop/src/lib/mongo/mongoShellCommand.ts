@@ -90,6 +90,20 @@ export type MongoCommand =
 
 export type MongoWriteCommand = Extract<MongoCommand, { kind: MongoWriteKind }>;
 
+export function normalizeRustMongoCommand(raw: Record<string, unknown>): MongoCommand {
+  const command = Object.fromEntries(Object.entries(raw).filter(([, value]) => value !== null)) as Record<string, any>;
+  if (command.kind === "countDocuments") {
+    const { accurate, ...rest } = command;
+    return { ...rest, kind: "countDocuments", mode: accurate ? "accurate" : "legacy" } as MongoCommand;
+  }
+  if (command.kind === "dropIndexes") {
+    const { single, indexes, ...rest } = command;
+    if (single) return { ...rest, kind: "dropIndex", index: indexes } as MongoCommand;
+    return { ...rest, kind: "dropIndexes", ...(indexes ? { indexes } : {}) } as MongoCommand;
+  }
+  return command as MongoCommand;
+}
+
 export interface ParsedMongoCommand {
   text: string;
   command: MongoCommand;
@@ -419,6 +433,16 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     const docs = normalizeJsonArgument(args[0]);
     if (!docs) return null;
     return Array.isArray(JSON.parse(docs)) ? { kind: "insert", collection: insertMany.collection, docsJson: docs } : null;
+  }
+
+  const insert = parseCollectionMethodTarget(source, "insert");
+  if (insert) {
+    const args = parseMethodArgs(source, insert.methodCallIndex);
+    if (!args || args.length !== 1 || !args[0]?.trim()) return null;
+    const docs = normalizeJsonArgument(args[0]);
+    if (!docs) return null;
+    const value = JSON.parse(docs);
+    return value !== null && typeof value === "object" ? { kind: "insert", collection: insert.collection, docsJson: docs } : null;
   }
 
   for (const method of ["updateOne", "updateMany"] as const) {

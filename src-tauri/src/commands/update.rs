@@ -32,7 +32,7 @@ pub struct UpdateDownloadProgress {
 
 enum PendingUpdate {
     Downloading,
-    Ready { update: Update, bytes: Vec<u8> },
+    Ready { update: Box<Update>, bytes: Vec<u8> },
 }
 
 #[derive(Default)]
@@ -52,7 +52,7 @@ impl PendingUpdateState {
 
     fn finish_download(&self, update: Update, bytes: Vec<u8>) -> Result<(), String> {
         let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
-        *pending = Some(PendingUpdate::Ready { update, bytes });
+        *pending = Some(PendingUpdate::Ready { update: Box::new(update), bytes });
         Ok(())
     }
 

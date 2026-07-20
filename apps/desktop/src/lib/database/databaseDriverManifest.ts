@@ -92,10 +92,6 @@ export function manifestDatabaseTypes(): DatabaseType[] {
 }
 
 export function usesAgentCursorForQuery(dbType?: DatabaseType): boolean {
-  // Kingbase JDBC buffers the complete result while auto-commit is enabled,
-  // even when fetchSize is set. Use server-side LIMIT/OFFSET pagination so the
-  // first page does not scan and transfer the full result set.
-  if (dbType === "kingbase") return false;
   const runtimeMode = databaseRuntimeMode(dbType);
   return runtimeMode === "agent" || runtimeMode === "external";
 }

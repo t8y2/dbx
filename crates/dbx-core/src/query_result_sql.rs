@@ -136,7 +136,9 @@ pub fn build_query_pagination_execution_plan(
         return plan;
     }
 
-    if options.use_agent_cursor && options.pagination.offset == 0 {
+    let can_use_first_page_cursor = options.use_agent_cursor && options.pagination.offset == 0;
+    let prefer_server_pagination = options.database_type == Some(DatabaseType::Kingbase);
+    if can_use_first_page_cursor && !prefer_server_pagination {
         if !options.first_page_uses_actual_sql {
             plan.sql_to_execute = options.query_base_sql;
         }
@@ -157,6 +159,17 @@ pub fn build_query_pagination_execution_plan(
         plan.page_sql = paginated.sql;
         plan.page_limit = Some(options.pagination.limit);
         plan.page_offset = Some(options.pagination.offset);
+    } else if can_use_first_page_cursor {
+        // Kingbase JDBC may buffer an entire result in auto-commit mode, so use
+        // LIMIT/OFFSET whenever the statement can be rewritten safely. Keep the
+        // Agent cursor as a bounded fallback for multi-statement or dialect-
+        // specific SQL that the pagination parser cannot transform.
+        if !options.first_page_uses_actual_sql {
+            plan.sql_to_execute = options.query_base_sql;
+        }
+        plan.page_limit = Some(options.pagination.limit);
+        plan.page_offset = Some(options.pagination.offset);
+        plan.use_agent_result_session = true;
     }
     plan
 }
@@ -2275,6 +2288,43 @@ WHERE u.id = picked.id;
         assert_eq!(plan.page_limit, Some(500));
         assert_eq!(plan.page_offset, Some(0));
         assert!(plan.page_sql.is_none());
+        assert!(plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn kingbase_prefers_server_pagination_over_agent_cursor() {
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Kingbase),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM events LIMIT 500;");
+        assert_eq!(plan.page_sql, Some(plan.sql_to_execute.clone()));
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(!plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn kingbase_falls_back_to_agent_cursor_for_unrewritable_queries() {
+        let sql = "SELECT * FROM events; SELECT 1";
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Kingbase),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, sql);
+        assert!(plan.page_sql.is_none());
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
         assert!(plan.use_agent_result_session);
     }
 

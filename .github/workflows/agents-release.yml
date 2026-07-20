@@ -87,7 +87,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: agent-jars
-          path: "agents/drivers/*/build/libs/dbx-agent-*.jar"
+          path: |
+            agents/drivers/*/build/libs/dbx-agent-*.jar
+            !agents/drivers/kingbase/build/libs/dbx-agent-kingbase.jar
 
   build-oracle-native:
     needs: [bump-versions]
@@ -167,6 +169,45 @@ jobs:
           name: xugu-native
           path: "release-native/dbx-agent-xugu-*"
 
+  build-kingbase-native:
+    needs: [bump-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Test Kingbase native agent
+        working-directory: agents/drivers/kingbase-go
+        run: go test ./...
+      - name: Cross-compile Kingbase native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/kingbase-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-kingbase-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kingbase-native
+          path: "release-native/dbx-agent-kingbase-*"
+
   build-jre:
     runs-on: ubuntu-latest
     strategy:
@@ -239,7 +280,7 @@ jobs:
           path: "dbx-jre-*.tar.gz"
 
   release:
-    needs: [bump-versions, build-agents, build-oracle-native, build-xugu-native, build-jre]
+    needs: [bump-versions, build-agents, build-oracle-native, build-xugu-native, build-kingbase-native, build-jre]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -250,9 +291,10 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find artifacts/agent-jars -name '*.jar' -exec cp {} release/ \;
+          find artifacts/agent-jars -name '*.jar' ! -name 'dbx-agent-kingbase.jar' -exec cp {} release/ \;
           find artifacts/oracle-native -type f -name 'dbx-agent-oracle-*' -exec cp {} release/ \;
           find artifacts/xugu-native -type f -name 'dbx-agent-xugu-*' -exec cp {} release/ \;
+          find artifacts/kingbase-native -type f -name 'dbx-agent-kingbase-*' -exec cp {} release/ \;
           find artifacts -name 'dbx-jre-*.tar.gz' -exec cp {} release/ \;
           ls -lh release/
 
@@ -312,6 +354,7 @@ jobs:
           native_only_label() {
             local name="$1"
             case "$name" in
+              kingbase) echo "人大金仓 KingbaseES" ;;
               xugu) echo "虚谷 XuguDB" ;;
               *) echo "$name" ;;
             esac
@@ -370,7 +413,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu; do
+          for name in oracle xugu kingbase; do
             [ -f "release/dbx-agent-${name}.jar" ] && continue
             native_json=$(generate_native_platforms "$name")
             [ -z "$native_json" ] && continue
@@ -415,7 +458,7 @@ jobs:
           for f in release/dbx-agent-*.jar; do
             DRIVER_NAMES+=("$(basename "$f" .jar | sed 's/dbx-agent-//')")
           done
-          for name in oracle xugu; do
+          for name in oracle xugu kingbase; do
             [ -f "release/dbx-agent-${name}.jar" ] && continue
             compgen -G "release/dbx-agent-${name}-*" > /dev/null && DRIVER_NAMES+=("$name")
           done
@@ -423,6 +466,7 @@ jobs:
           native_only_label() {
             local name="$1"
             case "$name" in
+              kingbase) echo "人大金仓 KingbaseES" ;;
               oracle) echo "Oracle" ;;
               xugu) echo "虚谷 XuguDB" ;;
               *) echo "$name" ;;
@@ -445,6 +489,8 @@ jobs:
             NOTES="${NOTES}### ${label} (${old_ver} → ${new_ver})"$'\n'
             if [ "$name" = "oracle" ]; then
               LOG_PATH="agents/drivers/oracle-go/"
+            elif [ "$name" = "kingbase" ]; then
+              LOG_PATH="agents/drivers/kingbase-go/"
             elif [ -d "agents/drivers/$name" ]; then
               LOG_PATH="agents/drivers/$name/"
             else

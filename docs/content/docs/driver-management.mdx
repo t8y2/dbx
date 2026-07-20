@@ -1,18 +1,19 @@
 ---
 title: Driver Management
-description: Manage built-in and agent-based JDBC drivers, configure JRE versions, and handle driver updates.
+description: Manage built-in, native Agent, and JDBC Agent drivers, configure JRE versions, and handle driver updates.
 ---
 
-DBX uses a hybrid driver architecture: built-in native drivers for common databases and a JDBC agent system for databases that require vendor-specific JDBC drivers.
+DBX uses a hybrid driver architecture: built-in Rust drivers, standalone native Agents, and Java/JDBC Agents.
 
 ## Driver Architecture
 
-| Driver Type       | How It Works                   | Best For                                                                                                                                                                                 |
-| ----------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Native (built-in) | Rust drivers compiled into DBX | MySQL, PostgreSQL, SQLite, SQL Server, Oracle, Redis, MongoDB, DuckDB, ClickHouse, and more                                                                                              |
-| JDBC Agent        | Java subprocess managed by DBX | Databases that provide JDBC drivers: GaussDB, openGauss, DM, KingBase, HighGo, Vastbase, Trino, Hive, DB2, Informix, Neo4j, TDengine, XuguDB, YashanDB, GoldenDB, Kylin, SunDB, and more |
+| Driver Type       | How It Works                         | Best For                                                                                                                                                        |
+| ----------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Native (built-in) | Rust drivers compiled into DBX       | MySQL, PostgreSQL, SQLite, SQL Server, Redis, MongoDB, DuckDB, ClickHouse, and more                                                                              |
+| Native Agent      | Standalone Go/Rust process managed by DBX | Oracle, KingBase, XuguDB, and databases with a mature native driver                                                                                          |
+| JDBC Agent        | Java subprocess managed by DBX       | Databases that require JDBC: GaussDB, openGauss, DM, HighGo, Vastbase, Trino, Hive, DB2, Informix, Neo4j, TDengine, YashanDB, GoldenDB, Kylin, SunDB, and more |
 
-<Callout type="info">Native drivers work immediately after installation. Agent drivers require a one-time JDBC driver download and JRE setup, which DBX handles automatically when you first create a connection.</Callout>
+<Callout type="info">Built-in drivers work immediately. Native Agents require only a platform-specific executable, while JDBC Agents also require a JRE. DBX handles the matching installation when you first create a connection.</Callout>
 
 ## Driver Store
 
@@ -29,7 +30,7 @@ Open the Driver Store from **Settings → Drivers** or click the driver hint tha
 <Steps>
   <Step>### Open Driver Store Navigate to **Settings → Drivers** or click the driver install hint in the connection dialog.</Step>
   <Step>### Choose a Driver Find the database driver you need. Each entry shows the supported database and driver version.</Step>
-  <Step>### Click Install DBX downloads the JDBC driver JAR and any required dependencies. Progress is shown during download.</Step>
+  <Step>### Click Install DBX downloads the native Agent executable or JDBC Agent JAR and any required runtime. Progress is shown during download.</Step>
   <Step>### Create a Connection Return to the connection dialog. The driver is now ready for use.</Step>
 </Steps>
 

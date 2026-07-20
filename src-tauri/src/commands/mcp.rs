@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 const MCP_PACKAGE_NAME: &str = "@dbx-app/mcp-server";
 const MCP_LATEST_URL: &str = "https://registry.npmjs.org/@dbx-app%2fmcp-server/latest";
 const MCP_INSTALL_COMMAND: &str = "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org";
-const MCP_MIN_NODE_VERSION: NodeVersion = NodeVersion { major: 22, minor: 13, patch: 0 };
-const MCP_MIN_NODE_VERSION_REQUIREMENT: &str = ">=22.13.0";
+const MCP_MIN_NODE_VERSION: NodeVersion = NodeVersion { major: 18, minor: 18, patch: 0 };
+const MCP_MIN_NODE_VERSION_REQUIREMENT: &str = ">=18.18.0";
 const SHELL_COMMAND_MARKER: &str = "__DBX_MCP_COMMAND_OUTPUT_START__";
 
 #[derive(Debug, Serialize)]
@@ -50,6 +50,13 @@ struct NodeRuntime {
     mcp_bin_path: Option<PathBuf>,
 }
 
+#[derive(Debug)]
+struct McpPackage {
+    version: Option<String>,
+    script_path: PathBuf,
+    minimum_node_version: Option<NodeVersion>,
+}
+
 impl NodeRuntime {
     fn probe(candidate: NodeRuntimeCandidate) -> Option<Self> {
         let (node_path, node_version) = resolve_node_identity(&candidate.node_path)?;
@@ -65,8 +72,14 @@ impl NodeRuntime {
             .and_then(|value| normalized_reported_path(Path::new(value.trim())))
             .unwrap_or_else(|| npm_prefix_from_root(&npm_root));
         let package_root = npm_root.join(MCP_PACKAGE_NAME);
-        let mcp_version = package_version(&package_root);
-        let mcp_script_path = canonical_runtime_path(&package_root.join("dist").join("index.js"));
+        let package = mcp_package(&package_root);
+        let package_is_compatible = package
+            .as_ref()
+            .and_then(|package| package.minimum_node_version)
+            .map_or(true, |minimum| parse_node_version(&node_version).is_some_and(|version| version >= minimum));
+        let mcp_version = package.as_ref().and_then(|package| package.version.clone());
+        // Resolve the package-declared launcher so npm layout changes do not break the built-in AI assistant.
+        let mcp_script_path = package.filter(|_| package_is_compatible).map(|package| package.script_path);
         let mcp_bin_path = mcp_bin_path(&npm_prefix);
 
         Some(Self { node_path, npm_cli_path, npm_root, node_version, mcp_version, mcp_script_path, mcp_bin_path })
@@ -517,10 +530,41 @@ fn successful_stdout(output: CommandOutput) -> Result<String, String> {
     Ok(output.stdout.trim().to_string())
 }
 
-fn package_version(package_root: &Path) -> Option<String> {
+fn mcp_package(package_root: &Path) -> Option<McpPackage> {
     let content = std::fs::read_to_string(package_root.join("package.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    value.get("version")?.as_str().map(ToOwned::to_owned)
+    let entry = match value.get("bin")? {
+        serde_json::Value::String(entry) => entry.as_str(),
+        serde_json::Value::Object(entries) => {
+            entries.get("dbx-mcp-server").or_else(|| entries.get("mcp-server"))?.as_str()?
+        }
+        _ => return None,
+    };
+    let package_root = canonical_runtime_path(package_root)?;
+    let relative_entry = Path::new(entry);
+    if relative_entry.is_absolute()
+        || relative_entry.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    let script_path = canonical_runtime_path(&package_root.join(relative_entry))?;
+    if !script_path.starts_with(&package_root) {
+        return None;
+    }
+    let version = value.get("version").and_then(serde_json::Value::as_str).map(ToOwned::to_owned);
+    let minimum_node_version =
+        value.pointer("/engines/node").and_then(serde_json::Value::as_str).and_then(parse_minimum_node_version);
+    Some(McpPackage { version, script_path, minimum_node_version })
+}
+
+fn parse_minimum_node_version(requirement: &str) -> Option<NodeVersion> {
+    let version = requirement.trim().strip_prefix(">=")?.split_whitespace().next()?;
+    parse_node_version(version)
 }
 
 #[cfg(not(windows))]
@@ -810,9 +854,9 @@ mod tests {
     #[cfg(not(windows))]
     use super::{bash_login_script, canonical_runtime_path, NodeRuntimeCandidate};
     use super::{
-        is_mcp_compatible_node_version, mcp_command_for_runtime, normalized_reported_path, npm_cli_candidates,
-        parse_node_version, prefer_runtime, prefixed_output_path, require_managed_mcp_command,
-        resolve_managed_mcp_command, stdout_after_shell_marker, NodeRuntime, NodeVersion,
+        is_mcp_compatible_node_version, mcp_command_for_runtime, mcp_package, normalized_reported_path,
+        npm_cli_candidates, parse_minimum_node_version, parse_node_version, prefer_runtime, prefixed_output_path,
+        require_managed_mcp_command, resolve_managed_mcp_command, stdout_after_shell_marker, NodeRuntime, NodeVersion,
         MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME, SHELL_COMMAND_MARKER,
     };
     #[cfg(not(windows))]
@@ -909,9 +953,9 @@ mod tests {
         let shared_npm_root = "/runtime/shared/node_modules";
         let shared_script = "/runtime/shared/node_modules/@dbx-app/mcp-server/dist/index.js";
         let old_runtime =
-            runtime_with_version_and_root("/runtime/node-20", shared_npm_root, Some(shared_script), "v20.18.1");
+            runtime_with_version_and_root("/runtime/node-18", shared_npm_root, Some(shared_script), "v18.17.1");
         let compatible_runtime =
-            runtime_with_version_and_root("/runtime/node-22", shared_npm_root, Some(shared_script), "v22.13.0");
+            runtime_with_version_and_root("/runtime/node-20", shared_npm_root, Some(shared_script), "v20.18.1");
         let mut fallback = None;
 
         assert!(prefer_runtime(old_runtime, &mut fallback).is_none());
@@ -924,12 +968,55 @@ mod tests {
 
     #[test]
     fn node_version_parser_enforces_mcp_minimum() {
-        assert_eq!(parse_node_version("v22.13.0"), Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
-        assert_eq!(parse_node_version("22.13.0-nightly"), Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
-        assert!(!is_mcp_compatible_node_version("v22.12.9"));
-        assert!(!is_mcp_compatible_node_version("v21.99.99"));
-        assert!(is_mcp_compatible_node_version("v22.13.0"));
+        assert_eq!(parse_node_version("v18.18.0"), Some(NodeVersion { major: 18, minor: 18, patch: 0 }));
+        assert_eq!(parse_node_version("18.18.0-nightly"), Some(NodeVersion { major: 18, minor: 18, patch: 0 }));
+        assert!(!is_mcp_compatible_node_version("v18.17.9"));
+        assert!(!is_mcp_compatible_node_version("v17.99.99"));
+        assert!(is_mcp_compatible_node_version("v18.18.0"));
         assert!(is_mcp_compatible_node_version("v24.0.0"));
+    }
+
+    #[test]
+    fn package_node_requirement_parser_handles_owned_engine_format() {
+        assert_eq!(parse_minimum_node_version(">=18.18.0"), Some(NodeVersion { major: 18, minor: 18, patch: 0 }));
+        assert_eq!(parse_minimum_node_version("^22.13.0"), None);
+    }
+
+    #[test]
+    fn mcp_package_uses_declared_current_and_legacy_entries() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("dbx-mcp-package-test-{}-{nonce}", std::process::id()));
+        let current_entry = dir.join("bin").join("dbx-mcp-server.js");
+        std::fs::create_dir_all(current_entry.parent().unwrap()).unwrap();
+        std::fs::write(&current_entry, "// native launcher\n").unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"version":"0.4.38","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
+
+        let current = mcp_package(&dir).unwrap();
+        assert_eq!(current.version.as_deref(), Some("0.4.38"));
+        assert_eq!(current.script_path, canonical_runtime_path(&current_entry).unwrap());
+        assert_eq!(current.minimum_node_version, Some(NodeVersion { major: 18, minor: 18, patch: 0 }));
+
+        let legacy_entry = dir.join("dist").join("index.js");
+        std::fs::create_dir_all(legacy_entry.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_entry, "// legacy server\n").unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"version":"0.4.32","bin":{"dbx-mcp-server":"dist/index.js"},"engines":{"node":">=22.13.0"}}"#,
+        )
+        .unwrap();
+
+        let legacy = mcp_package(&dir).unwrap();
+        assert_eq!(legacy.version.as_deref(), Some("0.4.32"));
+        assert_eq!(legacy.script_path, canonical_runtime_path(&legacy_entry).unwrap());
+        assert_eq!(legacy.minimum_node_version, Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -945,10 +1032,10 @@ mod tests {
     #[test]
     fn incompatible_runtime_does_not_fall_back_to_available_mcp_shim() {
         let incompatible = runtime_with_version_and_root(
-            "/runtime/node-20",
-            "/runtime/node-20-root",
-            Some("/runtime/node-20-root/bin/dbx-mcp-server"),
-            "v20.18.1",
+            "/runtime/node-18",
+            "/runtime/node-18-root",
+            Some("/runtime/node-18-root/bin/dbx-mcp-server"),
+            "v18.17.1",
         );
 
         let command =
@@ -985,7 +1072,7 @@ mod tests {
         let prefix = dir.join("prefix");
         let npm_root = prefix.join("lib").join("node_modules");
         let package_root = npm_root.join(super::MCP_PACKAGE_NAME);
-        let script_path = package_root.join("dist").join("index.js");
+        let script_path = package_root.join("bin").join("dbx-mcp-server.js");
         let node_path = dir.join("node-v24");
         let node_alias = dir.join("node");
         let npm_cli_path = dir.join("npm");
@@ -994,7 +1081,11 @@ mod tests {
         std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
         std::fs::write(&npm_cli_path, "// fake npm cli\n").unwrap();
         std::fs::write(&script_path, "// fake mcp server\n").unwrap();
-        std::fs::write(package_root.join("package.json"), r#"{"version":"0.4.29"}"#).unwrap();
+        std::fs::write(
+            package_root.join("package.json"),
+            r#"{"version":"0.4.38","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
         let node_script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf 'PATH=%s\\n' \"$PATH\" >> {}\n\
              if [ \"$1\" = '--version' ]; then printf 'v24.16.0\\n'; \

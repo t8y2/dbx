@@ -56,6 +56,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     );
     private boolean postgresCatalogMode;
     private boolean sqlServerIdentityCatalogMode;
+    private volatile boolean usePgDefaultExpressionFunction;
 
     public static final PostgresLikeAgentProfile KINGBASE_PROFILE = new PostgresLikeAgentProfile(
         "com.kingbase8.Driver",
@@ -70,6 +71,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     protected void afterConnect(ConnectParams params, Connection connection) {
         postgresCatalogMode = false;
         sqlServerIdentityCatalogMode = false;
+        usePgDefaultExpressionFunction = false;
         setMysqlCompatMode(params.isMysql_compat_mode());
         if (params.isMysql_compat_mode()) {
             return;
@@ -489,12 +491,30 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     }
 
     private List<ColumnInfo> getRegularColumns(String schema, String table, Set<String> primaryKeys) {
+        boolean usePgFunction = usePgDefaultExpressionFunction;
+        try {
+            return queryRegularColumns(schema, table, primaryKeys, usePgFunction ? "pg_get_expr" : "sys_get_expr");
+        } catch (RuntimeException error) {
+            if (usePgFunction || !isUndefinedFunction(error, "sys_get_expr")) {
+                throw error;
+            }
+            usePgDefaultExpressionFunction = true;
+            return queryRegularColumns(schema, table, primaryKeys, "pg_get_expr");
+        }
+    }
+
+    private List<ColumnInfo> queryRegularColumns(
+        String schema,
+        String table,
+        Set<String> primaryKeys,
+        String defaultExpressionFunction
+    ) {
         return unchecked(() -> {
             List<ColumnInfo> result = new ArrayList<>();
             String sql = "SELECT a.attname AS column_name, " +
                 "format_type(a.atttypid, a.atttypmod) AS data_type, " +
                 "NOT a.attnotnull AS is_nullable, " +
-                "sys_get_expr(ad.adbin, ad.adrelid) AS column_default, " +
+                defaultExpressionFunction + "(ad.adbin, ad.adrelid) AS column_default, " +
                 "d.description AS column_comment, " +
                 "CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 " +
                 "THEN ((a.atttypmod - 4) >> 16) & 65535 ELSE NULL END AS numeric_precision, " +
@@ -986,6 +1006,23 @@ public final class KingbaseAgent extends PostgresLikeAgent {
             }
         }
         return insufficientPrivilege && mentionsSysFreespace;
+    }
+
+    private static boolean isUndefinedFunction(Throwable error, String functionName) {
+        boolean undefinedFunction = false;
+        boolean mentionsFunction = false;
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof SQLException && "42883".equals(((SQLException) current).getSQLState())) {
+                undefinedFunction = true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                mentionsFunction |= normalized.contains(functionName.toLowerCase(Locale.ROOT));
+                undefinedFunction |= normalized.contains("does not exist") || normalized.contains("不存在");
+            }
+        }
+        return undefinedFunction && mentionsFunction;
     }
 
     private static void appendRoutineKindPredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {

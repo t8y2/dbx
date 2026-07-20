@@ -93,7 +93,7 @@ const GITHUB_RELEASE_DOWNLOAD_PREFIX = "https://github.com/t8y2/dbx/releases/dow
 const CNB_RELEASE_DOWNLOAD_PREFIX = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 const MIN_APP_VERSION = "0.6.0";
 const driverVersionMap = driverVersions as Record<string, string>;
-const nativeDriverKeys = new Set(["oracle", "xugu"]);
+const nativeDriverKeys = new Set(["oracle", "kingbase", "xugu"]);
 
 const platformLabels: Record<string, string> = {
   "macos-aarch64": "macOS (Apple Silicon)",
@@ -311,10 +311,11 @@ export function buildNativeAgentEntries(assets: GitHubReleaseAsset[]): NativeAge
   const entries: NativeAgentDisplayEntry[] = [];
 
   for (const asset of assets) {
-    const match = /^dbx-agent-(oracle|xugu)-(.+?)(?:\.exe)?$/.exec(asset.name);
+    const match = /^dbx-agent-(.+?)-(macos-aarch64|macos-x64|linux-aarch64|linux-x64|windows-aarch64|windows-x64)(?:\.exe)?$/.exec(asset.name);
     if (!match) continue;
 
     const [, key, platformKey] = match;
+    if (!nativeDriverKeys.has(key)) continue;
     entries.push({
       key,
       label: labelForDriver(key),

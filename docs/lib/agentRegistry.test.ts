@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test, vi } from "vitest";
-import { buildAgentDownloadCatalog, downloadLinksFor, fetchAgentDownloadCatalog, formatSize } from "./agentRegistry";
+import { buildAgentDownloadCatalog, buildNativeAgentEntries, downloadLinksFor, fetchAgentDownloadCatalog, formatSize } from "./agentRegistry";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -65,4 +65,32 @@ test("catalog falls back from GitHub to CNB", async () => {
 
 test("unknown fallback asset sizes render as unavailable", () => {
   assert.equal(formatSize(0), "—");
+});
+
+test("KingBase release executables are listed as native agents", () => {
+  const entries = buildNativeAgentEntries([
+    {
+      name: "dbx-agent-kingbase-windows-x64.exe",
+      browser_download_url: "https://example.com/dbx-agent-kingbase-windows-x64.exe",
+      size: 1024,
+    },
+    {
+      name: "dbx-agent-kingbase-linux-x64",
+      browser_download_url: "https://example.com/dbx-agent-kingbase-linux-x64",
+      size: 2048,
+    },
+    {
+      name: "dbx-agent-kingbase.jar",
+      browser_download_url: "https://example.com/dbx-agent-kingbase.jar",
+      size: 4096,
+    },
+  ]);
+
+  assert.deepEqual(
+    entries.map(({ key, platformKey, filename }) => ({ key, platformKey, filename })),
+    [
+      { key: "kingbase", platformKey: "linux-x64", filename: "dbx-agent-kingbase-linux-x64" },
+      { key: "kingbase", platformKey: "windows-x64", filename: "dbx-agent-kingbase-windows-x64.exe" },
+    ],
+  );
 });

@@ -1,9 +1,15 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from "vitest";
-import { createStatementGutterMarkerDom } from "@/lib/editor/codemirrorStatementGutter";
+import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 
 describe("CodeMirror statement gutter marker", () => {
+  it("omits the gutter when run buttons and status markers are absent", () => {
+    expect(shouldShowStatementGutter(false, 0)).toBe(false);
+    expect(shouldShowStatementGutter(true, 0)).toBe(true);
+    expect(shouldShowStatementGutter(false, 1)).toBe(true);
+  });
+
   it("keeps execution status inside the run button column", () => {
     const marker = createStatementGutterMarkerDom({
       canExecute: true,

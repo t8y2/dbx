@@ -8,6 +8,10 @@ export interface StatementGutterMarkerDomOptions {
   statusLabel?: string;
 }
 
+export function shouldShowStatementGutter(showRunButtons: boolean, markerCount: number): boolean {
+  return showRunButtons || markerCount > 0;
+}
+
 function createStatusIconDom(status: StatementExecutionMarkerStatus, includeCircle: boolean) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");

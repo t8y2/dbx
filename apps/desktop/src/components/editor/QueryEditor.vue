@@ -57,7 +57,7 @@ import {
   type QueryEditorTableReferencePayload,
 } from "@/lib/editor/queryEditorTableDrop";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
-import { createStatementGutterMarkerDom } from "@/lib/editor/codemirrorStatementGutter";
+import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -321,6 +321,11 @@ let editorIsActive = true;
 let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
 let pendingImeModelEmit = false;
+
+function runStatementGutterExtension(markers = props.statementExecutionMarkers ?? []): import("@codemirror/state").Extension {
+  const showRunButtons = !props.hideExecutionControls && settingsStore.editorSettings.showStatementRunButtons;
+  return shouldShowStatementGutter(showRunButtons, markers.length) ? (buildRunStatementGutterExtension?.() ?? []) : [];
+}
 
 type SelectionCaseMode = "upper" | "lower";
 let executableStatementRangeCache: ExecutableStatementRangeCache | null = null;
@@ -3391,7 +3396,7 @@ onMounted(async () => {
           return { dom };
         },
       }),
-      runGutterComp.of(buildRunStatementGutterExtension()),
+      runGutterComp.of(runStatementGutterExtension()),
       lineNumbers({
         domEventHandlers: {
           mousedown: selectSqlLineFromGutter,
@@ -3777,6 +3782,15 @@ watch(
 );
 
 watch(
+  () => props.statementExecutionMarkers?.length ?? 0,
+  () => {
+    if (!view.value || !runGutterComp) return;
+    // Remove the compartment entirely when controls and markers are absent so the editor keeps no empty gutter width.
+    view.value.dispatch({ effects: runGutterComp.reconfigure(runStatementGutterExtension()) });
+  },
+);
+
+watch(
   () => props.connectionId,
   () => {
     refreshCompletionCache();
@@ -3852,7 +3866,7 @@ watch(
         wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
         vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
         closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),
-        runGutterComp.reconfigure(buildRunStatementGutterExtension?.() ?? []),
+        runGutterComp.reconfigure(runStatementGutterExtension()),
         runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
       ],
     });

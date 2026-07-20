@@ -7,9 +7,10 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql)).toEqual(["start_date", "end_date"]);
   });
 
-  it("ignores placeholders inside strings, quoted identifiers, and comments", () => {
+  it("extracts exact quoted braced placeholders but ignores partial embeds, backticks, and comments", () => {
     const sql = `
       select '\${quoted}' as a, "\${identifier}" as b, \`\${mysql_identifier}\`
+      , 'prefix\${embedded}' as c, 'x#{partial}' as d
       -- \${line_comment}
       # \${hash_comment}
       #\${hash_comment_without_space}
@@ -18,7 +19,11 @@ describe("extractSqlParameters", () => {
       from t
       where id = \${id}
     `;
-    expect(extractSqlParameters(sql)).toEqual(["id"]);
+    expect(extractSqlParameters(sql)).toEqual(["quoted", "identifier", "id"]);
+    expect(extractSqlParameterDescriptors("select * from t where dt='\${date}' and flag=\"#{enabled}\"")).toEqual([
+      { key: "date", name: "date", syntax: "shell", token: "'${date}'" },
+      { key: "enabled", name: "enabled", syntax: "mybatis", token: '"#{enabled}"' },
+    ]);
   });
 
   it("ignores placeholders inside Postgres dollar-quoted strings", () => {
@@ -292,6 +297,24 @@ describe("substituteSqlParameters", () => {
     ).toBe("select * from t where dt >= '2026-06-26' and amount > 100.50 and enabled = TRUE");
   });
 
+  it("replaces exact quoted braced placeholders as whole tokens without double-quoting", () => {
+    const sql = "select * from t where dt = '${date}' and name = \"${name}\" and flag = '#{enabled}' and id = ${id}";
+    expect(
+      substituteSqlParameters(sql, {
+        date: { kind: "string", value: "2026-06-26" },
+        name: { kind: "string", value: "O'Reilly" },
+        enabled: { kind: "boolean", value: "true" },
+        id: { kind: "number", value: "7" },
+      }),
+    ).toBe("select * from t where dt = '2026-06-26' and name = 'O''Reilly' and flag = TRUE and id = 7");
+  });
+
+  it("does not treat partial quoted embeds as parameters", () => {
+    const sql = "select 'prefix${date}' as a, \"x#{id}y\" as b, ${real}";
+    expect(extractSqlParameters(sql)).toEqual(["real"]);
+    expect(substituteSqlParameters(sql, { real: { kind: "number", value: "1" }, date: { kind: "string", value: "x" }, id: { kind: "number", value: "2" } })).toBe("select 'prefix${date}' as a, \"x#{id}y\" as b, 1");
+  });
+
   it("escapes string values and supports null and raw SQL", () => {
     const sql = "select ${name}, ${empty_value}, ${expression}";
     expect(
@@ -409,6 +432,13 @@ describe("enabledSyntaxes option", () => {
     expect(extractSqlParameters(sql, { databaseType: "saphana", enabledSyntaxes: ["named", "shell"] })).toEqual(["shell_name"]);
     // A non-saphana database with named disabled also drops :name.
     expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"] })).toEqual(["shell_name"]);
+  });
+
+  it("respects enabledSyntaxes for exact quoted braced placeholders", () => {
+    const sql = "select '${shell_name}' as a, \"#{mybatis_name}\" as b";
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"] })).toEqual(["shell_name"]);
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["mybatis"] })).toEqual(["mybatis_name"]);
+    expect(substituteSqlParameters(sql, { shell_name: { kind: "string", value: "x" } }, { enabledSyntaxes: ["named"] })).toBe(sql);
   });
 });
 

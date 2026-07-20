@@ -958,6 +958,7 @@ const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["DATE_FORMAT", ["date", "format"]],
   ["FROM_UNIXTIME", ["unix_timestamp"]],
   ["UNIX_TIMESTAMP", []],
+  ["SYSDATE", []],
   ["JSON_EXTRACT", ["json", "path"]],
   ["JSON_UNQUOTE", ["json"]],
   ["GROUP_CONCAT", ["expression"]],

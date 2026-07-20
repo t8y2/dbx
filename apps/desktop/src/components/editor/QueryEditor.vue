@@ -72,7 +72,17 @@ import { metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
-import { areSqlSemanticDiagnosticsEqual, buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport, tableReferenceKey, type SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
+import {
+  areSqlSemanticDiagnosticsEqual,
+  buildSqlParserErrorDiagnostic,
+  buildSqlSemanticDiagnostics,
+  isSqlSemanticDiagnosticInputContext,
+  isSqlVirtualTableReference,
+  shouldRunSqlSemanticDiagnostics,
+  sqlSemanticDiagnosticRangesForViewport,
+  tableReferenceKey,
+  type SqlSemanticDiagnostic,
+} from "@/lib/sql/semantic/diagnostics";
 import { sqlReferenceAnalysisDialectFor } from "@/lib/sql/semantic/dialect";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
@@ -301,6 +311,7 @@ let previewRangeComp: import("@codemirror/state").Compartment | null = null;
 let buildPreviewRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildResultSourceRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildStatementExecutionMarkersExtension: (() => import("@codemirror/state").Extension) | null = null;
+let statementExecutionGutterMounted = false;
 let buildRunStatementGutterExtension: (() => import("@codemirror/state").Extension) | null = null;
 let indentComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorIndentUnit: typeof import("@codemirror/language").indentUnit | null = null;
@@ -1400,6 +1411,10 @@ function completionMetadataTarget(table: { name: string; schema?: string | null 
   return { database: props.database, schema: table.schema ?? props.schema };
 }
 
+function isVirtualCompletionTableReference(table: { name: string; schema?: string | null }): boolean {
+  return isSqlVirtualTableReference(table, props.databaseType);
+}
+
 function completionQualifiedTableTarget(completionContext: ReturnType<typeof getSqlCompletionContext>): { name: string; schema: string } | null {
   if (!completionContext.suggestColumns) return null;
   const parts = completionContext.qualifierParts ?? completionContext.qualifier?.split(".").filter(Boolean) ?? [];
@@ -1430,6 +1445,7 @@ async function findExactSemanticDiagnosticTable(table: SqlTableReference): Promi
 }
 
 async function ensureColumnsForTable(table: { name: string; schema?: string | null }): Promise<boolean> {
+  if (isVirtualCompletionTableReference(table)) return false;
   const cacheKey = completionCacheKey(table);
   if (cachedColumnsByTable.has(cacheKey)) return true;
   if (!props.connectionId || props.database == null) return false;
@@ -1447,6 +1463,7 @@ function isMissingTableMetadataError(error: unknown) {
 }
 
 async function ensureForeignKeysForTable(table: { name: string; schema?: string | null }) {
+  if (isVirtualCompletionTableReference(table)) return;
   const cacheKey = completionCacheKey(table);
   if (cachedForeignKeysByTable.has(cacheKey) || !props.connectionId || props.database == null) return;
   const target = completionMetadataTarget(table);
@@ -1754,7 +1771,7 @@ async function enrichSemanticDiagnosticTables(tables: SqlTableReference[]): Prom
   const enriched: SqlTableReference[] = [];
   const missingTables = new Set<string>();
   for (const table of tables) {
-    if (isStatementLocalSemanticTable(table)) {
+    if (isStatementLocalSemanticTable(table) || isSqlVirtualTableReference(table, props.databaseType)) {
       enriched.push(table);
       continue;
     }
@@ -1774,7 +1791,7 @@ async function ensureColumnsForSemanticDiagnostics(tables: SqlTableReference[]):
   const seen = new Set<string>();
   const targets: SqlTableReference[] = [];
   for (const table of tables) {
-    if (isStatementLocalSemanticTable(table)) continue;
+    if (isStatementLocalSemanticTable(table) || isSqlVirtualTableReference(table, props.databaseType)) continue;
     const tableWithInlineColumns = table as SqlTableReference & {
       columns?: string[];
     };
@@ -1896,6 +1913,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
             missingTables,
             loadedColumnTables: loadedColumnsByTable,
             sql: range.sql,
+            databaseType: props.databaseType,
           }),
           range,
           sql,
@@ -2437,6 +2455,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
 
   const cteDefs = extractCteDefinitions(fullDoc);
   for (const refTable of completionContext.referencedTables) {
+    if (isVirtualCompletionTableReference(refTable)) continue;
     const cteDef = cteDefs.find((c) => c.name.toLowerCase() === refTable.name.toLowerCase());
     if (cteDef) {
       columnsByTable.set(
@@ -2555,6 +2574,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
   }
   if (!onDemandOnlyColumns && !tableNameCompletion) {
     for (const refTable of completionContext.referencedTables) {
+      if (isVirtualCompletionTableReference(refTable)) continue;
       if (refTable.columns && refTable.columns.length > 0) continue;
       const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
       if (cacheKey === qualifiedColumnCacheKey) continue;
@@ -2757,7 +2777,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     }
     return rt;
   });
-  const unresolvedRefs = refs.filter((rt) => !rt.schema && !rt.columns);
+  const unresolvedRefs = refs.filter((rt) => !rt.schema && !rt.columns && !isVirtualCompletionTableReference(rt));
   if (!localOnlyMetadata && unresolvedRefs.length > 0) {
     const lookupGroups = await Promise.all(unresolvedRefs.map((rt) => connectionStore.listCompletionTables(props.connectionId!, props.database!, rt.name, 20, props.schema, false, props.schema)));
     if (epoch !== completionEpoch) return null;
@@ -2796,6 +2816,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
   if (shouldFetchColumnsForCompletion) {
     await Promise.all(
       refs.map(async (refTable) => {
+        if (isVirtualCompletionTableReference(refTable)) return;
         if (refTable.columns && refTable.columns.length > 0) return;
         const cacheKey = refTable.schema ? `${refTable.schema}.${refTable.name}` : refTable.name;
         if (cachedColumnsByTable.has(cacheKey)) return;
@@ -3196,6 +3217,7 @@ onMounted(async () => {
     });
     return field;
   };
+  statementExecutionGutterMounted = (props.statementExecutionMarkers?.length ?? 0) > 0;
 
   buildSqlSignatureExtension = () =>
     showTooltip.compute(["doc", "selection"], (currentState) => {
@@ -3463,7 +3485,7 @@ onMounted(async () => {
       }),
       previewRangeComp.of(buildPreviewRangeExtension()),
       buildResultSourceRangeExtension(),
-      statementExecutionGutterComp.of(buildStatementExecutionMarkersExtension()),
+      statementExecutionGutterComp.of(statementExecutionGutterMounted ? buildStatementExecutionMarkersExtension() : []),
       Prec.highest(
         keymap.of([
           { key: "'", run: handleSqlSingleQuote },
@@ -3770,7 +3792,22 @@ watch(
 watch(
   () => props.statementExecutionMarkers ?? [],
   (markers) => {
-    if (!view.value || !setStatementExecutionMarkersEffect) return;
+    if (!view.value || !statementExecutionGutterComp || !buildStatementExecutionMarkersExtension || !setStatementExecutionMarkersEffect) return;
+    if (markers.length === 0) {
+      if (!statementExecutionGutterMounted) return;
+      view.value.dispatch({
+        effects: statementExecutionGutterComp.reconfigure([]),
+      });
+      statementExecutionGutterMounted = false;
+      return;
+    }
+    if (!statementExecutionGutterMounted) {
+      view.value.dispatch({
+        effects: statementExecutionGutterComp.reconfigure(buildStatementExecutionMarkersExtension()),
+      });
+      statementExecutionGutterMounted = true;
+      return;
+    }
     view.value.dispatch({
       effects: setStatementExecutionMarkersEffect.of(markers),
     });

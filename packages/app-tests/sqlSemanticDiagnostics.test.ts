@@ -51,6 +51,22 @@ test("flags confirmed missing tables", () => {
   assert.equal(diagnostics[0]?.severity, "error");
 });
 
+test("does not flag MySQL DUAL as a missing physical table", () => {
+  const analysis: SqlReferenceAnalysis = {
+    tables: [{ name: "DUAL", span: span(24, 27) }],
+    columns: [],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [],
+    columnsByTable: new Map(),
+    missingTables: new Set(["dual"]),
+    databaseType: "mysql",
+  });
+
+  assert.deepEqual(diagnostics, []);
+});
+
 test("trims whitespace from missing table diagnostic spans", () => {
   const analysis: SqlReferenceAnalysis = {
     tables: [{ name: "t_00011", span: span(32, 39) }],

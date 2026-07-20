@@ -107,7 +107,7 @@ test("suggests lower-case SQL keywords when configured", () => {
   );
 });
 
-test("suggests PostgreSQL-specific data types and functions", () => {
+test("suggests database-specific data types and functions", () => {
   const typeItems = buildSqlCompletionItems("create table events (payload js", "create table events (payload js".length, {
     tables: [],
     columnsByTable: new Map(),
@@ -128,6 +128,11 @@ test("suggests PostgreSQL-specific data types and functions", () => {
     columnsByTable: new Map(),
     databaseType: "mysql",
   });
+  const mysqlSysdateItems = buildSqlCompletionItems("select sysd", "select sysd".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
   const postgresDateItems = buildSqlCompletionItems("select date_f", "select date_f".length, {
     tables: [],
     columnsByTable: new Map(),
@@ -138,6 +143,7 @@ test("suggests PostgreSQL-specific data types and functions", () => {
   assert.ok(serialItems.some((item) => item.type === "keyword" && item.label === "SERIAL"));
   assert.ok(functionItems.some((item) => item.type === "function" && item.label === "JSONB_BUILD_OBJECT"));
   assert.ok(mysqlFunctionItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"));
+  assert.ok(mysqlSysdateItems.some((item) => item.type === "function" && item.label === "SYSDATE"));
   assert.equal(
     postgresDateItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"),
     false,

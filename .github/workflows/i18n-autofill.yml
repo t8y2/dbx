@@ -39,6 +39,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           token: ${{ secrets.I18N_BOT_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+          # The workflow executes the trusted base-branch script copied above;
+          # fork contents are only parsed as translation data, never executed.
+          allow-unsafe-pr-checkout: true
 
       - name: Fetch base branch
         env:

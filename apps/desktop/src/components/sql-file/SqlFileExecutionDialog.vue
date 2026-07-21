@@ -15,9 +15,9 @@ import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
-import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
-import { cancelSqlFileExecution, executeSqlFile, listenSqlFileProgress, listDatabases, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
+import { cancelSqlFileExecution, executeSqlFile, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
@@ -188,10 +188,9 @@ async function loadDatabasesForConnection(id: string) {
   loadingDatabases.value = true;
   try {
     await store.ensureConnected(id);
-    const names = databaseOptionsForConnection(
-      (await listDatabases(id)).map((db) => db.name),
-      store.getConfig(id),
-    );
+    const connection = store.getConfig(id);
+    if (!connection) return;
+    const names = await fetchSqlFileTargetOptions(id, connection);
     if (token !== databaseLoadToken) return;
     databaseOptions.value = names;
     database.value = chooseDatabase(names, id);

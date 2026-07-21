@@ -1204,6 +1204,31 @@ fn builds_postgres_create_table_with_comments_and_index() {
 }
 
 #[test]
+fn create_table_trims_table_name_whitespace_for_all_statements() {
+    let mut id = column("id");
+    id.data_type = "integer".to_string();
+    let idx = index("idx_users_id", &["id"]);
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "  users  ".to_string(),
+        columns: vec![id],
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE `users` (\n  `id` integer\n);", "CREATE INDEX `idx_users_id` ON `users` (`id`);",]
+    );
+}
+
+#[test]
 fn warns_for_sqlite_unsafe_column_changes() {
     let mut col = column("name");
     col.data_type = "text".to_string();
@@ -1235,6 +1260,82 @@ fn warns_for_sqlite_unsafe_column_changes() {
         result.warnings,
         vec!["SQLite cannot safely alter existing column \"name\" without rebuilding the table."]
     );
+}
+
+#[test]
+fn qualifies_attached_sqlite_table_and_index_changes() {
+    let mut email = column("email");
+    email.data_type = "text".to_string();
+    let mut old_index = index("idx_users_old", &["email"]);
+    old_index.marked_for_drop = true;
+    old_index.original = Some(IndexInfo {
+        name: "idx_users_old".to_string(),
+        columns: vec!["email".to_string()],
+        is_unique: false,
+        is_primary: false,
+        filter: None,
+        index_type: None,
+        included_columns: None,
+        comment: None,
+    });
+    let email_index = index("idx_users_email", &["email"]);
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Sqlite),
+        schema: Some("analytics".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![email],
+        indexes: vec![old_index, email_index],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"analytics\".\"users\" ADD COLUMN \"email\" text;",
+            "DROP INDEX \"analytics\".\"idx_users_old\";",
+            "CREATE INDEX \"analytics\".\"idx_users_email\" ON \"users\" (\"email\");",
+        ]
+    );
+
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "ATTACH DATABASE ':memory:' AS analytics;
+             CREATE TABLE main.users(id INTEGER);
+             CREATE TABLE analytics.users(id INTEGER);
+             CREATE INDEX analytics.idx_users_old ON users(id);",
+        )
+        .unwrap();
+    connection.execute_batch(&result.statements.join("\n")).unwrap();
+    let main_columns = connection
+        .prepare("PRAGMA main.table_info('users')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>("name"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let attached_columns = connection
+        .prepare("PRAGMA analytics.table_info('users')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>("name"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let attached_indexes = connection
+        .prepare("PRAGMA analytics.index_list('users')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>("name"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(main_columns, vec!["id"]);
+    assert_eq!(attached_columns, vec!["id", "email"]);
+    assert_eq!(attached_indexes, vec!["idx_users_email"]);
 }
 
 #[test]

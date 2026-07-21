@@ -38,6 +38,47 @@ function rowEvent(options: { meta?: boolean; shift?: boolean } = {}): MouseEvent
 }
 
 describe("useDataGridSelection", () => {
+  it("describes a rectangular selection with its display row and column indexes", () => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 1);
+
+    expect(selection.selectedCellMatrix.value).toEqual({
+      rowIndexes: [1, 2],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [
+        [2, "name-2"],
+        [3, "name-3"],
+      ],
+    });
+  });
+
+  it("supports non-contiguous columns when every selected row has the same columns", () => {
+    const selection = createSelection();
+
+    selection.selectedCellKeys.value = new Set(["0:0", "0:2", "2:0", "2:2"]);
+
+    expect(selection.selectedCellMatrix.value).toEqual({
+      rowIndexes: [0, 2],
+      columnIndexes: [0, 2],
+      columns: ["id", "email"],
+      rows: [
+        [1, "user-1@example.com"],
+        [3, "user-3@example.com"],
+      ],
+    });
+  });
+
+  it("rejects discrete selections whose rows do not share the same columns", () => {
+    const selection = createSelection();
+
+    selection.selectedCellKeys.value = new Set(["0:0", "0:2", "2:0"]);
+
+    expect(selection.selectedCellMatrix.value).toBeNull();
+  });
+
   it("creates a whole-row cell range for contiguous meta row selections", () => {
     const selection = createSelection();
 

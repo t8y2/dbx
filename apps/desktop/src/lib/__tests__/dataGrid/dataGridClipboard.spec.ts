@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { claimDataGridPaste, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { claimDataGridPaste, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
+
+afterEach(() => clearDataGridClipboardCopy());
 
 function target(nativeClipboard: boolean): EventTarget {
   return {
@@ -70,5 +73,64 @@ describe("planDataGridPaste", () => {
   it("returns no cells for empty bounds", () => {
     expect(planDataGridPaste([["a"]], 0, 1)).toEqual([]);
     expect(planDataGridPaste([["a"]], 1, 0)).toEqual([]);
+  });
+});
+
+describe("parseDataGridClipboard", () => {
+  it("restores null values copied from the DBX grid", () => {
+    rememberDataGridClipboardCopy("NULL\tNULL", [[null, "NULL"]]);
+
+    expect(parseDataGridClipboard("NULL\tNULL")).toEqual([[null, "NULL"]]);
+  });
+
+  it("keeps null text from external clipboard content as strings", () => {
+    rememberDataGridClipboardCopy("NULL", [[null]]);
+    clearDataGridClipboardCopy();
+
+    expect(parseDataGridClipboard("NULL")).toEqual([["NULL"]]);
+    expect(parseDataGridClipboard("null")).toEqual([["null"]]);
+  });
+
+  it("does not reuse null metadata after a literal NULL is copied", () => {
+    rememberDataGridClipboardCopy("NULL", [[null]]);
+    rememberDataGridClipboardCopy("NULL", [["NULL"]]);
+
+    expect(parseDataGridClipboard("NULL")).toEqual([["NULL"]]);
+  });
+
+  it("invalidates null metadata after another successful in-app copy", async () => {
+    rememberDataGridClipboardCopy("NULL", [[null]]);
+    await copyToClipboard("NULL", { navigator: { clipboard: { writeText: vi.fn() } } });
+
+    expect(parseDataGridClipboard("NULL")).toEqual([["NULL"]]);
+  });
+
+  it("keeps null metadata when a later in-app copy fails", async () => {
+    rememberDataGridClipboardCopy("NULL", [[null]]);
+    await expect(copyToClipboard("NULL", { navigator: { clipboard: { writeText: vi.fn().mockRejectedValue(new Error("denied")) } } })).rejects.toThrow("Clipboard API is not available");
+
+    expect(parseDataGridClipboard("NULL")).toEqual([[null]]);
+  });
+
+  it("preserves null positions beside cells containing tabs and newlines", () => {
+    const text = "left\tinside\tNULL\nline 1\nline 2\ttail";
+    rememberDataGridClipboardCopy(text, [
+      ["left\tinside", null],
+      ["line 1\nline 2", "tail"],
+    ]);
+
+    expect(parseDataGridClipboard(text)).toEqual([
+      ["left\tinside", null],
+      ["line 1\nline 2", "tail"],
+    ]);
+  });
+
+  it("restores null positions after copied headers", () => {
+    rememberDataGridClipboardCopy("name\tnote\nAda\tNULL", [["Ada", null]], true);
+
+    expect(parseDataGridClipboard("name\tnote\nAda\tNULL")).toEqual([
+      ["name", "note"],
+      ["Ada", null],
+    ]);
   });
 });

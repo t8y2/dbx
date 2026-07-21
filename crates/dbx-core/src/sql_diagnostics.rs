@@ -158,25 +158,21 @@ fn redact_sensitive_assignments(sql: &str) -> String {
         while j < chars.len() && chars[j].is_whitespace() {
             j += 1;
         }
-        if j < chars.len() && (chars[j] == '=' || chars[j] == ':') {
-            if is_sensitive_key(&key) {
-                out.push_str(&key);
-                for k in i..j {
-                    out.push(chars[k]);
-                }
+        if j < chars.len() && (chars[j] == '=' || chars[j] == ':') && is_sensitive_key(&key) {
+            out.push_str(&key);
+            out.extend(chars[i..j].iter().copied());
+            out.push(chars[j]);
+            j += 1;
+            while j < chars.len() && chars[j].is_whitespace() {
                 out.push(chars[j]);
                 j += 1;
-                while j < chars.len() && chars[j].is_whitespace() {
-                    out.push(chars[j]);
-                    j += 1;
-                }
-                while j < chars.len() && !chars[j].is_whitespace() {
-                    j += 1;
-                }
-                out.push_str("[REDACTED]");
-                i = j;
-                continue;
             }
+            while j < chars.len() && !chars[j].is_whitespace() {
+                j += 1;
+            }
+            out.push_str("[REDACTED]");
+            i = j;
+            continue;
         }
         out.push_str(&key);
     }

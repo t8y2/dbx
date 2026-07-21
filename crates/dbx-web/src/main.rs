@@ -66,63 +66,6 @@ fn normalize_public_base_path(value: Option<String>) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate, XLSX_CONTENT_TYPE};
-    use axum::body::Body;
-    use axum::http::header::CONTENT_TYPE;
-    use axum::http::Response;
-    use tower_http::compression::predicate::Predicate;
-
-    fn compression_response(content_type: &str) -> Response<Body> {
-        Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
-    }
-
-    #[test]
-    fn web_compression_skips_streams_and_precompressed_exports() {
-        let predicate = web_compression_predicate();
-
-        assert!(predicate.should_compress(&compression_response("application/json")));
-        assert!(!predicate.should_compress(&compression_response("text/event-stream")));
-        assert!(!predicate.should_compress(&compression_response(XLSX_CONTENT_TYPE)));
-    }
-
-    #[test]
-    fn normalize_public_base_path_defaults_to_root() {
-        assert_eq!(normalize_public_base_path(None), "/");
-        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
-        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
-    }
-
-    #[test]
-    fn normalize_public_base_path_trims_and_preserves_segments() {
-        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
-        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
-        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
-    }
-
-    #[test]
-    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
-    fn normalize_public_base_path_rejects_invalid_characters() {
-        normalize_public_base_path(Some("/dbx admin".to_string()));
-    }
-
-    #[test]
-    fn web_agent_dir_defaults_under_data_dir() {
-        let data_dir = std::path::PathBuf::from("/app/data");
-        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
-    }
-
-    #[test]
-    fn web_agent_dir_uses_explicit_env_override() {
-        let data_dir = std::path::PathBuf::from("/app/data");
-        assert_eq!(
-            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
-            std::path::PathBuf::from("/custom/agents")
-        );
-    }
-}
-
 #[cfg(feature = "mq-admin")]
 fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
@@ -142,12 +85,21 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/topics/update-partitions", post(routes::mq::update_partitions))
         .route("/mq/topics/stats", post(routes::mq::get_topic_stats))
         .route("/mq/topics/internal-stats", post(routes::mq::get_topic_internal_stats))
+        .route("/mq/topics/route", post(routes::mq::get_topic_route))
+        .route("/mq/topics/alter-config", post(routes::mq::alter_topic_config))
+        .route("/mq/topics/skip-accumulation", post(routes::mq::skip_topic_accumulation))
+        .route("/mq/messages/view", post(routes::mq::view_message))
+        .route("/mq/messages/query-by-key", post(routes::mq::query_messages_by_key))
+        .route("/mq/messages/query-by-topic", post(routes::mq::query_messages_by_topic))
+        .route("/mq/messages/trace", post(routes::mq::query_message_trace))
         .route("/mq/subscriptions/list", post(routes::mq::list_subscriptions))
         .route("/mq/subscriptions/create", post(routes::mq::create_subscription))
         .route("/mq/subscriptions/delete", post(routes::mq::delete_subscription))
         .route("/mq/subscriptions/skip-messages", post(routes::mq::skip_messages))
         .route("/mq/subscriptions/reset-cursor", post(routes::mq::reset_cursor))
         .route("/mq/subscriptions/clear-backlog", post(routes::mq::clear_backlog))
+        .route("/mq/consumers/group-config/get", post(routes::mq::get_consumer_group_config))
+        .route("/mq/consumers/group-config/alter", post(routes::mq::alter_consumer_group_config))
         .route("/mq/subscriptions/peek-messages", post(routes::mq::peek_messages))
         .route("/mq/subscriptions/expire-messages", post(routes::mq::expire_messages))
         .route("/mq/producers/list", post(routes::mq::list_producers))
@@ -255,6 +207,8 @@ async fn main() {
         .route("/connection/close-database", post(routes::connection::close_database_connection))
         .route("/connection/save", post(routes::connection::save_connections))
         .route("/connection/list", get(routes::connection::load_connections))
+        .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
+        .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
         .route("/plugins", get(routes::plugins::list_plugins))
         // JDBC
         .route("/jdbc/drivers", get(routes::jdbc::list_jdbc_drivers).post(routes::jdbc::import_jdbc_drivers))
@@ -291,7 +245,8 @@ async fn main() {
         .route("/agents/upgrade-all", post(routes::agents::upgrade_all_agents))
         .route("/agents/uninstall", post(routes::agents::uninstall_agent))
         .route("/agents/import-offline", post(routes::agents::import_agents_from_zip))
-        .route("/agents/import-jar", post(routes::agents::import_agent_jar))
+        .route("/agents/import-driver", post(routes::agents::import_agent_driver_file))
+        .route("/agents/import-jar", post(routes::agents::import_agent_driver_file))
         .route(
             "/agents/java-runtime",
             get(routes::agents::get_agent_java_runtime_config).post(routes::agents::set_agent_java_runtime_config),
@@ -363,7 +318,7 @@ async fn main() {
         .route("/query/build-search-result-where", post(routes::query::build_search_result_where))
         .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
         .route("/query/build-create-database-sql", post(routes::query::build_create_database_sql))
-        .route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql))
+        .route("/query/build-sqlite-attach-database-sql", post(routes::query::build_sqlite_attach_database_sql))
         .route("/query/build-drop-object-sql", post(routes::query::build_drop_object_sql))
         .route("/query/build-drop-table-sql", post(routes::query::build_drop_table_sql))
         .route("/query/build-drop-table-child-object-sql", post(routes::query::build_drop_table_child_object_sql))
@@ -607,9 +562,15 @@ async fn main() {
             "/app-settings/pinned-tree-node-ids",
             get(routes::app_settings::load_pinned_tree_node_ids).post(routes::app_settings::save_pinned_tree_node_ids),
         )
+        // Favorites state
         .route(
             "/app-settings/favorites-state",
             get(routes::app_settings::load_favorites_state).post(routes::app_settings::save_favorites_state),
+        )
+        // MCP policy
+        .route(
+            "/app-settings/mcp-policy",
+            get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync
@@ -634,6 +595,11 @@ async fn main() {
         .route("/cloud-sync/snippet/forget-token", post(routes::cloud_sync::forget_snippet_saved_token))
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
+
+    // Do not expose DuckDB-only handlers from builds that intentionally omit bundled DuckDB.
+    #[cfg(feature = "duckdb-bundled")]
+    let api =
+        api.route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql));
 
     let api = add_mq_routes(api)
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
@@ -683,4 +649,61 @@ async fn main() {
         .await
         .expect("Server error");
     shutdown_state.shutdown_background_tasks(std::time::Duration::from_secs(3)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate, XLSX_CONTENT_TYPE};
+    use axum::body::Body;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::Response;
+    use tower_http::compression::predicate::Predicate;
+
+    fn compression_response(content_type: &str) -> Response<Body> {
+        Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
+    }
+
+    #[test]
+    fn web_compression_skips_streams_and_precompressed_exports() {
+        let predicate = web_compression_predicate();
+
+        assert!(predicate.should_compress(&compression_response("application/json")));
+        assert!(!predicate.should_compress(&compression_response("text/event-stream")));
+        assert!(!predicate.should_compress(&compression_response(XLSX_CONTENT_TYPE)));
+    }
+
+    #[test]
+    fn normalize_public_base_path_defaults_to_root() {
+        assert_eq!(normalize_public_base_path(None), "/");
+        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
+        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
+    }
+
+    #[test]
+    fn normalize_public_base_path_trims_and_preserves_segments() {
+        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
+    }
+
+    #[test]
+    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
+    fn normalize_public_base_path_rejects_invalid_characters() {
+        normalize_public_base_path(Some("/dbx admin".to_string()));
+    }
+
+    #[test]
+    fn web_agent_dir_defaults_under_data_dir() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
+    }
+
+    #[test]
+    fn web_agent_dir_uses_explicit_env_override() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(
+            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
+            std::path::PathBuf::from("/custom/agents")
+        );
+    }
 }

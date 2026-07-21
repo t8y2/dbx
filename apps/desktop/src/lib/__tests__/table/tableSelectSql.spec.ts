@@ -28,6 +28,12 @@ describe("qualifiedTableName — Doris/StarRocks multi-catalog", () => {
   });
 });
 
+describe("qualifiedTableName — SQLite attached databases", () => {
+  it("qualifies tables with the attached database alias", () => {
+    expect(qualifiedTableName({ databaseType: "sqlite", schema: "analytics", tableName: "events" })).toBe('"analytics"."events"');
+  });
+});
+
 describe("quoteTableIdentifier", () => {
   it("backtick-quotes mysql identifiers", () => {
     expect(quoteTableIdentifier("mysql", "orders")).toBe("`orders`");

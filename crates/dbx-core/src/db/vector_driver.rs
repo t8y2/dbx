@@ -198,7 +198,7 @@ async fn list_milvus_databases(client: &VectorClient) -> Result<Vec<String>, Str
     if !names.iter().any(|name| name == "default") {
         names.push("default".to_string());
     }
-    names.sort_by(|a, b| a.cmp(b));
+    names.sort();
     Ok(names)
 }
 

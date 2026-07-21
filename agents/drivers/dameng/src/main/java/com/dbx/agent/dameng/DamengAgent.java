@@ -26,6 +26,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.SQLXML;
 import java.sql.Statement;
 import java.sql.Types;
@@ -73,7 +74,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
         """.stripIndent().trim();
     private static final Set<String> SYSTEM_USERS = Set.of(
         "SYS", "SYSAUDITOR", "SYSSSO", "CTISYS",
-        "SYS_DBA", "_SYS_STATISTICS", "SYS_PHM"
+        "SYSDBA", "SYS_DBA", "_SYS_STATISTICS", "SYS_PHM"
     );
 
     private Connection connection;
@@ -140,7 +141,18 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public List<String> listSchemas() {
-        return unchecked(this::listVisibleSchemas);
+        return unchecked(() -> {
+            try {
+                return listVisibleSchemas();
+            } catch (SQLException catalogError) {
+                try {
+                    return listVisibleUsers();
+                } catch (Exception fallbackError) {
+                    catalogError.addSuppressed(fallbackError);
+                    throw catalogError;
+                }
+            }
+        });
     }
 
     private List<String> listVisibleUsers() throws Exception {
@@ -623,13 +635,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         return unchecked(() -> {
-            String dbmsType = switch (objectType.toUpperCase(Locale.ROOT)) {
-                case "VIEW" -> "VIEW";
-                case "MATERIALIZED_VIEW", "MATERIALIZED VIEW" -> "MATERIALIZED_VIEW";
-                case "PROCEDURE" -> "PROCEDURE";
-                case "FUNCTION" -> "FUNCTION";
-                default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
-            };
+            String dbmsType = damengDdlObjectType(objectType);
             String source;
             String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -642,6 +648,18 @@ public final class DamengAgent extends BaseDatabaseAgent {
             }
             return new ObjectSource(name, objectType, schema, source);
         });
+    }
+
+    static String damengDdlObjectType(String objectType) {
+        return switch (objectType.toUpperCase(Locale.ROOT)) {
+            case "VIEW" -> "VIEW";
+            case "MATERIALIZED_VIEW", "MATERIALIZED VIEW" -> "MATERIALIZED_VIEW";
+            case "PROCEDURE" -> "PROCEDURE";
+            case "FUNCTION" -> "FUNCTION";
+            // DM DBMS_METADATA accepts TRIGGER directly and returns executable CREATE OR REPLACE DDL.
+            case "TRIGGER" -> "TRIGGER";
+            default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        };
     }
 
     @Override

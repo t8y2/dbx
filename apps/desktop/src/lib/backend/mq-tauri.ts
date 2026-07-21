@@ -29,6 +29,7 @@ import type {
   MqTokenRecord,
   MqIssuedToken,
   BacklogStats,
+  RocketMqConsumerGroupConfig,
   PeekedMessage,
   PeekMessagesOptions,
   MqRawRequest,
@@ -202,8 +203,44 @@ export async function mqGetBacklog(connectionId: string, topic: TopicRef, sub?: 
   return invoke("mq_get_backlog", { connectionId, topic, sub });
 }
 
+export async function mqGetConsumerGroupConfig(connectionId: string, groupId: string): Promise<RocketMqConsumerGroupConfig> {
+  return invoke("mq_get_consumer_group_config", { connectionId, groupId });
+}
+
+export async function mqAlterConsumerGroupConfig(connectionId: string, groupId: string, config: Partial<RocketMqConsumerGroupConfig>): Promise<void> {
+  return invoke("mq_alter_consumer_group_config", { connectionId, groupId, config });
+}
+
 export async function mqGetClusterInfo(connectionId: string): Promise<ClusterInfo> {
   return invoke("mq_get_cluster_info", { connectionId });
+}
+
+export async function mqGetTopicRoute(connectionId: string, topic: TopicRef): Promise<unknown> {
+  return invoke("mq_get_topic_route", { connectionId, topic });
+}
+
+export async function mqAlterTopicConfig(connectionId: string, topic: TopicRef, configs: unknown): Promise<void> {
+  return invoke("mq_alter_topic_config", { connectionId, topic, configs });
+}
+
+export async function mqSkipTopicAccumulation(connectionId: string, topic: TopicRef): Promise<unknown> {
+  return invoke("mq_skip_topic_accumulation", { connectionId, topic });
+}
+
+export async function mqViewMessage(connectionId: string, topic: TopicRef, msgId: string): Promise<unknown> {
+  return invoke("mq_view_message", { connectionId, topic, msgId });
+}
+
+export async function mqQueryMessagesByKey(connectionId: string, topic: TopicRef, key: string, begin: number, end: number, maxNum: number): Promise<unknown> {
+  return invoke("mq_query_messages_by_key", { connectionId, topic, key, begin, end, maxNum });
+}
+
+export async function mqQueryMessagesByTopic(connectionId: string, topic: TopicRef, begin: number, end: number, maxNum: number): Promise<unknown> {
+  return invoke("mq_query_messages_by_topic", { connectionId, topic, begin, end, maxNum });
+}
+
+export async function mqQueryMessageTrace(connectionId: string, msgId: string, traceTopic?: string): Promise<unknown> {
+  return invoke("mq_query_message_trace", { connectionId, msgId, traceTopic });
 }
 
 // Raw request

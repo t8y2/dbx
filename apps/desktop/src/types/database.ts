@@ -884,6 +884,7 @@ export interface QueryTab {
     schema?: string;
     name: string;
     objectType: ObjectSourceKind;
+    signature?: string;
   };
   tableMeta?: {
     schema?: string;

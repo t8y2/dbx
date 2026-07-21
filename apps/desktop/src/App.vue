@@ -19,6 +19,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useAppUpdater } from "@/composables/useAppUpdater";
+import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
 import { usePanelResize } from "@/composables/usePanelResize";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
@@ -52,6 +53,7 @@ import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/datab
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
+  isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
@@ -84,6 +86,7 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { APP_FONT_SANS_CSS_VAR, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
+import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -123,7 +126,29 @@ const savedSqlStore = useSavedSqlStore();
 connectionStore.setBeforeConnectHandler((config) => ensureJdbcxRuntimeDrivers(config, api).then(() => undefined));
 const { message: toastMessage, visible: toastVisible, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
-const { checkingUpdates, updateInfo, updateCheckMessage, showUpdateDialog, isDownloadingUpdate, downloadProgress, updateReady, hasUpdateAvailable, openUrl, checkUpdates, openLatestRelease, downloadAndInstallUpdate, restartApp } = useAppUpdater();
+const { activeCount: activeBackgroundTaskCount } = useExportTracker();
+const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
+const {
+  checkingUpdates,
+  updateInfo,
+  updateCheckMessage,
+  showUpdateDialog,
+  isDownloadingUpdate,
+  downloadProgress,
+  updateDownloaded,
+  isInstallingUpdate,
+  updateReady,
+  activeTaskCount: activeUpdateTaskCount,
+  hasUpdateAvailable,
+  openUrl,
+  checkUpdates,
+  openLatestRelease,
+  downloadAndInstallUpdate,
+  installDownloadedUpdate,
+  restartApp,
+} = useAppUpdater({
+  getActiveTaskCount: () => trackedUpdateTaskCount.value,
+});
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
@@ -159,6 +184,7 @@ const aiPanelReady = ref(false);
 const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize } = usePanelResize();
 const aiAssistantRef = ref<AiAssistantHandle | null>(null);
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
+const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 const selectedSql = ref("");
@@ -1627,7 +1653,7 @@ async function handleQuickOpenSelect(item: any) {
 
     const schema = item.schema || item.database;
     try {
-      const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType);
+      const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType, item.signature);
       const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${item.objectName || item.tableName}`);
       queryStore.updateSql(tabId, result.source);
       if (item.type !== "sequence" && item.type !== "trigger" && item.type !== "type" && item.type !== "type-body") {
@@ -1635,6 +1661,7 @@ async function handleQuickOpenSelect(item: any) {
           schema,
           name: item.objectName || item.tableName,
           objectType,
+          signature: item.signature,
         });
       }
       queryStore.markTabClean(queryStore.tabs.find((tab) => tab.id === tabId));
@@ -1734,6 +1761,12 @@ function handleKeydown(e: KeyboardEvent) {
       e.preventDefault();
       e.stopPropagation();
     }
+    return;
+  }
+  if (isCloseOtherTabsShortcut(e, shortcuts)) {
+    e.preventDefault();
+    e.stopPropagation();
+    appTabBarRef.value?.closeOtherActiveTabs();
     return;
   }
   if (isCloseTabShortcut(e, shortcuts)) {
@@ -2027,6 +2060,7 @@ onUnmounted(() => {
           <div :class="isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
             <div class="h-full flex flex-col min-w-0">
               <AppTabBar
+                ref="appTabBarRef"
                 :driver-store-open="driverStoreTabOpen"
                 :driver-store-active="driverStoreActive"
                 :settings-page-open="settingsPageTabOpen"
@@ -2270,9 +2304,13 @@ onUnmounted(() => {
           :update-check-message="updateCheckMessage"
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
+          :update-downloaded="updateDownloaded"
+          :is-installing-update="isInstallingUpdate"
           :update-ready="updateReady"
+          :active-task-count="activeUpdateTaskCount"
           @open-latest-release="openLatestRelease"
           @download-and-install="downloadAndInstallUpdate"
+          @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
         />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />

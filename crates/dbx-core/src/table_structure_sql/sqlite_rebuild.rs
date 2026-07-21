@@ -129,9 +129,6 @@ fn build_change_plan(conn: &mut Connection, options: &TableStructureSqlOptions) 
         return Err("SQLite table rebuild requires databaseType=sqlite.".to_string());
     }
     let schema = options.schema.as_deref().map(str::trim).filter(|schema| !schema.is_empty()).unwrap_or("main");
-    if !schema.eq_ignore_ascii_case("main") {
-        return Err("SQLite table rebuild currently supports the native main schema only.".to_string());
-    }
     if options.table_name.trim().is_empty() {
         return Err("SQLite table name cannot be empty.".to_string());
     }
@@ -216,7 +213,7 @@ fn build_change_plan(conn: &mut Connection, options: &TableStructureSqlOptions) 
 
     let mut generic_options = options.clone();
     generic_options.database_type = Some(DatabaseType::Sqlite);
-    generic_options.schema = None;
+    generic_options.schema = (!schema.eq_ignore_ascii_case("main")).then(|| schema.to_string());
     generic_options.triggers.clear();
     for column in &mut generic_options.columns {
         if let Some(original) = &column.original {
@@ -395,7 +392,7 @@ fn load_schema_snapshot(conn: &Connection, schema: &str, table_name: &str) -> Re
     drop(dependency_stmt);
 
     let schema_version: i64 = conn
-        .pragma_query_value(Some(rusqlite::DatabaseName::Main), "schema_version", |row| row.get(0))
+        .query_row(&format!("PRAGMA {schema_ident}.schema_version"), [], |row| row.get(0))
         .map_err(|error| format!("Failed to read SQLite schema version: {error}"))?;
     let autoincrement_sequence = if contains_sql_keyword(&table_sql, "autoincrement") {
         conn.query_row(
@@ -481,8 +478,16 @@ fn build_rebuild_statements(
     replaced_index_names: &HashSet<String>,
 ) -> Result<Vec<String>, String> {
     let mut create_replacement = rewrite_declared_column_types(&snapshot.table_sql, type_changes)?;
-    let (_, body_end) = find_create_table_body_span(&create_replacement)
+    let (body_start, body_end) = find_create_table_body_span(&create_replacement)
         .ok_or_else(|| "SQLite CREATE TABLE statement could not be parsed safely.".to_string())?;
+    let without_rowid = has_without_rowid_clause(&create_replacement[body_end + 1..]);
+    if !snapshot.schema.eq_ignore_ascii_case("main") {
+        create_replacement = format!(
+            "CREATE TABLE {}{}",
+            qualified_name(&snapshot.schema, &snapshot.table_name),
+            &create_replacement[body_start..]
+        );
+    }
     ensure_statement_terminated(&mut create_replacement);
     let backup_seed = u64::from_str_radix(&snapshot.revision[..15], 16)
         .map_err(|error| format!("Failed to derive SQLite backup table suffix: {error}"))?;
@@ -508,7 +513,6 @@ fn build_rebuild_statements(
     let qualified_backup = qualified_name(&snapshot.schema, &backup_name);
     let qualified_source = qualified_name(&snapshot.schema, &source_name);
 
-    let without_rowid = has_without_rowid_clause(&create_replacement[body_end + 1..]);
     let visible_columns = snapshot.columns.iter().filter(|column| column.hidden == 0).collect::<Vec<_>>();
     let live_names = snapshot.columns.iter().map(|column| column.name.to_ascii_lowercase()).collect::<HashSet<_>>();
     let rowid_alias = if without_rowid {
@@ -581,19 +585,23 @@ fn build_rebuild_statements(
         ));
     }
     statements.push(format!("DROP TABLE {qualified_source};"));
-    statements.extend(
-        snapshot
-            .dependencies
-            .iter()
-            .filter(|dependency| {
-                dependency.kind != "index" || !replaced_index_names.contains(&dependency.name.to_ascii_lowercase())
-            })
-            .map(|dependency| {
-                let mut sql = dependency.sql.clone();
-                ensure_statement_terminated(&mut sql);
-                sql
-            }),
-    );
+    let dependency_statements = snapshot
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency.kind != "index" || !replaced_index_names.contains(&dependency.name.to_ascii_lowercase())
+        })
+        .map(|dependency| -> Result<String, String> {
+            let mut sql = if snapshot.schema.eq_ignore_ascii_case("main") {
+                dependency.sql.clone()
+            } else {
+                qualify_sqlite_create_object_sql(&dependency.sql, &dependency.kind, &snapshot.schema, &dependency.name)?
+            };
+            ensure_statement_terminated(&mut sql);
+            Ok(sql)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    statements.extend(dependency_statements);
     Ok(statements)
 }
 
@@ -963,7 +971,7 @@ fn parse_column_type_span(entry: &str) -> Option<(String, usize, usize)> {
 fn parse_identifier(value: &str, start: usize) -> Option<(String, usize, bool)> {
     let bytes = value.as_bytes();
     let first = *bytes.get(start)?;
-    if matches!(first, b'"' | b'`' | b'[') {
+    if matches!(first, b'\'' | b'"' | b'`' | b'[') {
         let close = if first == b'[' { b']' } else { first };
         let mut decoded = String::new();
         let mut index = start + 1;
@@ -1276,6 +1284,153 @@ fn sql_words_outside_comments_and_quotes(sql: &str) -> Vec<String> {
     words
 }
 
+fn qualify_sqlite_create_object_sql(
+    sql: &str,
+    kind: &str,
+    schema: &str,
+    expected_name: &str,
+) -> Result<String, String> {
+    let keyword = match kind.to_ascii_lowercase().as_str() {
+        "index" => "index",
+        "trigger" => "trigger",
+        _ => return Err(format!("Unsupported SQLite dependency kind \"{kind}\".")),
+    };
+    let keyword_end = find_sql_keyword_end(sql, keyword)
+        .ok_or_else(|| format!("SQLite {kind} definition does not contain a {keyword} keyword."))?;
+    let mut object_start = skip_space_and_comments(sql, keyword_end)
+        .ok_or_else(|| format!("SQLite {kind} definition ended before the object name."))?;
+
+    if let Some((word, word_end, quoted)) = parse_identifier(sql, object_start) {
+        if !quoted && word.eq_ignore_ascii_case("if") {
+            let not_start = skip_space_and_comments(sql, word_end)
+                .ok_or_else(|| format!("SQLite {kind} IF clause is incomplete."))?;
+            let (not_word, not_end, not_quoted) =
+                parse_identifier(sql, not_start).ok_or_else(|| format!("SQLite {kind} IF clause is incomplete."))?;
+            let exists_start = skip_space_and_comments(sql, not_end)
+                .ok_or_else(|| format!("SQLite {kind} IF NOT clause is incomplete."))?;
+            let (exists_word, exists_end, exists_quoted) = parse_identifier(sql, exists_start)
+                .ok_or_else(|| format!("SQLite {kind} IF NOT clause is incomplete."))?;
+            if not_quoted
+                || exists_quoted
+                || !not_word.eq_ignore_ascii_case("not")
+                || !exists_word.eq_ignore_ascii_case("exists")
+            {
+                return Err(format!("SQLite {kind} definition has an invalid IF NOT EXISTS clause."));
+            }
+            object_start = skip_space_and_comments(sql, exists_end)
+                .ok_or_else(|| format!("SQLite {kind} definition ended before the object name."))?;
+        }
+    }
+
+    let (first_name, first_end, first_quoted) = parse_identifier(sql, object_start)
+        .ok_or_else(|| format!("SQLite {kind} definition has an invalid object name."))?;
+    let mut actual_name = first_name.clone();
+    let mut object_end = first_end;
+    let after_first = skip_space_and_comments(sql, first_end)
+        .ok_or_else(|| format!("SQLite {kind} definition has an invalid object name."))?;
+    if sql.as_bytes().get(after_first) == Some(&b'.') {
+        let second_start = skip_space_and_comments(sql, after_first + 1)
+            .ok_or_else(|| format!("SQLite {kind} definition has an incomplete qualified name."))?;
+        let (second_name, second_end, _) = parse_identifier(sql, second_start)
+            .ok_or_else(|| format!("SQLite {kind} definition has an incomplete qualified name."))?;
+        actual_name = second_name;
+        object_end = second_end;
+    } else if !first_quoted {
+        actual_name = first_name.rsplit_once('.').map_or(first_name.as_str(), |(_, name)| name).to_string();
+    }
+    if !actual_name.eq_ignore_ascii_case(expected_name) {
+        return Err(format!(
+            "SQLite {kind} definition name \"{actual_name}\" does not match metadata name \"{expected_name}\"."
+        ));
+    }
+
+    let mut qualified = sql.to_string();
+    qualified.replace_range(object_start..object_end, &qualified_name(schema, expected_name));
+    Ok(qualified)
+}
+
+fn find_sql_keyword_end(sql: &str, keyword: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut mode = ScanMode::Normal;
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match mode {
+            ScanMode::Normal => match byte {
+                b'\'' => mode = ScanMode::SingleQuote,
+                b'"' => mode = ScanMode::DoubleQuote,
+                b'`' => mode = ScanMode::Backtick,
+                b'[' => mode = ScanMode::Bracket,
+                b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                    mode = ScanMode::LineComment;
+                    index += 1;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    mode = ScanMode::BlockComment;
+                    index += 1;
+                }
+                _ if byte.is_ascii_alphabetic() || byte == b'_' => {
+                    let start = index;
+                    index += 1;
+                    while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
+                        index += 1;
+                    }
+                    if sql[start..index].eq_ignore_ascii_case(keyword) {
+                        return Some(index);
+                    }
+                    continue;
+                }
+                _ => {}
+            },
+            ScanMode::SingleQuote => {
+                if byte == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 1;
+                    } else {
+                        mode = ScanMode::Normal;
+                    }
+                }
+            }
+            ScanMode::DoubleQuote => {
+                if byte == b'"' {
+                    if bytes.get(index + 1) == Some(&b'"') {
+                        index += 1;
+                    } else {
+                        mode = ScanMode::Normal;
+                    }
+                }
+            }
+            ScanMode::Backtick => {
+                if byte == b'`' {
+                    if bytes.get(index + 1) == Some(&b'`') {
+                        index += 1;
+                    } else {
+                        mode = ScanMode::Normal;
+                    }
+                }
+            }
+            ScanMode::Bracket => {
+                if byte == b']' {
+                    mode = ScanMode::Normal;
+                }
+            }
+            ScanMode::LineComment => {
+                if byte == b'\n' {
+                    mode = ScanMode::Normal;
+                }
+            }
+            ScanMode::BlockComment => {
+                if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    mode = ScanMode::Normal;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
 fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -1477,6 +1632,221 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(backup_data.rows[0], serde_json::json!(["text", "42"]).as_array().unwrap().clone());
+    }
+
+    #[tokio::test]
+    async fn rebuilds_attached_schema_without_touching_same_named_main_objects() {
+        let pool = db::sqlite::connect_path(":memory:").await.unwrap();
+        pool.with_connection(|conn| {
+            conn.execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 ATTACH DATABASE ':memory:' AS analytics;
+                 CREATE TABLE main.audit(message TEXT);
+                 CREATE TABLE main.items(id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL);
+                 CREATE INDEX main.idx_items_value ON items(value);
+                 CREATE TRIGGER main.trg_items_ai AFTER INSERT ON items
+                   BEGIN INSERT INTO audit VALUES ('main:' || NEW.value); END;
+                 INSERT INTO main.items(value) VALUES ('11');
+                 DELETE FROM main.audit;
+                 CREATE TABLE analytics.audit(message TEXT);
+                 CREATE TABLE analytics.items(id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL);
+                 CREATE INDEX analytics.idx_items_value ON items(value);
+                 CREATE TRIGGER analytics.trg_items_ai AFTER INSERT ON items
+                   BEGIN INSERT INTO audit VALUES ('analytics:' || NEW.value); END;
+                 INSERT INTO analytics.items(id, value) VALUES (100, '42');
+                 DELETE FROM analytics.audit;",
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+
+        let mut options = type_change_options("items", "value", "TEXT", "INTEGER");
+        options.schema = Some("analytics".to_string());
+        options.columns.push(EditableStructureColumn {
+            id: "note".to_string(),
+            name: "note".to_string(),
+            data_type: "TEXT".to_string(),
+            is_nullable: true,
+            default_value: String::new(),
+            comment: String::new(),
+            is_primary_key: false,
+            extra: None,
+            original: None,
+            original_position: None,
+            marked_for_drop: false,
+            character_set: String::new(),
+            collation: String::new(),
+        });
+        options.indexes.push(EditableStructureIndex {
+            id: "idx_items_note".to_string(),
+            name: "idx_items_note".to_string(),
+            columns: vec!["note".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: String::new(),
+            index_type: String::new(),
+            included_columns: Vec::new(),
+            comment: String::new(),
+            original: None,
+            marked_for_drop: false,
+        });
+        let preview = preview_sqlite_table_structure_change_with_pool(pool.clone(), options.clone()).await.unwrap();
+        assert!(preview.warnings.is_empty(), "{:?}", preview.warnings);
+        assert!(preview.statements.iter().any(|sql| sql.starts_with("CREATE TABLE \"analytics\".\"items\"")));
+        assert!(preview.statements.iter().any(|sql| sql.starts_with("CREATE INDEX \"analytics\".\"idx_items_value\"")));
+        assert!(preview.statements.iter().any(|sql| sql.starts_with("CREATE TRIGGER \"analytics\".\"trg_items_ai\"")));
+
+        // A main-schema change after preview must not invalidate an attached-schema revision.
+        db::sqlite::execute_query(&pool, "CREATE TABLE main.unrelated(id INTEGER);").await.unwrap();
+        apply_sqlite_table_structure_change_with_pool(pool.clone(), options, &preview.schema_revision).await.unwrap();
+
+        let main_value =
+            db::sqlite::execute_query(&pool, "SELECT typeof(value), value FROM main.items;").await.unwrap();
+        assert_eq!(main_value.rows[0], serde_json::json!(["text", "11"]).as_array().unwrap().clone());
+        let attached_value =
+            db::sqlite::execute_query(&pool, "SELECT typeof(value), value FROM analytics.items;").await.unwrap();
+        assert_eq!(attached_value.rows[0], serde_json::json!(["integer", 42]).as_array().unwrap().clone());
+        let main_note = db::sqlite::execute_query(
+            &pool,
+            "SELECT count(*) FROM pragma_table_info('items', 'main') WHERE name='note';",
+        )
+        .await
+        .unwrap();
+        assert_eq!(main_note.rows[0][0], serde_json::json!(0));
+        let attached_note = db::sqlite::execute_query(
+            &pool,
+            "SELECT count(*) FROM pragma_table_info('items', 'analytics') WHERE name='note';",
+        )
+        .await
+        .unwrap();
+        assert_eq!(attached_note.rows[0][0], serde_json::json!(1));
+        let attached_note_index = db::sqlite::execute_query(
+            &pool,
+            "SELECT count(*) FROM analytics.sqlite_schema WHERE type='index' AND name='idx_items_note';",
+        )
+        .await
+        .unwrap();
+        assert_eq!(attached_note_index.rows[0][0], serde_json::json!(1));
+        let main_note_index = db::sqlite::execute_query(
+            &pool,
+            "SELECT count(*) FROM main.sqlite_schema WHERE type='index' AND name='idx_items_note';",
+        )
+        .await
+        .unwrap();
+        assert_eq!(main_note_index.rows[0][0], serde_json::json!(0));
+
+        db::sqlite::execute_query(&pool, "INSERT INTO analytics.items(value) VALUES (7);").await.unwrap();
+        let main_audit = db::sqlite::execute_query(&pool, "SELECT count(*) FROM main.audit;").await.unwrap();
+        assert_eq!(main_audit.rows[0][0], serde_json::json!(0));
+        let attached_audit = db::sqlite::execute_query(&pool, "SELECT message FROM analytics.audit;").await.unwrap();
+        assert_eq!(attached_audit.rows[0][0], serde_json::json!("analytics:7"));
+        let attached_max_id = db::sqlite::execute_query(&pool, "SELECT max(id) FROM analytics.items;").await.unwrap();
+        assert_eq!(attached_max_id.rows[0][0], serde_json::json!(101));
+
+        for schema in ["main", "analytics"] {
+            let dependencies = db::sqlite::execute_query(
+                &pool,
+                &format!(
+                    "SELECT type, name FROM {schema}.sqlite_schema \
+                     WHERE name IN ('idx_items_value', 'trg_items_ai') ORDER BY type;"
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(dependencies.rows.len(), 2);
+        }
+        let main_backups = db::sqlite::execute_query(
+            &pool,
+            "SELECT count(*) FROM main.sqlite_schema WHERE type='table' AND name GLOB 'items_[0-9]*';",
+        )
+        .await
+        .unwrap();
+        assert_eq!(main_backups.rows[0][0], serde_json::json!(0));
+        let attached_backups = db::sqlite::execute_query(
+            &pool,
+            "SELECT count(*) FROM analytics.sqlite_schema WHERE type='table' AND name GLOB 'items_[0-9]*';",
+        )
+        .await
+        .unwrap();
+        assert_eq!(attached_backups.rows[0][0], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn rebuilds_keyword_named_attached_schema_with_single_quoted_dependencies() {
+        let pool = db::sqlite::connect_path(":memory:").await.unwrap();
+        db::sqlite::execute_query(
+            &pool,
+            "ATTACH DATABASE ':memory:' AS \"select\";
+             CREATE TABLE \"select\".audit(message TEXT);
+             CREATE TABLE \"select\".items(value TEXT NOT NULL);
+             CREATE INDEX \"select\".'idx weird' ON items(value);
+             CREATE TRIGGER \"select\".'trg weird' AFTER INSERT ON items
+               BEGIN INSERT INTO audit VALUES ('attached:' || NEW.value); END;
+             INSERT INTO \"select\".items VALUES ('42');
+             DELETE FROM \"select\".audit;",
+        )
+        .await
+        .unwrap();
+        let definitions = db::sqlite::execute_query(
+            &pool,
+            "SELECT sql FROM \"select\".sqlite_schema
+             WHERE name IN ('idx weird', 'trg weird') ORDER BY type;",
+        )
+        .await
+        .unwrap();
+        assert_eq!(definitions.rows.len(), 2);
+        assert!(definitions.rows.iter().all(|row| row[0].as_str().unwrap().contains("'")));
+
+        let mut options = type_change_options("items", "value", "TEXT", "INTEGER");
+        options.schema = Some("select".to_string());
+        let preview = preview_sqlite_table_structure_change_with_pool(pool.clone(), options.clone()).await.unwrap();
+        assert!(preview.warnings.is_empty(), "{:?}", preview.warnings);
+        assert!(preview.statements.iter().any(|sql| sql.starts_with("CREATE TABLE \"select\".\"items\"")));
+        assert!(preview.statements.iter().any(|sql| sql.starts_with("CREATE INDEX \"select\".\"idx weird\"")));
+        assert!(preview.statements.iter().any(|sql| sql.starts_with("CREATE TRIGGER \"select\".\"trg weird\"")));
+
+        apply_sqlite_table_structure_change_with_pool(pool.clone(), options, &preview.schema_revision).await.unwrap();
+
+        let value =
+            db::sqlite::execute_query(&pool, "SELECT typeof(value), value FROM \"select\".items;").await.unwrap();
+        assert_eq!(value.rows[0], serde_json::json!(["integer", 42]).as_array().unwrap().clone());
+        db::sqlite::execute_query(&pool, "INSERT INTO \"select\".items VALUES (7);").await.unwrap();
+        let audit = db::sqlite::execute_query(&pool, "SELECT message FROM \"select\".audit;").await.unwrap();
+        assert_eq!(audit.rows[0][0], serde_json::json!("attached:7"));
+        let dependencies = db::sqlite::execute_query(
+            &pool,
+            "SELECT type, name FROM \"select\".sqlite_schema
+             WHERE name IN ('idx weird', 'trg weird') ORDER BY type;",
+        )
+        .await
+        .unwrap();
+        assert_eq!(dependencies.rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn attached_schema_change_after_preview_is_rejected_before_mutation() {
+        let pool = db::sqlite::connect_path(":memory:").await.unwrap();
+        db::sqlite::execute_query(
+            &pool,
+            "ATTACH DATABASE ':memory:' AS analytics;
+             CREATE TABLE analytics.items(value TEXT NOT NULL);
+             INSERT INTO analytics.items VALUES ('42');",
+        )
+        .await
+        .unwrap();
+        let mut options = type_change_options("items", "value", "TEXT", "INTEGER");
+        options.schema = Some("analytics".to_string());
+        let preview = preview_sqlite_table_structure_change_with_pool(pool.clone(), options.clone()).await.unwrap();
+
+        db::sqlite::execute_query(&pool, "CREATE TABLE analytics.unrelated(id INTEGER);").await.unwrap();
+        let error = apply_sqlite_table_structure_change_with_pool(pool.clone(), options, &preview.schema_revision)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("schema changed"), "{error}");
+        let value =
+            db::sqlite::execute_query(&pool, "SELECT typeof(value), value FROM analytics.items;").await.unwrap();
+        assert_eq!(value.rows[0], serde_json::json!(["text", "42"]).as_array().unwrap().clone());
     }
 
     #[tokio::test]

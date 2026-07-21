@@ -1,5 +1,5 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { getSqlCompletionContext, isOracleSystemValueName } from "@/lib/sql/sqlCompletion";
 import { executableStatementRanges, isOraclePlSqlStatement, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
 
@@ -15,6 +15,7 @@ export interface SqlSemanticDiagnosticSchema {
   missingTables?: Set<string>;
   loadedColumnTables?: Set<string>;
   sql?: string;
+  databaseType?: DatabaseType;
 }
 
 export interface SqlSemanticDiagnosticVisibleRange {
@@ -52,6 +53,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   for (const table of tables) {
+    if (isSqlVirtualTableReference(table, schema.databaseType)) continue;
     if (!schema.missingTables?.has(tableReferenceKey(table))) continue;
     diagnostics.push({
       span: trimSqlTextSpanWhitespace(schema.sql, table.span),
@@ -61,6 +63,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   for (const column of analysis.columns) {
+    if (isUnquotedOracleSystemValueReference(column, schema)) continue;
     const table = resolveColumnTable(column, tables, knownTables, schema.sql, scopesById);
     if (!table) continue;
     if (schema.missingTables?.has(tableReferenceKey(table))) continue;
@@ -80,6 +83,20 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   return diagnostics;
+}
+
+function isUnquotedOracleSystemValueReference(column: SqlColumnReference, schema: SqlSemanticDiagnosticSchema): boolean {
+  if (column.qualifier || !isOracleSystemValueName(column.name, schema.databaseType)) return false;
+  if (!schema.sql) return false;
+
+  const range = sqlTextSpanToOffsetRange(schema.sql, column.span);
+  if (!range) return false;
+  const firstCharacter = schema.sql.slice(range.from, range.to).trimStart()[0];
+  return firstCharacter !== '"' && firstCharacter !== "'" && firstCharacter !== "`" && firstCharacter !== "[";
+}
+
+export function isSqlVirtualTableReference(table: { name: string; schema?: string | null }, databaseType?: DatabaseType): boolean {
+  return databaseType === "mysql" && !table.schema && normalizeName(table.name) === "dual";
 }
 
 function trimSqlTextSpanWhitespace(sql: string | undefined, span: SqlTextSpan): SqlTextSpan {

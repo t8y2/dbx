@@ -18,10 +18,13 @@ import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
+import com.taosdata.jdbc.TSDBDriver;
+import com.taosdata.jdbc.rs.RestfulConnection;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.format.DateTimeFormatter;
@@ -194,7 +197,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         return JdbcExecutor.current().execute(
             requireConnected(),
             sql,
-            schema,
+            prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options.getMaxRows(),
             options.getFetchSize(),
@@ -208,7 +211,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         return JdbcExecutor.current().executePage(
             requireConnected(),
             sql,
-            schema,
+            prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options,
             this::tdengineResultValue
@@ -220,7 +223,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         return JdbcExecutor.current().startTableRead(
             requireConnected(),
             sql,
-            schema,
+            prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options,
             this::tdengineResultValue
@@ -230,6 +233,32 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     @Override
     public String setSchemaSQL(String schema) {
         return "USE " + quoteIdentifier(schema);
+    }
+
+    @Override
+    public QueryResult executeTransaction(List<String> statements, String schema) {
+        return super.executeTransaction(statements, prepareExecutionSchema(schema));
+    }
+
+    @Override
+    public QueryResult executeBatch(List<String> statements, String schema) {
+        return super.executeBatch(statements, prepareExecutionSchema(schema));
+    }
+
+    private String prepareExecutionSchema(String schema) {
+        return unchecked(() -> prepareExecutionSchema(requireConnected(), schema));
+    }
+
+    static String prepareExecutionSchema(Connection connection, String schema) throws SQLException {
+        if (!(connection instanceof RestfulConnection) || schema == null || schema.trim().isEmpty()) {
+            return schema;
+        }
+
+        String database = schema.trim();
+        // Connector/J 3.6.3 misparses quoted USE statements and puts the whole SQL in /rest/sql/<db>.
+        connection.setCatalog(database);
+        connection.setClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME, database);
+        return null;
     }
 
     @Override

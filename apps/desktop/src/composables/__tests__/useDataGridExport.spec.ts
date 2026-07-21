@@ -4,6 +4,7 @@ import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/
 import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements } from "@/lib/dataGrid/dataGridSql";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import type { CellSelectionMatrix } from "@/lib/dataGrid/gridSelection";
 
 const toast = vi.fn();
 
@@ -55,7 +56,7 @@ function row(data: unknown[]) {
   };
 }
 
-function createMongoExportState(options: { columns: string[]; item: ReturnType<typeof row> & { sourceIndex: number }; mongoDocuments: unknown[] }) {
+function createMongoExportState(options: { columns: string[]; item: ReturnType<typeof row> & { sourceIndex: number }; mongoDocuments: unknown[]; selectedCellMatrix?: CellSelectionMatrix }) {
   const state: UseDataGridExportOptions = {
     columns: computed(() => options.columns),
     displayItems: computed(() => [options.item]),
@@ -72,8 +73,9 @@ function createMongoExportState(options: { columns: string[]; item: ReturnType<t
     whereInput: computed(() => undefined),
     orderBy: computed(() => undefined),
     exportBatchSize: computed(() => 1000),
-    hasCellSelection: computed(() => false),
-    selectedCells: computed(() => ({ columns: [], rows: [] })),
+    hasCellSelection: computed(() => !!options.selectedCellMatrix),
+    selectedCells: computed(() => options.selectedCellMatrix ?? { columns: [], rows: [] }),
+    selectedCellMatrix: computed(() => options.selectedCellMatrix ?? null),
     selectedRange: computed(() => null),
     contextCell: ref({ rowId: options.item.id, rowIndex: 0, col: -1 }),
     getRowItem: (rowId) => (rowId === options.item.id ? options.item : undefined),
@@ -83,7 +85,7 @@ function createMongoExportState(options: { columns: string[]; item: ReturnType<t
   return useDataGridExport(state);
 }
 
-function createExportState(tableMeta: DataGridTableMeta, columns = tableMeta.columns?.map((column) => column.name) ?? ["id", "name"]) {
+function createExportState(tableMeta: DataGridTableMeta, columns = tableMeta.columns?.map((column) => column.name) ?? ["id", "name"], selectedCellMatrix?: CellSelectionMatrix) {
   const item = row(columns.map((column, index) => (column === "id" ? 1 : `value-${index}`)));
   const options: UseDataGridExportOptions = {
     columns: computed(() => columns),
@@ -99,8 +101,9 @@ function createExportState(tableMeta: DataGridTableMeta, columns = tableMeta.col
     whereInput: computed(() => undefined),
     orderBy: computed(() => undefined),
     exportBatchSize: computed(() => 1000),
-    hasCellSelection: computed(() => false),
-    selectedCells: computed(() => ({ columns: [], rows: [] })),
+    hasCellSelection: computed(() => !!selectedCellMatrix),
+    selectedCells: computed(() => selectedCellMatrix ?? { columns: [], rows: [] }),
+    selectedCellMatrix: computed(() => selectedCellMatrix ?? null),
     selectedRange: computed(() => null),
     contextCell: ref({ rowId: item.id, rowIndex: 0, col: -1 }),
     getRowItem: (rowId) => (rowId === item.id ? item : undefined),
@@ -195,6 +198,99 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).not.toHaveBeenCalled();
   });
 
+  it("reports selection INSERT prefetch failures", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [1],
+      columns: ["name"],
+      rows: [["value-1"]],
+    };
+    vi.mocked(buildDataGridCopyInsertStatement).mockRejectedValueOnce(new Error("selection builder unavailable"));
+    const state = createExportState(editableTable, ["id", "name"], matrix);
+
+    await state.prefetchSelectionAsInsertStatement();
+
+    expect(toast).toHaveBeenCalledTimes(1);
+    expect(toast).toHaveBeenCalledWith("grid.copyFailed: selection builder unavailable", 5000);
+    expect(state.canCopyPreparedSelectionInsert()).toBe(false);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it("builds selection INSERT statements from only the selected source columns and rows", async () => {
+    const items = [
+      { ...row([1, "Ada", true, "math"]), id: 1 },
+      { ...row([2, "Grace", false, "compiler"]), id: 2 },
+    ];
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [1, 3],
+      columns: ["display_name", "display_note"],
+      rows: [
+        ["Ada", "math"],
+        ["Grace", "compiler"],
+      ],
+    };
+    const options: UseDataGridExportOptions = {
+      columns: computed(() => ["id", "display_name", "active", "display_note"]),
+      displayItems: computed(() => items),
+      sql: computed(() => undefined),
+      tableMeta: computed(() => ({
+        tableName: "users",
+        primaryKeys: ["id"],
+        columns: [
+          { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+          { name: "name", data_type: "varchar", is_nullable: false },
+          { name: "active", data_type: "boolean", is_nullable: false },
+          { name: "note", data_type: "text", is_nullable: true },
+        ],
+      })),
+      databaseType: computed(() => "mysql"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "dbx"),
+      context: computed(() => "table-data"),
+      sourceColumns: computed(() => ["id", "name", "active", "note"]),
+      columnTypes: computed(() => ["int", "varchar", "boolean", "text"]),
+      whereInput: computed(() => undefined),
+      orderBy: computed(() => undefined),
+      exportBatchSize: computed(() => 1000),
+      hasCellSelection: computed(() => true),
+      selectedCells: computed(() => matrix),
+      selectedCellMatrix: computed(() => matrix),
+      selectedRange: computed(() => ({ startRow: 0, endRow: 1, startCol: 1, endCol: 3 })),
+      contextCell: ref({ rowId: 1, rowIndex: 0, col: 1 }),
+      getRowItem: (rowId) => items.find((item) => item.id === rowId),
+      selectedRowIds: ref(new Set<number>()),
+      hasRowSelection: computed(() => false),
+    };
+    const pending = deferred<string | undefined>();
+    vi.mocked(buildDataGridCopyInsertStatement).mockReturnValueOnce(pending.promise);
+    const state = useDataGridExport(options);
+
+    const prefetch = state.prefetchSelectionAsInsertStatement("merged");
+    await vi.waitFor(() => expect(buildDataGridCopyInsertStatement).toHaveBeenCalledTimes(1));
+    expect(state.copySelectionAsInsert("merged")).toBe(false);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+    pending.resolve("INSERT INTO users (name, note) VALUES ('Ada', 'math'), ('Grace', 'compiler');");
+    await prefetch;
+    expect(state.canCopyPreparedSelectionInsert("merged")).toBe(true);
+    expect(state.copySelectionAsInsert("merged")).toBe(true);
+
+    expect(buildDataGridCopyInsertStatement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        columns: ["display_name", "display_note"],
+        sourceColumns: ["name", "note"],
+        columnTypes: ["varchar", "text"],
+        rows: [
+          ["Ada", "math"],
+          ["Grace", "compiler"],
+        ],
+        excludePrimaryKeys: false,
+        insertMode: "merged",
+      }),
+    );
+    expect(copyToClipboard).toHaveBeenCalledWith("INSERT INTO users (name, note) VALUES ('Ada', 'math'), ('Grace', 'compiler');");
+  });
+
   it("copies Mongo JSON from the original document using the sorted source index and visible columns", async () => {
     const item = { ...row(["true", '{"role":"admin"}']), sourceIndex: 1 };
     const state = createMongoExportState({
@@ -240,6 +336,28 @@ describe("useDataGridExport prepared row statements", () => {
     "role": "maintainer"
   },
   "lastUpdatedDate": ISODate("2025-05-06T08:35:32Z")
+});`);
+  });
+
+  it("preserves original Mongo types while limiting INSERT to the selected fields", async () => {
+    const item = { ...row(["123", "true", '{"kind":"literal"}']), sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns: ["numericText", "booleanText", "jsonText"],
+      item,
+      mongoDocuments: [{ numericText: "123", booleanText: "true", jsonText: '{"kind":"literal"}' }],
+      selectedCellMatrix: {
+        rowIndexes: [0],
+        columnIndexes: [1],
+        columns: ["booleanText"],
+        rows: [["true"]],
+      },
+    });
+
+    await state.prefetchSelectionAsInsertStatement();
+    state.copySelectionAsInsert();
+
+    expect(copyToClipboard).toHaveBeenCalledWith(`db.getCollection("documents").insert({
+  "booleanText": "true"
 });`);
   });
 });

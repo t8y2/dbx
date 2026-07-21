@@ -1,6 +1,6 @@
 [package]
 name = "dbx-web"
-version = "0.5.61"
+version = "0.5.62"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -9,11 +9,13 @@ name = "dbx-web"
 path = "src/main.rs"
 
 [features]
-default = ["mq-admin"]
+default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
+duckdb-bundled = ["dbx-core/duckdb-bundled"]
 mq-admin = ["dbx-core/mq-admin"]
+sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 
 [dependencies]
-dbx-core = { path = "../dbx-core" }
+dbx-core = { path = "../dbx-core", default-features = false }
 redis = { version = "0.32", features = ["tokio-comp"] }
 axum = { version = "0.8", features = ["multipart", "ws"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip", "trace"] }

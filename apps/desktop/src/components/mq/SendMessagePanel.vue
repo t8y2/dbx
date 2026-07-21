@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { PeekedMessage, TopicInfo, TopicRef, SendMessageRequest, SendMessageResponse } from "@/types/mq";
+import type { MqSystemKind, PeekedMessage, TopicInfo, TopicRef, SendMessageRequest, SendMessageResponse } from "@/types/mq";
 import { mqSendMessage, mqListTopics, mqPeekMessages } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
+import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 
 interface Props {
   connectionId: string;
@@ -12,8 +13,11 @@ interface Props {
   namespace?: string;
   topic?: TopicInfo;
   readOnly?: boolean;
-  isKafkaCluster?: boolean;
+  mqSystemKind?: MqSystemKind;
+  isFlatMqCluster?: boolean;
   supportsPeekMessages?: boolean;
+  /** Hide outer toolbar when embedded in a dialog. */
+  embedded?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -21,6 +25,7 @@ const { t } = useI18n();
 
 const topicName = ref("");
 const messageKey = ref("");
+const messageTag = ref("");
 const messageValue = ref("");
 const headersText = ref("");
 const loading = ref(false);
@@ -28,6 +33,7 @@ const error = ref<string>();
 const success = ref<SendMessageResponse>();
 const availableTopics = ref<TopicInfo[]>([]);
 const topicsLoading = ref(false);
+const rocketMqTopicSelectRef = ref<InstanceType<typeof RocketMqTopicSelect>>();
 const headersExpanded = ref(false);
 const peekAdvancedExpanded = ref(false);
 const peekLoading = ref(false);
@@ -40,6 +46,7 @@ const peekCount = ref(20);
 let successTimer: ReturnType<typeof setTimeout> | undefined;
 
 const readOnlyMessage = computed(() => t("mqMessages.readOnlyCannotSend"));
+const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
 
 const topicOptions = computed(() => {
   return availableTopics.value.map((t) => ({
@@ -62,7 +69,12 @@ const selectedTopicRef = computed<TopicRef | null>(() => {
   };
 });
 
-const canBrowseMessages = computed(() => props.isKafkaCluster === true && props.supportsPeekMessages !== false);
+const canBrowseMessages = computed(() => props.isFlatMqCluster === true && props.supportsPeekMessages !== false && !isRocketMqCluster.value);
+
+function flatMqPeekGroupName(): string {
+  if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_viewer__";
+  return "__dbx_kafka_viewer__";
+}
 const topicListId = computed(() => `mq-topic-options-${props.connectionId}`);
 
 function clearSuccessLater() {
@@ -85,6 +97,10 @@ function guardWritable() {
 }
 
 async function loadTopics() {
+  if (isRocketMqCluster.value) {
+    await rocketMqTopicSelectRef.value?.loadTopics();
+    return;
+  }
   if (!props.tenant || !props.namespace) return;
   topicsLoading.value = true;
   try {
@@ -103,6 +119,13 @@ async function loadTopics() {
     console.warn("Failed to load topics:", e);
   } finally {
     topicsLoading.value = false;
+  }
+}
+
+function handleRocketMqTopicsLoaded(topics: TopicInfo[]) {
+  availableTopics.value = topics;
+  if (props.topic && !topicName.value) {
+    topicName.value = props.topic.shortName;
   }
 }
 
@@ -138,6 +161,9 @@ async function sendMessage() {
   loading.value = true;
   try {
     const headers = parseHeaders();
+    if (isRocketMqCluster.value && messageTag.value.trim()) {
+      headers.TAGS = messageTag.value.trim();
+    }
     const payloadBase64 = btoa(unescape(encodeURIComponent(messageValue.value)));
     const req: SendMessageRequest = {
       topic,
@@ -192,7 +218,7 @@ async function loadMessages() {
       options.offset = offset;
       peekOffset.value = String(offset);
     }
-    peekMessages.value = await mqPeekMessages(props.connectionId, topic, "__dbx_kafka_viewer__", count, options);
+    peekMessages.value = await mqPeekMessages(props.connectionId, topic, flatMqPeekGroupName(), count, options);
   } catch (e: unknown) {
     peekError.value = formatError(e);
   } finally {
@@ -253,13 +279,15 @@ watch(
 </script>
 
 <template>
-  <div class="send-message-panel">
-    <div class="panel-toolbar">
+  <div class="send-message-panel" :class="{ embedded: embedded }">
+    <div v-if="!embedded" class="panel-toolbar">
       <h3>{{ t("mqMessages.title") }}</h3>
       <button @click="clearForm" :disabled="loading" class="btn-sm">{{ t("mqMessages.clear") }}</button>
     </div>
 
-    <div v-if="!tenant || !namespace" class="panel-placeholder">{{ t("mqMessages.selectNamespaceOrTopicFirst") }}</div>
+    <div v-if="!tenant || !namespace" class="panel-placeholder">
+      {{ isRocketMqCluster ? t("mqRocketmq.connectionNotReady") : t("mqMessages.selectNamespaceOrTopicFirst") }}
+    </div>
 
     <div v-else class="send-form">
       <div v-if="readOnly" class="readonly-hint">{{ readOnlyMessage }}</div>
@@ -269,27 +297,34 @@ watch(
         <span>{{ t("mqMessages.sendSuccess", { partition: success.partition, offset: success.offset }) }}</span>
       </div>
 
-      <!-- 主题选择 -->
       <div class="form-group">
         <label>{{ t("mqMessages.targetTopic") }} <span class="required">*</span></label>
-        <div class="topic-select-row">
-          <input v-model="topicName" :list="topicListId" :disabled="readOnly || topicsLoading" class="topic-input" :placeholder="topicsLoading ? t('mqMessages.topicLoading') : t('mqMessages.topicSearchPlaceholder')" autocomplete="off" />
-          <datalist :id="topicListId">
-            <option v-for="t in topicOptions" :key="t.value" :value="t.value" :label="t.partitions != null ? $t('mqMessages.topicOptionWithPartitions', { label: t.label, partitions: t.partitions }) : t.label" />
-          </datalist>
-          <button @click="loadTopics" :disabled="topicsLoading" class="btn-icon" :title="t('mqMessages.refreshTopicList')">
-            <span v-if="topicsLoading" class="spin">⟳</span>
-            <span v-else>⟳</span>
-          </button>
-        </div>
-        <div v-if="!availableTopics.length && !topicsLoading" class="form-hint">{{ t("mqMessages.noTopicsAvailable") }}</div>
-        <div v-else class="form-hint">{{ t("mqMessages.topicSearchHint") }}</div>
+        <RocketMqTopicSelect v-if="isRocketMqCluster" ref="rocketMqTopicSelectRef" v-model="topicName" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" grouping="business" :show-type-filter="false" :disabled="readOnly" @loaded="handleRocketMqTopicsLoaded" />
+        <template v-else>
+          <div class="topic-select-row">
+            <input v-model="topicName" :list="topicListId" :disabled="readOnly || topicsLoading" class="topic-input" :placeholder="topicsLoading ? t('mqMessages.topicLoading') : t('mqMessages.topicSearchPlaceholder')" autocomplete="off" />
+            <datalist :id="topicListId">
+              <option v-for="t in topicOptions" :key="t.value" :value="t.value" :label="t.partitions != null ? $t('mqMessages.topicOptionWithPartitions', { label: t.label, partitions: t.partitions }) : t.label" />
+            </datalist>
+            <button @click="loadTopics" :disabled="topicsLoading" class="btn-icon" :title="t('mqMessages.refreshTopicList')">
+              <span v-if="topicsLoading" class="spin">⟳</span>
+              <span v-else>⟳</span>
+            </button>
+          </div>
+          <div v-if="!availableTopics.length && !topicsLoading" class="form-hint">{{ t("mqMessages.noTopicsAvailable") }}</div>
+          <div v-else class="form-hint">{{ t("mqMessages.topicSearchHint") }}</div>
+        </template>
       </div>
 
       <!-- 消息键 -->
       <div class="form-group">
         <label>{{ t("mqMessages.messageKey") }}</label>
         <input v-model="messageKey" type="text" :placeholder="t('mqMessages.optional')" :disabled="readOnly" />
+      </div>
+
+      <div v-if="isRocketMqCluster" class="form-group">
+        <label>{{ t("mqMessages.messageTag") }}</label>
+        <input v-model="messageTag" type="text" :placeholder="t('mqMessages.optional')" :disabled="readOnly" />
       </div>
 
       <!-- 消息内容 -->
@@ -381,6 +416,10 @@ watch(
   height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+.send-message-panel.embedded {
+  height: auto;
 }
 
 .panel-toolbar {
@@ -660,6 +699,19 @@ input[type="number"]:focus {
 
 .btn-primary:hover:not(:disabled) {
   opacity: 0.9;
+}
+
+.query-mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.query-mode-tabs .btn-sm.active {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-primary-alpha);
 }
 
 .message-browser {

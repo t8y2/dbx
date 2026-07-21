@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use dbx_core::storage::DesktopSettings;
+use dbx_core::storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState};
 use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
@@ -83,6 +83,16 @@ pub async fn load_favorites_state(state: State<'_, Arc<AppState>>) -> Result<Opt
 #[tauri::command]
 pub async fn save_favorites_state(state: State<'_, Arc<AppState>>, favorites: serde_json::Value) -> Result<(), String> {
     state.storage.save_favorites_state(&favorites).await
+}
+
+#[tauri::command]
+pub async fn load_mcp_global_policy(state: State<'_, Arc<AppState>>) -> Result<McpGlobalPolicyState, String> {
+    state.storage.load_mcp_global_policy().await
+}
+
+#[tauri::command]
+pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: McpGlobalPolicy) -> Result<(), String> {
+    state.storage.save_mcp_global_policy(&policy).await
 }
 
 #[tauri::command]

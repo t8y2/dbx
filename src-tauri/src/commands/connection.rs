@@ -162,18 +162,15 @@ async fn connect_agent_pool(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "sqlite-sqlcipher")]
-    use super::connect_sqlite_from_config;
-    use super::{
-        mark_mongo_legacy_driver, mongo_legacy_connect_params, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
-    };
-    use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     #[cfg(feature = "mq-admin")]
-    use {
-        super::{load_connection_configs, save_connection_configs},
-        dbx_core::connection::{AppState, PoolKind},
-        dbx_core::storage::Storage,
+    use super::load_connection_configs;
+    use super::{
+        connect_sqlite_from_config, mark_mongo_legacy_driver, mongo_legacy_connect_params, save_connection_configs,
+        MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
+    use dbx_core::connection::{AppState, PoolKind};
+    use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
+    use dbx_core::storage::Storage;
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
@@ -231,7 +228,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "sqlite-sqlcipher")]
     fn sqlite_config(path: &std::path::Path, password: &str) -> ConnectionConfig {
         let mut config = mongodb_config();
         config.id = "sqlite".to_string();
@@ -247,6 +243,91 @@ mod tests {
         config.database = None;
         config.connection_string = None;
         config
+    }
+
+    #[tokio::test]
+    async fn sqlite_connect_from_config_restores_attached_databases() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-sqlite-attach-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main_path = dir.join("main.sqlite");
+        let attached_path = dir.join("analytics.sqlite");
+        drop(dbx_core::db::sqlite::connect_path_create_if_missing(main_path.to_str().unwrap()).await.unwrap());
+        let attached =
+            dbx_core::db::sqlite::connect_path_create_if_missing(attached_path.to_str().unwrap()).await.unwrap();
+        dbx_core::db::sqlite::execute_query(&attached, "CREATE TABLE events(id INTEGER PRIMARY KEY);").await.unwrap();
+        drop(attached);
+
+        let mut config = sqlite_config(&main_path, "");
+        config.attached_databases.push(AttachedDatabaseConfig {
+            name: "analytics".to_string(),
+            path: attached_path.to_string_lossy().to_string(),
+        });
+
+        let pool = connect_sqlite_from_config(&config).await.expect("open SQLite connection with attachments");
+        let count = pool
+            .with_connection(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM analytics.sqlite_master WHERE type = 'table' AND name = 'events'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("query attached SQLite database");
+        assert_eq!(count, 1);
+
+        drop(pool);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sqlite_connect_from_config_rejects_sqlcipher_attachments_before_opening_files() {
+        let mut config = sqlite_config(std::path::Path::new("/missing/main.sqlite"), "secret");
+        config.attached_databases.push(AttachedDatabaseConfig {
+            name: "analytics".to_string(),
+            path: "/missing/analytics.sqlite".to_string(),
+        });
+
+        let error = match connect_sqlite_from_config(&config).await {
+            Ok(_) => panic!("SQLCipher attachments must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("SQLCipher"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn saving_memory_sqlite_attachments_keeps_the_live_pool_intact() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-sqlite-memory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let initial = sqlite_config(std::path::Path::new(":memory:"), "");
+        let pool = dbx_core::db::sqlite::connect_path(":memory:").await.unwrap();
+        dbx_core::db::sqlite::execute_query(
+            &pool,
+            "CREATE TABLE retained(value TEXT); INSERT INTO retained VALUES ('yes');",
+        )
+        .await
+        .unwrap();
+        state.configs.write().await.insert(initial.id.clone(), initial.clone());
+        state.connections.write().await.insert(initial.id.clone(), PoolKind::Sqlite(pool.clone()));
+
+        let mut invalid = initial.clone();
+        invalid.attached_databases.push(AttachedDatabaseConfig {
+            name: "analytics".to_string(),
+            path: dir.join("analytics.sqlite").to_string_lossy().to_string(),
+        });
+        let error = save_connection_configs(&state, &[invalid]).await.unwrap_err();
+
+        assert!(error.contains("in-memory main database"), "{error}");
+        assert!(state.connections.read().await.contains_key(&initial.id));
+        assert_eq!(state.configs.read().await.get(&initial.id), Some(&initial));
+        let retained = dbx_core::db::sqlite::execute_query(&pool, "SELECT value FROM retained;").await.unwrap();
+        assert_eq!(retained.rows[0][0], serde_json::json!("yes"));
+
+        drop(pool);
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(feature = "mq-admin")]
@@ -355,7 +436,7 @@ mod tests {
         let first = state.mq_registry.get_or_build(&initial).await.unwrap();
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        save_connection_configs(&state, &[updated.clone()]).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&updated)).await.unwrap();
 
         let cached_admin_url = state
             .configs
@@ -384,7 +465,7 @@ mod tests {
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
-        state.storage.save_connections(&[updated.clone()]).await.unwrap();
+        state.storage.save_connections(std::slice::from_ref(&updated)).await.unwrap();
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
         state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
 
@@ -422,7 +503,7 @@ mod tests {
         }
         let stale = state.mq_registry.get_or_build(&removed).await.unwrap();
 
-        save_connection_configs(&state, &[kept.clone()]).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
 
         let configs = state.configs.read().await;
         assert!(configs.contains_key(&kept.id));
@@ -451,7 +532,7 @@ mod tests {
         }
         state.connections.write().await.insert(removed.id.clone(), PoolKind::MessageQueue);
 
-        save_connection_configs(&state, &[kept.clone()]).await.unwrap();
+        save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
 
         assert!(!state.connections.read().await.contains_key(&removed.id));
 
@@ -466,6 +547,15 @@ pub async fn save_connections(state: State<'_, Arc<AppState>>, configs: Vec<Conn
 }
 
 async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig]) -> Result<(), String> {
+    for config in configs {
+        if config.db_type == DatabaseType::Sqlite {
+            db::sqlite::validate_persistent_attachments(
+                &config.host,
+                &config.password,
+                !config.attached_databases.is_empty(),
+            )?;
+        }
+    }
     state.storage.save_connections(configs).await?;
     let sync = sync_connection_configs(state, configs).await;
     remove_connection_pools_for_connection_ids(state, &sync.connection_pool_ids_to_drop).await;
@@ -588,12 +678,18 @@ fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqli
 }
 
 async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sqlite::SqliteHandle, String> {
-    db::sqlite::connect_path_with_cipher_key_and_extensions(
-        &expand_tilde(&config.host),
+    let sqlite_path = expand_tilde(&config.host);
+    db::sqlite::validate_persistent_attachments(&sqlite_path, &config.password, !config.attached_databases.is_empty())?;
+    let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
+        &sqlite_path,
         &config.password,
         sqlite_extension_specs_from_config(config),
     )
-    .await
+    .await?;
+    for attached in &config.attached_databases {
+        db::sqlite::attach_database(&pool, &attached.name, &expand_tilde(&attached.path))?;
+    }
+    Ok(pool)
 }
 
 #[tauri::command]
@@ -889,8 +985,8 @@ async fn test_connection_with_info_inner(
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
-                let kafka_launch = dbx_core::mq::service::resolve_kafka_launch_spec(&mqc, &state);
-                let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, kafka_launch).await {
+                let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
+                let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
                     Ok(adapter) => adapter,
                     Err(err) => {
                         state.mq_registry.drop_connection(connection_id).await;
@@ -960,6 +1056,13 @@ pub async fn connect_db(
     client_attempt: Option<u64>,
 ) -> Result<String, String> {
     let config = config.canonicalized();
+    if config.db_type == DatabaseType::Sqlite {
+        db::sqlite::validate_persistent_attachments(
+            &config.host,
+            &config.password,
+            !config.attached_databases.is_empty(),
+        )?;
+    }
     let id = config.id.clone();
     let db_config = metadata_connection_config(&config);
     let attempt = state.begin_connection_attempt_with_client_attempt(&id, client_attempt).await;
@@ -1200,8 +1303,8 @@ pub async fn connect_db(
         #[cfg(feature = "mq-admin")]
         DatabaseType::MessageQueue => {
             let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
-            let kafka_launch = dbx_core::mq::service::resolve_kafka_launch_spec(&mqc, &state);
-            let adapter = match state.mq_registry.get_or_build_config(&id, mqc, kafka_launch).await {
+            let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
+            let adapter = match state.mq_registry.get_or_build_config(&id, mqc, agent_launch).await {
                 Ok(adapter) => adapter,
                 Err(err) => {
                     state.mq_registry.drop_connection(&id).await;
@@ -1259,6 +1362,13 @@ pub async fn connection_final_proxy_port(
     let runtime_config = config.canonicalized();
     if !runtime_config.has_effective_transport_layers() {
         return Err("Connection has no configured transport layers".to_string());
+    }
+    if runtime_config.db_type == DatabaseType::Sqlite {
+        db::sqlite::validate_persistent_attachments(
+            &runtime_config.host,
+            &runtime_config.password,
+            !runtime_config.attached_databases.is_empty(),
+        )?;
     }
 
     let connection_id = runtime_config.id.clone();

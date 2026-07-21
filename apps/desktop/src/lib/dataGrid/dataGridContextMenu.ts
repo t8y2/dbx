@@ -12,7 +12,7 @@ export type DataGridColumnMenuItem = {
 export type DataGridContextMenuItem = {
   label: string;
   action?: () => void;
-  disabled?: boolean;
+  disabled?: boolean | (() => boolean);
   separator?: boolean;
   icon?: Component;
   iconClass?: string;

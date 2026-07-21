@@ -1716,6 +1716,11 @@
           "profile": "kafka",
           "label": "Apache Kafka",
           "agentKey": "kafka"
+        },
+        {
+          "profile": "rocketmq",
+          "label": "Apache RocketMQ",
+          "agentKey": "rocketmq"
         }
       ],
       "supportLevel": "connect",

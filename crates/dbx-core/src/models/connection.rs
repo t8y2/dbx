@@ -2086,6 +2086,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_mcp_access_is_ignored_and_not_serialized() {
+        let legacy: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "name": "Legacy",
+            "db_type": "mysql",
+            "host": "127.0.0.1",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "mcp_access": "read_only"
+        }))
+        .unwrap();
+        assert!(serde_json::to_value(&legacy).unwrap().get("mcp_access").is_none());
+        assert!(!legacy.read_only);
+    }
+
+    #[test]
     fn database_identifier_whitespace_is_preserved_and_percent_encoded() {
         let mut config = mysql_config("root", "secret", Some(" analytics "));
 

@@ -1,6 +1,12 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
-import { copyToClipboard, eventTargetAllowsAppClipboardShortcut, eventTargetAllowsNativeClipboard, eventTargetUsesNativeClipboard, hasNativeClipboardSelection, isPlainClipboardShortcut, readTextFromClipboard } from "../../apps/desktop/src/lib/common/clipboard.ts";
+import { test, vi } from "vitest";
+import { copyToClipboard, eventTargetAllowsAppClipboardShortcut, eventTargetAllowsNativeClipboard, eventTargetUsesNativeClipboard, hasNativeClipboardSelection, isPlainClipboardShortcut, readTextFromClipboard, type ClipboardEnvironment } from "../../apps/desktop/src/lib/common/clipboard.ts";
+
+const tauriClipboardMock = vi.hoisted(() => ({
+  writeText: vi.fn<(text: string) => Promise<void>>(),
+}));
+
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => tauriClipboardMock);
 
 test("copyToClipboard falls back when navigator clipboard is unavailable", async () => {
   const appended: unknown[] = [];
@@ -47,6 +53,76 @@ test("copyToClipboard falls back when navigator clipboard is unavailable", async
   assert.deepEqual(commands, ["copy"]);
   assert.equal(appended[0], textarea);
   assert.equal(removed[0], textarea);
+});
+
+test("copyToClipboard falls back to navigator clipboard after a Tauri write failure", async () => {
+  const webWrite = vi.fn(async () => undefined);
+  const legacyCopy = vi.fn(() => true);
+  tauriClipboardMock.writeText.mockRejectedValueOnce(new Error("native clipboard unavailable"));
+
+  await copyToClipboard("INSERT INTO users VALUES (1);", {
+    __TAURI_INTERNALS__: {},
+    navigator: { clipboard: { writeText: webWrite } },
+    document: {
+      body: { appendChild: vi.fn(), removeChild: vi.fn() },
+      createElement: vi.fn(),
+      execCommand: legacyCopy,
+    },
+  } as unknown as ClipboardEnvironment & Record<string, unknown>);
+
+  assert.deepEqual(webWrite.mock.calls, [["INSERT INTO users VALUES (1);"]]);
+  assert.equal(legacyCopy.mock.calls.length, 0);
+});
+
+test("copyToClipboard falls back to legacy copy after Tauri and navigator failures", async () => {
+  const selected: string[] = [];
+  const textarea = {
+    value: "",
+    style: {} as Record<string, string>,
+    setAttribute: vi.fn(),
+    select() {
+      selected.push(this.value);
+    },
+  };
+  const webWrite = vi.fn(async () => {
+    throw new Error("web clipboard unavailable");
+  });
+  const legacyCopy = vi.fn(() => true);
+  tauriClipboardMock.writeText.mockRejectedValueOnce(new Error("native clipboard unavailable"));
+
+  await copyToClipboard("INSERT INTO users VALUES (2);", {
+    __TAURI_INTERNALS__: {},
+    navigator: { clipboard: { writeText: webWrite } },
+    document: {
+      body: { appendChild: vi.fn(), removeChild: vi.fn() },
+      createElement: vi.fn(() => textarea),
+      execCommand: legacyCopy,
+    },
+  } as unknown as ClipboardEnvironment & Record<string, unknown>);
+
+  assert.deepEqual(webWrite.mock.calls, [["INSERT INTO users VALUES (2);"]]);
+  assert.deepEqual(selected, ["INSERT INTO users VALUES (2);"]);
+  assert.deepEqual(legacyCopy.mock.calls, [["copy"]]);
+});
+
+test("copyToClipboard does not fall back after a successful Tauri write", async () => {
+  const webWrite = vi.fn(async () => undefined);
+  const legacyCopy = vi.fn(() => true);
+  tauriClipboardMock.writeText.mockResolvedValueOnce(undefined);
+
+  await copyToClipboard("INSERT INTO users VALUES (3);", {
+    __TAURI_INTERNALS__: {},
+    navigator: { clipboard: { writeText: webWrite } },
+    document: {
+      body: { appendChild: vi.fn(), removeChild: vi.fn() },
+      createElement: vi.fn(),
+      execCommand: legacyCopy,
+    },
+  } as unknown as ClipboardEnvironment & Record<string, unknown>);
+
+  assert.deepEqual(tauriClipboardMock.writeText.mock.calls.at(-1), ["INSERT INTO users VALUES (3);"]);
+  assert.equal(webWrite.mock.calls.length, 0);
+  assert.equal(legacyCopy.mock.calls.length, 0);
 });
 
 test("readTextFromClipboard uses navigator clipboard when available", async () => {

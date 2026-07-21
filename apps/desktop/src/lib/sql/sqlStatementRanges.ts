@@ -246,6 +246,7 @@ const EXPLAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "WITH", "INSERT", "UPDATE"
 const CREATE_BODY_KEYWORDS = new Set(["SELECT", "WITH", "BEGIN", "DECLARE"]);
 const INSERT_BODY_KEYWORDS = new Set(["SELECT", "WITH"]);
 const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY", "RENAME", "SET"]);
+const CLICKHOUSE_ALTER_TABLE_HEADER = /^ALTER\s+TABLE\s+(?:(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")\s*\.\s*)?(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")(?:\s+ON\s+CLUSTER\s+(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+"|'(?:''|[^'])+'))?\s*$/i;
 const SET_OPERATION_KEYWORDS = new Set(["UNION", "INTERSECT", "EXCEPT", "MINUS"]);
 const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle"]);
@@ -682,6 +683,12 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (currentBodyKeyword === "ALTER" && isClickHouseAlterTableUpdateContinuation(sql, boundaries[boundaries.length - 1].from, lineStart.from, lineStart.keyword, databaseType)) {
+      // ClickHouse mutations use UPDATE as the first ALTER TABLE action, not as
+      // a standalone statement. Keep this dialect-specific to preserve soft boundaries elsewhere.
+      continue;
+    }
+
     if (currentBodyKeyword === "ALTER" && ALTER_BODY_KEYWORDS.has(lineStart.keyword)) {
       continue;
     }
@@ -915,6 +922,11 @@ function isMysqlCreateTableOptionContinuation(sql: string, statementFrom: number
 
   const next = nextNonWhitespaceChar(sql, lineStartFrom + keyword.length);
   return next === "=" || next === "'" || next === '"';
+}
+
+function isClickHouseAlterTableUpdateContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "clickhouse" || keyword !== "UPDATE") return false;
+  return CLICKHOUSE_ALTER_TABLE_HEADER.test(sql.slice(statementFrom, lineStartFrom));
 }
 
 function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean {

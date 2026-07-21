@@ -590,6 +590,19 @@ func TestXuguObjectSourceQuerySupportsSharedObjectKinds(t *testing.T) {
 	if !strings.Contains(typeBodyQuery, "ALL_TYPES") || !strings.Contains(typeBodyQuery, "TO_CHAR(u.BODY)") || !strings.Contains(typeBodyQuery, "u.BODY IS NOT NULL") {
 		t.Fatalf("type body query must return catalog BODY content: %s", typeBodyQuery)
 	}
+
+	for _, objectType := range []string{"VIEW", "TRIGGER", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"} {
+		query, _, err := objectSourceQuery("APP", "demo", objectType)
+		if err != nil {
+			t.Fatalf("%s source query: %v", objectType, err)
+		}
+		if !strings.Contains(query, "FROM ALL_") || !strings.Contains(query, "JOIN ALL_SCHEMAS") {
+			t.Fatalf("%s must use access-scoped ALL_* metadata: %s", objectType, query)
+		}
+		if strings.Contains(query, "SYS_") {
+			t.Fatalf("%s must not require SYS_* metadata access: %s", objectType, query)
+		}
+	}
 }
 
 func TestMetadataListConstraintsFromParams(t *testing.T) {
@@ -626,6 +639,125 @@ func TestParseForeignKeyColumns(t *testing.T) {
 
 	if strings.Join(local, ",") != "C1,C2" || strings.Join(ref, ",") != "ID1,ID2" {
 		t.Fatalf("unexpected foreign key columns: local=%v ref=%v", local, ref)
+	}
+}
+
+func TestRenderXuguTableDDLPreservesProgrammableTableMetadata(t *testing.T) {
+	amountDefault := "0"
+	description := "child table"
+	ddl := renderXuguTableDDL(
+		"APP", "CHILD",
+		[]columnInfo{
+			{Name: "ID", DataType: "INTEGER", IsNullable: false},
+			{Name: "PARENT_ID", DataType: "INTEGER", IsNullable: false},
+			{Name: "AMOUNT", DataType: "NUMERIC", IsNullable: true, ColumnDefault: &amountDefault},
+		},
+		xuguTableMetadata{
+			PctFree:        15,
+			CopyNum:        3,
+			PartitionType:  1,
+			PartitionKey:   `"ID"`,
+			PartitionCount: 2,
+			Comment:        description,
+		},
+		map[string]xuguIdentityInfo{"ID": {Column: "ID", Start: 10, Step: 5}},
+		[]xuguConstraintInfo{
+			{Name: "PK_CHILD", Type: "P", Definition: `"ID"`, Enabled: true},
+			{Name: "CK_CHILD_AMOUNT", Type: "C", Definition: `("AMOUNT") >= (0)`, Enabled: true},
+			{
+				Name: "FK_CHILD_PARENT", Type: "F", Definition: `("PARENT_ID")("ID")`,
+				ReferenceSchema: "APP", ReferenceTable: "PARENT", UpdateAction: "n", DeleteAction: "c", Enabled: true,
+			},
+		},
+		[]xuguPartitionInfo{{Name: "P_10", Value: "10"}, {Name: "P_MAX", Value: "MAXVALUES"}}, nil,
+	)
+
+	for _, want := range []string{
+		`"ID" INTEGER IDENTITY(10,5) NOT NULL`,
+		`CONSTRAINT "PK_CHILD" PRIMARY KEY ("ID")`,
+		`CONSTRAINT "CK_CHILD_AMOUNT" CHECK (("AMOUNT") >= (0))`,
+		`CONSTRAINT "FK_CHILD_PARENT" FOREIGN KEY ("PARENT_ID") REFERENCES "APP"."PARENT" ("ID") ON UPDATE NO ACTION ON DELETE CASCADE NOT DEFERRABLE`,
+		"PCTFREE 15 COPY NUMBER 3",
+		`PARTITION BY RANGE ("ID") PARTITIONS (`,
+		`"P_10" VALUES LESS THAN (10)`,
+		`"P_MAX" VALUES LESS THAN (MAXVALUES)`,
+		"COMMENT 'child table'",
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Fatalf("generated DDL is missing %q:\n%s", want, ddl)
+		}
+	}
+}
+
+func TestRenderXuguTableDDLTemporaryTableCommitMode(t *testing.T) {
+	ddl := renderXuguTableDDL("APP", "TMP", []columnInfo{{Name: "ID", DataType: "INTEGER", IsNullable: true}},
+		xuguTableMetadata{TempType: 1, OnCommitDelete: true}, nil, nil, nil, nil)
+	if !strings.HasPrefix(ddl, `CREATE TEMP TABLE "APP"."TMP"`) || !strings.Contains(ddl, "ON COMMIT DELETE ROWS") {
+		t.Fatalf("unexpected temporary table DDL: %s", ddl)
+	}
+	globalDDL := renderXuguTableDDL("APP", "GTMP", []columnInfo{{Name: "ID", DataType: "INTEGER", IsNullable: true}},
+		xuguTableMetadata{TempType: 2, OnCommitDelete: false}, nil, nil, nil, nil)
+	if !strings.HasPrefix(globalDDL, `CREATE GLOBAL TEMP TABLE "APP"."GTMP"`) || !strings.Contains(globalDDL, "ON COMMIT PRESERVE ROWS") {
+		t.Fatalf("unexpected global temporary table DDL: %s", globalDDL)
+	}
+}
+
+func TestRenderXuguTableDDLSubpartitionDefinitions(t *testing.T) {
+	ddl := renderXuguTableDDL("APP", "SUBPART", []columnInfo{{Name: "ID", DataType: "INTEGER", IsNullable: true}},
+		xuguTableMetadata{PartitionType: 2, PartitionKey: `"REGION"`, SubpartitionType: 1, SubpartitionKey: `"ID"`}, nil, nil,
+		[]xuguPartitionInfo{{Name: "P_EAST", Value: "'east'"}},
+		[]xuguPartitionInfo{{Name: "SP_10", Value: "10"}, {Name: "SP_MAX", Value: "MAXVALUES"}})
+	for _, want := range []string{
+		`PARTITION BY LIST ("REGION")`,
+		`"P_EAST" VALUES ('east')`,
+		`SUBPARTITION BY RANGE ("ID") SUBPARTITIONS (`,
+		`"SP_10" VALUES LESS THAN (10)`,
+		`"SP_MAX" VALUES LESS THAN (MAXVALUES)`,
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Fatalf("generated DDL is missing %q:\n%s", want, ddl)
+		}
+	}
+}
+
+func TestRenderXuguTableDDLPreservesHashPartitionCount(t *testing.T) {
+	ddl := renderXuguTableDDL("APP", "HASH_PART", []columnInfo{{Name: "ID", DataType: "INTEGER", IsNullable: true}},
+		xuguTableMetadata{PartitionType: 3, PartitionKey: `"ID"`, PartitionCount: 4}, nil, nil,
+		[]xuguPartitionInfo{{Name: "SYS_P1", Value: "1"}, {Name: "SYS_P2", Value: "2"}}, nil)
+	if !strings.Contains(ddl, `PARTITION BY HASH ("ID") PARTITIONS 4`) {
+		t.Fatalf("hash partition count was not preserved: %s", ddl)
+	}
+	if strings.Contains(ddl, "VALUES") {
+		t.Fatalf("hash partition DDL must not render RANGE/LIST values: %s", ddl)
+	}
+}
+
+func TestRenderXuguTableDDLPreservesMatchAndDefaultOnNull(t *testing.T) {
+	insertOnlyDefault := "'insert'"
+	insertUpdateDefault := "'update'"
+	ddl := renderXuguTableDDL("APP", "CHILD",
+		[]columnInfo{
+			{Name: "A", DataType: "INTEGER", IsNullable: false},
+			{Name: "B", DataType: "INTEGER", IsNullable: false},
+			{Name: "INSERT_ONLY", DataType: "VARCHAR", IsNullable: false, ColumnDefault: &insertOnlyDefault, DefaultOnNull: 1},
+			{Name: "INSERT_UPDATE", DataType: "VARCHAR", IsNullable: false, ColumnDefault: &insertUpdateDefault, DefaultOnNull: 2},
+		},
+		xuguTableMetadata{}, nil,
+		[]xuguConstraintInfo{{
+			Name: "FK_CHILD_PARENT", Type: "F", Definition: `("A","B")("A","B")`,
+			ReferenceSchema: "APP", ReferenceTable: "PARENT", MatchType: "A", Enabled: true,
+		}}, nil, nil)
+	for _, want := range []string{
+		`DEFAULT ON NULL FOR INSERT ONLY 'insert'`,
+		`DEFAULT ON NULL FOR INSERT AND UPDATE 'update'`,
+		`FOREIGN KEY ("A", "B") REFERENCES "APP"."PARENT" ("A", "B") MATCH FULL`,
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Fatalf("generated DDL is missing %q:\n%s", want, ddl)
+		}
+	}
+	if got := xuguMatchClause("U"); got != "" {
+		t.Fatalf("MATCH_TYPE U = %q, want omitted default MATCH SIMPLE", got)
 	}
 }
 

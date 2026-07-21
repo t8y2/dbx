@@ -29,6 +29,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class KingbaseAgent extends PostgresLikeAgent {
     private static final int TRIGGER_TYPE_BEFORE = 1 << 1;
@@ -48,8 +50,13 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     private static final String KINGBASE_VIEW_SCHEMA = "CAST(v.schemaname AS varchar(256))";
     private static final String KINGBASE_MATVIEW_NAME = "CAST(mv.matviewname AS varchar(256))";
     private static final String KINGBASE_MATVIEW_SCHEMA = "CAST(mv.schemaname AS varchar(256))";
+    private static final Pattern BOUNDED_VARCHAR_TYPE = Pattern.compile(
+        "^(?:varchar|character\\s+varying)\\s*\\(\\s*(\\d+)\\s*\\)$",
+        Pattern.CASE_INSENSITIVE
+    );
     private boolean postgresCatalogMode;
     private boolean sqlServerIdentityCatalogMode;
+    private volatile boolean usePgDefaultExpressionFunction;
 
     public static final PostgresLikeAgentProfile KINGBASE_PROFILE = new PostgresLikeAgentProfile(
         "com.kingbase8.Driver",
@@ -64,6 +71,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     protected void afterConnect(ConnectParams params, Connection connection) {
         postgresCatalogMode = false;
         sqlServerIdentityCatalogMode = false;
+        usePgDefaultExpressionFunction = false;
         setMysqlCompatMode(params.isMysql_compat_mode());
         if (params.isMysql_compat_mode()) {
             return;
@@ -159,8 +167,8 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 ? "SELECT schema_name " +
                     "FROM information_schema.schemata " +
                     "WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' " +
-                    "AND UPPER(schema_name) NOT LIKE 'SYS%' " +
-                    "AND UPPER(schema_name) NOT LIKE 'XLOG%' " +
+                    "AND UPPER(schema_name) NOT LIKE 'SYS\\_%' ESCAPE '\\' " +
+                    "AND UPPER(schema_name) NOT LIKE 'XLOG\\_%' ESCAPE '\\' " +
                     "ORDER BY schema_name"
                 : "SELECT nspname AS schema_name " +
                     "FROM sys_catalog.sys_namespace " +
@@ -483,31 +491,43 @@ public final class KingbaseAgent extends PostgresLikeAgent {
     }
 
     private List<ColumnInfo> getRegularColumns(String schema, String table, Set<String> primaryKeys) {
+        boolean usePgFunction = usePgDefaultExpressionFunction;
+        try {
+            return queryRegularColumns(schema, table, primaryKeys, usePgFunction ? "pg_get_expr" : "sys_get_expr");
+        } catch (RuntimeException error) {
+            if (usePgFunction || !isUndefinedFunction(error, "sys_get_expr")) {
+                throw error;
+            }
+            usePgDefaultExpressionFunction = true;
+            return queryRegularColumns(schema, table, primaryKeys, "pg_get_expr");
+        }
+    }
+
+    private List<ColumnInfo> queryRegularColumns(
+        String schema,
+        String table,
+        Set<String> primaryKeys,
+        String defaultExpressionFunction
+    ) {
         return unchecked(() -> {
             List<ColumnInfo> result = new ArrayList<>();
             String sql = "SELECT a.attname AS column_name, " +
                 "format_type(a.atttypid, a.atttypmod) AS data_type, " +
                 "NOT a.attnotnull AS is_nullable, " +
-                "sys_get_expr(ad.adbin, ad.adrelid) AS column_default, " +
+                defaultExpressionFunction + "(ad.adbin, ad.adrelid) AS column_default, " +
                 "d.description AS column_comment, " +
                 "CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 " +
                 "THEN ((a.atttypmod - 4) >> 16) & 65535 ELSE NULL END AS numeric_precision, " +
                 "CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 " +
                 "THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, " +
                 "CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 " +
-                "THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length, " +
-                (sqlServerIdentityCatalogMode
-                    ? "ic.seed_value AS identity_seed, ic.increment_value AS identity_increment "
-                    : "NULL AS identity_seed, NULL AS identity_increment ") +
+                "THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length " +
                 "FROM sys_catalog.sys_attribute a " +
                 "JOIN sys_catalog.sys_type t ON t.oid = a.atttypid " +
                 "JOIN sys_catalog.sys_class c ON c.oid = a.attrelid " +
                 "JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace " +
                 "LEFT JOIN sys_catalog.sys_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum " +
                 "LEFT JOIN sys_catalog.sys_description d ON d.objoid = a.attrelid AND d.objsubid = a.attnum " +
-                (sqlServerIdentityCatalogMode
-                    ? "LEFT JOIN sys.identity_columns ic ON ic.object_id = c.oid AND ic.column_id = a.attnum "
-                    : "") +
                 "WHERE n.nspname = " + sqlString(effectiveSchema(schema)) +
                 " AND c.relname = " + sqlString(table) + " " +
                 "AND a.attnum > 0 AND NOT a.attisdropped " +
@@ -522,7 +542,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                             rs.getBoolean("is_nullable"),
                             rs.getString("column_default"),
                             primaryKeys.contains(columnName),
-                            identityExtra(rs),
+                            null,
                             rs.getString("column_comment"),
                             intObject(rs, "numeric_precision"),
                             intObject(rs, "numeric_scale"),
@@ -531,11 +551,40 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                     }
                 }
             }
+            applySqlServerIdentityMetadata(schema, table, result);
             return result;
         });
     }
 
-    private static String identityExtra(ResultSet rs) throws Exception {
+    private void applySqlServerIdentityMetadata(String schema, String table, List<ColumnInfo> columns) {
+        if (!sqlServerIdentityCatalogMode || columns.isEmpty()) return;
+        String sql = "SELECT a.attname AS column_name, ic.seed_value AS identity_seed, " +
+            "ic.increment_value AS identity_increment " +
+            "FROM sys.identity_columns ic " +
+            "JOIN sys_catalog.sys_class c ON c.oid = ic.object_id " +
+            "JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace " +
+            "JOIN sys_catalog.sys_attribute a ON a.attrelid = c.oid AND a.attnum = ic.column_id " +
+            "WHERE n.nspname = " + sqlString(effectiveSchema(schema)) +
+            " AND c.relname = " + sqlString(table);
+        try (Statement stmt = requireConnected().createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            Map<String, ColumnInfo> columnsByName = new LinkedHashMap<>();
+            for (ColumnInfo column : columns) {
+                columnsByName.put(column.getName(), column);
+            }
+            while (rs.next()) {
+                ColumnInfo column = columnsByName.get(rs.getString("column_name"));
+                if (column != null) {
+                    column.setExtra(identityExtra(rs));
+                }
+            }
+        } catch (SQLException ignored) {
+            // Identity metadata is optional and some Kingbase versions expose a broken compatibility view.
+            sqlServerIdentityCatalogMode = false;
+        }
+    }
+
+    private static String identityExtra(ResultSet rs) throws SQLException {
         String seed = rs.getString("identity_seed");
         String increment = rs.getString("identity_increment");
         if (seed == null || increment == null) {
@@ -549,6 +598,7 @@ public final class KingbaseAgent extends PostgresLikeAgent {
             List<ColumnInfo> result = new ArrayList<>();
             String sql = "SELECT ic.column_name, ic.data_type, ic.is_nullable, ic.column_default, " +
                 "ic.numeric_precision, ic.numeric_scale, ic.character_maximum_length, " +
+                "format_type(a.atttypid, a.atttypmod) AS catalog_data_type, " +
                 "d.description AS column_comment " +
                 "FROM information_schema.columns ic " +
                 // information_schema preserves MySQL-compatible type metadata but does not expose comments.
@@ -564,9 +614,19 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
                         String columnName = rs.getString("column_name");
+                        String dataType = rs.getString("data_type");
+                        Integer characterLength = intObject(rs, "character_maximum_length");
+                        String catalogDataType = rs.getString("catalog_data_type");
+                        Integer catalogCharacterLength = boundedCharacterLength(catalogDataType);
+                        if ("varchar".equalsIgnoreCase(dataType)
+                            && (characterLength == null || characterLength <= 0)
+                            && catalogCharacterLength != null) {
+                            dataType = catalogDataType;
+                            characterLength = catalogCharacterLength;
+                        }
                         result.add(new ColumnInfo(
                             columnName,
-                            rs.getString("data_type"),
+                            dataType,
                             "YES".equalsIgnoreCase(coalesce(rs.getString("is_nullable"))),
                             rs.getString("column_default"),
                             primaryKeys.contains(columnName),
@@ -574,13 +634,25 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                             rs.getString("column_comment"),
                             intObject(rs, "numeric_precision"),
                             intObject(rs, "numeric_scale"),
-                            intObject(rs, "character_maximum_length")
+                            characterLength
                         ));
                     }
                 }
             }
             return result;
         });
+    }
+
+    private static Integer boundedCharacterLength(String dataType) {
+        if (dataType == null) return null;
+        Matcher match = BOUNDED_VARCHAR_TYPE.matcher(dataType.trim());
+        if (!match.matches()) return null;
+        try {
+            int length = Integer.parseInt(match.group(1));
+            return length > 0 ? length : null;
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     @Override
@@ -596,8 +668,8 @@ public final class KingbaseAgent extends PostgresLikeAgent {
                 "JOIN SYS_CATALOG.SYS_CLASS i ON i.oid = ix.indexrelid " +
                 "JOIN SYS_CATALOG.SYS_NAMESPACE n ON n.oid = t.relnamespace " +
                 "JOIN SYS_CATALOG.SYS_AM am ON am.oid = i.relam " +
-                "JOIN generate_series(1, 64) AS pos(n) ON pos.n <= array_length(string_to_array(ix.indkey::text, ' '), 1) " +
-                "JOIN SYS_CATALOG.SYS_ATTRIBUTE a ON a.attrelid = t.oid AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 " +
+                "JOIN unnest(ix.indkey) WITH ORDINALITY AS pos(attnum, n) ON true " +
+                "JOIN SYS_CATALOG.SYS_ATTRIBUTE a ON a.attrelid = t.oid AND a.attnum = pos.attnum " +
                 "WHERE n.nspname = " + sqlString(effectiveSchema(schema)) +
                 " AND t.relname = " + sqlString(table) + " " +
                 "ORDER BY i.relname, pos.n";
@@ -817,8 +889,12 @@ public final class KingbaseAgent extends PostgresLikeAgent {
             .append("FROM sys_catalog.sys_class c ")
             .append("JOIN sys_catalog.sys_namespace n ON ").append(KINGBASE_NAMESPACE_OID).append(" = ").append(KINGBASE_REL_NAMESPACE).append(' ')
             .append("LEFT JOIN sys_catalog.sys_description d ON CAST(d.objoid AS varchar(64)) = ").append(KINGBASE_REL_OID).append(" AND d.objsubid = 0 ")
-            .append("WHERE ").append(KINGBASE_SCHEMA_NAME).append(" = ").append(sqlString(schema));
-        appendRegularTablePredicate(sql);
+            .append("WHERE ").append(KINGBASE_SCHEMA_NAME).append(" = ").append(sqlString(schema))
+            .append(" AND (EXISTS (SELECT 1 FROM sys_catalog.sys_tables t ")
+            .append("WHERE CAST(t.schemaname AS varchar(256)) = ").append(KINGBASE_SCHEMA_NAME)
+            .append(" AND CAST(t.tablename AS varchar(256)) = ").append(KINGBASE_REL_NAME).append(')')
+            .append(" OR EXISTS (SELECT 1 FROM sys_catalog.sys_foreign_table ft ")
+            .append("WHERE CAST(ft.ftrelid AS varchar(64)) = ").append(KINGBASE_REL_OID).append("))");
         MetadataSqlSupport.appendNameFilter(sql, args, KINGBASE_REL_NAME, constraints);
         return sql.toString();
     }
@@ -865,19 +941,6 @@ public final class KingbaseAgent extends PostgresLikeAgent {
             .append("WHERE ").append(KINGBASE_MATVIEW_SCHEMA).append(" = ").append(sqlString(schema));
         MetadataSqlSupport.appendNameFilter(sql, args, KINGBASE_MATVIEW_NAME, constraints);
         return sql.toString();
-    }
-
-    private static void appendRegularTablePredicate(StringBuilder sql) {
-        sql.append(" AND NOT EXISTS (SELECT 1 FROM sys_catalog.sys_rewrite r ")
-            .append("WHERE CAST(r.ev_class AS varchar(64)) = ").append(KINGBASE_REL_OID)
-            .append(" AND CAST(r.rulename AS varchar(256)) = '_RETURN')")
-            .append(" AND NOT EXISTS (SELECT 1 FROM sys_catalog.sys_index ix ")
-            .append("WHERE CAST(ix.indexrelid AS varchar(64)) = ").append(KINGBASE_REL_OID).append(')')
-            .append(" AND NOT EXISTS (SELECT 1 FROM sys_catalog.sys_attribute sa1 ")
-            .append("JOIN sys_catalog.sys_attribute sa2 ON CAST(sa2.attrelid AS varchar(64)) = CAST(sa1.attrelid AS varchar(64)) ")
-            .append("WHERE CAST(sa1.attrelid AS varchar(64)) = ").append(KINGBASE_REL_OID)
-            .append(" AND CAST(sa1.attname AS varchar(256)) = 'last_value'")
-            .append(" AND CAST(sa2.attname AS varchar(256)) = 'log_cnt')");
     }
 
     private static void appendRelationVisibilityPredicate(StringBuilder sql) {
@@ -943,6 +1006,23 @@ public final class KingbaseAgent extends PostgresLikeAgent {
             }
         }
         return insufficientPrivilege && mentionsSysFreespace;
+    }
+
+    private static boolean isUndefinedFunction(Throwable error, String functionName) {
+        boolean undefinedFunction = false;
+        boolean mentionsFunction = false;
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof SQLException && "42883".equals(((SQLException) current).getSQLState())) {
+                undefinedFunction = true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                mentionsFunction |= normalized.contains(functionName.toLowerCase(Locale.ROOT));
+                undefinedFunction |= normalized.contains("does not exist") || normalized.contains("不存在");
+            }
+        }
+        return undefinedFunction && mentionsFunction;
     }
 
     private static void appendRoutineKindPredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {

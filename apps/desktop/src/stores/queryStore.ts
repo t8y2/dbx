@@ -1054,6 +1054,27 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function showExecutedQueryResults(connectionId: string, database: string, sql: string, queryResults: QueryResult[]) {
+    const id = createTab(connectionId, database, undefined, "query", undefined, sql);
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab) return id;
+
+    const results = markQueryResultsRowsRaw(queryResults);
+    const firstDataResult = results.findIndex((result) => result.columns.length > 0);
+    const activeIndex = firstDataResult >= 0 ? firstDataResult : 0;
+    tab.lastExecutedSql = sql;
+    tab.resultBaseSql = sql;
+    tab.results = results.length > 1 ? results : undefined;
+    tab.activeResultIndex = results.length > 1 ? activeIndex : undefined;
+    tab.result = results[activeIndex];
+    tab.isExecuting = false;
+    tab.isCancelling = false;
+    tab.executionId = undefined;
+    tab.queryExecutionStartedAt = undefined;
+    if (tab.result) touchResult(tab);
+    return id;
+  }
+
   function refreshExternalSqlFileTitles() {
     const externalTabs = tabs.value.filter((tab) => tab.mode === "query" && tab.externalSqlPath);
     const titles = externalSqlFileDisplayTitles(externalTabs.map((tab) => tab.externalSqlPath!));
@@ -1878,7 +1899,7 @@ export const useQueryStore = defineStore("query", () => {
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
     const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
     const orderBy = tab.orderByInput?.trim() || sortOrder;
-    const limit = tab.resultPageLimit ?? tableOpenPageLimit();
+    const limit = tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
     const offset = tab.resultPageOffset ?? 0;
     const refreshPreparationId = uuid();
 
@@ -2449,6 +2470,7 @@ export const useQueryStore = defineStore("query", () => {
       if (sources.length !== 1 || analysis.distinct) return unchanged;
 
       const loaded = await loadEditableQuerySource(tab, analysis, sources[0]!, conn, databaseType, traceId, elapsed);
+      if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(databaseType, loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
       const declaredPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
@@ -3306,7 +3328,7 @@ export const useQueryStore = defineStore("query", () => {
         countSql = plan.countSql;
         useAgentResultSession = plan.useAgentResultSession;
       } else if (tab.mode === "data") {
-        pageLimit = options?.pagination?.limit ?? tableOpenPageLimit();
+        pageLimit = options?.pagination?.limit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
         pageOffset = options?.pagination?.offset ?? 0;
       }
 
@@ -4125,7 +4147,7 @@ export const useQueryStore = defineStore("query", () => {
       pagination:
         tab.mode === "data"
           ? {
-              limit: tab.resultPageLimit ?? tableOpenPageLimit(),
+              limit: tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize),
               offset: tab.resultPageOffset ?? 0,
             }
           : undefined,
@@ -4337,6 +4359,7 @@ export const useQueryStore = defineStore("query", () => {
     hasDirtyTabs,
     isConfirmingAppClose,
     createTab,
+    showExecutedQueryResults,
     switchTab,
     closeTab,
     forceClosePendingTab,

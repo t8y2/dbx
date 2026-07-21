@@ -11,8 +11,8 @@ vi.stubGlobal("localStorage", {
   clear: () => storage.clear(),
 });
 
-function keyboardEvent(key: string) {
-  return { key, shiftKey: false, preventDefault: vi.fn() } as unknown as KeyboardEvent;
+function keyboardEvent(key: string, extras: Partial<KeyboardEvent> = {}) {
+  return { key, shiftKey: false, preventDefault: vi.fn(), ...extras } as unknown as KeyboardEvent;
 }
 
 describe("useDataGridConditionEditor", () => {
@@ -191,5 +191,22 @@ describe("useDataGridConditionEditor", () => {
     const escape = keyboardEvent("Escape");
     expect(editor.handleKeydown(escape)).toBe("dismiss");
     expect(editor.dropdownOpen.value).toBe(false);
+  });
+
+  it("ignores shortcut keys while an IME composition is active", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["name"], historyScope: {} });
+    value.value = "na";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(1));
+
+    const composingEnter = keyboardEvent("Enter", { isComposing: true });
+    expect(editor.handleKeydown(composingEnter)).toBeUndefined();
+    expect(composingEnter.preventDefault).not.toHaveBeenCalled();
+    expect(value.value).toBe("na");
+
+    const processEnter = keyboardEvent("Process");
+    expect(editor.handleKeydown(processEnter)).toBeUndefined();
+    expect(processEnter.preventDefault).not.toHaveBeenCalled();
   });
 });

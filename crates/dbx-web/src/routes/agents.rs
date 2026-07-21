@@ -7,9 +7,10 @@ use dbx_core::agent_manager::{
     AgentDriverInfo, AgentState, DriverStoreUsage, JavaRuntimeConfig, JavaRuntimeMode, DEFAULT_JRE_KEY,
 };
 use dbx_core::agent_service::{
-    build_agent_list, clear_agent_download_cache, fetch_registry,
-    import_agents_from_zip as import_agents_from_zip_core, install_agent_driver, invalidate_registry_cache,
-    reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre, upgrade_all_agent_drivers, AgentProgressEvent,
+    build_agent_list, clear_agent_download_cache, fetch_registry, import_agent_driver,
+    import_agents_from_zip as import_agents_from_zip_core, inspect_offline_zip, install_agent_driver,
+    invalidate_registry_cache, reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre,
+    upgrade_all_agent_drivers, AgentProgressEvent, OfflineImportPlan,
 };
 use dbx_core::driver_runtime::DriverRuntimeSummary;
 use futures::Stream;
@@ -177,18 +178,22 @@ pub async fn import_agents_from_zip(
         }
 
         let zip_path = tmp_dir.join(format!("agent-offline-{}.zip", uuid::Uuid::new_v4()));
-        let mut upload = tokio::fs::File::create(&zip_path).await.map_err(|err| AppError(err.to_string()))?;
-        let mut field = field;
-        while let Some(chunk) = field.chunk().await.map_err(|err| AppError(err.to_string()))? {
-            upload.write_all(&chunk).await.map_err(|err| AppError(err.to_string()))?;
-        }
-        upload.flush().await.map_err(|err| AppError(err.to_string()))?;
-        drop(upload);
-
         let tx = progress_sender(&state, "global").await;
-        let result =
+        let result = async {
+            let mut upload = tokio::fs::File::create(&zip_path).await.map_err(|err| AppError(err.to_string()))?;
+            let mut field = field;
+            while let Some(chunk) = field.chunk().await.map_err(|err| AppError(err.to_string()))? {
+                upload.write_all(&chunk).await.map_err(|err| AppError(err.to_string()))?;
+            }
+            upload.flush().await.map_err(|err| AppError(err.to_string()))?;
+            drop(upload);
+
+            let plan = inspect_offline_zip(&zip_path).map_err(AppError)?;
+            ensure_no_offline_import_blockers(&state.app, &plan).await.map_err(AppError)?;
             import_agents_from_zip_core(&state.app.agent_manager, &zip_path, |event| send_progress_event(&tx, event))
-                .map_err(AppError);
+                .map_err(AppError)
+        }
+        .await;
         let _ = std::fs::remove_file(&zip_path);
 
         let result = result?;
@@ -199,37 +204,44 @@ pub async fn import_agents_from_zip(
     Err(AppError("No file uploaded".to_string()))
 }
 
-pub async fn import_agent_jar(
+pub async fn import_agent_driver_file(
     State(state): State<Arc<WebState>>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut db_type: Option<String> = None;
-    let mut jar_data: Option<Vec<u8>> = None;
-    let mut jar_name = String::new();
+    let mut driver_data: Option<Vec<u8>> = None;
+    let mut driver_name = String::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         if name == "dbType" {
             db_type = Some(field.text().await.map_err(|e| AppError(e.to_string()))?);
         } else if name == "file" {
-            jar_name = field.file_name().unwrap_or("driver.jar").to_string();
-            if !jar_name.to_lowercase().ends_with(".jar") {
-                return Err(AppError("Only .jar files can be imported".to_string()));
-            }
-            jar_data = Some(field.bytes().await.map_err(|e| AppError(e.to_string()))?.to_vec());
+            driver_name = field.file_name().unwrap_or("agent").to_string();
+            driver_data = Some(field.bytes().await.map_err(|e| AppError(e.to_string()))?.to_vec());
         }
     }
 
     let db_type = db_type.ok_or_else(|| AppError("Missing dbType field".to_string()))?;
-    let data = jar_data.ok_or_else(|| AppError("No file uploaded".to_string()))?;
+    let data = driver_data.ok_or_else(|| AppError("No file uploaded".to_string()))?;
 
-    let temp_dir = state.app.plugins.root_dir().join("jar_upload_tmp");
+    let temp_dir = state.app.plugins.root_dir().join("agent_upload_tmp");
     std::fs::create_dir_all(&temp_dir).map_err(|e| AppError(e.to_string()))?;
-    let tmp_path = temp_dir.join(&jar_name);
+    let suffix = std::path::Path::new(&driver_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!(".{extension}"))
+        .unwrap_or_default();
+    let tmp_path = temp_dir.join(format!("agent-{}{}", uuid::Uuid::new_v4(), suffix));
     std::fs::write(&tmp_path, &data).map_err(|e| AppError(e.to_string()))?;
 
-    dbx_core::agent_service::import_agent_jar(&state.app.agent_manager, &db_type, &tmp_path).map_err(AppError::from)?;
+    let result = async {
+        ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&db_type)).await.map_err(AppError)?;
+        import_agent_driver(&state.app.agent_manager, &db_type, &tmp_path).map_err(AppError::from)
+    }
+    .await;
     let _ = std::fs::remove_file(&tmp_path);
+    result?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -301,4 +313,20 @@ async fn ensure_no_agent_update_blockers(
     } else {
         Err(format!("请先关闭以下数据库连接后再更新驱动: {}", blockers.join(", ")))
     }
+}
+
+async fn ensure_no_offline_import_blockers(
+    state: &dbx_core::connection::AppState,
+    plan: &OfflineImportPlan,
+) -> Result<(), String> {
+    let mut driver_keys = plan.driver_keys.clone();
+    if plan.includes_jre {
+        // Replacing a managed JRE affects every running Java Agent, so include
+        // all active runtimes in the same connection-aware update preflight.
+        driver_keys.extend(state.agent_manager.active_daemon_keys().await);
+        driver_keys.extend(state.active_agent_connection_driver_keys().await);
+        driver_keys.sort();
+        driver_keys.dedup();
+    }
+    ensure_no_agent_update_blockers(state, &driver_keys).await
 }

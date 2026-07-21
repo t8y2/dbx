@@ -185,6 +185,26 @@ function closeAllRegularSurfaces() {
   closeSpecialRegularSurfaces();
 }
 
+function closeOtherActiveTabs() {
+  if (props.settingsPageActive) {
+    queryStore.closeRegularTabs();
+    closeSpecialRegularSurfaces("settings");
+    return;
+  }
+  if (props.driverStoreActive) {
+    queryStore.closeRegularTabs();
+    closeSpecialRegularSurfaces("driverStore");
+    return;
+  }
+
+  const tab = queryStore.tabs.find((item) => item.id === queryStore.activeTabId);
+  if (!tab) return;
+  if (tab.pinned) queryStore.closeOtherFixedTabs(tab.id);
+  else closeOtherRegularTabsFromTab(tab);
+}
+
+defineExpose({ closeOtherActiveTabs });
+
 function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextMenuItem[] {
   const keep = surface;
   const closeCurrent = surface === "driverStore" ? () => emit("close-driver-store") : () => emit("close-settings-page");
@@ -208,6 +228,7 @@ function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextM
       },
       disabled: closeOtherDisabled,
       icon: X,
+      shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
     },
     {
       label: closeAllLabel,
@@ -270,6 +291,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: closeOtherAction,
       disabled: closeOtherDisabled,
       icon: X,
+      shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
     },
     {
       label: closeAllLabel,
@@ -434,6 +456,7 @@ function tabDatabaseIconType(tab: QueryTab) {
     const externalConfig = connection.external_config as { systemKind?: unknown } | undefined;
     const systemKind = typeof externalConfig?.systemKind === "string" ? externalConfig.systemKind : "";
     if (connection.driver_profile === "kafka" || systemKind === "kafka") return "kafka";
+    if (connection.driver_profile === "rocketmq" || systemKind === "rocketmq") return "rocketmq";
     if (connection.driver_profile === "pulsar" || systemKind === "pulsar") return "pulsar";
   }
   return connection.driver_profile || connection.db_type;
@@ -569,7 +592,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -644,13 +667,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-settings-page-tab
-                class="group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
                     : ['h-7 rounded-md border font-medium', settingsPageActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
                 "
                 :style="isClassicLayout && settingsPageActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                :data-active-tab="settingsPageActive"
                 @click="emit('activate-settings-page')"
                 @mousedown.middle.prevent="emit('close-settings-page')"
               >
@@ -670,13 +694,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-driver-store-tab
-                class="group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
                     : ['h-7 rounded-md border font-medium', driverStoreActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
                 "
                 :style="isClassicLayout && driverStoreActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                :data-active-tab="driverStoreActive"
                 @click="emit('activate-driver-store')"
                 @mousedown.middle.prevent="emit('close-driver-store')"
               >
@@ -760,7 +785,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -890,15 +915,16 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       }
     "
   >
-    <DialogContent class="sm:max-w-md">
+    <DialogContent class="min-w-0 sm:max-w-md">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <AlertTriangle class="h-5 w-5 text-amber-500" />
           {{ t("editor.unsavedChangesTitle") }}
         </DialogTitle>
       </DialogHeader>
-      <div class="space-y-2">
-        <p class="text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
+      <!-- Grid items use min-content sizing by default; shrink and wrap long file paths before they can displace the footer actions. -->
+      <div class="min-w-0 space-y-2">
+        <p class="wrap-anywhere text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
         <Popover v-if="showCloseConfirmBulkActions" :open="closeConfirmListOpen" @update:open="closeConfirmListOpen = $event">
           <PopoverTrigger as-child>
             <button
@@ -923,7 +949,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
           </PopoverContent>
         </Popover>
       </div>
-      <DialogFooter>
+      <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" variant="secondary" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>

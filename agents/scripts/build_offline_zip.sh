@@ -47,6 +47,10 @@ for platform in "${PLATFORMS[@]}"; do
   # Copy all driver JARs (platform-independent)
   for jar_file in "$RELEASE_DIR"/dbx-agent-*.jar; do
     [ -f "$jar_file" ] || continue
+    # Kingbase is distributed only as a native agent; keep legacy JDBC builds out of offline bundles.
+    case "$(basename "$jar_file")" in
+      dbx-agent-kingbase.jar|dbx-agent-kingbase-*.jar) continue ;;
+    esac
     cp "$jar_file" "$WORK/drivers/"
   done
 

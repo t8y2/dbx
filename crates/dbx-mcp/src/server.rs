@@ -14,8 +14,14 @@ use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use dbx_core::{
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
     models::connection::DatabaseType,
-    production_safety::{is_production_database, targets_production_database},
-    sql_risk::{classify_sql_risk_for_database, SqlRisk},
+    production_safety::{
+        is_production_database, mongo_pipeline_targets_production_database, targets_production_database,
+    },
+    query_execution_sql::is_write_sql_for_database,
+    sql_risk::{
+        classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch, SqlRisk,
+    },
+    storage::McpGlobalPolicy,
 };
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -131,27 +137,44 @@ pub struct DbxMcpServer {
 
 #[derive(Clone, Debug, Default)]
 pub struct McpScope {
-    pub connection_id: Option<String>,
+    pub connection_ids: Vec<String>,
     pub connection_name: Option<String>,
     pub database: Option<String>,
 }
 
+struct ResolvedConnection {
+    connection: dbx_core::models::connection::ConnectionConfig,
+    policy: McpGlobalPolicy,
+}
+
 impl McpScope {
     pub fn from_env() -> Self {
+        let mut connection_ids = scoped_connection_ids(std::env::var("DBX_MCP_SCOPE_CONNECTION_IDS").ok().as_deref());
+        if connection_ids.is_empty() {
+            if let Some(connection_id) = non_empty_env("DBX_MCP_SCOPE_CONNECTION_ID") {
+                connection_ids.push(connection_id);
+            }
+        }
         Self {
-            connection_id: non_empty_env("DBX_MCP_SCOPE_CONNECTION_ID"),
+            connection_ids,
             connection_name: non_empty_env("DBX_MCP_SCOPE_CONNECTION_NAME"),
             database: non_empty_env("DBX_MCP_SCOPE_DATABASE"),
         }
     }
 
     fn enabled(&self) -> bool {
-        self.connection_id.is_some() || self.connection_name.is_some()
+        self.connection_scope_enabled() || self.database.is_some()
+    }
+
+    fn connection_scope_enabled(&self) -> bool {
+        !self.connection_ids.is_empty() || self.connection_name.is_some()
     }
 
     fn matches(&self, connection: &dbx_core::models::connection::ConnectionConfig) -> bool {
-        self.connection_id.as_deref() == Some(connection.id.as_str())
-            || self.connection_name.as_deref() == Some(connection.name.as_str())
+        if !self.connection_ids.is_empty() {
+            return self.connection_ids.iter().any(|id| id == &connection.id);
+        }
+        self.connection_name.as_deref() == Some(connection.name.as_str())
     }
 }
 
@@ -191,18 +214,21 @@ impl DbxMcpServer {
                 let rows = connections.iter().map(ConnectionSummary::from).collect::<Vec<_>>();
                 text(format_connections(&rows))
             }
-            Err(error) => tool_error("CONNECTION_LOAD_ERROR", error),
+            Err(error) => backend_tool_error("CONNECTION_LOAD_ERROR", error),
         }
     }
 
     #[tool(name = "dbx_list_tables", description = "List tables and views for a database connection")]
     async fn list_tables(&self, Parameters(request): Parameters<ListTablesRequest>) -> CallToolResult {
-        let connection = match self.resolve_connection(&request.selector).await {
-            Ok(connection) => connection,
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = self.resolve_database(request.database, &connection);
-        match self.backend.list_tables(&connection, &database, &request.schema.unwrap_or_default()).await {
+        let database = match self.resolve_database(request.database, &resolved.connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        match self.backend.list_tables(&resolved.connection, &database, &request.schema.unwrap_or_default()).await {
             Ok(tables) if tables.is_empty() => text("No tables found."),
             Ok(tables) => text(
                 tables
@@ -224,14 +250,17 @@ impl DbxMcpServer {
 
     #[tool(name = "dbx_describe_table", description = "Get column definitions for a table")]
     async fn describe_table(&self, Parameters(request): Parameters<DescribeTableRequest>) -> CallToolResult {
-        let connection = match self.resolve_connection(&request.selector).await {
-            Ok(connection) => connection,
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = self.resolve_database(request.database, &connection);
+        let database = match self.resolve_database(request.database, &resolved.connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
         match self
             .backend
-            .get_columns(&connection, &database, &request.schema.unwrap_or_default(), &request.table)
+            .get_columns(&resolved.connection, &database, &request.schema.unwrap_or_default(), &request.table)
             .await
         {
             Ok(columns) if columns.is_empty() => text("No columns found."),
@@ -245,35 +274,43 @@ impl DbxMcpServer {
         description = "Execute a SQL query on a database connection (max 100 rows returned)"
     )]
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
-        let connection = match self.resolve_connection(&request.selector).await {
-            Ok(connection) => connection,
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let connection = &resolved.connection;
         if connection.db_type == dbx_core::models::connection::DatabaseType::Redis {
             return tool_error(
                 "REDIS_COMMAND_REQUIRED",
                 "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
             );
         }
-        let database = self.resolve_database(request.database, &connection);
+        let database = match self.resolve_database(request.database, connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
         if connection.db_type == DatabaseType::MongoDb {
-            let command = match validate_mongo_command(&connection, &database, &request.sql) {
+            let command = match validate_mongo_command(connection, &resolved.policy, &database, &request.sql) {
                 Ok(command) => command,
                 Err(error) => return error,
             };
-            return match self.backend.execute_mongo_command(&connection, &database, &command).await {
+            return match self.backend.execute_mongo_command(connection, &database, &command).await {
                 Ok(result) => text(format_query_result(&result, 100)),
-                Err(error) => tool_error("QUERY_ERROR", error),
+                Err(error) => backend_tool_error("QUERY_ERROR", error),
             };
         }
+        let permissions = match validate_sql_policy(connection, &resolved.policy, &database, &request.sql) {
+            Ok(permissions) => permissions,
+            Err(error) => return error,
+        };
         let result = self
             .backend
             .execute_agent_tool(
-                &connection,
+                connection,
                 &database,
                 "execute_query",
                 json!({ "sql": request.sql, "limit": 100 }),
-                default_permissions(),
+                permissions,
             )
             .await;
         agent_result(result)
@@ -284,10 +321,11 @@ impl DbxMcpServer {
         &self,
         Parameters(request): Parameters<ExecuteRedisCommandRequest>,
     ) -> CallToolResult {
-        let connection = match self.resolve_connection(&request.selector).await {
-            Ok(connection) => connection,
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let connection = &resolved.connection;
         if connection.db_type != DatabaseType::Redis {
             return tool_error("INVALID_CONNECTION_TYPE", format!("Connection \"{}\" is not Redis.", connection.name));
         }
@@ -296,12 +334,21 @@ impl DbxMcpServer {
             Err(error) => return tool_error("REDIS_COMMAND_BLOCKED", error),
         };
         let safety = classify_command(&argv[0]);
-        let permissions = default_permissions();
+        let permissions = mcp_permissions(connection, &resolved.policy);
+        if safety != RedisCommandSafety::Allowed && resolved.policy.read_only {
+            return tool_error("MCP_READ_ONLY", "DBX global MCP read-only mode is enabled. Redis command blocked.");
+        }
+        if safety != RedisCommandSafety::Allowed && connection.read_only {
+            return tool_error(
+                "CONNECTION_READ_ONLY",
+                format!("Connection \"{}\" has read-only protection enabled. Redis command blocked.", connection.name),
+            );
+        }
         if safety == RedisCommandSafety::Blocked && !permissions.allow_dangerous {
             return tool_error(
                 "REDIS_COMMAND_BLOCKED",
                 format!(
-                    "Dangerous Redis command \"{}\" is blocked. Set DBX_MCP_ALLOW_DANGEROUS_SQL=1 to allow it.",
+                    "Dangerous Redis command \"{}\" is disabled in DBX MCP settings.",
                     argv[0].to_ascii_uppercase()
                 ),
             );
@@ -309,16 +356,15 @@ impl DbxMcpServer {
         if safety != RedisCommandSafety::Allowed && !permissions.allow_writes {
             return tool_error(
                 "REDIS_COMMAND_BLOCKED",
-                "MCP Redis command execution is read-only for this session. Set DBX_MCP_ALLOW_WRITES=1 to allow write or dangerous commands.",
+                "MCP Redis command execution is read-only in DBX MCP settings.",
             );
         }
-        let database = request
-            .db
-            .or_else(|| self.scope.database.as_deref().and_then(parse_redis_database))
-            .or_else(|| redis_database(&connection))
-            .unwrap_or(0);
+        let database = match self.resolve_redis_database(request.db, connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
         // Production protection is stricter than the opt-in write flags by design.
-        if safety != RedisCommandSafety::Allowed && is_production_database(&connection, &database.to_string()) {
+        if safety != RedisCommandSafety::Allowed && is_production_database(connection, &database.to_string()) {
             return tool_error(
                 "PRODUCTION_WRITE_BLOCKED",
                 "MCP cannot execute write or dangerous Redis commands against a production database.",
@@ -327,7 +373,7 @@ impl DbxMcpServer {
         match self
             .backend
             .execute_redis_command(
-                &connection,
+                connection,
                 database,
                 &request.command,
                 safety == RedisCommandSafety::Blocked && permissions.allow_dangerous,
@@ -335,20 +381,24 @@ impl DbxMcpServer {
             .await
         {
             Ok(result) => text(format_redis_result(&result)),
-            Err(error) => tool_error("REDIS_COMMAND_ERROR", error),
+            Err(error) => backend_tool_error("REDIS_COMMAND_ERROR", error),
         }
     }
 
     #[tool(name = "dbx_get_schema_context", description = "Get compact table and column context for writing SQL")]
     async fn get_schema_context(&self, Parameters(request): Parameters<SchemaContextRequest>) -> CallToolResult {
-        let connection = match self.resolve_connection(&request.selector).await {
-            Ok(connection) => connection,
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = self.resolve_database(request.database, &connection);
+        let connection = &resolved.connection;
+        let database = match self.resolve_database(request.database, connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
         let schema = request.schema.unwrap_or_default();
         let max_tables = request.max_tables.unwrap_or(8).clamp(1, 20);
-        let available = match self.backend.list_tables(&connection, &database, &schema).await {
+        let available = match self.backend.list_tables(connection, &database, &schema).await {
             Ok(tables) => tables,
             Err(error) => return tool_error("SCHEMA_CONTEXT_ERROR", error),
         };
@@ -371,7 +421,7 @@ impl DbxMcpServer {
         let mut tables = Vec::with_capacity(selected.len());
         for table in selected {
             // Keep metadata calls sequential because some embedded drivers expose a single physical connection.
-            let columns = match self.backend.get_columns(&connection, &database, &schema, &table.name).await {
+            let columns = match self.backend.get_columns(connection, &database, &schema, &table.name).await {
                 Ok(columns) => columns,
                 Err(error) => return tool_error("SCHEMA_CONTEXT_ERROR", error),
             };
@@ -382,7 +432,17 @@ impl DbxMcpServer {
 
     #[tool(name = "dbx_add_connection", description = "Add a new database connection to DBX")]
     async fn add_connection(&self, Parameters(request): Parameters<AddConnectionRequest>) -> CallToolResult {
-        let mut connections = match self.backend.load_connections().await {
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "DBX global MCP read-only mode is enabled. Connection management is not allowed.",
+            );
+        }
+        let connections = match self.backend.load_connections().await {
             Ok(connections) => connections,
             Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
         };
@@ -412,16 +472,25 @@ impl DbxMcpServer {
             Ok(config) => config,
             Err(error) => return tool_error("INVALID_CONNECTION", error),
         };
-        connections.push(config.clone());
-        if let Err(error) = self.backend.save_connections(&connections).await {
-            return tool_error("CONNECTION_SAVE_ERROR", error);
+        match self.backend.add_connection_for_mcp(config).await {
+            Ok(config) => text(format!("Connection \"{}\" added (id: {}).", config.name, config.id)),
+            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
         }
-        text(format!("Connection \"{}\" added (id: {}).", config.name, config.id))
     }
 
     #[tool(name = "dbx_remove_connection", description = "Remove a database connection from DBX")]
     async fn remove_connection(&self, Parameters(request): Parameters<RemoveConnectionRequest>) -> CallToolResult {
-        let mut connections = match self.backend.load_connections().await {
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "DBX global MCP read-only mode is enabled. Connection management is not allowed.",
+            );
+        }
+        let connections = match self.backend.load_connections().await {
             Ok(connections) => connections,
             Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
         };
@@ -444,20 +513,24 @@ impl DbxMcpServer {
                 format!("Connection \"{}\" not found.", request.connection_name),
             );
         };
-        connections.retain(|connection| connection.id != target.id);
-        if let Err(error) = self.backend.save_connections(&connections).await {
-            return tool_error("CONNECTION_SAVE_ERROR", error);
+        match self.backend.remove_connection_for_mcp(&target.id).await {
+            Ok(true) => text(format!("Connection \"{}\" (id: {}) removed.", target.name, target.id)),
+            Ok(false) => tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{}\" not found.", target.name)),
+            Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
         }
-        text(format!("Connection \"{}\" (id: {}) removed.", target.name, target.id))
     }
 
     #[tool(name = "dbx_open_table", description = "Open a table in DBX desktop app. Requires DBX to be running.")]
     async fn open_table(&self, Parameters(request): Parameters<OpenTableRequest>) -> CallToolResult {
-        let connection = match self.resolve_connection(&request.selector).await {
-            Ok(connection) => connection,
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = self.resolve_database(request.database, &connection);
+        let connection = &resolved.connection;
+        let database = match self.resolve_database(request.database, connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
         match self
             .backend
             .bridge_request(
@@ -473,7 +546,7 @@ impl DbxMcpServer {
             .await
         {
             Ok(()) => text(format!("Opened {} in DBX", request.table)),
-            Err(error) => tool_error("DBX_NOT_RUNNING", error),
+            Err(error) => backend_tool_error("DBX_NOT_RUNNING", error),
         }
     }
 
@@ -482,35 +555,29 @@ impl DbxMcpServer {
         description = "Execute a SQL query in DBX desktop app UI and show results there. Requires DBX to be running."
     )]
     async fn execute_and_show(&self, Parameters(request): Parameters<ExecuteAndShowRequest>) -> CallToolResult {
-        let connection = match self.resolve_connection(&request.selector).await {
-            Ok(connection) => connection,
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let connection = &resolved.connection;
         if connection.db_type == DatabaseType::Redis {
             return tool_error("REDIS_COMMAND_REQUIRED", "Use dbx_execute_redis_command for Redis connections.");
         }
-        let database = self.resolve_database(request.database, &connection);
-        let permissions = default_permissions();
-        if connection.db_type == DatabaseType::MongoDb {
-            if let Err(error) = validate_mongo_command(&connection, &database, &request.sql) {
-                return error;
-            }
+        let database = match self.resolve_database(request.database, connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        let permissions = if connection.db_type == DatabaseType::MongoDb {
+            mcp_permissions(connection, &resolved.policy)
         } else {
-            let risk = match classify_sql_risk_for_database(&request.sql, connection.db_type) {
-                Ok(risk) => risk,
-                Err(error) => return tool_error("SQL_BLOCKED", error),
-            };
-            if risk != SqlRisk::ReadOnly && targets_production_database(&connection, &database, &request.sql) {
-                return tool_error(
-                    "PRODUCTION_WRITE_BLOCKED",
-                    "MCP cannot send writes against a production database to DBX.",
-                );
+            match validate_sql_policy(connection, &resolved.policy, &database, &request.sql) {
+                Ok(permissions) => permissions,
+                Err(error) => return error,
             }
-            if risk == SqlRisk::Transaction || (risk == SqlRisk::Ddl && !permissions.allow_dangerous) {
-                return tool_error("SQL_BLOCKED", format!("{} statement is blocked for this session.", risk));
-            }
-            if risk == SqlRisk::Write && !permissions.allow_writes {
-                return tool_error("SQL_BLOCKED", "MCP SQL execution is read-only for this session.");
+        };
+        if connection.db_type == DatabaseType::MongoDb {
+            if let Err(error) = validate_mongo_command(connection, &resolved.policy, &database, &request.sql) {
+                return error;
             }
         }
         match self
@@ -529,32 +596,77 @@ impl DbxMcpServer {
             .await
         {
             Ok(()) => text("Query sent to DBX"),
-            Err(error) => tool_error("DBX_NOT_RUNNING", error),
+            Err(error) => backend_tool_error("DBX_NOT_RUNNING", error),
         }
     }
 }
 
 impl DbxMcpServer {
     async fn load_scoped_connections(&self) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, String> {
+        let policy = self.backend.load_mcp_global_policy().await?;
         let connections = self.backend.load_connections().await?;
-        if !self.scope.enabled() {
-            return Ok(connections);
-        }
-        Ok(connections.into_iter().filter(|connection| self.scope.matches(connection)).collect())
+        Ok(connections
+            .into_iter()
+            .filter(|connection| policy_allows_connection(&policy, connection))
+            .filter(|connection| !self.scope.connection_scope_enabled() || self.scope.matches(connection))
+            .collect())
     }
 
+    async fn load_policy(&self) -> Result<McpGlobalPolicy, CallToolResult> {
+        self.backend.load_mcp_global_policy().await.map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))
+    }
+
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
     fn resolve_database(
         &self,
         requested: Option<String>,
         connection: &dbx_core::models::connection::ConnectionConfig,
-    ) -> String {
-        requested.or_else(|| self.scope.database.clone()).or_else(|| connection.database.clone()).unwrap_or_default()
+    ) -> Result<String, CallToolResult> {
+        let requested = requested.map(|database| database.trim().to_string()).filter(|database| !database.is_empty());
+        if let Some(scoped) = self.scope.database.as_deref() {
+            if let Some(requested) = requested.as_deref() {
+                if requested != scoped {
+                    return Err(tool_error(
+                        "DATABASE_OUT_OF_SCOPE",
+                        format!("Database \"{requested}\" is outside the scoped database \"{scoped}\"."),
+                    ));
+                }
+            }
+            return Ok(scoped.to_string());
+        }
+        Ok(requested.or_else(|| connection.database.clone()).unwrap_or_default())
     }
 
-    async fn resolve_connection(
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
+    fn resolve_redis_database(
         &self,
-        selector: &ConnectionSelector,
-    ) -> Result<dbx_core::models::connection::ConnectionConfig, CallToolResult> {
+        requested: Option<u32>,
+        connection: &dbx_core::models::connection::ConnectionConfig,
+    ) -> Result<u32, CallToolResult> {
+        if let Some(scoped) = self.scope.database.as_deref() {
+            let scoped_database = parse_redis_database(scoped).ok_or_else(|| {
+                tool_error(
+                    "INVALID_DATABASE_SCOPE",
+                    format!("Redis database scope \"{scoped}\" must be a non-negative integer."),
+                )
+            })?;
+            if let Some(requested) = requested {
+                if requested != scoped_database {
+                    return Err(tool_error(
+                        "DATABASE_OUT_OF_SCOPE",
+                        format!("Redis database {requested} is outside the scoped database {scoped_database}."),
+                    ));
+                }
+            }
+            return Ok(scoped_database);
+        }
+        Ok(requested.or_else(|| redis_database(connection)).unwrap_or(0))
+    }
+
+    async fn resolve_connection(&self, selector: &ConnectionSelector) -> Result<ResolvedConnection, CallToolResult> {
+        let policy = self.load_policy().await?;
         let connections =
             self.backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
         if let Some(id) = selector.connection_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
@@ -562,15 +674,21 @@ impl DbxMcpServer {
                 .into_iter()
                 .find(|connection| connection.id == id)
                 .ok_or_else(|| tool_error("CONNECTION_NOT_FOUND", format!("Connection with id \"{id}\" not found.")))?;
-            if self.scope.enabled() && !self.scope.matches(&connection) {
+            if self.scope.connection_scope_enabled() && !self.scope.matches(&connection) {
                 return Err(tool_error(
                     "CONNECTION_OUT_OF_SCOPE",
                     format!("Connection \"{id}\" is outside this DBX AI session scope."),
                 ));
             }
-            return Ok(connection);
+            if !policy_allows_connection(&policy, &connection) {
+                return Err(tool_error(
+                    "CONNECTION_OUT_OF_SCOPE",
+                    format!("Connection \"{id}\" is not allowed by DBX MCP settings."),
+                ));
+            }
+            return Ok(ResolvedConnection { connection, policy });
         }
-        if self.scope.enabled() {
+        if self.scope.connection_scope_enabled() {
             let connection = connections
                 .into_iter()
                 .find(|connection| self.scope.matches(connection))
@@ -583,17 +701,34 @@ impl DbxMcpServer {
                     ));
                 }
             }
-            return Ok(connection);
+            if !policy_allows_connection(&policy, &connection) {
+                return Err(tool_error(
+                    "CONNECTION_OUT_OF_SCOPE",
+                    "The DBX AI session scope is outside the global MCP connection allowlist.",
+                ));
+            }
+            return Ok(ResolvedConnection { connection, policy });
         }
         let Some(name) = selector.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) else {
             return Err(tool_error("CONNECTION_NOT_FOUND", "Either connection_id or connection_name is required."));
         };
         let matching =
             connections.into_iter().filter(|connection| connection.name.eq_ignore_ascii_case(name)).collect::<Vec<_>>();
-        match matching.as_slice() {
-            [] => Err(tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{name}\" not found."))),
-            [connection] => Ok(connection.clone()),
-            _ => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &matching))),
+        let allowed = matching
+            .iter()
+            .filter(|connection| policy_allows_connection(&policy, connection))
+            .cloned()
+            .collect::<Vec<_>>();
+        match allowed.as_slice() {
+            [] if matching.is_empty() => {
+                Err(tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{name}\" not found.")))
+            }
+            [] => Err(tool_error(
+                "CONNECTION_OUT_OF_SCOPE",
+                format!("Connection \"{name}\" is not allowed by DBX MCP settings."),
+            )),
+            [connection] => Ok(ResolvedConnection { connection: connection.clone(), policy }),
+            _ => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &allowed))),
         }
     }
 }
@@ -615,23 +750,93 @@ fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
 }
 
+fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolResult {
+    let error = error.into();
+    for code in [
+        "MCP_POLICY_UNAVAILABLE",
+        "MCP_READ_ONLY",
+        "CONNECTION_OUT_OF_SCOPE",
+        "DATABASE_OUT_OF_SCOPE",
+        "INVALID_DATABASE_SCOPE",
+        "CONNECTION_READ_ONLY",
+        "PRODUCTION_DATABASE_READ_ONLY",
+        "PRODUCTION_WRITE_BLOCKED",
+        "SQL_BLOCKED",
+    ] {
+        let marker = format!("{code}:");
+        if let Some(index) = error.find(&marker) {
+            return tool_error(code, error[index + marker.len()..].trim());
+        }
+    }
+    tool_error(default_code, error)
+}
+
 fn agent_result(result: dbx_core::agent_events::ToolResult) -> CallToolResult {
     if result.is_error {
-        tool_error("DBX_TOOL_ERROR", result.content.trim_start_matches("Error: "))
+        backend_tool_error("DBX_TOOL_ERROR", result.content.trim_start_matches("Error: "))
     } else {
         text(result.content)
     }
 }
 
-fn default_permissions() -> dbx_core::agent_tools::AgentSqlPermissions {
+fn policy_allows_connection(
+    policy: &McpGlobalPolicy,
+    connection: &dbx_core::models::connection::ConnectionConfig,
+) -> bool {
+    policy.allowed_connection_ids.as_ref().is_none_or(|allowed| allowed.iter().any(|id| id == &connection.id))
+}
+
+fn mcp_permissions(
+    connection: &dbx_core::models::connection::ConnectionConfig,
+    policy: &McpGlobalPolicy,
+) -> dbx_core::agent_tools::AgentSqlPermissions {
     dbx_core::agent_tools::AgentSqlPermissions {
-        allow_writes: boolean_env("DBX_MCP_ALLOW_WRITES").unwrap_or(true),
-        allow_dangerous: boolean_env("DBX_MCP_ALLOW_DANGEROUS_SQL").unwrap_or(false),
+        allow_writes: !policy.read_only && !connection.read_only,
+        allow_dangerous: !policy.read_only && !connection.read_only && policy.allow_dangerous_sql,
     }
 }
 
+// CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
+#[allow(clippy::result_large_err)]
+fn validate_sql_policy(
+    connection: &dbx_core::models::connection::ConnectionConfig,
+    policy: &McpGlobalPolicy,
+    database: &str,
+    sql: &str,
+) -> Result<dbx_core::agent_tools::AgentSqlPermissions, CallToolResult> {
+    if mcp_sql_has_forbidden_database_switch(sql, connection.db_type) {
+        return Err(tool_error("SQL_BLOCKED", "MCP does not allow USE or persistent database switching."));
+    }
+    let risk =
+        classify_sql_risk_for_database(sql, connection.db_type).map_err(|error| tool_error("SQL_BLOCKED", error))?;
+    if risk == SqlRisk::Transaction {
+        return Err(tool_error("SQL_BLOCKED", "Transaction statements are not supported by MCP."));
+    }
+    let is_write = is_write_sql_for_database(sql, connection.db_type);
+    if policy.read_only && is_write {
+        return Err(tool_error("MCP_READ_ONLY", "DBX global MCP read-only mode is enabled. SQL write blocked."));
+    }
+    if connection.read_only && is_write {
+        return Err(tool_error(
+            "CONNECTION_READ_ONLY",
+            format!("Connection \"{}\" has read-only protection enabled. SQL write blocked.", connection.name),
+        ));
+    }
+    let high_risk = risk == SqlRisk::Ddl || is_dangerous_sql_for_database(sql, connection.db_type);
+    if high_risk && !policy.allow_dangerous_sql {
+        return Err(tool_error("SQL_BLOCKED", "High-risk SQL is disabled in DBX MCP settings."));
+    }
+    if is_write && targets_production_database(connection, database, sql) {
+        return Err(tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database."));
+    }
+    Ok(mcp_permissions(connection, policy))
+}
+
+// CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
+#[allow(clippy::result_large_err)]
 fn validate_mongo_command(
     connection: &dbx_core::models::connection::ConnectionConfig,
+    policy: &McpGlobalPolicy,
     database: &str,
     source: &str,
 ) -> Result<MongoCommand, CallToolResult> {
@@ -643,25 +848,28 @@ fn validate_mongo_command(
             ),
         )
     })?;
-    let permissions = default_permissions();
-    if let Err(error) = mongo::validate_safety(
-        &command,
-        permissions.allow_writes,
-        permissions.allow_dangerous,
-        is_production_database(connection, database),
-    ) {
+    let permissions = mcp_permissions(connection, policy);
+    let production_database = match &command {
+        MongoCommand::Aggregate { pipeline, .. } => {
+            mongo_pipeline_targets_production_database(connection, database, pipeline)
+        }
+        _ => is_production_database(connection, database),
+    };
+    if let Err(error) =
+        mongo::validate_safety(&command, permissions.allow_writes, permissions.allow_dangerous, production_database)
+    {
         return Err(match error {
             MongoSafetyError::WritesDisabled => tool_error(
-                "SQL_BLOCKED",
-                "MCP MongoDB execution is read-only for this session. Set DBX_MCP_ALLOW_WRITES=1 to allow write commands.",
+                if policy.read_only { "MCP_READ_ONLY" } else { "CONNECTION_READ_ONLY" },
+                "MCP MongoDB execution is read-only in DBX MCP settings.",
             ),
             MongoSafetyError::EmptyFilter => tool_error(
                 "SQL_BLOCKED",
-                "MongoDB update/delete commands must include a non-empty filter unless DBX_MCP_ALLOW_DANGEROUS_SQL=1 is set.",
+                "MongoDB update/delete commands must include a non-empty filter unless high-risk operations are enabled in DBX MCP settings.",
             ),
             MongoSafetyError::Dangerous => tool_error(
                 "SQL_BLOCKED",
-                "Dangerous MongoDB command is blocked. Set DBX_MCP_ALLOW_DANGEROUS_SQL=1 to allow it.",
+                "Dangerous MongoDB command is disabled in DBX MCP settings.",
             ),
             MongoSafetyError::ProductionWrite => {
                 tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database.")
@@ -671,16 +879,18 @@ fn validate_mongo_command(
     Ok(command)
 }
 
-fn boolean_env(name: &str) -> Option<bool> {
-    match std::env::var(name).ok()?.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
-    }
-}
-
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+}
+
+fn scoped_connection_ids(value: Option<&str>) -> Vec<String> {
+    let mut ids = Vec::new();
+    for id in value.unwrap_or_default().split(',').map(str::trim).filter(|id| !id.is_empty()) {
+        if !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
 }
 
 fn default_port(db_type: &str) -> Option<u16> {
@@ -820,8 +1030,31 @@ mod tests {
         connections: Vec<ConnectionConfig>,
     }
 
+    fn connection(id: &str, name: &str, db_type: &str, database: &str) -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": name,
+            "db_type": db_type,
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database,
+            "ssl": false
+        }))
+        .unwrap()
+    }
+
+    fn result_text(result: &CallToolResult) -> &str {
+        result.content[0].as_text().expect("text tool result").text.as_str()
+    }
+
     #[async_trait]
     impl DbxBackend for FakeBackend {
+        async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+            Ok(McpGlobalPolicy::default())
+        }
+
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(self.connections.clone())
         }
@@ -843,8 +1076,12 @@ mod tests {
             }
         }
 
-        async fn save_connections(&self, _connections: &[ConnectionConfig]) -> Result<(), String> {
-            Ok(())
+        async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+            Ok(config)
+        }
+
+        async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
+            Ok(true)
         }
     }
 
@@ -888,7 +1125,7 @@ mod tests {
     fn scoped_server_hides_mutating_and_desktop_tools() {
         let server = DbxMcpServer::with_runtime_options(
             Arc::new(FakeBackend { connections: Vec::new() }),
-            McpScope { connection_id: Some("scoped".to_string()), ..Default::default() },
+            McpScope { connection_ids: vec!["scoped".to_string()], ..Default::default() },
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
@@ -897,5 +1134,94 @@ mod tests {
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
         assert!(!names.iter().any(|name| name == "dbx_open_table"));
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
+    }
+
+    #[test]
+    fn scoped_connection_ids_are_deduplicated_and_take_precedence_over_name() {
+        assert_eq!(scoped_connection_ids(Some(" first, second,first ,, ")), vec!["first", "second"]);
+
+        let first = connection("first", "other", "sqlite", ":memory:");
+        let named = ConnectionConfig { id: "named".to_string(), name: "scope-name".to_string(), ..first.clone() };
+        let scope = McpScope {
+            connection_ids: vec!["first".to_string()],
+            connection_name: Some("scope-name".to_string()),
+            database: None,
+        };
+
+        assert!(scope.matches(&first));
+        assert!(!scope.matches(&named));
+    }
+
+    #[tokio::test]
+    async fn database_scope_is_a_hard_bound_without_filtering_connections() {
+        let scoped = connection("scoped", "scoped", "postgres", "configured");
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections: vec![scoped.clone()] }),
+            McpScope { database: Some("analytics".to_string()), ..Default::default() },
+            false,
+        );
+
+        assert_eq!(server.load_scoped_connections().await.unwrap().len(), 1);
+        assert_eq!(server.resolve_database(None, &scoped).unwrap(), "analytics");
+        assert_eq!(server.resolve_database(Some("analytics".to_string()), &scoped).unwrap(), "analytics");
+        let error = server.resolve_database(Some("production".to_string()), &scoped).unwrap_err();
+        assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
+
+        let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        assert!(!names.iter().any(|name| name == "dbx_add_connection"));
+        assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
+    }
+
+    #[test]
+    fn redis_database_scope_fails_closed_and_cannot_be_overridden() {
+        let redis = connection("redis", "redis", "redis", "1");
+        let scoped = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections: vec![redis.clone()] }),
+            McpScope { database: Some("2".to_string()), ..Default::default() },
+            false,
+        );
+        assert_eq!(scoped.resolve_redis_database(None, &redis).unwrap(), 2);
+        let error = scoped.resolve_redis_database(Some(3), &redis).unwrap_err();
+        assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
+
+        let invalid = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections: vec![redis.clone()] }),
+            McpScope { database: Some("analytics".to_string()), ..Default::default() },
+            false,
+        );
+        let error = invalid.resolve_redis_database(None, &redis).unwrap_err();
+        assert!(result_text(&error).contains("INVALID_DATABASE_SCOPE"));
+    }
+
+    #[test]
+    fn local_mongo_aggregate_cannot_write_to_a_production_database() {
+        let mut mongo = connection("mongo", "mongo", "mongodb", "staging");
+        mongo.production_databases = vec!["production".to_string()];
+        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+
+        let error = validate_mongo_command(
+            &mongo,
+            &policy,
+            "staging",
+            r#"db.items.aggregate([{"$out":{"db":"production","coll":"archive"}}])"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&error).contains("PRODUCTION_WRITE_BLOCKED"));
+
+        assert!(
+            validate_mongo_command(&mongo, &policy, "staging", r#"db.items.aggregate([{"$out":"archive"}])"#,).is_ok()
+        );
+    }
+
+    #[test]
+    fn agent_results_preserve_stable_backend_policy_errors() {
+        let result = agent_result(dbx_core::agent_events::ToolResult {
+            tool_call_id: "test".to_string(),
+            tool_name: "execute_query".to_string(),
+            content: "Error: API request failed: MCP_READ_ONLY: policy changed".to_string(),
+            is_error: true,
+            explain_data: None,
+        });
+        assert!(result_text(&result).contains("Error [MCP_READ_ONLY]: policy changed"));
     }
 }

@@ -56,6 +56,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Db2
             | DatabaseType::Tdengine
             | DatabaseType::Xugu
+            | DatabaseType::Sqlite
             | DatabaseType::DuckDb
             | DatabaseType::Iris
     )

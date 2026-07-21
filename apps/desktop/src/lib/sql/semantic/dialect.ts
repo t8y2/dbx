@@ -137,6 +137,11 @@ export const SQL_SEMANTIC_DIALECTS: Record<string, SqlSemanticDialectAdapter> = 
   },
 };
 
+export function sqlReferenceAnalysisDialectFor(options: { databaseType?: DatabaseType; identifierQuote?: string; fallbackDialect: string }): string {
+  if (options.databaseType === "kingbase" && options.identifierQuote === "`") return "mysql";
+  return options.fallbackDialect;
+}
+
 export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" }): SqlSemanticDialectAdapter {
   if (options.dialect && SQL_SEMANTIC_DIALECTS[options.dialect]) return SQL_SEMANTIC_DIALECTS[options.dialect];
   switch (options.databaseType) {

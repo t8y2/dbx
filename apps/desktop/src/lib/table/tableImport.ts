@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import type { TableImportJsonShape, TableImportParseOptions, TableImportSourceFormat, TableImportTextEncoding } from "@/lib/backend/api";
 
 export const IMPORT_SKIP_TARGET = "";
 
@@ -25,6 +26,34 @@ export interface ImportTargetColumnLike {
 export type TableImportWizardStep = "source" | "options" | "mapping" | "review" | "execution";
 
 export const TABLE_IMPORT_WIZARD_STEPS: TableImportWizardStep[] = ["source", "options", "mapping", "review", "execution"];
+
+export interface TableImportParseSettings {
+  format: TableImportSourceFormat;
+  delimiter: string;
+  textEncoding: TableImportTextEncoding;
+  titleRow: number;
+  dataStartRow: number;
+  lastDataRow: number;
+  trimValues: boolean;
+  emptyStringAsNull: boolean;
+  sheetName?: string;
+  jsonShape: TableImportJsonShape;
+}
+
+export function buildTableImportParseOptions(settings: TableImportParseSettings): TableImportParseOptions {
+  const isDelimited = settings.format === "csv" || settings.format === "tsv" || settings.format === "delimited";
+  return {
+    delimiter: settings.format === "tsv" ? "\\t" : settings.format === "csv" ? "," : settings.delimiter,
+    encoding: isDelimited ? settings.textEncoding : null,
+    titleRow: settings.titleRow,
+    dataStartRow: settings.dataStartRow,
+    lastDataRow: settings.lastDataRow,
+    trimValues: settings.trimValues,
+    emptyStringAsNull: settings.emptyStringAsNull,
+    sheetName: settings.format === "excel" ? settings.sheetName || null : null,
+    jsonShape: settings.format === "json" ? settings.jsonShape : null,
+  };
+}
 
 export function normalizeImportColumnName(name: string): string {
   return name.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");

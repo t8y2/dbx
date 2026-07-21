@@ -513,7 +513,8 @@ impl DuckDbWorkerClient {
             let mut pending = self.inner.pending.lock().await;
             let ids = pending
                 .iter()
-                .filter_map(|(id, request)| (request.generation == generation).then(|| id.clone()))
+                .filter(|&(_id, request)| request.generation == generation)
+                .map(|(id, _request)| id.clone())
                 .collect::<Vec<_>>();
             ids.into_iter().filter_map(|id| pending.remove(&id).map(|request| (id, request.sender))).collect::<Vec<_>>()
         };
@@ -631,7 +632,8 @@ fn spawn_stdout_reader(
             let mut pending = pending.lock().await;
             let ids = pending
                 .iter()
-                .filter_map(|(id, request)| (request.generation == generation).then(|| id.clone()))
+                .filter(|&(_id, request)| request.generation == generation)
+                .map(|(id, _request)| id.clone())
                 .collect::<Vec<_>>();
             ids.into_iter().filter_map(|id| pending.remove(&id).map(|request| (id, request.sender))).collect::<Vec<_>>()
         };

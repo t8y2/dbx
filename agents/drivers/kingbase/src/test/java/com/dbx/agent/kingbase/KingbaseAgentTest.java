@@ -146,6 +146,22 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void mysqlCompatListSchemasFiltersSystemPrefixButKeepsUserSchemas() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        agent.setMysqlCompatMode(true);
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"schema_name"},
+            new Object[][]{{"app"}, {"systems"}}
+        )));
+
+        Assertions.assertEquals(Arrays.asList("app", "systems"), agent.listSchemas());
+        Assertions.assertTrue(sql.get(0).contains("FROM information_schema.schemata"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("NOT LIKE 'SYS\\_%' ESCAPE '\\'"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("NOT LIKE 'SYS%'"), sql.get(0));
+    }
+
+    @Test
     void postgresCompatModeUsesPostgresCatalogForMetadata() throws Exception {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
@@ -165,6 +181,30 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertTrue(sql.get(2).contains("FROM pg_catalog.pg_namespace"), sql.get(2));
         Assertions.assertEquals("SET search_path TO \"app\"", agent.setSchemaSQL("app"));
         Assertions.assertEquals("RESET search_path", agent.resetSchemaSQL());
+    }
+
+    @Test
+    void postgresCompatModePreservesMaterializedViews() throws Exception {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        Connection connection = postgresCatalogConnection(sql, resultSet(
+            new String[]{"table_name", "table_type", "table_comment"},
+            new Object[][]{{"orders", "TABLE", null}, {"order_summary", "MATERIALIZED VIEW", "cached orders"}}
+        ));
+
+        Method afterConnect = KingbaseAgent.class.getDeclaredMethod("afterConnect", ConnectParams.class, Connection.class);
+        afterConnect.setAccessible(true);
+        afterConnect.invoke(agent, new ConnectParams(), connection);
+        TestSupport.setPrivateConnection(agent, connection);
+
+        List<TableInfo> tables = agent.listTables("public");
+
+        Assertions.assertEquals(2, tables.size());
+        Assertions.assertEquals("MATERIALIZED VIEW", tables.get(1).getTable_type());
+        Assertions.assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
+        Assertions.assertEquals("SELECT 1 FROM pg_catalog.pg_namespace WHERE 1 = 0", sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("FROM pg_catalog.pg_class c"), sql.get(2));
+        Assertions.assertTrue(sql.get(2).contains("c.relkind IN ('r','p','v','m','f')"), sql.get(2));
     }
 
     @Test
@@ -331,12 +371,30 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertEquals("TABLE", tables.get(0).getTable_type());
         Assertions.assertEquals("app_view", tables.get(1).getName());
         Assertions.assertEquals("VIEW", tables.get(1).getTable_type());
-        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class"), sql.get(0));
-        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_rewrite"), sql.get(0));
-        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_index"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class c"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_tables t"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_foreign_table ft"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_views"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_matviews"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("relkind"), sql.get(0));
+    }
+
+    @Test
+    void regularTableDiscoveryExcludesCompositeTypesWithPositiveTableCatalog() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, compositeAwareTableConnection(sql));
+
+        List<TableInfo> tables = agent.listTables("public", new MetadataListConstraints(null, null, null, List.of("TABLE")));
+
+        Assertions.assertEquals(1, tables.size());
+        Assertions.assertEquals("orders", tables.get(0).getName());
+        Assertions.assertFalse(tables.stream().anyMatch(table -> "address_type".equals(table.getName())));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_tables t"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_foreign_table ft"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("information_schema.tables"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("sys_rewrite"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("sys_index"), sql.get(0));
     }
 
     @Test
@@ -431,7 +489,8 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         agent.listTables("public", new MetadataListConstraints("ord", 30, 60, List.of("TABLE", "VIEW")));
 
-        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_class c"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_tables t"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("FROM sys_catalog.sys_views"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("UNION ALL"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("UPPER(CAST(c.relname AS varchar(256))) LIKE ? ESCAPE '\\\\'"), sql.get(0));
@@ -556,7 +615,22 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void mysqlCompatGetColumnsKeepsInformationSchemaPath() {
+    void regularGetColumnsFallsBackToPgGetExprAndCachesTheChoice() {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        TestSupport.setPrivateConnection(agent, defaultExpressionFallbackConnection(sql));
+
+        List<ColumnInfo> first = agent.getColumns("public", "orders");
+        List<ColumnInfo> second = agent.getColumns("public", "orders");
+
+        Assertions.assertEquals("nextval('orders_id_seq'::regclass)", first.get(0).getColumn_default());
+        Assertions.assertEquals("nextval('orders_id_seq'::regclass)", second.get(0).getColumn_default());
+        Assertions.assertEquals(1, sql.stream().filter(query -> query.contains("sys_get_expr(")).count(), sql.toString());
+        Assertions.assertEquals(2, sql.stream().filter(query -> query.contains("pg_get_expr(")).count(), sql.toString());
+    }
+
+    @Test
+    void mysqlCompatGetColumnsRestoresBoundedCatalogCharacterTypes() {
         List<String> sql = new ArrayList<>();
         KingbaseAgent agent = new KingbaseAgent();
         agent.setMysqlCompatMode(true);
@@ -574,9 +648,14 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
                     "numeric_precision",
                     "numeric_scale",
                     "character_maximum_length",
+                    "catalog_data_type",
                     "column_comment"
                 },
-                new Object[][]{{"id", "int", "NO", null, 32, 0, null, "identifier"}}
+                new Object[][]{
+                    {"id", "int", "NO", null, 32, 0, null, "integer", "identifier"},
+                    {"name", "varchar", "YES", null, null, null, -1, "character varying(64)", null},
+                    {"notes", "varchar", "YES", null, null, null, -1, "varchar", null}
+                }
             )
         ));
 
@@ -584,9 +663,26 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("int", columns.get(0).getData_type());
         Assertions.assertEquals("identifier", columns.get(0).getComment());
+        Assertions.assertEquals("character varying(64)", columns.get(1).getData_type());
+        Assertions.assertEquals(Integer.valueOf(64), columns.get(1).getCharacter_maximum_length());
+        Assertions.assertEquals("varchar", columns.get(2).getData_type());
+        Assertions.assertEquals(Integer.valueOf(-1), columns.get(2).getCharacter_maximum_length());
         Assertions.assertTrue(sql.get(1).contains("FROM information_schema.columns"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("format_type(a.atttypid, a.atttypmod) AS catalog_data_type"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("LEFT JOIN sys_catalog.sys_description"), sql.get(1));
         Assertions.assertNull(columns.get(0).getExtra());
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "PUBLIC",
+            "orders",
+            columns,
+            Collections.emptyList(),
+            Collections.emptyList(),
+            true
+        );
+        Assertions.assertTrue(ddl.contains("`name` character varying(64)"), ddl);
+        Assertions.assertTrue(ddl.contains("`notes` varchar"), ddl);
+        Assertions.assertFalse(ddl.contains("varchar(-1)"), ddl);
     }
 
     @Test
@@ -605,14 +701,16 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
                     "column_comment",
                     "numeric_precision",
                     "numeric_scale",
-                    "character_maximum_length",
-                    "identity_seed",
-                    "identity_increment"
+                    "character_maximum_length"
                 },
                 new Object[][]{
-                    {"id", "int", false, null, null, 32, 0, null, "1", "1"},
-                    {"name", "character varying", true, null, null, null, null, 64, null, null}
+                    {"id", "int", false, null, null, 32, 0, null},
+                    {"name", "character varying", true, null, null, null, null, 64}
                 }
+            ),
+            resultSet(
+                new String[]{"column_name", "identity_seed", "identity_increment"},
+                new Object[][]{{"id", "1", "1"}}
             )
         ));
 
@@ -620,7 +718,26 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         Assertions.assertEquals("identity(1,1)", columns.get(0).getExtra());
         Assertions.assertNull(columns.get(1).getExtra());
-        Assertions.assertTrue(sql.get(1).contains("LEFT JOIN sys.identity_columns"), sql.get(1));
+        Assertions.assertFalse(sql.get(1).contains("sys.identity_columns"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("FROM sys.identity_columns"), sql.get(2));
+    }
+
+    @Test
+    void sqlServerCompatGetColumnsIgnoresBrokenIdentityCatalog() throws Exception {
+        List<String> sql = new ArrayList<>();
+        KingbaseAgent agent = new KingbaseAgent();
+        setSqlServerIdentityCatalogMode(agent, true);
+        TestSupport.setPrivateConnection(agent, sqlServerIdentityFailureConnection(sql));
+
+        List<ColumnInfo> columns = agent.getColumns("dbo", "orders");
+
+        Assertions.assertEquals(2, columns.size());
+        Assertions.assertEquals("id", columns.get(0).getName());
+        Assertions.assertTrue(columns.get(0).getIs_primary_key());
+        Assertions.assertNull(columns.get(0).getExtra());
+        Assertions.assertFalse(sql.get(1).contains("sys.identity_columns"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("FROM sys.identity_columns"), sql.get(2));
+        Assertions.assertFalse(isSqlServerIdentityCatalogMode(agent));
     }
 
     @Test
@@ -685,6 +802,8 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         Assertions.assertFalse(indexes.get(1).getIs_primary());
         Assertions.assertEquals(Arrays.asList("name", "created"), indexes.get(2).getColumns());
         Assertions.assertTrue(sql.get(0).contains("FROM SYS_CATALOG.SYS_INDEX"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("unnest(ix.indkey) WITH ORDINALITY"), sql.get(0));
+        Assertions.assertFalse(sql.get(0).contains("[pos.n]"), sql.get(0));
         Assertions.assertFalse(sql.get(0).contains("information_schema.table_constraints"), sql.get(0));
     }
 
@@ -746,8 +865,123 @@ class KingbaseAgentTest extends JdbcFakeExecutionBehaviorTest {
         });
     }
 
+    private static Connection compositeAwareTableConnection(List<String> sql) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String preparedSql = String.valueOf(args[0]);
+                sql.add(preparedSql);
+                boolean positivelySelectsTables = preparedSql.contains("FROM sys_catalog.sys_tables t")
+                    && preparedSql.contains("FROM sys_catalog.sys_foreign_table ft");
+                Object[][] rows = positivelySelectsTables
+                    ? new Object[][]{{"orders", "TABLE", null}}
+                    : new Object[][]{{"orders", "TABLE", null}, {"address_type", "TABLE", null}};
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        return resultSet(new String[]{"table_name", "table_type", "table_comment"}, rows);
+                    }
+                    if ("setString".equals(statementMethod.getName()) || "close".equals(statementMethod.getName())) {
+                        return null;
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
     private static Connection preparedConnectionWithFailure(List<String> sql, String failingSqlFragment, ResultSet fallback) {
         return preparedConnectionWithFailures(sql, List.of(failingSqlFragment), fallback);
+    }
+
+    private static Connection sqlServerIdentityFailureConnection(List<String> sql) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                return proxy(Statement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        String query = String.valueOf(statementArgs[0]);
+                        sql.add(query);
+                        if (query.contains("FROM sys.identity_columns")) {
+                            throw new SQLException("ERROR: cannot open file base/14465/t48_3852767: No such file or directory");
+                        }
+                        if (query.contains("information_schema.table_constraints")) {
+                            return resultSet(new String[]{"column_name"}, new Object[][]{{"id"}});
+                        }
+                        return resultSet(
+                            new String[]{
+                                "column_name",
+                                "data_type",
+                                "is_nullable",
+                                "column_default",
+                                "column_comment",
+                                "numeric_precision",
+                                "numeric_scale",
+                                "character_maximum_length"
+                            },
+                            new Object[][]{
+                                {"id", "int", false, null, null, 32, 0, null},
+                                {"name", "character varying", false, null, null, null, null, 64}
+                            }
+                        );
+                    }
+                    if ("close".equals(statementMethod.getName())) return null;
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) return false;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection defaultExpressionFallbackConnection(List<String> sql) {
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String query = String.valueOf(args[0]);
+                sql.add(query);
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        return resultSet(new String[]{"column_name"}, new Object[][]{{"id"}});
+                    }
+                    if ("close".equals(statementMethod.getName())) return null;
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("createStatement".equals(method.getName())) {
+                return proxy(Statement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        String query = String.valueOf(statementArgs[0]);
+                        sql.add(query);
+                        if (query.contains("sys_get_expr(")) {
+                            throw new SQLException(
+                                "ERROR: function sys_get_expr(pg_node_tree, oid) does not exist",
+                                "42883"
+                            );
+                        }
+                        return resultSet(
+                            new String[]{
+                                "column_name",
+                                "data_type",
+                                "is_nullable",
+                                "column_default",
+                                "column_comment",
+                                "numeric_precision",
+                                "numeric_scale",
+                                "character_maximum_length"
+                            },
+                            new Object[][]{
+                                {"id", "integer", false, "nextval('orders_id_seq'::regclass)", null, 32, 0, null}
+                            }
+                        );
+                    }
+                    if ("close".equals(statementMethod.getName())) return null;
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) return false;
+            return defaultValue(method.getReturnType());
+        });
     }
 
     private static Connection preparedConnectionWithMetadataFailure(

@@ -16,6 +16,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
@@ -68,6 +69,17 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals("SELECT 1 FROM DUAL", DamengAgent.explainTargetSql("-- comment\n explain SELECT 1 FROM DUAL;;"));
         assertNull(DamengAgent.explainTargetSql("EXPLAINER SELECT 1"));
         assertNull(DamengAgent.explainTargetSql("SELECT 'EXPLAIN' FROM DUAL"));
+    }
+
+    @Test
+    void objectSourceTypesMapToDamengMetadataTypes() {
+        assertEquals("VIEW", DamengAgent.damengDdlObjectType("VIEW"));
+        assertEquals("MATERIALIZED_VIEW", DamengAgent.damengDdlObjectType("MATERIALIZED VIEW"));
+        assertEquals("MATERIALIZED_VIEW", DamengAgent.damengDdlObjectType("MATERIALIZED_VIEW"));
+        assertEquals("PROCEDURE", DamengAgent.damengDdlObjectType("PROCEDURE"));
+        assertEquals("FUNCTION", DamengAgent.damengDdlObjectType("function"));
+        assertEquals("TRIGGER", DamengAgent.damengDdlObjectType("trigger"));
+        assertThrows(IllegalArgumentException.class, () -> DamengAgent.damengDdlObjectType("TABLE"));
     }
 
     @Test

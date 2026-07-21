@@ -95,7 +95,8 @@ import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sq
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, normalizeSqlVariableSyntaxOverrides, SQL_VARIABLE_SYNTAX_DATABASE_TYPES, SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS, type SqlVariableSyntaxOverrides, type SqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
-import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
+import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
+import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
 import { isMacOS } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
@@ -105,10 +106,11 @@ import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
+import McpConnectionScopePicker from "@/components/settings/McpConnectionScopePicker.vue";
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_THEME_PALETTES, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
-import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
+import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
@@ -119,6 +121,7 @@ import { apiUrl } from "@/lib/common/webPath";
 import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
 import { DateTimePatterns, normalizeSupportedDateTimePattern } from "@/lib/dataGrid/columnFormatter";
+import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE } from "@/lib/dataGrid/paginationPageSize";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -295,6 +298,7 @@ const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColu
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
+const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
 const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
 const editInfiniteScrollMaxRows = ref(settingsStore.editorSettings.infiniteScrollMaxRows);
 const editAutoCalculateTotalRows = ref(settingsStore.editorSettings.autoCalculateTotalRows);
@@ -302,6 +306,10 @@ const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColum
 const editTableColumnTemplateDatabaseType = ref<DatabaseType>(TABLE_COLUMN_TEMPLATE_DATABASE_TYPES[0] ?? "mysql");
 const editSqlVariableSyntaxOverrides = ref<SqlVariableSyntaxOverrides>(normalizeSqlVariableSyntaxOverrides(settingsStore.editorSettings.sqlVariableSyntaxOverrides));
 const editSqlVariableSyntaxDatabaseType = ref<DatabaseType>(SQL_VARIABLE_SYNTAX_DATABASE_TYPES[0] ?? "mysql");
+
+function updateTableOpenPageSizeDraft(value: string | number) {
+  editTableOpenPageSize.value = normalizeTableOpenPageSizeDraft(value);
+}
 
 function sqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles): boolean {
   return editSqlVariableSyntaxOverrides.value[editSqlVariableSyntaxDatabaseType.value]?.[key] ?? true;
@@ -428,6 +436,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
+    tableOpenPageSize: editTableOpenPageSize.value,
     infiniteScroll: editInfiniteScroll.value,
     infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
     autoCalculateTotalRows: editAutoCalculateTotalRows.value,
@@ -708,6 +717,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
+  editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
   editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
   editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
   editAutoCalculateTotalRows.value = settingsStore.editorSettings.autoCalculateTotalRows;
@@ -931,6 +941,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
+    editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
     editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
     editAutoCalculateTotalRows.value = DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows;
@@ -988,6 +999,7 @@ function resetAllDefaults() {
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
+  editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
   editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
   editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
   editAutoCalculateTotalRows.value = DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows;
@@ -1314,7 +1326,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "snippets", label: t("settings.snippetsTab") },
   ...(isWeb ? [] : [{ value: "sync" as const, label: t("settings.syncTab") }]),
   { value: "ai", label: t("settings.aiTab") },
-  ...(isWeb ? [] : [{ value: "mcp" as const, label: t("settings.mcpTab") }]),
+  { value: "mcp" as const, label: t("settings.mcpTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
@@ -1401,7 +1413,7 @@ async function exportDebugLogs() {
 }
 
 // ---------- MCP Server ----------
-type McpConfigTab = "claude" | "cursor" | "trae" | "vscode" | "windsurf" | "codex" | "opencode";
+type McpConfigTab = "claude" | "cursor" | "trae" | "vscode" | "windsurf" | "codex" | "opencode" | "cherry-studio";
 type McpCopyKind = "install" | `${McpConfigTab}-config`;
 
 const mcpStatus = ref<McpServerStatus | null>(null);
@@ -1410,39 +1422,100 @@ const mcpStatusError = ref("");
 const mcpCopied = ref<"" | McpCopyKind>("");
 const mcpConfigTab = ref<McpConfigTab>("claude");
 const MCP_READONLY_STORAGE_KEY = "dbx-mcp-config-readonly";
-const MCP_ALLOW_DANGEROUS_STORAGE_KEY = "dbx-mcp-config-allow-dangerous";
-const mcpReadonlyMode = ref(localStorage.getItem(MCP_READONLY_STORAGE_KEY) === "true");
-const mcpAllowDangerous = ref(localStorage.getItem(MCP_ALLOW_DANGEROUS_STORAGE_KEY) === "true");
+const MCP_SCOPE_CONNECTION_STORAGE_KEY = "dbx-mcp-config-scope-connection";
+const mcpPolicyLoading = ref(false);
+const mcpPolicySaving = ref(false);
+const mcpPolicyLoadError = ref("");
 const mcpInstalling = ref(false);
 const mcpInstallMessage = ref("");
 const mcpInstallError = ref(false);
+const mcpExecutionMode = computed(() => mcpExecutionModeFromPolicy(settingsStore.mcpGlobalPolicy));
+const mcpExecutionModeOptions: McpExecutionMode[] = ["read_only", "safe_write", "high_risk_write"];
+const mcpAllowedConnectionIds = computed(() => settingsStore.mcpGlobalPolicy.allowedConnectionIds);
+const mcpSelectableConnections = computed(() => connectionStore.connections);
+const mcpPolicyControlsDisabled = computed(() =>
+  isMcpPolicyMutationBlocked({
+    loading: mcpPolicyLoading.value,
+    saving: mcpPolicySaving.value,
+    loadError: mcpPolicyLoadError.value,
+  }),
+);
 
-const mcpEnvEntries = computed<McpEnvEntry[]>(() => {
-  const entries: McpEnvEntry[] = [];
-  if (mcpReadonlyMode.value) {
-    entries.push(["DBX_MCP_ALLOW_WRITES", "0"]);
+async function saveMcpPolicy(partial: { readOnly?: boolean; allowDangerousSql?: boolean; allowedConnectionIds?: string[] | null }) {
+  if (mcpPolicyControlsDisabled.value) return;
+  mcpPolicySaving.value = true;
+  try {
+    await settingsStore.updateMcpGlobalPolicy(partial);
+  } catch (e: any) {
+    toast(t("settings.mcpPolicySaveFailed", { error: e?.message || String(e) }), 5000);
+  } finally {
+    mcpPolicySaving.value = false;
   }
-  if (!mcpReadonlyMode.value && mcpAllowDangerous.value) {
-    entries.push(["DBX_MCP_ALLOW_DANGEROUS_SQL", "1"]);
+}
+
+function onMcpExecutionModeChange(mode: McpExecutionMode) {
+  if (mode === mcpExecutionMode.value) return;
+  if (mode === "high_risk_write" && !window.confirm(t("settings.mcpExecutionModeHighRiskConfirm"))) {
+    return;
   }
-  return entries;
-});
+  void saveMcpPolicy(mcpPolicyFieldsForExecutionMode(mode));
+}
+
+function onMcpExecutionModeKeydown(event: KeyboardEvent, mode: McpExecutionMode) {
+  if (mcpPolicyControlsDisabled.value) return;
+  const currentIndex = mcpExecutionModeOptions.indexOf(mode);
+  let nextIndex: number | undefined;
+  if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = mcpExecutionModeOptions.length - 1;
+  else if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % mcpExecutionModeOptions.length;
+  else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex - 1 + mcpExecutionModeOptions.length) % mcpExecutionModeOptions.length;
+  if (nextIndex === undefined || nextIndex === currentIndex) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  const nextMode = mcpExecutionModeOptions[nextIndex];
+  // These cards visually replace native radios, so preserve the radio-group keyboard contract.
+  const currentTarget = event.currentTarget;
+  const group = currentTarget instanceof HTMLElement ? currentTarget.closest<HTMLElement>('[role="radiogroup"]') : null;
+  group?.querySelector<HTMLElement>(`[data-mcp-execution-mode="${nextMode}"]`)?.focus();
+  onMcpExecutionModeChange(nextMode);
+}
+
+function onMcpAllowedConnectionIdsChange(allowedConnectionIds: string[] | null) {
+  void saveMcpPolicy({ allowedConnectionIds });
+}
 
 const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
-  if (!mcpStatus.value?.node_path || !mcpStatus.value.script_path) return undefined;
-  return {
-    command: mcpStatus.value.node_path,
-    args: [mcpStatus.value.script_path],
-  };
+  if (isWeb) {
+    return {
+      command: "dbx-mcp-server",
+      env: {
+        DBX_WEB_URL: mcpWebBackendUrl(window.location.origin, apiUrl("/api")),
+        DBX_WEB_PASSWORD: "your-web-login-password",
+      },
+    };
+  }
+  if (mcpStatus.value?.node_path && mcpStatus.value.script_path) {
+    return {
+      command: mcpStatus.value.node_path,
+      args: [mcpStatus.value.script_path],
+    };
+  }
+  if (mcpStatus.value?.bin_path) {
+    return { command: mcpStatus.value.bin_path };
+  }
+  return undefined;
 });
 
-const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpLaunchConfig.value));
 
-const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpLaunchConfig.value));
 
-const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+const mcpCherryStudioRecommendedConfig = computed(() => buildMcpCherryStudioConfig(mcpLaunchConfig.value));
 
-const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpLaunchConfig.value));
+
+const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpLaunchConfig.value));
 
 const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
   if (!mcpStatus.value) return "muted";
@@ -1462,15 +1535,6 @@ const mcpStatusLabel = computed(() => {
 const mcpCommand = computed(() => {
   if (!mcpStatus.value) return "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org";
   return mcpStatus.value.installed ? mcpStatus.value.update_command : mcpStatus.value.install_command;
-});
-
-watch(mcpReadonlyMode, (value) => {
-  localStorage.setItem(MCP_READONLY_STORAGE_KEY, String(value));
-  if (value) mcpAllowDangerous.value = false;
-});
-
-watch(mcpAllowDangerous, (value) => {
-  localStorage.setItem(MCP_ALLOW_DANGEROUS_STORAGE_KEY, String(value));
 });
 
 async function refreshMcpStatus() {
@@ -1811,6 +1875,8 @@ watch(
   () => settingsVisible.value,
   async (open) => {
     if (open) {
+      mcpPolicyLoading.value = true;
+      mcpPolicyLoadError.value = "";
       aiConfigListMode.value = "list";
       aiEditConfigId.value = null;
       activeSettingsTab.value = props.initialTab || "appearance";
@@ -1818,6 +1884,19 @@ watch(
       oldPassword.value = "";
       newPassword.value = "";
       confirmNewPassword.value = "";
+      try {
+        await settingsStore.initMcpGlobalPolicy(true);
+        if (!settingsStore.mcpGlobalPolicy.configured && localStorage.getItem(MCP_READONLY_STORAGE_KEY) === "true") {
+          await settingsStore.updateMcpGlobalPolicy({ readOnly: true });
+        }
+        if (settingsStore.mcpGlobalPolicy.configured) localStorage.removeItem(MCP_READONLY_STORAGE_KEY);
+        localStorage.removeItem(MCP_SCOPE_CONNECTION_STORAGE_KEY);
+      } catch (e: any) {
+        mcpPolicyLoadError.value = e?.message || String(e);
+        toast(t("settings.mcpPolicyLoadFailed", { error: mcpPolicyLoadError.value }), 5000);
+      } finally {
+        mcpPolicyLoading.value = false;
+      }
       await settingsStore.initAiConfigs();
       await settingsStore.initDesktopSettings();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
@@ -3818,6 +3897,21 @@ onUnmounted(cleanupPreviewEditor);
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" class="flex flex-col gap-5 py-2">
+              <div class="space-y-3">
+                <div class="text-sm font-medium text-muted-foreground">{{ t("settings.dataGridDisplay") }}</div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="table-open-page-size">
+                      {{ t("settings.tableOpenPageSize") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.tableOpenPageSizeDescription") }}
+                    </p>
+                  </div>
+                  <Input id="table-open-page-size" type="number" inputmode="numeric" class="h-7 w-24 px-2 text-right text-xs tabular-nums" :min="MIN_RESULT_PAGE_SIZE" :max="MAX_RESULT_PAGE_SIZE" :model-value="editTableOpenPageSize" @update:model-value="updateTableOpenPageSizeDraft" />
+                </div>
+              </div>
+
               <template v-if="!isWeb">
                 <div class="space-y-3">
                   <div class="text-sm font-medium text-muted-foreground">DuckDB</div>
@@ -4726,7 +4820,7 @@ onUnmounted(cleanupPreviewEditor);
               </div>
             </section>
 
-            <section v-else-if="activeSettingsTab === 'mcp' && !isWeb" class="flex flex-col gap-5 py-2">
+            <section v-else-if="activeSettingsTab === 'mcp'" class="flex flex-col gap-5 py-2">
               <div class="rounded-md border bg-muted/20 p-4">
                 <div class="flex items-start justify-between gap-4">
                   <div class="min-w-0 space-y-2">
@@ -4738,7 +4832,7 @@ onUnmounted(cleanupPreviewEditor);
                       </HelpTooltip>
                     </div>
                   </div>
-                  <Badge variant="outline" class="shrink-0 rounded-md" :class="mcpStatusTone === 'ok' ? 'border-green-500/40 text-green-600 dark:text-green-400' : mcpStatusTone === 'warning' ? 'border-amber-500/40 text-amber-600 dark:text-amber-400' : 'text-muted-foreground'">
+                  <Badge v-if="!isWeb" variant="outline" class="shrink-0 rounded-md" :class="mcpStatusTone === 'ok' ? 'border-green-500/40 text-green-600 dark:text-green-400' : mcpStatusTone === 'warning' ? 'border-amber-500/40 text-amber-600 dark:text-amber-400' : 'text-muted-foreground'">
                     <Loader2 v-if="mcpStatusLoading" class="mr-1 h-3 w-3 animate-spin" />
                     <CheckCircle2 v-else-if="mcpStatusTone === 'ok'" class="mr-1 h-3 w-3" />
                     <AlertTriangle v-else-if="mcpStatusTone === 'warning'" class="mr-1 h-3 w-3" />
@@ -4747,7 +4841,7 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
               </div>
 
-              <div class="grid gap-3 sm:grid-cols-2">
+              <div v-if="!isWeb" class="grid gap-3 sm:grid-cols-2">
                 <div class="rounded-md border p-3">
                   <div class="text-xs font-medium uppercase text-muted-foreground">{{ t("settings.mcpCurrent") }}</div>
                   <div class="mt-2 font-mono text-sm">
@@ -4781,7 +4875,7 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
               </div>
 
-              <div class="space-y-2">
+              <div v-if="!isWeb" class="space-y-2">
                 <Label>{{ mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand") }}</Label>
                 <div class="flex min-w-0 items-center gap-2">
                   <div class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap">
@@ -4807,36 +4901,120 @@ onUnmounted(cleanupPreviewEditor);
 
               <div class="space-y-2">
                 <p class="text-xs text-muted-foreground">{{ t("settings.mcpConfigOptionsHint") }}</p>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <p v-if="mcpPolicyLoadError" class="rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ t("settings.mcpPolicyLoadFailed", { error: mcpPolicyLoadError }) }}</p>
+                <McpConnectionScopePicker :connections="mcpSelectableConnections" :allowed-connection-ids="mcpAllowedConnectionIds" :disabled="mcpPolicyControlsDisabled" :busy="mcpPolicyLoading || mcpPolicySaving" @update:allowed-connection-ids="onMcpAllowedConnectionIdsChange" />
+                <div class="space-y-3 rounded-md border bg-muted/20 p-3">
                   <div class="space-y-1">
-                    <Label for="mcp-readonly-mode">{{ t("settings.mcpReadonlyMode") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.mcpReadonlyModeDescription") }}</p>
+                    <Label id="mcp-execution-mode-label">{{ t("settings.mcpExecutionMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.mcpExecutionModeDescription") }}</p>
                   </div>
-                  <Switch id="mcp-readonly-mode" v-model="mcpReadonlyMode" />
-                </div>
-              </div>
-
-              <div class="space-y-2">
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="mcp-allow-dangerous">{{ t("settings.mcpAllowDangerous") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.mcpAllowDangerousDescription") }}</p>
+                  <div class="grid grid-cols-1 p-1 sm:grid-cols-3 gap-2.5" role="radiogroup" aria-labelledby="mcp-execution-mode-label">
+                    <Button
+                      :disabled="mcpPolicyControlsDisabled"
+                      type="button"
+                      role="radio"
+                      data-mcp-execution-mode="read_only"
+                      :aria-checked="mcpExecutionMode === 'read_only'"
+                      :tabindex="mcpExecutionMode === 'read_only' ? 0 : -1"
+                      variant="outline"
+                      class="settings-choice-card h-auto justify-center border p-3"
+                      :class="mcpExecutionMode === 'read_only' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      @click="onMcpExecutionModeChange('read_only')"
+                      @keydown="onMcpExecutionModeKeydown($event, 'read_only')"
+                    >
+                      <span>{{ t("settings.mcpExecutionModeReadOnly") }}</span>
+                    </Button>
+                    <Button
+                      :disabled="mcpPolicyControlsDisabled"
+                      type="button"
+                      role="radio"
+                      data-mcp-execution-mode="safe_write"
+                      :aria-checked="mcpExecutionMode === 'safe_write'"
+                      :tabindex="mcpExecutionMode === 'safe_write' ? 0 : -1"
+                      variant="outline"
+                      class="settings-choice-card h-auto justify-center border p-3"
+                      :class="mcpExecutionMode === 'safe_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      @click="onMcpExecutionModeChange('safe_write')"
+                      @keydown="onMcpExecutionModeKeydown($event, 'safe_write')"
+                    >
+                      <span>{{ t("settings.mcpExecutionModeSafeWrite") }}</span>
+                      <span class="text-[10px] font-normal text-green-600 dark:text-green-400">{{ t("settings.mcpExecutionModeRecommended") }}</span>
+                    </Button>
+                    <Button
+                      :disabled="mcpPolicyControlsDisabled"
+                      type="button"
+                      role="radio"
+                      data-mcp-execution-mode="high_risk_write"
+                      :aria-checked="mcpExecutionMode === 'high_risk_write'"
+                      :tabindex="mcpExecutionMode === 'high_risk_write' ? 0 : -1"
+                      variant="outline"
+                      class="settings-choice-card h-auto justify-center border p-3"
+                      :class="mcpExecutionMode === 'high_risk_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      @click="onMcpExecutionModeChange('high_risk_write')"
+                      @keydown="onMcpExecutionModeKeydown($event, 'high_risk_write')"
+                    >
+                      <span>{{ t("settings.mcpExecutionModeHighRiskWrite") }}</span>
+                    </Button>
                   </div>
-                  <Switch id="mcp-allow-dangerous" v-model="mcpAllowDangerous" :disabled="mcpReadonlyMode" />
+                  <!-- Keep every translation in one grid cell so mode changes cannot reflow the capability matrix. -->
+                  <div data-mcp-execution-mode-description class="grid text-xs">
+                    <p class="col-start-1 row-start-1 text-muted-foreground" :class="mcpExecutionMode === 'read_only' ? 'visible' : 'invisible'">
+                      {{ t("settings.mcpExecutionModeReadOnlyDescription") }}
+                    </p>
+                    <p class="col-start-1 row-start-1 text-muted-foreground" :class="mcpExecutionMode === 'safe_write' ? 'visible' : 'invisible'">
+                      {{ t("settings.mcpExecutionModeSafeWriteDescription") }}
+                    </p>
+                    <p class="col-start-1 row-start-1 flex items-start gap-1.5 text-amber-600 dark:text-amber-400" :class="mcpExecutionMode === 'high_risk_write' ? 'visible' : 'invisible'">
+                      <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{{ t("settings.mcpExecutionModeHighRiskWriteDescription") }}</span>
+                    </p>
+                  </div>
+                  <div class="space-y-1.5">
+                    <div class="space-y-0.5">
+                      <p class="text-xs font-medium">{{ t("settings.mcpCapabilityTitle") }}</p>
+                      <p class="text-[11px] text-muted-foreground">{{ t("settings.mcpCapabilityDescription") }}</p>
+                    </div>
+                    <div class="overflow-x-auto rounded-md border bg-background">
+                      <table class="w-full min-w-[36rem] table-fixed text-xs">
+                        <thead class="bg-muted/50 text-muted-foreground">
+                          <tr>
+                            <th scope="col" class="w-[46%] px-3 py-2 text-left font-medium">{{ t("settings.mcpCapabilityOperation") }}</th>
+                            <th v-for="column in MCP_EXECUTION_MODE_COLUMNS" :key="column.mode" scope="col" class="px-2 py-2 text-center font-medium">
+                              {{ t(column.labelKey) }}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody class="divide-y">
+                          <tr v-for="row in MCP_CAPABILITY_ROWS" :key="row.labelKey">
+                            <th scope="row" class="px-3 py-2 text-left font-normal leading-relaxed">{{ t(row.labelKey) }}</th>
+                            <td v-for="column in MCP_EXECUTION_MODE_COLUMNS" :key="column.mode" class="px-2 py-2 text-center">
+                              <span class="inline-flex items-center justify-center" :class="row[column.mode] ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground/60'">
+                                <Check v-if="row[column.mode]" class="h-4 w-4" aria-hidden="true" />
+                                <X v-else class="h-4 w-4" aria-hidden="true" />
+                                <span class="sr-only">{{ t(row[column.mode] ? "settings.mcpCapabilityAllowed" : "settings.mcpCapabilityBlocked") }}</span>
+                              </span>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <p class="text-[11px] leading-relaxed text-muted-foreground">{{ t("settings.mcpCapabilityAlwaysEnforced") }}</p>
+                  </div>
                 </div>
               </div>
 
               <div class="space-y-2">
                 <Label>{{ t("settings.mcpConfig") }}</Label>
                 <Tabs v-model="mcpConfigTab" class="space-y-3">
-                  <TabsList class="max-w-full overflow-x-auto">
-                    <TabsTrigger value="claude">Claude Code</TabsTrigger>
-                    <TabsTrigger value="cursor">Cursor</TabsTrigger>
-                    <TabsTrigger value="trae">TRAE</TabsTrigger>
-                    <TabsTrigger value="vscode">VS Code</TabsTrigger>
-                    <TabsTrigger value="windsurf">Windsurf</TabsTrigger>
-                    <TabsTrigger value="codex">Codex</TabsTrigger>
-                    <TabsTrigger value="opencode">OpenCode</TabsTrigger>
+                  <TabsList class="grid h-auto w-full grid-cols-2 gap-1 overflow-visible group-data-horizontal/tabs:h-auto sm:grid-cols-4 xl:grid-cols-8">
+                    <TabsTrigger value="claude" class="h-8 min-w-0 px-2">Claude Code</TabsTrigger>
+                    <TabsTrigger value="cursor" class="h-8 min-w-0 px-2">Cursor</TabsTrigger>
+                    <TabsTrigger value="trae" class="h-8 min-w-0 px-2">TRAE</TabsTrigger>
+                    <TabsTrigger value="vscode" class="h-8 min-w-0 px-2">VS Code</TabsTrigger>
+                    <TabsTrigger value="windsurf" class="h-8 min-w-0 px-2">Windsurf</TabsTrigger>
+                    <TabsTrigger value="codex" class="h-8 min-w-0 px-2">Codex</TabsTrigger>
+                    <TabsTrigger value="opencode" class="h-8 min-w-0 px-2">OpenCode</TabsTrigger>
+                    <TabsTrigger value="cherry-studio" class="h-8 min-w-0 px-2">Cherry Studio</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="claude" class="m-0">
@@ -4933,6 +5111,21 @@ onUnmounted(cleanupPreviewEditor);
                         <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpOpenCodeRecommendedConfig }}</code></pre>
                         <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('opencode-config', mcpOpenCodeRecommendedConfig)">
                           <CheckCircle2 v-if="mcpCopied === 'opencode-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="cherry-studio" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpCherryStudioConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpCherryStudioRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('cherry-studio-config', mcpCherryStudioRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'cherry-studio-config'" class="h-3.5 w-3.5 text-green-500" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -5140,12 +5333,12 @@ onUnmounted(cleanupPreviewEditor);
             </Button>
           </DialogFooter>
 
-          <DialogFooter v-else-if="activeSettingsTab === 'mcp' && !isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
+          <DialogFooter v-else-if="activeSettingsTab === 'mcp'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
             <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <div class="flex-1" />
-            <Button variant="outline" :disabled="mcpStatusLoading" @click="refreshMcpStatus">
+            <Button v-if="!isWeb" variant="outline" :disabled="mcpStatusLoading" @click="refreshMcpStatus">
               <Loader2 v-if="mcpStatusLoading" class="mr-1 h-3 w-3 animate-spin" />
               <RefreshCw v-else class="mr-1 h-3 w-3" />
               {{ t("settings.mcpRefresh") }}

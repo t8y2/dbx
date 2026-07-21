@@ -527,24 +527,24 @@ async function handleSelectObject(obj: SchemaDiffObject) {
   try {
     // For "create" objects: source has it, target doesn't → fetch source DDL
     if (obj.operationType === "create" && !obj.sourceDdl) {
-      const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, objectType);
+      const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, objectType, obj.arguments);
       if (result?.source) obj.sourceDdl = result.source;
     }
 
     // For "delete" objects: target has it, source doesn't → fetch target DDL
     if (obj.operationType === "delete" && !obj.targetDdl) {
-      const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, objectType);
+      const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, objectType, obj.arguments);
       if (result?.source) obj.targetDdl = result.source;
     }
 
     // For "modify" objects: fetch whichever side is missing
     if (obj.operationType === "modify") {
       if (!obj.sourceDdl) {
-        const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, objectType);
+        const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, objectType, obj.arguments);
         if (result?.source) obj.sourceDdl = result.source;
       }
       if (!obj.targetDdl) {
-        const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, objectType);
+        const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, objectType, obj.arguments);
         if (result?.source) obj.targetDdl = result.source;
       }
     }

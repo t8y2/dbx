@@ -53,7 +53,7 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
             Err(error) => Err(error),
         },
         PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
-        PoolKind::VectorDb(client) => vector_driver::list_databases(&client).await,
+        PoolKind::VectorDb(client) => vector_driver::list_databases(client).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             match client.mongo_list_databases::<Vec<serde_json::Value>>().await {
@@ -216,7 +216,7 @@ pub async fn list_collections_core(
                 .map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None, kind: None, bucket_name: None })
                 .collect())
         }
-        PoolKind::VectorDb(client) => vector_driver::list_collections_with_db(&client, database).await,
+        PoolKind::VectorDb(client) => vector_driver::list_collections_with_db(client, database).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let names = sort_names(client.mongo_list_collections(database).await?);

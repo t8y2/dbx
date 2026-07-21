@@ -183,13 +183,15 @@ fn find_as_keyword_outside_quotes(sql: &str) -> Option<usize> {
                 }
                 in_double = !in_double;
             }
-            b'a' | b'A' if !in_single && !in_double && i + 1 < bytes.len() => {
-                if (bytes[i + 1] == b's' || bytes[i + 1] == b'S')
+            b'a' | b'A'
+                if !in_single
+                    && !in_double
+                    && i + 1 < bytes.len()
+                    && (bytes[i + 1] == b's' || bytes[i + 1] == b'S')
                     && is_sql_word_boundary(bytes.get(i.wrapping_sub(1)).copied())
-                    && is_sql_word_boundary(bytes.get(i + 2).copied())
-                {
-                    return Some(i);
-                }
+                    && is_sql_word_boundary(bytes.get(i + 2).copied()) =>
+            {
+                return Some(i);
             }
             _ => {}
         }

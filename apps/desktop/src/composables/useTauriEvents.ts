@@ -1,6 +1,7 @@
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
+import type { QueryResult } from "@/types/database";
 
 export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarget) => Promise<void>; openSqlFilePath: (path: string) => Promise<void>; openDbFilePath: (path: string) => Promise<void>; openConnectionDeepLink: (url: string) => Promise<void> }) {
   const connectionStore = useConnectionStore();
@@ -51,21 +52,15 @@ export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarge
           connection_id: string;
           database: string;
           sql: string;
-          allow_writes?: boolean;
-          allow_dangerous?: boolean;
+          results: QueryResult[];
         }>("mcp-execute-query", async (event) => {
           try {
-            const { connection_id, database, sql, allow_writes, allow_dangerous } = event.payload;
+            const { connection_id, database, sql, results } = event.payload;
             if (!connectionStore.connections.length) await connectionStore.initFromDisk();
             const config = connectionStore.getConfig(connection_id);
             if (!config) return;
             connectionStore.activeConnectionId = connection_id;
-            await connectionStore.ensureConnected(connection_id);
-            const tabId = queryStore.createTab(connection_id, database, undefined, "query");
-            queryStore.updateSql(tabId, sql);
-            await queryStore.executeTabSql(tabId, sql, {
-              mongoSafety: { allowWrites: !!allow_writes, allowDangerous: !!allow_dangerous },
-            });
+            queryStore.showExecutedQueryResults(connection_id, database, sql, results);
             focusCurrentWindow();
           } catch (e) {
             console.error("[DBX] mcp-execute-query error:", e);

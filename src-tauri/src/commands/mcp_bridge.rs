@@ -7,10 +7,12 @@ use tokio::net::TcpListener;
 
 use super::connection::AppState;
 
-use super::connection::ensure_connection_writable;
+use dbx_core::storage::McpGlobalPolicy;
 
 const BIND_ADDR: &str = "127.0.0.1:0";
 const MCP_BRIDGE_PORT_FILE: &str = "mcp-bridge-port";
+const MCP_EXECUTE_AND_SHOW_SQL_ONLY: &str =
+    "UNSUPPORTED_OPERATION: MCP execute-and-show only supports SQL connections.";
 
 #[derive(Deserialize)]
 struct OpenTableRequest {
@@ -28,8 +30,6 @@ struct ExecuteQueryRequest {
     database: Option<String>,
     sql: String,
     schema: Option<String>,
-    allow_writes: Option<bool>,
-    allow_dangerous: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -174,7 +174,8 @@ struct RedisCommandRequest {
     connection_id: Option<String>,
     db: u32,
     command: String,
-    skip_safety_check: Option<bool>,
+    #[serde(rename = "skip_safety_check")]
+    _skip_safety_check: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -190,8 +191,7 @@ pub struct McpExecuteQueryEvent {
     pub connection_id: String,
     pub database: String,
     pub sql: String,
-    pub allow_writes: bool,
-    pub allow_dangerous: bool,
+    pub results: Vec<dbx_core::db::QueryResult>,
 }
 
 pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
@@ -292,7 +292,29 @@ fn find_config_by_name<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_mongo_database, resolve_mongo_target_values, write_port_file};
+    use super::{
+        ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed, ensure_mcp_execute_and_show_supported,
+        ensure_mcp_sql_database_switch_allowed, mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
+        resolve_connection, resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
+    };
+    use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
+    use dbx_core::storage::{McpGlobalPolicy, Storage};
+    use std::sync::Arc;
+
+    fn mysql_config(read_only: bool) -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": "readonly-connection",
+            "name": "Read-only connection",
+            "db_type": "mysql",
+            "host": "localhost",
+            "port": 3306,
+            "username": "tester",
+            "password": "",
+            "database": "test",
+            "read_only": read_only
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn writes_bridge_port_file_to_resolved_data_dir() {
@@ -339,6 +361,133 @@ mod tests {
             ("connection-id".to_string(), "sample_db".to_string())
         );
     }
+
+    #[test]
+    fn execute_and_show_accepts_sql_connections_only() {
+        assert!(ensure_mcp_execute_and_show_supported(&DatabaseType::Mysql).is_ok());
+        assert!(ensure_mcp_execute_and_show_supported(&DatabaseType::MongoDb).is_err());
+        assert!(ensure_mcp_execute_and_show_supported(&DatabaseType::Redis).is_err());
+        assert!(ensure_mcp_execute_and_show_supported(&DatabaseType::Elasticsearch).is_err());
+    }
+
+    #[test]
+    fn mcp_sql_checks_supplied_connection_read_only_flag() {
+        let mut config = mysql_config(true);
+
+        assert!(ensure_mcp_connection_sql_write_allowed(&config, false).is_ok());
+        let error = ensure_mcp_connection_sql_write_allowed(&config, true).unwrap_err();
+        assert!(error.starts_with("CONNECTION_READ_ONLY:"));
+
+        config.read_only = false;
+        assert!(ensure_mcp_connection_sql_write_allowed(&config, true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_connection_refreshes_read_only_from_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "dbx-mcp-bridge-connection-refresh-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = Storage::open(&root.join("storage.db")).await.unwrap();
+        let mut config = mysql_config(false);
+        storage.save_connections(&[config.clone()]).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, root.join("plugins")));
+
+        let initial = resolve_connection(&state, Some(&config.id), &config.name).await.unwrap();
+        assert!(!initial.read_only);
+
+        config.read_only = true;
+        state.storage.save_connections(&[config.clone()]).await.unwrap();
+        let refreshed = resolve_connection(&state, Some(&config.id), &config.name).await.unwrap();
+        assert!(refreshed.read_only);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_sql_rejects_persistent_database_switches() {
+        assert!(ensure_mcp_sql_database_switch_allowed(DatabaseType::Mysql, "SELECT 1").is_ok());
+        assert_eq!(
+            ensure_mcp_sql_database_switch_allowed(DatabaseType::Mysql, "USE production").unwrap_err(),
+            "SQL_BLOCKED: MCP does not allow USE or persistent database switching."
+        );
+    }
+
+    #[test]
+    fn mcp_allowlist_distinguishes_all_subset_and_none() {
+        let all = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        assert!(ensure_connection_in_mcp_scope(&all, "conn-1").is_ok());
+
+        let subset = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: Some(vec!["conn-1".to_string()]),
+        };
+        assert!(ensure_connection_in_mcp_scope(&subset, "conn-1").is_ok());
+        assert!(ensure_connection_in_mcp_scope(&subset, "conn-2").unwrap_err().starts_with("CONNECTION_OUT_OF_SCOPE:"));
+
+        let none =
+            McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: Some(Vec::new()) };
+        assert!(ensure_connection_in_mcp_scope(&none, "conn-1").is_err());
+    }
+
+    #[test]
+    fn mongo_aggregate_write_stages_are_detected_structurally() {
+        assert!(mongo_pipeline_has_write_stage(r#"[{"$match":{}},{"$out":"archive"}]"#));
+        assert!(mongo_pipeline_has_write_stage(r#"[{"$merge":{"into":"archive"}}]"#));
+        assert!(!mongo_pipeline_has_write_stage(r#"[{"$project":{"label":"$out"}}]"#));
+    }
+
+    #[test]
+    fn mongo_filters_distinguish_guarded_and_unbounded_writes() {
+        for filter in [
+            "{}",
+            r#"{"$comment":"all rows"}"#,
+            r#"{"$expr":true}"#,
+            r#"{"$or":[{}, {"id":1}]}"#,
+            r#"{"$nor":[{"$expr":false}]}"#,
+            r#"{"$or":[{"id":{"$exists":true}},{"id":{"$exists":false}}]}"#,
+            r#"{"$or":[{"id":{"$exists":true}},{"id":{"$not":{"$exists":true}}}]}"#,
+            r#"{"$or":[{"id":{"$eq":1}},{"id":{"$ne":1}}]}"#,
+            r#"{"$or":[{"$and":[{"id":{"$eq":1}}]},{"id":{"$ne":1}}]}"#,
+            r#"{"$or":[{"$and":[{"id":{"$eq":1}},{}]},{"id":{"$ne":1}}]}"#,
+            r#"{"$or":[{"$and":[{"id":{"$eq":1}},{"x":{"$exists":true}}]},{"id":{"$ne":1}},{"x":{"$exists":false}}]}"#,
+            r#"{"$or":[{"id":1},{"id":{"$ne":1}}]}"#,
+            r#"{"$or":[{"id":{"$gt":1}},{"id":{"$lte":1}}]}"#,
+            r#"{"$or":[{"id":{"$gte":1}},{"id":{"$lt":1}}]}"#,
+            r#"{"$or":[{"id":{"$in":[1,2]}},{"id":{"$nin":[2,1]}}]}"#,
+            r#"{"_id":{"$exists":true}}"#,
+            r#"{"id":{"$nin":[]}}"#,
+            r#"{"_id":{"$oid":"not-an-object-id"}}"#,
+            r#"{"sequence":{"$numberLong":"9223372036854775808"}}"#,
+            r#"{"created_at":{"$date":"2026-02-30T00:00:00Z"}}"#,
+            r#"{"name":{"$regex":".*"}}"#,
+            r#"{"$or":[{"_id":{"$oid":"507f1f77bcf86cd799439011"}},{"_id":{"$ne":{"$oid":"507f1f77bcf86cd799439011"}}}]}"#,
+            r#"{"$and":[{"tenant_id":1},{"$nor":[{"archived":true}]}]}"#,
+            r#"{"$or":[]}"#,
+            r#"{"$opaque":[{"id":1}]}"#,
+        ] {
+            assert!(mongo_filter_is_effectively_unbounded(filter), "{filter}");
+        }
+        for filter in [
+            r#"{"id":1}"#,
+            r#"{"created_at":{"$gte":"2026-01-01"}}"#,
+            r#"{"$and":[{}, {"tenant_id":1}]}"#,
+            r#"{"$or":[{"tenant_id":1},{"tenant_id":2}]}"#,
+            r#"{"id":{"$ne":1}}"#,
+            r#"{"id":{"$in":[1,2]}}"#,
+            r#"{"id":{"$exists":true}}"#,
+            r#"{"_id":{"$oid":"507f1f77bcf86cd799439011"}}"#,
+            r#"{"sequence":{"$numberLong":"9223372036854775807"}}"#,
+            r#"{"created_at":{"$date":"2026-01-01T00:00:00.000Z"}}"#,
+            r#"{"tenant_id":1,"id":{"$nin":[]}}"#,
+        ] {
+            assert!(!mongo_filter_is_effectively_unbounded(filter), "{filter}");
+        }
+    }
 }
 
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
@@ -365,18 +514,436 @@ async fn resolve_connection(
     connection_id: Option<&str>,
     connection_name: &str,
 ) -> Result<crate::models::connection::ConnectionConfig, String> {
-    let configs = state.storage.load_connections().await.map_err(|e| e.to_string())?;
+    let policy = load_mcp_policy(state).await?;
+    let configs = state.storage.load_connections().await.map_err(|e| mcp_policy_unavailable(e.to_string()))?;
     let config = if let Some(id) = connection_id.filter(|s| !s.is_empty()) {
         configs.iter().find(|c| c.id == id).ok_or_else(|| format!("Connection with id '{}' not found", id))?
     } else {
         find_config_by_name(&configs, connection_name).ok_or_else(|| "Connection not found".to_string())?
     };
+    ensure_connection_in_mcp_scope(&policy, &config.id)?;
     let mut state_configs = state.configs.write().await;
     if !state_configs.contains_key(&config.id) {
         state_configs.insert(config.id.clone(), config.clone());
     }
     drop(state_configs);
     Ok(config.clone())
+}
+
+async fn load_mcp_policy(state: &Arc<AppState>) -> Result<McpGlobalPolicy, String> {
+    state
+        .storage
+        .load_mcp_global_policy()
+        .await
+        .map(|state| state.policy())
+        .map_err(|error| mcp_policy_unavailable(error.to_string()))
+}
+
+fn mcp_policy_unavailable(error: String) -> String {
+    if error.starts_with("MCP_POLICY_UNAVAILABLE:") {
+        error
+    } else {
+        format!("MCP_POLICY_UNAVAILABLE: {error}")
+    }
+}
+
+fn ensure_connection_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), String> {
+    if policy.allowed_connection_ids.as_ref().is_some_and(|allowed| !allowed.iter().any(|id| id == connection_id)) {
+        return Err(format!(
+            "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by DBX MCP settings"
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_mcp_write_allowed(
+    state: &Arc<AppState>,
+    config: &crate::models::connection::ConnectionConfig,
+    database: &str,
+    action: &str,
+) -> Result<(), String> {
+    ensure_mcp_write_allowed_with_risk(state, config, database, action, false).await
+}
+
+async fn ensure_mcp_write_allowed_with_risk(
+    state: &Arc<AppState>,
+    config: &crate::models::connection::ConnectionConfig,
+    database: &str,
+    action: &str,
+    dangerous: bool,
+) -> Result<(), String> {
+    let policy = load_mcp_policy(state).await?;
+    ensure_connection_in_mcp_scope(&policy, &config.id)?;
+    if policy.read_only {
+        return Err(format!("MCP_READ_ONLY: DBX MCP read-only mode is enabled. {action} blocked."));
+    }
+    if dangerous && !policy.allow_dangerous_sql {
+        return Err(format!("SQL_BLOCKED: High-risk operation '{action}' is disabled in DBX MCP settings."));
+    }
+    if config.read_only {
+        return Err(format!(
+            "CONNECTION_READ_ONLY: connection '{}' has read-only protection enabled. {action} blocked.",
+            config.name
+        ));
+    }
+    if dbx_core::production_safety::is_production_database(config, database) {
+        return Err(format!("PRODUCTION_DATABASE_READ_ONLY: {action} blocked for production database '{database}'."));
+    }
+    Ok(())
+}
+
+pub(crate) async fn ensure_mcp_read_allowed_by_id(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+) -> Result<(), String> {
+    let policy = load_mcp_policy(state).await?;
+    ensure_connection_in_mcp_scope(&policy, connection_id)?;
+    let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    let config = configs
+        .iter()
+        .find(|config| config.id == connection_id)
+        .ok_or_else(|| format!("Connection with id '{connection_id}' not found"))?;
+    check_visible_database(config, database)
+}
+
+pub(crate) async fn ensure_mcp_write_allowed_by_id(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    action: &str,
+) -> Result<(), String> {
+    ensure_mcp_write_allowed_by_id_with_risk(state, connection_id, database, action, false).await
+}
+
+pub(crate) async fn ensure_mcp_dangerous_write_allowed_by_id(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    action: &str,
+) -> Result<(), String> {
+    ensure_mcp_write_allowed_by_id_with_risk(state, connection_id, database, action, true).await
+}
+
+async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    pipeline_json: &str,
+) -> Result<(), String> {
+    let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    let config = configs
+        .iter()
+        .find(|config| config.id == connection_id)
+        .ok_or_else(|| format!("Connection with id '{connection_id}' not found"))?;
+    if dbx_core::production_safety::mongo_pipeline_targets_production_database(config, database, pipeline_json) {
+        return Err(
+            "PRODUCTION_DATABASE_READ_ONLY: MongoDB aggregate write targeting production scope is blocked.".to_string()
+        );
+    }
+    Ok(())
+}
+
+async fn ensure_mcp_write_allowed_by_id_with_risk(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    action: &str,
+    dangerous: bool,
+) -> Result<(), String> {
+    let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    let config = configs
+        .iter()
+        .find(|config| config.id == connection_id)
+        .ok_or_else(|| format!("Connection with id '{connection_id}' not found"))?;
+    ensure_mcp_write_allowed_with_risk(state, config, database, action, dangerous).await
+}
+
+pub(crate) async fn ensure_mcp_mongo_filtered_write_allowed_by_id(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    action: &str,
+    filter_json: &str,
+) -> Result<(), String> {
+    if mongo_filter_is_effectively_unbounded(filter_json) {
+        ensure_mcp_dangerous_write_allowed_by_id(state, connection_id, database, action).await
+    } else {
+        ensure_mcp_write_allowed_by_id(state, connection_id, database, action).await
+    }
+}
+
+pub(crate) async fn ensure_mcp_mongo_aggregate_allowed_by_id(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    pipeline_json: &str,
+) -> Result<(), String> {
+    if !mongo_pipeline_has_write_stage(pipeline_json) {
+        return ensure_mcp_read_allowed_by_id(state, connection_id, database).await;
+    }
+    ensure_mcp_dangerous_write_allowed_by_id(state, connection_id, database, "MongoDB aggregate write").await?;
+    ensure_mcp_mongo_pipeline_target_allowed_by_id(state, connection_id, database, pipeline_json).await
+}
+
+fn mongo_pipeline_has_write_stage(pipeline_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(pipeline_json)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .is_some_and(|stages| {
+            stages.iter().any(|stage| {
+                stage
+                    .as_object()
+                    .is_some_and(|document| document.contains_key("$out") || document.contains_key("$merge"))
+            })
+        })
+}
+
+fn mongo_filter_is_effectively_unbounded(filter_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(filter_json)
+        .ok()
+        .as_ref()
+        .map_or(true, |value| mongo_filter_contains_opaque_logic(value) || mongo_filter_value_is_unbounded(value))
+}
+
+fn mongo_filter_contains_opaque_logic(value: &serde_json::Value) -> bool {
+    let Some(filter) = value.as_object() else {
+        return true;
+    };
+    filter.iter().any(|(key, value)| match key.as_str() {
+        "$comment" => false,
+        "$where" | "$expr" | "$nor" => true,
+        "$and" | "$or" => {
+            let Some(clauses) = value.as_array() else {
+                return true;
+            };
+            clauses.is_empty()
+                || clauses.iter().any(|clause| !clause.is_object() || mongo_filter_contains_opaque_logic(clause))
+                || (key == "$or"
+                    && clauses
+                        .iter()
+                        .any(|clause| clause.as_object().is_some_and(|document| document.contains_key("$and"))))
+                || (key == "$or" && mongo_or_has_complementary_field_clauses(clauses))
+        }
+        _ => key.starts_with('$') || mongo_field_predicate_contains_opaque_logic(value),
+    })
+}
+
+fn mongo_field_predicate_contains_opaque_logic(value: &serde_json::Value) -> bool {
+    let Some(predicate) = value.as_object() else {
+        return false;
+    };
+    if mongo_extended_json_scalar_literal_is_valid(value) {
+        return false;
+    }
+    let has_operator = predicate.keys().any(|key| key.starts_with('$'));
+    has_operator
+        && predicate.keys().any(|key| {
+            !matches!(key.as_str(), "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" | "$in" | "$nin" | "$exists")
+        })
+}
+
+fn mongo_extended_json_scalar_literal_is_valid(value: &serde_json::Value) -> bool {
+    let Some(wrapper) = value.as_object().filter(|wrapper| wrapper.len() == 1) else {
+        return false;
+    };
+    if let Some(value) = wrapper.get("$oid").and_then(serde_json::Value::as_str) {
+        return value.len() == 24 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    if let Some(value) = wrapper.get("$numberLong").and_then(serde_json::Value::as_str) {
+        return value.parse::<i64>().is_ok();
+    }
+    wrapper
+        .get("$date")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MongoFieldOperator {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    In,
+    Nin,
+    Exists,
+}
+
+struct MongoPureFieldPredicate<'a> {
+    field: &'a str,
+    operator: MongoFieldOperator,
+    operand: &'a serde_json::Value,
+}
+
+fn mongo_or_has_complementary_field_clauses(clauses: &[serde_json::Value]) -> bool {
+    clauses.iter().enumerate().any(|(index, clause)| {
+        let Some(predicate) = mongo_pure_field_predicate(clause) else {
+            return false;
+        };
+        clauses[index + 1..]
+            .iter()
+            .filter_map(mongo_pure_field_predicate)
+            .any(|other| mongo_field_predicates_are_complementary(&predicate, &other))
+    })
+}
+
+fn mongo_pure_field_predicate(value: &serde_json::Value) -> Option<MongoPureFieldPredicate<'_>> {
+    let filter = value.as_object()?;
+    let mut entries = filter.iter().filter(|(key, _)| key.as_str() != "$comment");
+    let (field, predicate) = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    if field == "$and" {
+        let clauses = predicate.as_array()?;
+        let mut bounded = clauses.iter().filter(|clause| !mongo_filter_value_is_unbounded(clause));
+        let clause = bounded.next()?;
+        if bounded.next().is_some() {
+            return None;
+        }
+        return mongo_pure_field_predicate(clause);
+    }
+    if field == "$or" {
+        let clauses = predicate.as_array()?;
+        return (clauses.len() == 1).then(|| mongo_pure_field_predicate(&clauses[0])).flatten();
+    }
+    if field.starts_with('$') {
+        return None;
+    }
+    let Some(operator_document) = predicate.as_object() else {
+        return Some(MongoPureFieldPredicate { field, operator: MongoFieldOperator::Eq, operand: predicate });
+    };
+    if mongo_extended_json_scalar_literal_is_valid(predicate)
+        || !operator_document.keys().any(|key| key.starts_with('$'))
+    {
+        return Some(MongoPureFieldPredicate { field, operator: MongoFieldOperator::Eq, operand: predicate });
+    }
+    let mut operators = operator_document.iter();
+    let (operator, operand) = operators.next()?;
+    if operators.next().is_some() {
+        return None;
+    }
+    let operator = match operator.as_str() {
+        "$eq" => MongoFieldOperator::Eq,
+        "$ne" => MongoFieldOperator::Ne,
+        "$gt" => MongoFieldOperator::Gt,
+        "$gte" => MongoFieldOperator::Gte,
+        "$lt" => MongoFieldOperator::Lt,
+        "$lte" => MongoFieldOperator::Lte,
+        "$in" => MongoFieldOperator::In,
+        "$nin" => MongoFieldOperator::Nin,
+        "$exists" => MongoFieldOperator::Exists,
+        _ => return None,
+    };
+    Some(MongoPureFieldPredicate { field, operator, operand })
+}
+
+fn mongo_field_predicates_are_complementary(
+    left: &MongoPureFieldPredicate<'_>,
+    right: &MongoPureFieldPredicate<'_>,
+) -> bool {
+    if left.field != right.field {
+        return false;
+    }
+    use MongoFieldOperator::{Eq, Exists, Gt, Gte, In, Lt, Lte, Ne, Nin};
+    match (left.operator, right.operator) {
+        (Exists, Exists) => {
+            left.operand.as_bool().zip(right.operand.as_bool()).is_some_and(|(left, right)| left != right)
+        }
+        (In, Nin) | (Nin, In) => mongo_json_sets_equal(left.operand, right.operand),
+        (Eq, Ne) | (Ne, Eq) | (Gt, Lte) | (Lte, Gt) | (Gte, Lt) | (Lt, Gte) => left.operand == right.operand,
+        _ => false,
+    }
+}
+
+fn mongo_json_sets_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    let (Some(left), Some(right)) = (left.as_array(), right.as_array()) else {
+        return false;
+    };
+    left.iter().all(|value| right.contains(value)) && right.iter().all(|value| left.contains(value))
+}
+
+fn mongo_filter_value_is_unbounded(value: &serde_json::Value) -> bool {
+    let Some(filter) = value.as_object() else {
+        return true;
+    };
+    if filter.is_empty() || filter.contains_key("$where") || filter.contains_key("$expr") {
+        return true;
+    }
+    filter.iter().all(|(key, value)| match key.as_str() {
+        "$comment" => true,
+        "$and" => value
+            .as_array()
+            .map_or(true, |clauses| clauses.is_empty() || clauses.iter().all(mongo_filter_value_is_unbounded)),
+        "$or" => value
+            .as_array()
+            .map_or(true, |clauses| clauses.is_empty() || clauses.iter().any(mongo_filter_value_is_unbounded)),
+        "$nor" => true,
+        _ if mongo_field_predicate_is_empty_nin(value) => true,
+        "_id" if mongo_field_predicate_is_exists_true(value) => true,
+        _ => key.starts_with('$'),
+    })
+}
+
+fn mongo_field_predicate_is_empty_nin(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|predicate| {
+        predicate.len() == 1 && predicate.get("$nin").and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty)
+    })
+}
+
+fn mongo_field_predicate_is_exists_true(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|predicate| {
+        predicate.len() == 1 && predicate.get("$exists").and_then(serde_json::Value::as_bool) == Some(true)
+    })
+}
+
+async fn ensure_mcp_sql_allowed(
+    state: &Arc<AppState>,
+    config: &crate::models::connection::ConnectionConfig,
+    database: &str,
+    sql: &str,
+) -> Result<(), String> {
+    let policy = load_mcp_policy(state).await?;
+    ensure_connection_in_mcp_scope(&policy, &config.id)?;
+    ensure_mcp_sql_database_switch_allowed(config.db_type, sql)?;
+    let is_write = dbx_core::query_execution_sql::is_write_sql_for_database(sql, config.db_type);
+    if policy.read_only && is_write {
+        return Err("MCP_READ_ONLY: DBX MCP read-only mode is enabled. SQL write blocked.".to_string());
+    }
+    if !policy.allow_dangerous_sql && dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type) {
+        return Err("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string());
+    }
+    ensure_mcp_connection_sql_write_allowed(config, is_write)?;
+    if is_write && dbx_core::production_safety::targets_production_database(config, database, sql) {
+        return Err("PRODUCTION_DATABASE_READ_ONLY: SQL write targeting production scope is blocked.".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_mcp_sql_database_switch_allowed(
+    database_type: crate::models::connection::DatabaseType,
+    sql: &str,
+) -> Result<(), String> {
+    if dbx_core::sql_risk::mcp_sql_has_forbidden_database_switch(sql, database_type) {
+        return Err("SQL_BLOCKED: MCP does not allow USE or persistent database switching.".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_mcp_connection_sql_write_allowed(
+    config: &crate::models::connection::ConnectionConfig,
+    is_write: bool,
+) -> Result<(), String> {
+    if is_write && config.read_only {
+        return Err(format!(
+            "CONNECTION_READ_ONLY: connection '{}' has read-only protection enabled. SQL write blocked.",
+            config.name
+        ));
+    }
+    Ok(())
 }
 
 fn check_visible_database(config: &crate::models::connection::ConnectionConfig, database: &str) -> Result<(), String> {
@@ -462,15 +1029,58 @@ async fn handle_execute_query(app: &AppHandle, state: &Arc<AppState>, body: &str
             return;
         }
     };
-    let event = McpExecuteQueryEvent {
-        connection_id: config.id.clone(),
-        database: req.database.unwrap_or_else(|| config.database.clone().unwrap_or_default()),
-        sql: req.sql,
-        allow_writes: req.allow_writes.unwrap_or(false),
-        allow_dangerous: req.allow_dangerous.unwrap_or(false),
+    let database = req.database.unwrap_or_else(|| config.database.clone().unwrap_or_default());
+    if let Err(error) = ensure_mcp_execute_and_show_supported(&config.db_type) {
+        respond(stream, "400 Bad Request", error).await;
+        return;
+    }
+    // Check the complete batch first so a session-changing statement cannot
+    // hide a later production write, then recheck every statement immediately
+    // before it reaches the database.
+    if let Err(e) = ensure_mcp_sql_allowed(state, &config, &database, &req.sql).await {
+        respond(stream, "403 Forbidden", &e).await;
+        return;
+    }
+    let statements = if config.db_type == crate::models::connection::DatabaseType::SqlServer {
+        dbx_core::sql::split_sql_batches(&req.sql)
+    } else {
+        dbx_core::sql::split_sql_statements_for_database(&req.sql, config.db_type)
     };
+    let statements = if statements.is_empty() { vec![req.sql.clone()] } else { statements };
+    let mut results = Vec::with_capacity(statements.len());
+    for statement in statements {
+        let current = match resolve_connection(state, Some(&config.id), &config.name).await {
+            Ok(config) => config,
+            Err(e) => {
+                respond(stream, "403 Forbidden", &e).await;
+                return;
+            }
+        };
+        if let Err(e) = ensure_mcp_sql_allowed(state, &current, &database, &statement).await {
+            respond(stream, "403 Forbidden", &e).await;
+            return;
+        }
+        match dbx_core::query::execute_sql_statement(state, &current.id, &database, &statement, None, None).await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                respond(stream, "500 Internal Server Error", &format!("QUERY_ERROR: {e}")).await;
+                return;
+            }
+        }
+    }
+    let event = McpExecuteQueryEvent { connection_id: config.id.clone(), database, sql: req.sql, results };
     let _ = app.emit("mcp-execute-query", &event);
     respond(stream, "200 OK", "ok").await;
+}
+
+fn ensure_mcp_execute_and_show_supported(
+    database_type: &crate::models::connection::DatabaseType,
+) -> Result<(), &'static str> {
+    if dbx_core::query_execution_sql::supports_sql_query(*database_type) {
+        Ok(())
+    } else {
+        Err(MCP_EXECUTE_AND_SHOW_SQL_ONLY)
+    }
 }
 
 async fn handle_list_tables_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
@@ -658,6 +1268,11 @@ async fn handle_mongo_aggregate_documents_data(state: &Arc<AppState>, body: &str
     else {
         return;
     };
+    if let Err(e) = ensure_mcp_mongo_aggregate_allowed_by_id(state, &connection_id, &database, &req.pipeline_json).await
+    {
+        respond_error(stream, "403 Forbidden", &e).await;
+        return;
+    }
     match dbx_core::mongo_ops::mongo_aggregate_documents_core(
         state,
         &connection_id,
@@ -715,7 +1330,7 @@ async fn handle_mongo_create_index_data(state: &Arc<AppState>, body: &str, strea
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Create index").await {
+    if let Err(e) = ensure_mcp_dangerous_write_allowed_by_id(state, &connection_id, &database, "Create index").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -747,7 +1362,7 @@ async fn handle_mongo_drop_indexes_data(state: &Arc<AppState>, body: &str, strea
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Drop indexes").await {
+    if let Err(e) = ensure_mcp_dangerous_write_allowed_by_id(state, &connection_id, &database, "Drop indexes").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -779,7 +1394,8 @@ async fn handle_mongo_drop_collection_data(state: &Arc<AppState>, body: &str, st
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Drop collection").await {
+    if let Err(e) = ensure_mcp_dangerous_write_allowed_by_id(state, &connection_id, &database, "Drop collection").await
+    {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -802,7 +1418,7 @@ async fn handle_mongo_insert_documents_data(state: &Arc<AppState>, body: &str, s
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Insert").await {
+    if let Err(e) = ensure_mcp_write_allowed_by_id(state, &connection_id, &database, "Insert").await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -833,7 +1449,12 @@ async fn handle_mongo_update_documents_data(state: &Arc<AppState>, body: &str, s
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Update").await {
+    let policy_check = if mongo_filter_is_effectively_unbounded(&req.filter_json) {
+        ensure_mcp_dangerous_write_allowed_by_id(state, &connection_id, &database, "Update").await
+    } else {
+        ensure_mcp_write_allowed_by_id(state, &connection_id, &database, "Update").await
+    };
+    if let Err(e) = policy_check {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -867,7 +1488,12 @@ async fn handle_mongo_delete_documents_data(state: &Arc<AppState>, body: &str, s
     else {
         return;
     };
-    if let Err(e) = ensure_connection_writable(state, &connection_id, "Delete").await {
+    let policy_check = if mongo_filter_is_effectively_unbounded(&req.filter_json) {
+        ensure_mcp_dangerous_write_allowed_by_id(state, &connection_id, &database, "Delete").await
+    } else {
+        ensure_mcp_write_allowed_by_id(state, &connection_id, &database, "Delete").await
+    };
+    if let Err(e) = policy_check {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -906,20 +1532,25 @@ async fn handle_redis_execute_command_data(state: &Arc<AppState>, body: &str, st
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
-    if let Some(name) = dbx_core::query::connection_readonly_name(state, &config.id).await {
-        let cmd_name = req.command.split_whitespace().next().unwrap_or("");
-        if dbx_core::db::redis_driver::classify_command(cmd_name)
-            != dbx_core::db::redis_driver::RedisCommandSafety::Allowed
-        {
-            respond_error(
-                stream,
-                "403 Forbidden",
-                &format!(
-                    "Read-only mode: connection '{}' has read-only protection enabled. Command '{}' blocked.",
-                    name, cmd_name
-                ),
-            )
-            .await;
+    let argv = match dbx_core::db::redis_driver::parse_command_argv(&req.command) {
+        Ok(argv) => argv,
+        Err(error) => {
+            respond_error(stream, "400 Bad Request", &format!("Invalid Redis command: {error}")).await;
+            return;
+        }
+    };
+    let cmd_name = argv[0].to_ascii_uppercase();
+    let safety = dbx_core::db::redis_driver::classify_command(&cmd_name);
+    let centrally_approved_high_risk = safety == dbx_core::db::redis_driver::RedisCommandSafety::Blocked;
+    if safety != dbx_core::db::redis_driver::RedisCommandSafety::Allowed {
+        let policy_check = if centrally_approved_high_risk {
+            ensure_mcp_write_allowed_with_risk(state, &config, &database, &format!("Redis command '{cmd_name}'"), true)
+                .await
+        } else {
+            ensure_mcp_write_allowed(state, &config, &database, &format!("Redis command '{cmd_name}'")).await
+        };
+        if let Err(e) = policy_check {
+            respond_error(stream, "403 Forbidden", &e).await;
             return;
         }
     }
@@ -928,7 +1559,7 @@ async fn handle_redis_execute_command_data(state: &Arc<AppState>, body: &str, st
         &config.id,
         req.db,
         &req.command,
-        req.skip_safety_check.unwrap_or(false),
+        centrally_approved_high_risk,
     )
     .await
     {
@@ -957,15 +1588,51 @@ async fn handle_execute_query_data(state: &Arc<AppState>, body: &str, stream: &m
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
-    // Read-only check: reject if the connection has read-only protection and the SQL is a write
-    if let Err(e) = dbx_core::query::check_read_only_for_connection(state, &config.id, &req.sql).await {
+    if let Err(e) = ensure_mcp_sql_allowed(state, &config, &database, &req.sql).await {
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
-    match dbx_core::query::execute_sql_statement(state, &config.id, &database, &req.sql, req.schema.as_deref(), None)
+    let statements = if config.db_type == crate::models::connection::DatabaseType::SqlServer {
+        dbx_core::sql::split_sql_batches(&req.sql)
+    } else {
+        dbx_core::sql::split_sql_statements_for_database(&req.sql, config.db_type)
+    };
+    let statements = if statements.is_empty() { vec![req.sql] } else { statements };
+    let mut last_result = None;
+    for statement in statements {
+        // Re-read both policy and connection settings immediately before every
+        // statement so a settings change can stop the remainder of the batch.
+        let current = match resolve_connection(state, Some(&config.id), &config.name).await {
+            Ok(config) => config,
+            Err(e) => {
+                respond_error(stream, "403 Forbidden", &e).await;
+                return;
+            }
+        };
+        if let Err(e) = ensure_mcp_sql_allowed(state, &current, &database, &statement).await {
+            respond_error(stream, "403 Forbidden", &e).await;
+            return;
+        }
+        match dbx_core::query::execute_sql_statement(
+            state,
+            &current.id,
+            &database,
+            &statement,
+            req.schema.as_deref(),
+            None,
+        )
         .await
-    {
-        Ok(result) => respond_json(stream, &result).await,
-        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+        {
+            Ok(result) => last_result = Some(result),
+            Err(e) => {
+                respond_error(stream, "500 Internal Server Error", &e).await;
+                return;
+            }
+        }
+    }
+    if let Some(result) = last_result {
+        respond_json(stream, &result).await;
+    } else {
+        respond_error(stream, "500 Internal Server Error", "No SQL statement to execute").await;
     }
 }

@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read as IoRead, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read as IoRead, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 use calamine::{open_workbook_auto, Data, ExcelDateTime, Reader as CalamineReader};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
@@ -778,6 +779,12 @@ enum XlsxTemporalKind {
     Duration,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct XlsxCellStyle {
+    temporal_kind: Option<XlsxTemporalKind>,
+    number_format: Option<Arc<str>>,
+}
+
 fn format_chrono_duration_hms(duration: chrono::Duration, wrap_to_day: bool) -> String {
     let mut millis = duration.num_milliseconds();
     let negative = millis < 0;
@@ -852,6 +859,37 @@ fn xlsx_cell_value_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTem
     }
 }
 
+fn xlsx_numeric_display_text(value: f64, style: Option<&XlsxCellStyle>) -> String {
+    style
+        .and_then(|style| style.number_format.as_deref())
+        .and_then(|format_code| {
+            let format = ssfmt::NumberFormat::parse(format_code).ok()?;
+            let mut options = ssfmt::FormatOptions::default();
+            let lcid = format.sections().iter().flat_map(|section| &section.parts).find_map(|part| match part {
+                ssfmt::ast::FormatPart::Locale(locale) => locale.lcid,
+                _ => None,
+            });
+            // ssfmt 0.1 only provides en-US locale data; preserve the German separators explicitly.
+            if lcid == Some(0x0407) {
+                options.locale.decimal_separator = ',';
+                options.locale.thousands_separator = '.';
+            }
+            Some(format.format(value, &options))
+        })
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn xlsx_cell_text_value(cell: &Data, style: Option<&XlsxCellStyle>) -> Option<String> {
+    if style.and_then(|style| style.temporal_kind).is_some() {
+        return None;
+    }
+    match cell {
+        Data::Float(value) if value.is_finite() => Some(xlsx_numeric_display_text(*value, style)),
+        Data::Int(value) => Some(xlsx_numeric_display_text(*value as f64, style)),
+        _ => None,
+    }
+}
+
 pub fn xlsx_cell_value(cell: &Data) -> serde_json::Value {
     xlsx_cell_value_with_temporal_kind(cell, None)
 }
@@ -883,7 +921,7 @@ fn xml_local_name_eq(name: &[u8], expected: &[u8]) -> bool {
     name.rsplit(|byte| *byte == b':').next().is_some_and(|local| local.eq_ignore_ascii_case(expected))
 }
 
-fn xml_attr_value(reader: &XmlReader<&[u8]>, element: &BytesStart<'_>, key: &[u8]) -> Option<String> {
+fn xml_attr_value<R: BufRead>(reader: &XmlReader<R>, element: &BytesStart<'_>, key: &[u8]) -> Option<String> {
     element.attributes().flatten().find_map(|attr| {
         if xml_local_name_eq(attr.key.as_ref(), key) {
             attr.decode_and_unescape_value(reader.decoder()).ok().map(|value| value.into_owned())
@@ -950,12 +988,12 @@ fn xlsx_temporal_kind_from_format_code(format_code: &str) -> Option<XlsxTemporal
     }
 }
 
-fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalKind>> {
+fn parse_xlsx_styles(styles_xml: &str) -> Vec<XlsxCellStyle> {
     let mut reader = XmlReader::from_str(styles_xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
-    let mut custom_formats = HashMap::<u16, XlsxTemporalKind>::new();
-    let mut style_kinds = Vec::new();
+    let mut custom_formats = HashMap::<u16, String>::new();
+    let mut styles = Vec::new();
     let mut in_cell_xfs = false;
 
     loop {
@@ -966,9 +1004,7 @@ fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalK
                 let id = xml_attr_value(&reader, &element, b"numFmtId").and_then(|value| value.parse::<u16>().ok());
                 let format_code = xml_attr_value(&reader, &element, b"formatCode");
                 if let (Some(id), Some(format_code)) = (id, format_code) {
-                    if let Some(kind) = xlsx_temporal_kind_from_format_code(&format_code) {
-                        custom_formats.insert(id, kind);
-                    }
+                    custom_formats.insert(id, format_code);
                 }
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"cellXfs") => {
@@ -980,10 +1016,25 @@ fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalK
             Ok(Event::Start(element)) | Ok(Event::Empty(element))
                 if in_cell_xfs && xml_local_name_eq(element.name().as_ref(), b"xf") =>
             {
-                let kind = xml_attr_value(&reader, &element, b"numFmtId")
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .and_then(|id| custom_formats.get(&id).copied().or_else(|| xlsx_builtin_temporal_kind(id)));
-                style_kinds.push(kind);
+                let num_fmt_id =
+                    xml_attr_value(&reader, &element, b"numFmtId").and_then(|value| value.parse::<u16>().ok());
+                let custom_format_code = num_fmt_id.and_then(|id| custom_formats.get(&id).map(String::as_str));
+                let temporal_kind = num_fmt_id.and_then(|id| {
+                    custom_formats
+                        .get(&id)
+                        .and_then(|code| xlsx_temporal_kind_from_format_code(code))
+                        .or_else(|| xlsx_builtin_temporal_kind(id))
+                });
+                styles.push(XlsxCellStyle {
+                    temporal_kind,
+                    number_format: if temporal_kind.is_none() {
+                        custom_format_code
+                            .or_else(|| num_fmt_id.and_then(|id| ssfmt::format_code_from_id(id as u32)))
+                            .map(Arc::<str>::from)
+                    } else {
+                        None
+                    },
+                });
             }
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
@@ -991,7 +1042,7 @@ fn parse_xlsx_style_temporal_kinds(styles_xml: &str) -> Vec<Option<XlsxTemporalK
         buf.clear();
     }
 
-    style_kinds
+    styles
 }
 
 fn xlsx_workbook_sheet_refs(workbook_xml: &str) -> Vec<(String, Option<String>)> {
@@ -1091,14 +1142,15 @@ fn xlsx_cell_ref_position(reference: &str) -> Option<(usize, usize)> {
     (saw_column && saw_row).then_some((row, column))
 }
 
-fn parse_xlsx_sheet_temporal_kinds(
-    sheet_xml: &str,
-    style_kinds: &[Option<XlsxTemporalKind>],
-) -> HashMap<(usize, usize), XlsxTemporalKind> {
-    let mut reader = XmlReader::from_str(sheet_xml);
+fn parse_xlsx_sheet_cell_styles<R: BufRead>(
+    source: R,
+    styles: &[XlsxCellStyle],
+    text_columns: &HashSet<usize>,
+) -> Result<HashMap<(usize, usize), XlsxCellStyle>, String> {
+    let mut reader = XmlReader::from_reader(source);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
-    let mut kinds = HashMap::new();
+    let mut cell_styles = HashMap::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(element)) | Ok(Event::Empty(element))
@@ -1110,22 +1162,25 @@ fn parse_xlsx_sheet_temporal_kinds(
                     buf.clear();
                     continue;
                 };
-                let Some(kind) = style_kinds.get(style_id).copied().flatten() else {
+                let Some(style) = styles.get(style_id) else {
                     buf.clear();
                     continue;
                 };
                 if let Some(position) =
                     xml_attr_value(&reader, &element, b"r").and_then(|reference| xlsx_cell_ref_position(&reference))
                 {
-                    kinds.insert(position, kind);
+                    if style.temporal_kind.is_some() || text_columns.contains(&position.1) {
+                        cell_styles.insert(position, style.clone());
+                    }
                 }
             }
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(error.to_string()),
             _ => {}
         }
         buf.clear();
     }
-    kinds
+    Ok(cell_styles)
 }
 
 fn read_xlsx_zip_text(zip: &mut zip::ZipArchive<File>, path: &str) -> Result<String, String> {
@@ -1135,12 +1190,16 @@ fn read_xlsx_zip_text(zip: &mut zip::ZipArchive<File>, path: &str) -> Result<Str
     Ok(content)
 }
 
-fn xlsx_temporal_cell_kinds(path: &str, sheet_name: &str) -> Result<HashMap<(usize, usize), XlsxTemporalKind>, String> {
+fn xlsx_cell_styles(
+    path: &str,
+    sheet_name: &str,
+    text_columns: &HashSet<usize>,
+) -> Result<HashMap<(usize, usize), XlsxCellStyle>, String> {
     let file = File::open(path).map_err(|err| err.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|err| err.to_string())?;
     let styles_xml = read_xlsx_zip_text(&mut zip, "xl/styles.xml").unwrap_or_default();
-    let style_kinds = parse_xlsx_style_temporal_kinds(&styles_xml);
-    if style_kinds.is_empty() {
+    let styles = parse_xlsx_styles(&styles_xml);
+    if styles.is_empty() {
         return Ok(HashMap::new());
     }
 
@@ -1149,14 +1208,30 @@ fn xlsx_temporal_cell_kinds(path: &str, sheet_name: &str) -> Result<HashMap<(usi
     let Some(sheet_path) = xlsx_sheet_path_for_name(&workbook_xml, &rels_xml, sheet_name) else {
         return Ok(HashMap::new());
     };
-    let sheet_xml = read_xlsx_zip_text(&mut zip, &sheet_path)?;
-    Ok(parse_xlsx_sheet_temporal_kinds(&sheet_xml, &style_kinds))
+    let sheet = zip.by_name(&sheet_path).map_err(|error| error.to_string())?;
+    parse_xlsx_sheet_cell_styles(BufReader::new(sheet), &styles, text_columns)
+}
+
+fn is_legacy_xls_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xls"))
 }
 
 pub fn parse_xlsx_file_with_options(
     path: &str,
     options: &TableImportParseOptions,
     preview_limit: usize,
+) -> Result<ParsedImportFile, String> {
+    parse_xlsx_file_with_options_and_text_columns(path, options, preview_limit, &HashSet::new())
+}
+
+fn parse_xlsx_file_with_options_and_text_columns(
+    path: &str,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+    text_source_columns: &HashSet<String>,
 ) -> Result<ParsedImportFile, String> {
     let mut workbook = open_workbook_auto(path).map_err(|e| e.to_string())?;
     let sheet_names = workbook.sheet_names().to_vec();
@@ -1170,11 +1245,38 @@ pub fn parse_xlsx_file_with_options(
     } else {
         sheet_names.first().cloned().ok_or_else(|| "Workbook has no sheets".to_string())?
     };
-    let temporal_cell_kinds = xlsx_temporal_cell_kinds(path, &sheet_name).unwrap_or_default();
     let range = workbook.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
     let (range_start_row, range_start_column) =
         range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
     let row_range = effective_import_row_range(options)?;
+    let mut style_selection_columns = Vec::new();
+    for (index, source_row) in range.rows().enumerate() {
+        let row_number = index + 1;
+        if row_range.title_row == Some(row_number) {
+            style_selection_columns = source_row
+                .iter()
+                .enumerate()
+                .map(|(index, cell)| normalize_header(&xlsx_cell_label(cell), index))
+                .collect();
+            break;
+        }
+        let row_is_within_range = match row_range.last_data_row {
+            Some(last) => row_number <= last,
+            None => true,
+        };
+        if row_number >= row_range.data_start_row && row_is_within_range {
+            style_selection_columns = (0..source_row.len()).map(|index| format!("column_{}", index + 1)).collect();
+            break;
+        }
+    }
+    let text_worksheet_columns = style_selection_columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| text_source_columns.contains(column).then_some(range_start_column + index + 1))
+        .collect::<HashSet<_>>();
+    let legacy_xls = is_legacy_xls_path(path);
+    let cell_styles =
+        if legacy_xls { HashMap::new() } else { xlsx_cell_styles(path, &sheet_name, &text_worksheet_columns)? };
     let mut columns = Vec::new();
     let mut rows = Vec::new();
     let mut total_rows = 0;
@@ -1188,7 +1290,10 @@ pub fn parse_xlsx_file_with_options(
                     // Calamine rows are relative to the used range, while XLSX style coordinates are worksheet-absolute.
                     let cell_position = (range_start_row + row_number, range_start_column + index + 1);
                     normalize_header(
-                        &xlsx_cell_label_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied()),
+                        &xlsx_cell_label_with_temporal_kind(
+                            cell,
+                            cell_styles.get(&cell_position).and_then(|style| style.temporal_kind),
+                        ),
                         index,
                     )
                 })
@@ -1209,16 +1314,27 @@ pub fn parse_xlsx_file_with_options(
             continue;
         }
         let mut row = Vec::with_capacity(columns.len());
-        for index in 0..columns.len() {
+        for (index, column) in columns.iter().enumerate() {
             let cell_position = (range_start_row + row_number, range_start_column + index + 1);
-            row.push(
-                source_row
-                    .get(index)
-                    .map(|cell| {
-                        xlsx_cell_value_with_temporal_kind(cell, temporal_cell_kinds.get(&cell_position).copied())
-                    })
-                    .unwrap_or(serde_json::Value::Null),
-            );
+            let style = cell_styles.get(&cell_position);
+            let value = source_row
+                .get(index)
+                .map(|cell| {
+                    if text_source_columns.contains(column) {
+                        if legacy_xls && matches!(cell, Data::Float(_) | Data::Int(_)) {
+                            return Err(format!(
+                                "Legacy .xls files cannot preserve numeric display formatting for text target column '{column}'. Save the workbook as .xlsx or map this source column to a numeric target."
+                            ));
+                        }
+                        if let Some(text) = xlsx_cell_text_value(cell, style) {
+                            return Ok(serde_json::Value::String(text));
+                        }
+                    }
+                    Ok(xlsx_cell_value_with_temporal_kind(cell, style.and_then(|style| style.temporal_kind)))
+                })
+                .transpose()?
+                .unwrap_or(serde_json::Value::Null);
+            row.push(value);
         }
         rows.push(row);
     }
@@ -1257,6 +1373,16 @@ pub async fn parse_import_file_with_options(
     options: &TableImportParseOptions,
     preview_limit: usize,
 ) -> Result<ParsedImportFile, String> {
+    parse_import_file_with_options_and_text_columns(path, source_format, options, preview_limit, HashSet::new()).await
+}
+
+async fn parse_import_file_with_options_and_text_columns(
+    path: &str,
+    source_format: Option<TableImportSourceFormat>,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+    text_source_columns: HashSet<String>,
+) -> Result<ParsedImportFile, String> {
     let format = effective_source_format(path, source_format)?;
     ensure_non_streaming_file_size(path, format)?;
     match format {
@@ -1276,9 +1402,11 @@ pub async fn parse_import_file_with_options(
         TableImportSourceFormat::Excel => {
             let path = path.to_string();
             let options = options.clone();
-            tokio::task::spawn_blocking(move || parse_xlsx_file_with_options(&path, &options, preview_limit))
-                .await
-                .map_err(|e| e.to_string())?
+            tokio::task::spawn_blocking(move || {
+                parse_xlsx_file_with_options_and_text_columns(&path, &options, preview_limit, &text_source_columns)
+            })
+            .await
+            .map_err(|e| e.to_string())?
         }
     }
 }
@@ -1393,7 +1521,7 @@ fn build_import_insert_batch_from_rows_with_format(
                 .enumerate()
                 .map(|(target_index, (source_index, _))| {
                     let value = row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null);
-                    normalize_import_temporal_value(
+                    normalize_import_value(
                         &value,
                         column_types.get(target_index).and_then(|data_type| data_type.as_deref()),
                         db_type,
@@ -1424,6 +1552,76 @@ fn normalize_import_temporal_value(
         if oracle_date_time { Some("datetime") } else { data_type },
         date_time_format,
     )
+}
+
+fn is_textual_import_target_type(data_type: &str) -> bool {
+    let mut lower = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    loop {
+        let unwrapped = ["nullable", "lowcardinality"].iter().find_map(|wrapper| {
+            lower
+                .strip_prefix(&format!("{wrapper}("))
+                .and_then(|inner| inner.strip_suffix(')'))
+                .map(|inner| inner.trim().to_string())
+        });
+        match unwrapped {
+            Some(inner) => lower = inner,
+            None => break,
+        }
+    }
+    if lower == "long raw" || lower.starts_with("long raw(") {
+        return false;
+    }
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(
+        base,
+        "char"
+            | "character"
+            | "varchar"
+            | "varchar2"
+            | "nvarchar"
+            | "nvarchar2"
+            | "nchar"
+            | "string"
+            | "fixedstring"
+            | "sysname"
+            | "long"
+            | "text"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "ntext"
+            | "clob"
+            | "nclob"
+            | "enum"
+            | "set"
+    ) || lower.starts_with("character varying")
+}
+
+fn textual_source_columns_for_import(
+    mappings: &[TableImportColumnMapping],
+    target_column_types: &[(String, String)],
+) -> HashSet<String> {
+    mappings
+        .iter()
+        .filter(|mapping| {
+            target_column_types
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&mapping.target_column))
+                .map(|(_, data_type)| data_type.as_str())
+                .or(mapping.target_data_type.as_deref())
+                .is_some_and(is_textual_import_target_type)
+        })
+        .map(|mapping| mapping.source_column.clone())
+        .collect()
+}
+
+fn normalize_import_value(
+    value: &serde_json::Value,
+    data_type: Option<&str>,
+    db_type: &DatabaseType,
+    date_time_format: Option<&str>,
+) -> serde_json::Value {
+    normalize_import_temporal_value(value, data_type, db_type, date_time_format)
 }
 
 pub fn build_import_insert_batches(
@@ -1458,17 +1656,6 @@ fn build_import_insert_batches_with_format(
     batch_size: usize,
     date_time_format: Option<&str>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
-    if *db_type == DatabaseType::CloudflareD1 {
-        return crate::db::cloudflare_d1::build_import_insert_batches(
-            &data.rows,
-            &data.columns,
-            mappings,
-            target_column_types,
-            table,
-            schema,
-            batch_size.clamp(1, 100),
-        );
-    }
     let mapped = mapping_indexes(data, mappings)?;
     let columns = mapped.iter().map(|(_, target)| target.clone()).collect::<Vec<_>>();
     let column_types = columns
@@ -1480,6 +1667,17 @@ fn build_import_insert_batches_with_format(
                 .map(|(_, data_type)| data_type.clone())
         })
         .collect::<Vec<_>>();
+    if *db_type == DatabaseType::CloudflareD1 {
+        return crate::db::cloudflare_d1::build_import_insert_batches(
+            &data.rows,
+            &data.columns,
+            mappings,
+            target_column_types,
+            table,
+            schema,
+            batch_size.clamp(1, 100),
+        );
+    }
     // Drivers without multi-row VALUES support still benefit from the agent
     // batching the generated single-row statements during execution.
     let batch_size = if supports_multi_row_insert_values(db_type) { batch_size.max(1) } else { 1 };
@@ -1494,7 +1692,7 @@ fn build_import_insert_batches_with_format(
                     .enumerate()
                     .map(|(target_index, (source_index, _))| {
                         let value = row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null);
-                        normalize_import_temporal_value(
+                        normalize_import_value(
                             &value,
                             column_types.get(target_index).and_then(|data_type| data_type.as_deref()),
                             db_type,
@@ -2085,9 +2283,7 @@ where
             pending_rows.push(delimited_record_to_row(&record, columns.len(), config));
         }
 
-        let mut source_row_number = config.row_range.data_start_row;
-        for record in reader.records() {
-            source_row_number += 1;
+        for (source_row_number, record) in (config.row_range.data_start_row.saturating_add(1)..).zip(reader.records()) {
             if config.row_range.last_data_row.is_some_and(|last| source_row_number > last) {
                 break;
             }
@@ -2203,11 +2399,30 @@ where
         return Ok(TableImportSummary { import_id: request.import_id.clone(), rows_imported, total_rows });
     }
 
-    let parsed = match parse_import_file_with_options(
+    let mut target_column_types = get_columns_for_transfer(
+        state,
+        pool_key,
+        &request.connection_id,
+        &request.database,
+        &request.schema,
+        &request.table,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|column| (column.name, column.data_type))
+    .collect::<Vec<_>>();
+    if target_column_types.is_empty() {
+        target_column_types = created_column_types.clone().unwrap_or_default();
+    }
+    let text_source_columns = textual_source_columns_for_import(&request.mappings, &target_column_types);
+
+    let parsed = match parse_import_file_with_options_and_text_columns(
         &request.file_path,
         Some(source_format),
         &request.parse_options,
         usize::MAX,
+        text_source_columns,
     )
     .await
     {
@@ -2228,23 +2443,6 @@ where
         total_rows,
         error: None,
     });
-
-    let mut target_column_types = get_columns_for_transfer(
-        state,
-        pool_key,
-        &request.connection_id,
-        &request.database,
-        &request.schema,
-        &request.table,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|column| (column.name, column.data_type))
-    .collect::<Vec<_>>();
-    if target_column_types.is_empty() {
-        target_column_types = created_column_types.clone().unwrap_or_default();
-    }
 
     let batches = match build_import_insert_batches_with_format(
         &parsed,
@@ -2319,12 +2517,13 @@ mod tests {
         zip.write_all(content.as_bytes()).unwrap();
     }
 
-    fn build_temporal_test_xlsx(date1904: bool, cells: &[(&str, usize, f64)]) -> Vec<u8> {
+    fn build_styled_test_xlsx<S: AsRef<str>>(date1904: bool, cells: &[(S, usize, f64)]) -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(cursor);
         let workbook_pr = if date1904 { r#"<workbookPr date1904="1"/>"# } else { "" };
         let mut rows = std::collections::BTreeMap::<usize, String>::new();
         for (reference, style_id, value) in cells {
+            let reference = reference.as_ref();
             let (row, _) = xlsx_cell_ref_position(reference).expect("valid XLSX cell reference");
             rows.entry(row).or_default().push_str(&format!(r#"<c r="{reference}" s="{style_id}"><v>{value}</v></c>"#));
         }
@@ -2374,27 +2573,43 @@ mod tests {
         write_xlsx_test_entry(
             &mut zip,
             "xl/styles.xml",
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <numFmts count="4">
+  <numFmts count="12">
     <numFmt numFmtId="164" formatCode="yyyy-mm-dd"/>
     <numFmt numFmtId="165" formatCode="yyyy-mm-dd hh:mm:ss"/>
     <numFmt numFmtId="166" formatCode="hh:mm:ss"/>
     <numFmt numFmtId="167" formatCode="[h]:mm:ss"/>
+    <numFmt numFmtId="168" formatCode="0.0"/>
+    <numFmt numFmtId="169" formatCode="0.00"/>
+    <numFmt numFmtId="170" formatCode="00000"/>
+    <numFmt numFmtId="171" formatCode="#,##0.00"/>
+    <numFmt numFmtId="172" formatCode="0.00E+00"/>
+    <numFmt numFmtId="173" formatCode="0.0%"/>
+    <numFmt numFmtId="174" formatCode="[$€-407]#,##0.00"/>
+    <numFmt numFmtId="175" formatCode="[$-409]#,##0.00"/>
   </numFmts>
   <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
   <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="5">
+  <cellXfs count="13">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
     <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="168" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="169" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="170" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="171" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="172" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="173" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="174" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="175" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>"#,
+</styleSheet>"##,
         );
         write_xlsx_test_entry(
             &mut zip,
@@ -2408,6 +2623,145 @@ mod tests {
         );
 
         zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn retains_only_temporal_and_text_target_xlsx_styles() {
+        let styles = vec![
+            XlsxCellStyle { temporal_kind: None, number_format: Some(Arc::from("0.00")) },
+            XlsxCellStyle { temporal_kind: Some(XlsxTemporalKind::Date), number_format: None },
+        ];
+        let sheet = r#"<worksheet><sheetData><row r="1">
+            <c r="A1" s="0"><v>10</v></c>
+            <c r="B1" s="0"><v>20</v></c>
+            <c r="C1" s="1"><v>45996</v></c>
+        </row></sheetData></worksheet>"#;
+
+        let retained =
+            parse_xlsx_sheet_cell_styles(Cursor::new(sheet.as_bytes()), &styles, &HashSet::from([2])).unwrap();
+
+        assert_eq!(retained.len(), 2);
+        assert!(!retained.contains_key(&(1, 1)));
+        assert_eq!(retained.get(&(1, 2)).and_then(|style| style.number_format.as_deref()), Some("0.00"));
+        assert_eq!(retained.get(&(1, 3)).and_then(|style| style.temporal_kind), Some(XlsxTemporalKind::Date));
+    }
+
+    #[test]
+    fn legacy_xls_rejects_numeric_to_text_without_affecting_numeric_targets() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-formatted-{}.xls", uuid::Uuid::new_v4()));
+        std::fs::write(&path, include_bytes!("../tests/fixtures/issue3683-formatted-numbers.xls")).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        let numeric =
+            parse_xlsx_file_with_options_and_text_columns(&path.to_string_lossy(), &options, 10, &HashSet::new())
+                .unwrap();
+        let values = numeric.rows[0].iter().map(|value| value.as_f64()).collect::<Vec<_>>();
+        assert_eq!(values, vec![Some(10.0), Some(42.0), Some(0.125), Some(1234.5), Some(99.5)]);
+
+        for column in 1..=4 {
+            let source_column = format!("column_{column}");
+            let error = parse_xlsx_file_with_options_and_text_columns(
+                &path.to_string_lossy(),
+                &options,
+                10,
+                &HashSet::from([source_column.clone()]),
+            )
+            .unwrap_err();
+            assert!(error.contains("Legacy .xls"), "{error}");
+            assert!(error.contains(&source_column), "{error}");
+            assert!(error.contains("Save the workbook as .xlsx"), "{error}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_process_rss_kib(pid: u32) -> Option<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:")?.split_ascii_whitespace().next()?.parse::<u64>().ok())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xlsx_style_rss_helper() {
+        let Ok(sheet_path) = std::env::var("DBX_XLSX_STYLE_RSS_PATH") else {
+            return;
+        };
+        let ready_path = std::env::var("DBX_XLSX_STYLE_RSS_READY").unwrap();
+        let go_path = std::env::var("DBX_XLSX_STYLE_RSS_GO").unwrap();
+        std::fs::write(&ready_path, b"ready").unwrap();
+        while !Path::new(&go_path).exists() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let styles = [XlsxCellStyle { temporal_kind: None, number_format: Some(Arc::from("0.00")) }];
+        let sheet = BufReader::new(File::open(sheet_path).unwrap());
+        let retained = parse_xlsx_sheet_cell_styles(sheet, &styles, &HashSet::new()).unwrap();
+        assert!(retained.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn streaming_xlsx_style_scan_keeps_peak_rss_bounded() {
+        const ROWS: usize = 120_000;
+        const COLUMNS: usize = 8;
+        const MAX_RSS_GROWTH_KIB: u64 = 48 * 1024;
+
+        let suffix = uuid::Uuid::new_v4();
+        let sheet_path = std::env::temp_dir().join(format!("dbx-xlsx-style-rss-{suffix}.xml"));
+        let ready_path = std::env::temp_dir().join(format!("dbx-xlsx-style-rss-{suffix}.ready"));
+        let go_path = std::env::temp_dir().join(format!("dbx-xlsx-style-rss-{suffix}.go"));
+        let mut sheet = std::io::BufWriter::new(File::create(&sheet_path).unwrap());
+        write!(sheet, "<worksheet><sheetData>").unwrap();
+        for row in 1..=ROWS {
+            write!(sheet, "<row r=\"{row}\">").unwrap();
+            for column in 0..COLUMNS {
+                let column_name = (b'A' + column as u8) as char;
+                write!(sheet, "<c r=\"{column_name}{row}\" s=\"0\"><v>{row}</v></c>").unwrap();
+            }
+            write!(sheet, "</row>").unwrap();
+        }
+        write!(sheet, "</sheetData></worksheet>").unwrap();
+        sheet.flush().unwrap();
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "table_import::tests::xlsx_style_rss_helper", "--nocapture"])
+            .env("DBX_XLSX_STYLE_RSS_PATH", &sheet_path)
+            .env("DBX_XLSX_STYLE_RSS_READY", &ready_path)
+            .env("DBX_XLSX_STYLE_RSS_GO", &go_path)
+            .spawn()
+            .unwrap();
+        for _ in 0..10_000 {
+            if ready_path.exists() {
+                break;
+            }
+            assert!(child.try_wait().unwrap().is_none(), "RSS helper exited before becoming ready");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(ready_path.exists(), "RSS helper did not become ready");
+        let baseline_rss = linux_process_rss_kib(child.id()).expect("helper RSS before scan");
+        std::fs::write(&go_path, b"go").unwrap();
+        let mut peak_rss = baseline_rss;
+        let status = loop {
+            if let Some(rss) = linux_process_rss_kib(child.id()) {
+                peak_rss = peak_rss.max(rss);
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+
+        let _ = std::fs::remove_file(&sheet_path);
+        let _ = std::fs::remove_file(&ready_path);
+        let _ = std::fs::remove_file(&go_path);
+        assert!(status.success());
+        assert!(
+            peak_rss.saturating_sub(baseline_rss) <= MAX_RSS_GROWTH_KIB,
+            "streaming style scan RSS grew by {} KiB (baseline {baseline_rss} KiB, peak {peak_rss} KiB)",
+            peak_rss.saturating_sub(baseline_rss)
+        );
     }
 
     #[test]
@@ -2706,6 +3060,18 @@ mod tests {
         assert_eq!(xlsx_sheet_names(&path.to_string_lossy()).unwrap(), vec!["First", "Second"]);
         assert_eq!(parsed.columns, vec!["name"]);
         assert_eq!(parsed.rows, vec![vec![serde_json::json!("Ada")]]);
+        assert_eq!(
+            mapping_indexes(
+                &parsed,
+                &[TableImportColumnMapping {
+                    source_column: "name".to_string(),
+                    target_column: "display_name".to_string(),
+                    target_data_type: None,
+                }],
+            )
+            .unwrap(),
+            vec![(0, "display_name".to_string())]
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -2726,11 +3092,242 @@ mod tests {
     }
 
     #[test]
+    fn keeps_excel_numeric_and_text_cell_types_distinct() {
+        let integer_valued_float = xlsx_cell_value(&Data::Float(10_401_029_008.0));
+        assert_eq!(integer_valued_float, serde_json::json!(10_401_029_008.0));
+        assert_eq!(infer_value_type(&integer_valued_float), Some(ImportInferredType::Decimal));
+        assert_eq!(xlsx_cell_value(&Data::Float(10_401_029_008.5)), serde_json::json!(10_401_029_008.5));
+        assert_eq!(xlsx_cell_value(&Data::Float(9_007_199_254_740_992.0)), serde_json::json!(9_007_199_254_740_992.0));
+        for text in ["10.0", "00123", "1e3", "10401029008.0"] {
+            assert_eq!(xlsx_cell_value(&Data::String(text.to_string())), serde_json::json!(text));
+        }
+    }
+
+    #[test]
+    fn renders_common_excel_numeric_display_formats() {
+        let display = |value, format_code: &str| {
+            xlsx_numeric_display_text(
+                value,
+                Some(&XlsxCellStyle { temporal_kind: None, number_format: Some(Arc::from(format_code)) }),
+            )
+        };
+
+        assert_eq!(display(42.0, "00000"), "00042");
+        assert_eq!(display(1234.5, "#,##0.00"), "1,234.50");
+        assert_eq!(display(1234.0, "0.00E+00"), "1.23E+03");
+        assert_eq!(display(0.125, "0.0%"), "12.5%");
+        assert_eq!(display(1234.5, "[$€-407]#,##0.00"), "€1.234,50");
+        assert_eq!(display(1234.5, "[$-407]#,##0.00"), "1.234,50");
+        assert_eq!(display(1234.5, "[$-409]#,##0.00"), "1,234.50");
+        assert_eq!(display(12.5, "["), "12.5");
+    }
+
+    #[test]
+    fn formats_only_excel_columns_mapped_to_text_targets() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-display-formats-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            build_styled_test_xlsx(
+                false,
+                &[
+                    ("A1", 7, 42.0),
+                    ("B1", 8, 1234.5),
+                    ("C1", 9, 1234.0),
+                    ("D1", 10, 0.125),
+                    ("E1", 11, 1234.5),
+                    ("F1", 12, 1234.5),
+                    ("G1", 6, 10.0),
+                ],
+            ),
+        )
+        .unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let text_source_columns = (1..=6).map(|index| format!("column_{index}")).collect::<HashSet<_>>();
+
+        let parsed =
+            parse_xlsx_file_with_options_and_text_columns(&path.to_string_lossy(), &options, 10, &text_source_columns)
+                .unwrap();
+
+        assert_eq!(
+            parsed.rows[0],
+            vec![
+                serde_json::json!("00042"),
+                serde_json::json!("1,234.50"),
+                serde_json::json!("1.23E+03"),
+                serde_json::json!("12.5%"),
+                serde_json::json!("€1.234,50"),
+                serde_json::json!("1,234.50"),
+                serde_json::json!(10.0),
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recognizes_supported_textual_import_target_types() {
+        for data_type in [
+            "FixedString(32)",
+            "Nullable(FixedString(32))",
+            "LowCardinality(String)",
+            "sysname",
+            "LONG",
+            "LONG VARCHAR",
+        ] {
+            assert!(is_textual_import_target_type(data_type), "{data_type}");
+        }
+        for data_type in ["LONG RAW", "BIGINT", "Nullable(Float64)"] {
+            assert!(!is_textual_import_target_type(data_type), "{data_type}");
+        }
+    }
+
+    #[test]
+    fn selects_excel_display_conversion_only_for_textual_mappings() {
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "code_source".to_string(),
+                target_column: "code".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "amount_source".to_string(),
+                target_column: "amount".to_string(),
+                target_data_type: None,
+            },
+        ];
+
+        let selected = textual_source_columns_for_import(
+            &mappings,
+            &[("code".to_string(), "varchar(32)".to_string()), ("amount".to_string(), "double".to_string())],
+        );
+
+        assert_eq!(selected, HashSet::from(["code_source".to_string()]));
+    }
+
+    #[test]
+    fn clickhouse_fixed_string_import_uses_excel_numeric_display_text() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-fixed-string-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_styled_test_xlsx(false, &[("A1", 5, 10.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "column_1".to_string(),
+            target_column: "code".to_string(),
+            target_data_type: None,
+        }];
+        let target_column_types = [("code".to_string(), "FixedString(16)".to_string())];
+        let text_source_columns = textual_source_columns_for_import(&mappings, &target_column_types);
+
+        let data =
+            parse_xlsx_file_with_options_and_text_columns(&path.to_string_lossy(), &options, 10, &text_source_columns)
+                .unwrap();
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &target_column_types,
+            "issue_3683_fixed_string",
+            "",
+            &DatabaseType::ClickHouse,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(text_source_columns, HashSet::from(["column_1".to_string()]));
+        assert_eq!(data.rows, vec![vec![serde_json::json!("10.0")]]);
+        assert_eq!(batches[0].sql, "INSERT INTO `issue_3683_fixed_string` (`code`) VALUES\n('10.0')");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mysql_varchar_import_uses_excel_numeric_display_text() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-number-format-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            build_styled_test_xlsx(false, &[("A1", 0, 10_401_029_008.0), ("A2", 5, 10.0), ("A3", 6, 10.0)]),
+        )
+        .unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let numeric_data = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let mut data = parse_xlsx_file_with_options_and_text_columns(
+            &path.to_string_lossy(),
+            &options,
+            10,
+            &HashSet::from(["column_1".to_string()]),
+        )
+        .unwrap();
+        data.rows.extend([
+            vec![serde_json::json!("10.0")],
+            vec![serde_json::json!("00123")],
+            vec![serde_json::json!("1e3")],
+            vec![serde_json::json!("10401029008.0")],
+        ]);
+        data.total_rows = data.rows.len();
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "column_1".to_string(),
+            target_column: "code".to_string(),
+            target_data_type: None,
+        }];
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("code".to_string(), "varchar(32)".to_string())],
+            "issue_3683",
+            "",
+            &DatabaseType::Mysql,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches[0].sql,
+            "INSERT INTO `issue_3683` (`code`) VALUES\n('10401029008'),\n('10.0'),\n('10.00'),\n('10.0'),\n('00123'),\n('1e3'),\n('10401029008.0')"
+        );
+        assert!(data.rows[..3].iter().all(|row| row[0].as_str().is_some()));
+        assert!(numeric_data.rows.iter().all(|row| row[0].as_f64().is_some()));
+
+        let numeric_batches = build_import_insert_batches(
+            &numeric_data,
+            &mappings,
+            &[("code".to_string(), "double".to_string())],
+            "issue_3683_numeric",
+            "",
+            &DatabaseType::Mysql,
+            500,
+        )
+        .unwrap();
+        assert!(numeric_batches[0].sql.contains("(10401029008.0),\n(10.0),\n(10.0)"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn excel_integer_sample_keeps_decimal_create_table_inference() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-inference-{}.xlsx", uuid::Uuid::new_v4()));
+        let cells = (1..=101)
+            .map(|row| (format!("A{row}"), 0, if row == 101 { 100.5 } else { row as f64 }))
+            .collect::<Vec<_>>();
+        std::fs::write(&path, build_styled_test_xlsx(false, &cells)).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let data =
+            parse_xlsx_file_with_options(&path.to_string_lossy(), &options, CREATE_TABLE_INFERENCE_ROWS).unwrap();
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "column_1".to_string(),
+            target_column: "amount".to_string(),
+            target_data_type: None,
+        }];
+
+        let plan = build_import_create_table_plan(&data, &mappings, "measurements", "", &DatabaseType::Mysql).unwrap();
+
+        assert_eq!(data.total_rows, 101);
+        assert_eq!(data.rows.len(), CREATE_TABLE_INFERENCE_ROWS);
+        assert_eq!(plan.columns[0].data_type, "DOUBLE");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn parses_excel_temporal_styles_before_type_inference() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-{}.xlsx", uuid::Uuid::new_v4()));
         std::fs::write(
             &path,
-            build_temporal_test_xlsx(false, &[("A1", 1, 45996.0), ("B1", 2, 45996.0), ("C1", 3, 0.5), ("D1", 4, 1.5)]),
+            build_styled_test_xlsx(false, &[("A1", 1, 45996.0), ("B1", 2, 45996.0), ("C1", 3, 0.5), ("D1", 4, 1.5)]),
         )
         .unwrap();
         let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
@@ -2757,7 +3354,7 @@ mod tests {
     #[test]
     fn parses_excel_temporal_styles_with_1904_date_system() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-1904-{}.xlsx", uuid::Uuid::new_v4()));
-        std::fs::write(&path, build_temporal_test_xlsx(true, &[("A1", 1, 1.0)])).unwrap();
+        std::fs::write(&path, build_styled_test_xlsx(true, &[("A1", 1, 1.0)])).unwrap();
         let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
 
         let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
@@ -2770,7 +3367,7 @@ mod tests {
     #[test]
     fn parses_excel_temporal_styles_from_non_a1_used_range() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-temporal-offset-{}.xlsx", uuid::Uuid::new_v4()));
-        std::fs::write(&path, build_temporal_test_xlsx(false, &[("C3", 1, 45996.0), ("D3", 2, 45996.0)])).unwrap();
+        std::fs::write(&path, build_styled_test_xlsx(false, &[("C3", 1, 45996.0), ("D3", 2, 45996.0)])).unwrap();
         let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
 
         let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();

@@ -104,6 +104,78 @@ pub fn is_production_database(config: &ConnectionConfig, database: &str) -> bool
                 .any(|name| normalize_database_name(name) == normalize_database_name(database)))
 }
 
+/// Returns whether a MongoDB aggregation write stage targets production scope.
+/// `$out` and `$merge` can name a database different from the pipeline's source
+/// database, so checking only the selected database is insufficient.
+pub fn mongo_pipeline_targets_production_database(
+    config: &ConnectionConfig,
+    active_database: &str,
+    pipeline_json: &str,
+) -> bool {
+    if is_production_database(config, active_database) {
+        return true;
+    }
+
+    let Ok(serde_json::Value::Array(stages)) = serde_json::from_str::<serde_json::Value>(pipeline_json) else {
+        return true;
+    };
+    let mut has_write_stage = false;
+    let mut uncertain = false;
+    let mut targets = HashSet::new();
+
+    for stage in stages {
+        let Some(document) = stage.as_object() else {
+            continue;
+        };
+        if let Some(target) = document.get("$out") {
+            has_write_stage = true;
+            match target {
+                serde_json::Value::String(_) => {
+                    add_mongo_current_database(&mut targets, &mut uncertain, active_database)
+                }
+                serde_json::Value::Object(target) => match target.get("db").and_then(serde_json::Value::as_str) {
+                    Some(database) if !database.trim().is_empty() => {
+                        targets.insert(database.to_string());
+                    }
+                    _ => uncertain = true,
+                },
+                _ => uncertain = true,
+            }
+        }
+        if let Some(target) = document.get("$merge") {
+            has_write_stage = true;
+            match target {
+                serde_json::Value::String(_) => {
+                    add_mongo_current_database(&mut targets, &mut uncertain, active_database)
+                }
+                serde_json::Value::Object(target) => match target.get("into") {
+                    Some(serde_json::Value::String(_)) => {
+                        add_mongo_current_database(&mut targets, &mut uncertain, active_database)
+                    }
+                    Some(serde_json::Value::Object(into)) => match into.get("db").and_then(serde_json::Value::as_str) {
+                        Some(database) if !database.trim().is_empty() => {
+                            targets.insert(database.to_string());
+                        }
+                        _ => uncertain = true,
+                    },
+                    _ => uncertain = true,
+                },
+                _ => uncertain = true,
+            }
+        }
+    }
+
+    has_write_stage && (uncertain || targets.iter().any(|database| is_production_database(config, database)))
+}
+
+fn add_mongo_current_database(targets: &mut HashSet<String>, uncertain: &mut bool, active_database: &str) {
+    if active_database.trim().is_empty() {
+        *uncertain = true;
+    } else {
+        targets.insert(active_database.to_string());
+    }
+}
+
 /// Returns whether a non-read SQL statement targets production scope.
 ///
 /// Agent execution already classifies SQL risk with `sql_risk`; this function
@@ -144,6 +216,7 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
             .filter(|value| !value.is_empty())
         {
             use_database = database;
+            assessment.databases.insert(use_database.clone());
             continue;
         }
 
@@ -407,7 +480,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             continue;
         }
         if ch == '/' && next == Some('*') {
-            if let Some((body, close_index)) = mysql_executable_comment_body(&chars, index) {
+            if let Some((body, close_index)) = mysql_executable_comment_body(chars, index) {
                 result.text.push(' ');
                 let body_chars: Vec<char> = body.chars().collect();
                 append_sql_target_safety_text(&body_chars, result);
@@ -423,7 +496,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             }
             continue;
         }
-        if let Some((tag, tag_len)) = dollar_quote_tag_at(&chars, index) {
+        if let Some((tag, tag_len)) = dollar_quote_tag_at(chars, index) {
             index += tag_len;
             while index + tag_len <= chars.len() && !chars[index..index + tag_len].iter().collect::<String>().eq(&tag) {
                 index += 1;
@@ -433,7 +506,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             continue;
         }
         if ch == '\'' {
-            index = skip_string_literal(&chars, index, '\'', '\'');
+            index = skip_string_literal(chars, index, '\'', '\'');
             result.text.push(' ');
             continue;
         }
@@ -547,7 +620,7 @@ fn append_quoted_identifier_token(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_production_database, targets_production_database};
+    use super::{is_production_database, mongo_pipeline_targets_production_database, targets_production_database};
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use serde::Deserialize;
 
@@ -649,6 +722,7 @@ mod tests {
             "staging",
             "SELECT * FROM prod_app.users; DELETE FROM staging.users WHERE id = 1"
         ));
+        assert!(targets_production_database(&config(), "staging", "USE prod_app"));
     }
 
     #[test]
@@ -685,5 +759,41 @@ mod tests {
 
         assert!(targets_production_database(&sqlserver, "staging", "DELETE FROM prod_app.dbo.users WHERE id = 1"));
         assert!(!targets_production_database(&sqlserver, "staging", "DELETE FROM prod_app.users WHERE id = 1"));
+    }
+
+    #[test]
+    fn detects_cross_database_mongo_aggregate_write_targets() {
+        let mut mongo = config();
+        mongo.db_type = DatabaseType::MongoDb;
+        mongo.database = Some("staging".to_string());
+        mongo.production_databases = vec!["production".to_string()];
+
+        assert!(mongo_pipeline_targets_production_database(
+            &mongo,
+            "staging",
+            r#"[{"$out":{"db":"production","coll":"copied"}}]"#
+        ));
+        assert!(mongo_pipeline_targets_production_database(
+            &mongo,
+            "staging",
+            r#"[{"$merge":{"into":{"db":"production","coll":"copied"}}}]"#
+        ));
+        assert!(!mongo_pipeline_targets_production_database(&mongo, "staging", r#"[{"$out":"copied"}]"#));
+        assert!(mongo_pipeline_targets_production_database(&mongo, "production", r#"[{"$merge":{"into":"copied"}}]"#));
+    }
+
+    #[test]
+    fn fails_closed_for_indeterminate_mongo_aggregate_write_targets() {
+        let mut mongo = config();
+        mongo.db_type = DatabaseType::MongoDb;
+        mongo.database = None;
+        mongo.production_databases = vec!["production".to_string()];
+
+        assert!(mongo_pipeline_targets_production_database(&mongo, "", r#"[{"$out":"copied"}]"#));
+        assert!(mongo_pipeline_targets_production_database(
+            &mongo,
+            "staging",
+            r#"[{"$merge":{"whenMatched":"replace"}}]"#
+        ));
     }
 }

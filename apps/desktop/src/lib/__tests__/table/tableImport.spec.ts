@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { autoMapImportColumns, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, suggestImportTargetDataTypes, validateImportMappings } from "@/lib/table/tableImport";
+import { autoMapImportColumns, buildTableImportParseOptions, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, suggestImportTargetDataTypes, validateImportMappings } from "@/lib/table/tableImport";
 
 describe("tableImport", () => {
   it("auto maps exact and normalized column names", () => {
@@ -52,6 +52,22 @@ describe("tableImport", () => {
     expect(nextTableImportWizardStep("execution")).toBe("execution");
     expect(previousTableImportWizardStep("review")).toBe("mapping");
     expect(previousTableImportWizardStep("source")).toBe("source");
+  });
+
+  it("keeps the selected Excel worksheet in execution parse options", () => {
+    const baseSettings = {
+      delimiter: ",",
+      textEncoding: "auto" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      emptyStringAsNull: true,
+      jsonShape: "auto" as const,
+    };
+
+    expect(buildTableImportParseOptions({ ...baseSettings, format: "excel", sheetName: "Second" }).sheetName).toBe("Second");
+    expect(buildTableImportParseOptions({ ...baseSettings, format: "csv", sheetName: "Second" }).sheetName).toBeNull();
   });
 
   it("suggests create-table data types from preview rows", () => {

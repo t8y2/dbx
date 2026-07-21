@@ -33,11 +33,12 @@
   "highgo": "0.1.31",
   "yashandb": "0.1.29",
   "oscar": "0.1.8",
-  "xugu": "0.1.20",
+  "xugu": "0.1.21",
   "iris": "0.1.24",
   "iotdb": "0.1.21",
   "etcd": "0.1.21",
   "zookeeper": "0.1.11",
   "kafka": "0.1.4",
+  "rocketmq": "0.1.0",
   "sqlserver-legacy": "0.1.4"
 }

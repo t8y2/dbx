@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { Search, X } from "@lucide/vue";
+import { ChevronDown, ChevronUp, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -18,6 +18,7 @@ const searchText = defineModel<string>("text", { default: "" });
 const emit = defineEmits<{
   keydown: [event: KeyboardEvent];
   close: [];
+  navigate: [delta: number];
   acceptSuggestion: [index: number];
   hoverSuggestion: [index: number];
 }>();
@@ -27,6 +28,11 @@ const searchInput = ref<HTMLInputElement>();
 function onSuggestionMouseDown(event: MouseEvent, index: number) {
   event.preventDefault();
   emit("acceptSuggestion", index);
+}
+
+function keepSearchInputFocused(event: MouseEvent) {
+  // Pointer navigation should not move focus away from the search input; keyboard activation still uses click.
+  event.preventDefault();
 }
 
 defineExpose({
@@ -68,7 +74,31 @@ defineExpose({
       </div>
       <span v-if="props.matchCount > 0" class="text-xs text-muted-foreground shrink-0">{{ props.currentMatchIndex + 1 }}/{{ props.matchCount }}</span>
       <span v-else-if="props.hasDeferredSearchText" class="text-xs text-muted-foreground shrink-0">0</span>
-      <button type="button" class="text-muted-foreground hover:text-foreground shrink-0" @click="emit('close')"><X class="w-3.5 h-3.5" /></button>
+      <button
+        type="button"
+        class="text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:pointer-events-none shrink-0"
+        :disabled="props.matchCount === 0"
+        :title="t('search.prevMatch')"
+        :aria-label="t('search.prevMatch')"
+        @mousedown="keepSearchInputFocused"
+        @click="emit('navigate', -1)"
+      >
+        <ChevronUp class="w-3.5 h-3.5" />
+      </button>
+      <button
+        type="button"
+        class="text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:pointer-events-none shrink-0"
+        :disabled="props.matchCount === 0"
+        :title="t('search.nextMatch')"
+        :aria-label="t('search.nextMatch')"
+        @mousedown="keepSearchInputFocused"
+        @click="emit('navigate', 1)"
+      >
+        <ChevronDown class="w-3.5 h-3.5" />
+      </button>
+      <button type="button" class="text-muted-foreground hover:text-foreground shrink-0" :title="t('search.close')" :aria-label="t('search.close')" @click="emit('close')">
+        <X class="w-3.5 h-3.5" />
+      </button>
     </div>
   </Transition>
 </template>

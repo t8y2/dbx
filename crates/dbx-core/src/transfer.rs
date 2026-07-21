@@ -344,12 +344,7 @@ pub(crate) fn wrap_dameng_identity_insert_sql(insert_sql: &str, table: &str, sch
 
 pub(crate) fn wrap_dameng_identity_insert_sql_for_table(insert_sql: &str, full_table: &str) -> String {
     let trimmed = insert_sql.trim().trim_end_matches(';').trim();
-    format!(
-        "{};\n{};\n{};",
-        format!("SET IDENTITY_INSERT {full_table} ON"),
-        trimmed,
-        format!("SET IDENTITY_INSERT {full_table} OFF")
-    )
+    format!("SET IDENTITY_INSERT {full_table} ON;\n{trimmed};\nSET IDENTITY_INSERT {full_table} OFF;")
 }
 
 async fn execute_transfer_write_statement(
@@ -4139,7 +4134,7 @@ where
                 can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
             let ddl = if can_reuse_source_ddl {
                 let source_ddl = crate::schema::get_table_ddl_core(
-                    &state,
+                    state,
                     &request.source_connection_id,
                     &request.source_database,
                     &request.source_schema,
@@ -5222,19 +5217,13 @@ mod tests {
 
     #[test]
     fn transfer_create_table_result_treats_existing_table_as_preexisting() {
-        assert_eq!(
-            transfer_create_table_created(
-                Err("ERROR: relation \"items\" already exists (SQLSTATE 42P07)".to_string()),
-                "create"
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            transfer_create_table_created(Err("错误: 关系 \"items\" 已经存在".to_string()), "create").unwrap(),
-            false
-        );
-        assert_eq!(transfer_create_table_created(Ok(()), "create").unwrap(), true);
+        assert!(!transfer_create_table_created(
+            Err("ERROR: relation \"items\" already exists (SQLSTATE 42P07)".to_string()),
+            "create"
+        )
+        .unwrap());
+        assert!(!transfer_create_table_created(Err("错误: 关系 \"items\" 已经存在".to_string()), "create").unwrap());
+        assert!(transfer_create_table_created(Ok(()), "create").unwrap());
         assert_eq!(
             transfer_create_table_created(Err("permission denied for schema public".to_string()), "create")
                 .unwrap_err(),

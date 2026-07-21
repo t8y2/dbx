@@ -17,6 +17,11 @@ export interface SelectionData {
   rows: GridCellValue[][];
 }
 
+export interface CellSelectionMatrix extends SelectionData {
+  rowIndexes: number[];
+  columnIndexes: number[];
+}
+
 export interface SelectionSummary {
   cellCount: number;
   rowCount: number;

@@ -4547,7 +4547,6 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     #[test]
     fn mysql_tcp_keepalive_uses_milliseconds_not_seconds() {
         assert_eq!(MYSQL_TCP_KEEPALIVE_MS, 30_000);
-        assert!(MYSQL_TCP_KEEPALIVE_MS >= 1_000);
     }
 
     #[test]

@@ -69,7 +69,7 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
     }
     return quoteTableIdentifier(databaseType, tableName);
   }
-  if (isSchemaAware(databaseType) && !usesDatabaseObjectTreeMode(databaseType) && schema) {
+  if ((isSchemaAware(databaseType) || databaseType === "sqlite") && !usesDatabaseObjectTreeMode(databaseType) && schema) {
     if (databaseType === "sqlserver") {
       const linked = parseSqlServerLinkedSchema(schema);
       if (linked) return sqlServerLinkedTableName(linked, tableName);

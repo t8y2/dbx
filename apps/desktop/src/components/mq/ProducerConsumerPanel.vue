@@ -2,8 +2,9 @@
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { ConsumerInfo, ProducerInfo, SubscriptionInfo, TopicInfo, TopicRef, TopicStats } from "@/types/mq";
+import type { ConsumerInfo, ProducerInfo, SubscriptionInfo, TopicInfo, TopicRef, TopicStats, MqSystemKind } from "@/types/mq";
 import { mqGetTopicStats, mqListConsumers, mqListProducers, mqListSubscriptions, mqUnloadTopic } from "@/lib/backend/api";
+import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 
 interface Props {
   connectionId: string;
@@ -12,10 +13,17 @@ interface Props {
   namespace?: string;
   readOnly?: boolean;
   selectedSubscription?: string;
-  isKafkaCluster?: boolean;
+  isFlatMqCluster?: boolean;
+  mqSystemKind?: MqSystemKind;
+  viewMode?: "all" | "producers" | "consumers";
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  viewMode: "all",
+});
+const emit = defineEmits<{
+  topicSelected: [topic: TopicInfo | undefined];
+}>();
 const { t } = useI18n();
 
 interface PartitionClientRow {
@@ -48,20 +56,140 @@ const selectedPartitionName = ref("");
 const loading = ref(false);
 const unloading = ref(false);
 const error = ref<string>();
+const availableTopics = ref<TopicInfo[]>([]);
+const topicsLoading = ref(false);
+const selectedTopicName = ref("");
+const topicSelectRef = ref<InstanceType<typeof RocketMqTopicSelect>>();
+let loadedTopicsKey = "";
+let syncingTopicFromProps = false;
+
+const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
+const isProducersOnly = computed(() => props.viewMode === "producers");
+const isConsumersOnly = computed(() => props.viewMode === "consumers");
+const requiresTopicForRocketMq = computed(() => isRocketMqCluster.value && isProducersOnly.value);
+const showConsumerSections = computed(() => !isProducersOnly.value);
+const showProducerSections = computed(() => !isConsumersOnly.value);
+const panelTitle = computed(() => {
+  if (isProducersOnly.value) return t("mqAdmin.tabProducers");
+  if (isConsumersOnly.value) return t("mqClients.activeConsumers");
+  return t("mqClients.title");
+});
+const isClusterWideMode = computed(() => isRocketMqCluster.value && !props.topic && !!props.tenant && !!props.namespace && !requiresTopicForRocketMq.value);
 
 let runtimeLoadSeq = 0;
 let consumerLoadSeq = 0;
+let scheduledRuntimeLoad: ReturnType<typeof setTimeout> | undefined;
+let scheduledRuntimeLoadKey = "";
 
-const topicRef = computed<TopicRef | null>(() => {
-  if (!props.topic || !props.tenant || !props.namespace) return null;
+function buildTopicRefFromName(name: string): TopicRef | null {
+  const topic = name.trim();
+  if (!topic || !props.tenant || !props.namespace) return null;
+  const matched = availableTopics.value.find((item) => item.shortName === topic);
   return {
     tenant: props.tenant,
     namespace: props.namespace,
-    topic: props.topic.shortName,
-    persistent: props.topic.persistent,
-    partitioned: props.topic.partitioned,
+    topic,
+    persistent: matched?.persistent ?? true,
+    partitioned: matched?.partitioned ?? false,
+  };
+}
+
+const topicRef = computed<TopicRef | null>(() => {
+  if (!props.tenant || !props.namespace) return null;
+  if (requiresTopicForRocketMq.value) {
+    return buildTopicRefFromName(selectedTopicName.value);
+  }
+  if (isClusterWideMode.value) {
+    return {
+      tenant: props.tenant,
+      namespace: props.namespace,
+      topic: "",
+      persistent: true,
+      partitioned: false,
+    };
+  }
+  const topic = props.topic;
+  if (!topic) return null;
+  return {
+    tenant: props.tenant,
+    namespace: props.namespace,
+    topic: topic.shortName,
+    persistent: topic.persistent,
+    partitioned: topic.partitioned,
   };
 });
+
+function runtimeWatchKey(): string {
+  if (requiresTopicForRocketMq.value) {
+    return [props.connectionId, props.tenant, props.namespace, selectedTopicName.value.trim()].join("\0");
+  }
+  const current = topicRef.value;
+  return [props.connectionId, props.tenant, props.namespace, props.mqSystemKind, current ? topicRefKey(current) : ""].join("\0");
+}
+
+function scheduleLoadRuntimeClients() {
+  const key = runtimeWatchKey();
+  if (scheduledRuntimeLoad && scheduledRuntimeLoadKey === key) return;
+  scheduledRuntimeLoadKey = key;
+  if (scheduledRuntimeLoad) clearTimeout(scheduledRuntimeLoad);
+  scheduledRuntimeLoad = setTimeout(() => {
+    scheduledRuntimeLoad = undefined;
+    void loadRuntimeClients();
+  }, 0);
+}
+
+async function loadTopics(force = false) {
+  if (!requiresTopicForRocketMq.value || !props.tenant || !props.namespace) return;
+  const key = [props.connectionId, props.tenant, props.namespace].join("\0");
+  if (!force && (topicsLoading.value || (loadedTopicsKey === key && availableTopics.value.length > 0))) return;
+  loadedTopicsKey = key;
+  topicsLoading.value = true;
+  try {
+    await topicSelectRef.value?.loadTopics();
+  } catch (e: unknown) {
+    error.value = formatError(e);
+  } finally {
+    topicsLoading.value = false;
+  }
+}
+
+function handleTopicsLoaded(topics: TopicInfo[]) {
+  availableTopics.value = topics;
+  if (props.topic && !selectedTopicName.value) {
+    selectedTopicName.value = props.topic.shortName;
+  } else if (!selectedTopicName.value && topics.length === 1) {
+    selectedTopicName.value = topics[0].shortName;
+  }
+  syncProducerTopicToParent(selectedTopicName.value);
+}
+
+function syncProducerTopicToParent(name: string) {
+  if (!requiresTopicForRocketMq.value) return;
+  if (!name) {
+    emit("topicSelected", undefined);
+    return;
+  }
+  const topic = availableTopics.value.find((item) => item.shortName === name) ?? (props.topic?.shortName === name ? props.topic : undefined);
+  if (topic) {
+    emit("topicSelected", topic);
+    return;
+  }
+  emit("topicSelected", {
+    name,
+    shortName: name,
+    persistent: true,
+    partitioned: false,
+  });
+}
+
+async function loadRocketMqProducers(current: TopicRef, loadSeq: number, currentKey: string) {
+  producers.value = await mqListProducers(props.connectionId, current);
+  if (!isRuntimeLoadCurrent(loadSeq, currentKey)) return;
+  stats.value = undefined;
+  subscriptions.value = [];
+  selectedSubscription.value = "";
+  selectedPartitionName.value = "";
+}
 
 const partitionRows = computed(() => extractPartitionClientRows(stats.value?.raw));
 const kafkaPartitionRows = computed(() => extractKafkaPartitionRows(stats.value?.raw));
@@ -94,11 +222,25 @@ async function loadRuntimeClients() {
     error.value = undefined;
     return;
   }
-  const currentKey = topicRefKey(current);
+  const currentKey = activeTopicKey(current);
 
   loading.value = true;
   error.value = undefined;
   try {
+    if (isClusterWideMode.value) {
+      producers.value = await mqListProducers(props.connectionId, current);
+      subscriptions.value = await mqListSubscriptions(props.connectionId, current);
+      stats.value = undefined;
+      selectedSubscription.value = props.selectedSubscription ?? subscriptions.value[0]?.name ?? "";
+      selectedPartitionName.value = "";
+      return;
+    }
+
+    if (requiresTopicForRocketMq.value) {
+      await loadRocketMqProducers(current, loadSeq, currentKey);
+      return;
+    }
+
     const statsData = await mqGetTopicStats(props.connectionId, current);
     if (!isRuntimeLoadCurrent(loadSeq, currentKey)) return;
     stats.value = statsData;
@@ -207,7 +349,7 @@ async function loadSelectedSubscriptionConsumers(options: LoadConsumersOptions =
   if (!current || !subscriptionName) return [];
 
   const loadSeq = ++consumerLoadSeq;
-  const currentKey = topicRefKey(current);
+  const currentKey = activeTopicKey(current);
   let consumers = await mqListConsumers(props.connectionId, current, subscriptionName);
   if (!isConsumerLoadCurrent(loadSeq, currentKey, subscriptionName)) return [];
   applySubscriptionConsumers(subscriptionName, consumers);
@@ -235,6 +377,13 @@ function topicRefKey(topic: TopicRef): string {
   return [topic.tenant, topic.namespace, topic.topic, topic.persistent ? "1" : "0", topic.partitioned ? "1" : "0"].join("|");
 }
 
+function activeTopicKey(topic: TopicRef): string {
+  if (requiresTopicForRocketMq.value) {
+    return [topic.tenant, topic.namespace, topic.topic].join("|");
+  }
+  return topicRefKey(topic);
+}
+
 function isRuntimeLoadCurrent(loadSeq: number, topicKey: string): boolean {
   return loadSeq === runtimeLoadSeq && isCurrentTopic(topicKey);
 }
@@ -245,7 +394,7 @@ function isConsumerLoadCurrent(loadSeq: number, topicKey: string, subscriptionNa
 
 function isCurrentTopic(topicKey: string): boolean {
   const current = topicRef.value;
-  return !!current && topicRefKey(current) === topicKey;
+  return !!current && activeTopicKey(current) === topicKey;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -387,14 +536,44 @@ function stringField(value: unknown): string {
 }
 
 watch(
-  () => [props.connectionId, props.topic?.name, props.topic?.partitioned, props.tenant, props.namespace],
+  runtimeWatchKey,
   () => {
-    void loadRuntimeClients();
+    scheduleLoadRuntimeClients();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.topic?.shortName ?? "",
+  (name) => {
+    if (!requiresTopicForRocketMq.value) return;
+    if (name === selectedTopicName.value) return;
+    syncingTopicFromProps = true;
+    selectedTopicName.value = name;
+    syncingTopicFromProps = false;
+  },
+  { immediate: true },
+);
+
+watch(selectedTopicName, (name) => {
+  if (syncingTopicFromProps) return;
+  syncProducerTopicToParent(name);
+});
+
+watch(
+  () => (requiresTopicForRocketMq.value ? [props.connectionId, props.tenant, props.namespace].join("\0") : ""),
+  (key) => {
+    if (!key) {
+      loadedTopicsKey = "";
+      return;
+    }
+    void loadTopics();
   },
   { immediate: true },
 );
 
 watch(selectedSubscription, () => {
+  if (isProducersOnly.value) return;
   syncSelectedPartition();
   void loadSelectedSubscriptionConsumers({ retryIfEmpty: true }).catch((e: unknown) => {
     error.value = formatError(e) || String(e);
@@ -418,156 +597,166 @@ watch(
 <template>
   <div class="producer-consumer-panel">
     <div class="panel-toolbar">
-      <h3>{{ t("mqClients.title") }}</h3>
+      <h3>{{ panelTitle }}</h3>
       <div class="toolbar-actions">
-        <button v-if="!isKafkaCluster" class="btn-sm danger" :disabled="readOnly || !topic || unloading" @click="unloadTopic">
+        <button v-if="!isFlatMqCluster" class="btn-sm danger" :disabled="readOnly || !topicRef || unloading" @click="unloadTopic">
           {{ unloading ? t("mqClients.unloading") : t("mqClients.unloadTopic") }}
         </button>
-        <button class="btn-sm" :disabled="loading || !topic" @click="loadRuntimeClients">
+        <button class="btn-secondary" :disabled="loading || !topicRef" @click="loadRuntimeClients">
           {{ loading ? t("mqClients.refreshing") : t("mqClients.refresh") }}
         </button>
       </div>
     </div>
 
-    <div v-if="!topic" class="panel-placeholder">{{ t("mqClients.selectTopicFirst") }}</div>
-    <div v-else-if="error" class="panel-error">{{ error }}</div>
-
-    <div v-else class="runtime-content">
-      <section v-if="isKafkaStats" class="runtime-section">
-        <div class="section-heading">
-          <h4>{{ t("mqClients.kafkaPartitionStatus") }}</h4>
-          <span>{{ t("mqClients.partitionCount", { count: kafkaPartitionRows.length }) }}</span>
-        </div>
-        <table class="runtime-table partition-table">
-          <thead>
-            <tr>
-              <th>{{ t("mqClients.partition") }}</th>
-              <th>{{ t("mqClients.beginOffset") }}</th>
-              <th>{{ t("mqClients.latestOffset") }}</th>
-              <th>{{ t("mqClients.messageCount") }}</th>
-              <th>{{ t("mqClients.leader") }}</th>
-              <th>{{ t("mqClients.replicas") }}</th>
-              <th>{{ t("mqClients.isr") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="partition in kafkaPartitionRows" :key="partition.partition">
-              <td>{{ partition.partition }}</td>
-              <td>{{ partition.beginOffset }}</td>
-              <td>{{ partition.endOffset }}</td>
-              <td>{{ partition.messageCount }}</td>
-              <td>{{ partition.leader }}</td>
-              <td>{{ partition.replicas.join(", ") || "-" }}</td>
-              <td>{{ partition.isr.join(", ") || "-" }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section v-else-if="partitionRows.length" class="runtime-section">
-        <div class="section-heading">
-          <h4>{{ t("mqClients.partitionClients") }}</h4>
-          <span>{{ t("mqClients.partitionCount", { count: partitionRows.length }) }}</span>
-        </div>
-        <table class="runtime-table partition-table">
-          <thead>
-            <tr>
-              <th>{{ t("mqClients.partition") }}</th>
-              <th>{{ t("mqClients.inboundRate") }}</th>
-              <th>{{ t("mqClients.outboundRate") }}</th>
-              <th>{{ t("mqClients.producers") }}</th>
-              <th>{{ t("mqClients.subscriptions") }}</th>
-              <th>{{ t("mqClients.consumers") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="partition in partitionRows" :key="partition.name" :class="{ selected: selectedPartition?.name === partition.name }" @click="selectedPartitionName = partition.name">
-              <td :title="partition.name">{{ partition.shortName }}</td>
-              <td>{{ formatRate(partition.msgRateIn) }}</td>
-              <td>{{ formatRate(partition.msgRateOut) }}</td>
-              <td>{{ partition.producerCount }}</td>
-              <td>{{ partition.subscriptionCount }}</td>
-              <td>{{ partition.consumerCount }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section class="runtime-section">
-        <div class="section-heading">
-          <h4>{{ t("mqClients.activeProducers") }}</h4>
-          <div class="heading-meta">
-            <span v-if="selectedPartition" class="scope-chip">{{ selectedScopeLabel }}</span>
-            <span>{{ displayedProducers.length }}</span>
-          </div>
-        </div>
-        <div v-if="!displayedProducers.length && !loading" class="empty-state">{{ t("mqClients.noActiveProducers") }}</div>
-        <table v-else class="runtime-table">
-          <thead>
-            <tr>
-              <th>{{ t("mqClients.name") }}</th>
-              <th>{{ t("mqClients.id") }}</th>
-              <th>{{ t("mqClients.address") }}</th>
-              <th>{{ t("mqClients.version") }}</th>
-              <th>{{ t("mqClients.rate") }}</th>
-              <th>{{ t("mqClients.throughput") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="producer in displayedProducers" :key="`${selectedScopeLabel}-${producer.producerId}-${producer.producerName}`">
-              <td>{{ producer.producerName || "-" }}</td>
-              <td>{{ producer.producerId }}</td>
-              <td>{{ producer.address || "-" }}</td>
-              <td>{{ producer.clientVersion || "-" }}</td>
-              <td>{{ formatOptionalRate(producer.msgRateIn) }}</td>
-              <td>{{ formatOptionalBytes(producer.msgThroughputIn) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section class="runtime-section">
-        <div class="section-heading">
-          <h4>{{ t("mqClients.activeConsumers") }}</h4>
-          <div class="subscription-selector">
-            <span v-if="selectedPartition" class="scope-chip">{{ selectedScopeLabel }}</span>
-            <span>{{ displayedConsumers.length }}</span>
-            <select v-if="!isKafkaStats && partitionRows.length" v-model="selectedPartitionName" :disabled="loading">
-              <option v-for="partition in partitionRows" :key="partition.name" :value="partition.name">{{ partition.shortName }}</option>
-            </select>
-            <select v-model="selectedSubscription" :disabled="loading || !subscriptionOptions.length">
-              <option v-for="sub in subscriptionOptions" :key="sub.name" :value="sub.name">{{ sub.name }}</option>
-            </select>
-          </div>
-        </div>
-        <div v-if="!subscriptionOptions.length && !loading" class="empty-state">{{ t("mqClients.noSubscriptions") }}</div>
-        <div v-else-if="!displayedConsumers.length && !loading" class="empty-state">
-          {{ selectedPartition ? t("mqClients.noConsumersOnPartition") : t("mqClients.noConsumersOnSubscription") }}
-        </div>
-        <table v-else class="runtime-table">
-          <thead>
-            <tr>
-              <th>{{ t("mqClients.name") }}</th>
-              <th>{{ t("mqClients.address") }}</th>
-              <th>{{ t("mqClients.version") }}</th>
-              <th>{{ t("mqClients.rate") }}</th>
-              <th>{{ t("mqClients.throughput") }}</th>
-              <th>{{ t("mqClients.permits") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="consumer in displayedConsumers" :key="`${selectedScopeLabel}-${selectedSubscription}-${consumer.consumerName}-${consumer.address}`">
-              <td>{{ consumer.consumerName || "-" }}</td>
-              <td>{{ consumer.address || "-" }}</td>
-              <td>{{ consumer.clientVersion || "-" }}</td>
-              <td>{{ formatOptionalRate(consumer.msgRateOut) }}</td>
-              <td>{{ formatOptionalBytes(consumer.msgThroughputOut) }}</td>
-              <td>{{ consumer.availablePermits }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
+    <div v-if="requiresTopicForRocketMq" class="topic-picker">
+      <label>{{ t("mqMessages.targetTopic") }}</label>
+      <RocketMqTopicSelect ref="topicSelectRef" v-model="selectedTopicName" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" grouping="business" :show-type-filter="false" :disabled="topicsLoading" @loaded="handleTopicsLoaded" />
     </div>
+
+    <div v-if="!topicRef && !isClusterWideMode && !requiresTopicForRocketMq" class="panel-placeholder">
+      {{ t("mqClients.selectTopicFirst") }}
+    </div>
+    <template v-else-if="topicRef || isClusterWideMode">
+      <div v-if="isClusterWideMode" class="panel-hint">{{ t("mqClients.rocketmqClusterHint") }}</div>
+      <div v-if="error" class="panel-error">{{ error }}</div>
+
+      <div v-if="!error" class="runtime-content">
+        <section v-if="isKafkaStats" class="runtime-section">
+          <div class="section-heading">
+            <h4>{{ t("mqClients.kafkaPartitionStatus") }}</h4>
+            <span>{{ t("mqClients.partitionCount", { count: kafkaPartitionRows.length }) }}</span>
+          </div>
+          <table class="runtime-table partition-table">
+            <thead>
+              <tr>
+                <th>{{ t("mqClients.partition") }}</th>
+                <th>{{ t("mqClients.beginOffset") }}</th>
+                <th>{{ t("mqClients.latestOffset") }}</th>
+                <th>{{ t("mqClients.messageCount") }}</th>
+                <th>{{ t("mqClients.leader") }}</th>
+                <th>{{ t("mqClients.replicas") }}</th>
+                <th>{{ t("mqClients.isr") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="partition in kafkaPartitionRows" :key="partition.partition">
+                <td>{{ partition.partition }}</td>
+                <td>{{ partition.beginOffset }}</td>
+                <td>{{ partition.endOffset }}</td>
+                <td>{{ partition.messageCount }}</td>
+                <td>{{ partition.leader }}</td>
+                <td>{{ partition.replicas.join(", ") || "-" }}</td>
+                <td>{{ partition.isr.join(", ") || "-" }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section v-else-if="partitionRows.length" class="runtime-section">
+          <div class="section-heading">
+            <h4>{{ t("mqClients.partitionClients") }}</h4>
+            <span>{{ t("mqClients.partitionCount", { count: partitionRows.length }) }}</span>
+          </div>
+          <table class="runtime-table partition-table">
+            <thead>
+              <tr>
+                <th>{{ t("mqClients.partition") }}</th>
+                <th>{{ t("mqClients.inboundRate") }}</th>
+                <th>{{ t("mqClients.outboundRate") }}</th>
+                <th>{{ t("mqClients.producers") }}</th>
+                <th>{{ t("mqClients.subscriptions") }}</th>
+                <th>{{ t("mqClients.consumers") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="partition in partitionRows" :key="partition.name" :class="{ selected: selectedPartition?.name === partition.name }" @click="selectedPartitionName = partition.name">
+                <td :title="partition.name">{{ partition.shortName }}</td>
+                <td>{{ formatRate(partition.msgRateIn) }}</td>
+                <td>{{ formatRate(partition.msgRateOut) }}</td>
+                <td>{{ partition.producerCount }}</td>
+                <td>{{ partition.subscriptionCount }}</td>
+                <td>{{ partition.consumerCount }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section v-if="showProducerSections" class="runtime-section">
+          <div class="section-heading">
+            <h4>{{ t("mqClients.activeProducers") }}</h4>
+            <div class="heading-meta">
+              <span v-if="selectedPartition" class="scope-chip">{{ selectedScopeLabel }}</span>
+              <span>{{ displayedProducers.length }}</span>
+            </div>
+          </div>
+          <div v-if="!displayedProducers.length && !loading" class="empty-state">{{ t("mqClients.noActiveProducers") }}</div>
+          <table v-else class="runtime-table">
+            <thead>
+              <tr>
+                <th>{{ t("mqClients.name") }}</th>
+                <th>{{ t("mqClients.id") }}</th>
+                <th>{{ t("mqClients.address") }}</th>
+                <th>{{ t("mqClients.version") }}</th>
+                <th>{{ t("mqClients.rate") }}</th>
+                <th>{{ t("mqClients.throughput") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="producer in displayedProducers" :key="`${selectedScopeLabel}-${producer.producerId}-${producer.producerName}`">
+                <td>{{ producer.producerName || "-" }}</td>
+                <td>{{ producer.producerId }}</td>
+                <td>{{ producer.address || "-" }}</td>
+                <td>{{ producer.clientVersion || "-" }}</td>
+                <td>{{ formatOptionalRate(producer.msgRateIn) }}</td>
+                <td>{{ formatOptionalBytes(producer.msgThroughputIn) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section v-if="showConsumerSections" class="runtime-section">
+          <div class="section-heading">
+            <h4>{{ t("mqClients.activeConsumers") }}</h4>
+            <div class="subscription-selector">
+              <span v-if="selectedPartition" class="scope-chip">{{ selectedScopeLabel }}</span>
+              <span>{{ displayedConsumers.length }}</span>
+              <select v-if="!isKafkaStats && partitionRows.length" v-model="selectedPartitionName" :disabled="loading">
+                <option v-for="partition in partitionRows" :key="partition.name" :value="partition.name">{{ partition.shortName }}</option>
+              </select>
+              <select v-model="selectedSubscription" :disabled="loading || !subscriptionOptions.length">
+                <option v-for="sub in subscriptionOptions" :key="sub.name" :value="sub.name">{{ sub.name }}</option>
+              </select>
+            </div>
+          </div>
+          <div v-if="!subscriptionOptions.length && !loading" class="empty-state">{{ t("mqClients.noSubscriptions") }}</div>
+          <div v-else-if="!displayedConsumers.length && !loading" class="empty-state">
+            {{ selectedPartition ? t("mqClients.noConsumersOnPartition") : t("mqClients.noConsumersOnSubscription") }}
+          </div>
+          <table v-else class="runtime-table">
+            <thead>
+              <tr>
+                <th>{{ t("mqClients.name") }}</th>
+                <th>{{ t("mqClients.address") }}</th>
+                <th>{{ t("mqClients.version") }}</th>
+                <th>{{ t("mqClients.rate") }}</th>
+                <th>{{ t("mqClients.throughput") }}</th>
+                <th>{{ t("mqClients.permits") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="consumer in displayedConsumers" :key="`${selectedScopeLabel}-${selectedSubscription}-${consumer.consumerName}-${consumer.address}`">
+                <td>{{ consumer.consumerName || "-" }}</td>
+                <td>{{ consumer.address || "-" }}</td>
+                <td>{{ consumer.clientVersion || "-" }}</td>
+                <td>{{ formatOptionalRate(consumer.msgRateOut) }}</td>
+                <td>{{ formatOptionalBytes(consumer.msgThroughputOut) }}</td>
+                <td>{{ consumer.availablePermits }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -592,10 +781,64 @@ watch(
   font-weight: 600;
 }
 
+.panel-hint {
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+  background: var(--color-background-secondary);
+}
+
+.topic-picker {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border-light);
+  background: var(--color-background-secondary);
+}
+
+.topic-picker label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.topic-select-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topic-select-row select {
+  min-width: 240px;
+  max-width: 420px;
+  flex: 1;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-background);
+  color: var(--color-text);
+  font-size: 13px;
+  padding: 0 10px;
+}
+
 .toolbar-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.btn-secondary {
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-background);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-hover);
 }
 
 .btn-sm {

@@ -1123,7 +1123,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
   return {
     databaseType: databaseType.value,
     schema: props.schema,
-    tableName: isCreateMode.value ? newTableName.value : props.tableName || "",
+    tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
     columns: columns.value,
     indexes: indexes.value,
     foreignKeys: foreignKeys.value,

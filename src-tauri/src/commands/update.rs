@@ -1,12 +1,12 @@
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 pub use dbx_core::update::UpdateInfo;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 
 const OFFICIAL_UPDATE_ENDPOINTS: [&str; 2] = [
     "https://dl.dbxio.com/releases/latest/latest.json",
@@ -28,6 +28,41 @@ pub enum UpdateDownloadSource {
 pub struct UpdateDownloadProgress {
     pub downloaded: u64,
     pub total: Option<u64>,
+}
+
+enum PendingUpdate {
+    Downloading,
+    Ready { update: Box<Update>, bytes: Vec<u8> },
+}
+
+#[derive(Default)]
+pub struct PendingUpdateState {
+    pending: Mutex<Option<PendingUpdate>>,
+}
+
+impl PendingUpdateState {
+    fn begin_download(&self) -> Result<(), String> {
+        let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
+        if pending.is_some() {
+            return Err("An update is already downloading or ready to install.".to_string());
+        }
+        *pending = Some(PendingUpdate::Downloading);
+        Ok(())
+    }
+
+    fn finish_download(&self, update: Update, bytes: Vec<u8>) -> Result<(), String> {
+        let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
+        *pending = Some(PendingUpdate::Ready { update: Box::new(update), bytes });
+        Ok(())
+    }
+
+    fn cancel_download(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            if matches!(pending.as_ref(), Some(PendingUpdate::Downloading)) {
+                *pending = None;
+            }
+        }
+    }
 }
 
 impl UpdateDownloadSource {
@@ -118,8 +153,9 @@ pub async fn get_system_proxy_url() -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn download_and_install_update(
+pub async fn download_update(
     app: AppHandle,
+    state: tauri::State<'_, PendingUpdateState>,
     source: UpdateDownloadSource,
     latest_version: Option<String>,
 ) -> Result<(), String> {
@@ -127,7 +163,23 @@ pub async fn download_and_install_update(
         return Err("Portable builds cannot use the in-app installer.".to_string());
     }
 
-    let endpoint_urls = source.endpoints(latest_version.as_deref())?;
+    state.begin_download()?;
+    let result = download_update_inner(&app, &source, latest_version.as_deref()).await;
+    match result {
+        Ok((update, bytes)) => state.finish_download(update, bytes),
+        Err(error) => {
+            state.cancel_download();
+            Err(error)
+        }
+    }
+}
+
+async fn download_update_inner(
+    app: &AppHandle,
+    source: &UpdateDownloadSource,
+    latest_version: Option<&str>,
+) -> Result<(Update, Vec<u8>), String> {
+    let endpoint_urls = source.endpoints(latest_version)?;
     println!("[DBX updater] checking from {} endpoints: {}", source.label(), endpoint_urls.join(", "));
     let mut endpoints = Vec::with_capacity(endpoint_urls.len());
     for endpoint_url in endpoint_urls {
@@ -159,8 +211,8 @@ pub async fn download_and_install_update(
 
     let downloaded = Arc::new(AtomicU64::new(0));
     let finished_downloaded = Arc::clone(&downloaded);
-    update
-        .download_and_install(
+    let bytes = update
+        .download(
             |chunk_len, total| {
                 let downloaded =
                     downloaded.fetch_add(chunk_len as u64, Ordering::Relaxed).saturating_add(chunk_len as u64);
@@ -175,7 +227,19 @@ pub async fn download_and_install_update(
             },
         )
         .await
-        .map_err(|e| format!("Failed to download and install update: {e}"))
+        .map_err(|e| format!("Failed to download update: {e}"))?;
+    Ok((update, bytes))
+}
+
+#[tauri::command]
+pub fn install_downloaded_update(state: tauri::State<'_, PendingUpdateState>) -> Result<(), String> {
+    let mut pending = state.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
+    let Some(PendingUpdate::Ready { update, bytes }) = pending.as_ref() else {
+        return Err("No downloaded update is ready to install.".to_string());
+    };
+    update.install(bytes).map_err(|e| format!("Failed to install update: {e}"))?;
+    *pending = None;
+    Ok(())
 }
 
 async fn update_url_is_available(url: &str) -> bool {

@@ -1,14 +1,32 @@
 import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
+import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
+
+type SqlFileTargetConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "visible_databases" | "visible_schemas">;
 
 export function databaseOptionsForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "visible_databases"> | undefined): string[] {
   const names = filterDatabaseNamesForConnection(databaseNames, connection);
   if (names.length === 0 && usesTreeSchemaMode(connection?.db_type)) return [""];
   return names;
+}
+
+export async function fetchSqlFileTargetOptions(connectionId: string, connection: SqlFileTargetConnection): Promise<string[]> {
+  if (connection.db_type === "dameng") {
+    const database = connection.database || "";
+    // Dameng users and schemas are not interchangeable: independent schemas
+    // appear in listSchemas but not in the user-backed listDatabases result.
+    const schemas = await api.listSchemas(connectionId, database, true);
+    return filterSchemaNamesForConnection(schemas, connection, database);
+  }
+
+  const databases = await api.listDatabases(connectionId);
+  return databaseOptionsForConnection(
+    databases.map((database) => database.name),
+    connection,
+  );
 }
 
 export function useDatabaseOptions() {

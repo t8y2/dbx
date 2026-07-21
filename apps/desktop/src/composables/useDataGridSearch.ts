@@ -91,8 +91,11 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   }
 
   function navigateMatch(delta: number) {
-    if (!matches.value.length) return;
-    currentMatchIndex.value = (currentMatchIndex.value + delta + matches.value.length) % matches.value.length;
+    const matchCount = matches.value.length;
+    if (!matchCount) return;
+    // Results may change between input and navigation; recover from a stale index in the requested direction.
+    const currentIndex = currentMatchIndex.value >= 0 && currentMatchIndex.value < matchCount ? currentMatchIndex.value : delta < 0 ? 0 : -1;
+    currentMatchIndex.value = (((currentIndex + delta) % matchCount) + matchCount) % matchCount;
     const match = currentMatch.value;
     if (match) options.onNavigate?.(match);
   }

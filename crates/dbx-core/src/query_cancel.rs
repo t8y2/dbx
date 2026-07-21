@@ -12,19 +12,14 @@ pub struct RunningQueryDiagnostics {
 
 type InterruptFn = Box<dyn Fn() + Send + 'static>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RunningTaskKind {
     Query,
     Count,
     Explain,
     Export,
+    #[default]
     Unknown,
-}
-
-impl Default for RunningTaskKind {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Clone, Debug, Default)]

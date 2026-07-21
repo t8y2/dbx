@@ -13,7 +13,7 @@ import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileJson, Fi
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import { autoMapImportColumns, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, suggestImportTargetDataTypes, validateImportMappings, type TableImportWizardStep } from "@/lib/table/tableImport";
+import { autoMapImportColumns, buildTableImportParseOptions, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, suggestImportTargetDataTypes, validateImportMappings, type TableImportWizardStep } from "@/lib/table/tableImport";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { ColumnInfo } from "@/types/database";
@@ -180,17 +180,7 @@ const createColumnSummaries = computed(() =>
     targetDataType: mapping.targetDataType || "",
   })),
 );
-const parseOptions = computed<api.TableImportParseOptions>(() => ({
-  delimiter: sourceFormat.value === "tsv" ? "\\t" : sourceFormat.value === "csv" ? "," : delimiter.value,
-  encoding: isDelimitedFormat(sourceFormat.value) ? textEncoding.value : null,
-  titleRow: titleRow.value,
-  dataStartRow: dataStartRow.value,
-  lastDataRow: lastDataRow.value,
-  trimValues: trimValues.value,
-  emptyStringAsNull: emptyStringAsNull.value,
-  sheetName: sourceFormat.value === "excel" ? selectedSheet.value || null : null,
-  jsonShape: sourceFormat.value === "json" ? jsonShape.value : null,
-}));
+const parseOptions = computed<api.TableImportParseOptions>(() => taskParseOptions(sourceFormat.value, selectedSheet.value));
 const terminalStatus = computed(() => progress.value?.status && ["done", "error", "cancelled"].includes(progress.value.status));
 
 function resetState() {
@@ -268,17 +258,18 @@ function uniqueTableName(baseName: string, usedNames: Set<string>): string {
 }
 
 function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): api.TableImportParseOptions {
-  return {
-    delimiter: format === "tsv" ? "\\t" : format === "csv" ? "," : delimiter.value,
-    encoding: isDelimitedFormat(format) ? textEncoding.value : null,
+  return buildTableImportParseOptions({
+    format,
+    delimiter: delimiter.value,
+    textEncoding: textEncoding.value,
     titleRow: titleRow.value,
     dataStartRow: dataStartRow.value,
     lastDataRow: lastDataRow.value,
     trimValues: trimValues.value,
     emptyStringAsNull: emptyStringAsNull.value,
-    sheetName: format === "excel" ? sheetName || null : null,
-    jsonShape: format === "json" ? jsonShape.value : null,
-  };
+    sheetName,
+    jsonShape: jsonShape.value,
+  });
 }
 
 function importParseOptions(format: api.TableImportSourceFormat, currentPreview: api.TableImportPreview, sheetName = ""): api.TableImportParseOptions {
@@ -622,7 +613,8 @@ async function startImport() {
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
         sourceFormat: sourceFormat.value,
-        parseOptions: importParseOptions(sourceFormat.value, currentPreview),
+        // Execution must parse the same worksheet that produced the preview and mappings.
+        parseOptions: importParseOptions(sourceFormat.value, currentPreview, selectedSheet.value),
         mappings: mappedColumns.value,
         mode: targetMode.value === "create" ? "append" : importMode.value,
         createTable: targetMode.value === "create",

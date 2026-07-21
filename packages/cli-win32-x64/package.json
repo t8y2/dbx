@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/cli-win32-x64",
-  "version": "0.4.38",
+  "version": "0.4.39",
   "description": "Precompiled DBX CLI binary for Windows x64",
   "license": "Apache-2.0",
   "repository": {

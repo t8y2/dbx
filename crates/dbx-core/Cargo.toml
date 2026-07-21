@@ -75,6 +75,7 @@ pageant = "0.2"
 portpicker = "0.1.1"
 csv = "1"
 calamine = { version = "0.30.1", features = ["dates"] }
+ssfmt = { version = "0.1.2", default-features = false }
 quick-xml = "0.37"
 base64 = "0.22"
 jsonwebtoken = "9"

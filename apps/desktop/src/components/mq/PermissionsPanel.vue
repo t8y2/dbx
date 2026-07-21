@@ -2,7 +2,7 @@
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { AuthAction, MqIssuedToken, MqTokenRecord, PermissionMap, PolicyScope, TopicInfo } from "@/types/mq";
+import type { AuthAction, MqIssuedToken, MqSystemKind, MqTokenRecord, PermissionMap, PolicyScope, TopicInfo } from "@/types/mq";
 import { mqGrantPermission, mqIssueToken, mqListPermissions, mqListTokenRecords, mqRevokePermission } from "@/lib/backend/api";
 import { formatMqTokenIssueError, type MqTokenIssueErrorView } from "@/lib/mq/mqTokenErrors";
 
@@ -12,12 +12,18 @@ interface Props {
   namespace?: string;
   topic?: TopicInfo;
   readOnly?: boolean;
+  mqSystemKind?: MqSystemKind;
 }
 
 const props = defineProps<Props>();
 const { t } = useI18n();
 
 const actionOptions: AuthAction[] = ["produce", "consume", "functions", "sources", "sinks", "packages"];
+
+const isFlatMqCluster = computed(() => props.mqSystemKind === "kafka" || props.mqSystemKind === "rocketmq");
+const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
+const panelTitle = computed(() => (isRocketMqCluster.value ? t("mqRocketmq.aclTitle") : t("mqPermissions.title")));
+const visibleActionOptions = computed(() => (isFlatMqCluster.value ? (["produce", "consume"] as AuthAction[]) : actionOptions));
 
 const permissions = ref<PermissionMap>({});
 const loading = ref(false);
@@ -79,6 +85,14 @@ function guardWritable() {
     return false;
   }
   return true;
+}
+
+function formatActionLabel(action: AuthAction): string {
+  if (isRocketMqCluster.value) {
+    if (action === "produce") return t("mqRocketmq.actionProduce");
+    if (action === "consume") return t("mqRocketmq.actionConsume");
+  }
+  return action;
 }
 
 async function loadPermissions() {
@@ -309,10 +323,10 @@ watch(
   <div class="permissions-panel">
     <div class="panel-toolbar">
       <div>
-        <h3>{{ t("mqPermissions.title") }}</h3>
+        <h3>{{ panelTitle }}</h3>
         <div v-if="scopeLabel" class="scope-label">{{ scopeLabel }}</div>
       </div>
-      <button @click="loadPermissions" :disabled="loading || !scope" class="btn-sm">
+      <button @click="loadPermissions" :disabled="loading || !scope" class="btn-secondary">
         {{ loading ? t("mqPermissions.refreshing") : t("mqPermissions.refresh") }}
       </button>
     </div>
@@ -334,9 +348,9 @@ watch(
           </label>
           <div class="actions-group" :class="{ invalid: actionsError }">
             <span>{{ t("mqPermissions.actions") }}</span>
-            <label v-for="action in actionOptions" :key="action" class="checkbox-label">
+            <label v-for="action in visibleActionOptions" :key="action" class="checkbox-label">
               <input v-model="selectedActions" type="checkbox" :value="action" :disabled="readOnly" />
-              {{ action }}
+              {{ formatActionLabel(action) }}
             </label>
             <span v-if="actionsError" class="field-error actions-error">{{ actionsError }}</span>
           </div>
@@ -359,11 +373,11 @@ watch(
               <td class="role-cell">{{ row.role }}</td>
               <td>
                 <span class="tag-list">
-                  <span v-for="action in row.actions" :key="action" class="tag">{{ action }}</span>
+                  <span v-for="action in row.actions" :key="action" class="tag">{{ formatActionLabel(action) }}</span>
                 </span>
               </td>
               <td class="row-actions">
-                <button @click="openTokenDialog(row.role)" class="btn-sm">{{ t("mqPermissions.token") }}</button>
+                <button v-if="!isFlatMqCluster" @click="openTokenDialog(row.role)" class="btn-sm">{{ t("mqPermissions.token") }}</button>
                 <button @click="revokePermission(row.role)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqPermissions.revoke") }}</button>
               </td>
             </tr>
@@ -411,9 +425,9 @@ watch(
               </div>
               <div class="actions-group token-actions">
                 <span>{{ t("mqPermissions.actions") }}</span>
-                <label v-for="action in actionOptions" :key="action" class="checkbox-label">
+                <label v-for="action in visibleActionOptions" :key="action" class="checkbox-label">
                   <input v-model="tokenActions" type="checkbox" :value="action" />
-                  {{ action }}
+                  {{ formatActionLabel(action) }}
                 </label>
               </div>
               <label>

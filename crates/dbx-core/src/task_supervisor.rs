@@ -44,6 +44,14 @@ impl TaskSupervisor {
         }
     }
 
+    pub async fn stop_and_wait(&self, key: &str) {
+        let task = self.tasks.lock().unwrap_or_else(|error| error.into_inner()).remove(key);
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
     pub fn stop_many<'a>(&self, keys: impl IntoIterator<Item = &'a str>) {
         for key in keys {
             self.stop(key);

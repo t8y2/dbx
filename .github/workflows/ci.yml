@@ -18,11 +18,43 @@ jobs:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-22.04
+    env:
+      # The workspace intentionally contains platform-specific CLI/MCP packages for every release target.
+      NPM_CONFIG_LOGLEVEL: error
     steps:
       - uses: actions/checkout@v5
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
+        with:
+          version: 10.27.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm --filter dbx... install --frozen-lockfile
+
+      - name: Frontend check
+        run: pnpm check
+
+  packages:
+    needs: changes
+    if: needs.changes.outputs.packages == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      # Unsupported-platform package warnings are expected while validating cross-platform package metadata.
+      NPM_CONFIG_LOGLEVEL: error
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.27.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -38,8 +70,8 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Frontend check
-        run: pnpm check
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Node package tests
         run: pnpm test:packages
@@ -55,6 +87,9 @@ jobs:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
+      # The fast lane skips only bundled DuckDB while retaining the other default capabilities.
+      RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
+      RUST_FAST_FEATURES: dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
       # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
@@ -103,12 +138,19 @@ jobs:
           shared-key: ci-rust-fmt-clippy-x86_64-unknown-linux-gnu
           # Preserve completed dependency builds when a later lint step fails.
           cache-on-failure: true
+          # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cargo fmt check
         run: cargo fmt --check
 
       - name: Cargo clippy
-        run: cargo clippy --workspace --locked --all-targets
+        run: |
+          if [ "$RUST_FEATURE_MODE" = "fast" ]; then
+            cargo clippy --workspace --locked --all-targets --no-default-features --features "$RUST_FAST_FEATURES" -- -D warnings
+          else
+            cargo clippy --workspace --locked --all-targets -- -D warnings
+          fi
 
       - name: Show sccache stats
         if: always()
@@ -123,6 +165,9 @@ jobs:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
+      # The fast lane skips only bundled DuckDB while retaining the other default capabilities.
+      RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
+      RUST_FAST_FEATURES: dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
       # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
@@ -171,9 +216,16 @@ jobs:
           cache-workspace-crates: true
           # Preserve completed dependency builds when a later test step fails.
           cache-on-failure: true
+          # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cargo test
-        run: cargo test --workspace --locked
+        run: |
+          if [ "$RUST_FEATURE_MODE" = "fast" ]; then
+            cargo test --workspace --locked --no-default-features --features "$RUST_FAST_FEATURES"
+          else
+            cargo test --workspace --locked
+          fi
 
       - name: Show sccache stats
         if: always()
@@ -228,7 +280,9 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
+      packages: ${{ steps.filter.outputs.packages }}
       rust: ${{ steps.filter.outputs.rust }}
+      rust_full: ${{ steps.rust-mode.outputs.full }}
       jdbc: ${{ steps.filter.outputs.jdbc }}
       agents: ${{ steps.filter.outputs.agents }}
     steps:
@@ -237,7 +291,7 @@ jobs:
           fetch-depth: 0
 
       - name: Detect changed areas
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -248,6 +302,17 @@ jobs:
               - 'package.json'
               - '.oxfmtrc.json'
               - 'scripts/run-check.mjs'
+              - '.github/workflows/ci.yml'
+            packages:
+              - 'packages/cli/**'
+              - 'packages/mcp-server/**'
+              - 'crates/dbx-cli/**'
+              - 'crates/dbx-mcp/**'
+              - 'scripts/verify-package-install.mjs'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             rust:
               - 'crates/**'
@@ -260,6 +325,42 @@ jobs:
               - 'plugins/jdbc/**'
             agents:
               - 'agents/**'
+
+      - name: Select Rust feature coverage
+        id: rust-mode
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          RUST_CHANGED: ${{ steps.filter.outputs.rust }}
+        run: |
+          full=false
+
+          if [ "$RUST_CHANGED" = "true" ] && [ "${{ github.event_name }}" = "push" ]; then
+            full=true
+          elif [ "$RUST_CHANGED" = "true" ]; then
+            if [ -z "$BASE_SHA" ] || echo "$BASE_SHA" | grep -Eq '^0+$'; then
+              BASE_SHA="HEAD~1"
+            fi
+
+            while IFS= read -r file; do
+              case "$file" in
+                Cargo.toml|Cargo.lock|rust-toolchain*|.github/workflows/ci.yml|*/Cargo.toml)
+                  full=true
+                  break
+                  ;;
+              esac
+
+              # Feature-gated DuckDB code must keep the full default-feature checks on its PR.
+              if echo "$file" | grep -Eqi 'duckdb' \
+                || { [ -f "$file" ] && grep -Eqi 'duckdb-bundled|cfg[^[:cntrl:]]*duckdb|feature[^[:cntrl:]]*duckdb' "$file"; } \
+                || git diff "$BASE_SHA" HEAD -- "$file" | grep -Eqi 'duckdb-bundled|cfg[^[:cntrl:]]*duckdb|feature[^[:cntrl:]]*duckdb'; then
+                full=true
+                break
+              fi
+            done < <(git diff --name-only "$BASE_SHA" HEAD -- Cargo.toml Cargo.lock 'rust-toolchain*' crates src-tauri .github/workflows/ci.yml)
+          fi
+
+          echo "full=$full" >> "$GITHUB_OUTPUT"
 
   agents:
     needs: changes

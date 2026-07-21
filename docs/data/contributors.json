@@ -1,13 +1,13 @@
 {
   "repository": "t8y2/dbx",
-  "generatedAt": "2026-07-19T05:23:09.753Z",
-  "stars": 10252,
+  "generatedAt": "2026-07-20T06:29:43.431Z",
+  "stars": 10381,
   "contributors": [
     {
       "login": "t8y2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/77960507?v=4",
       "profileUrl": "https://github.com/t8y2",
-      "commits": 2442,
+      "commits": 2451,
       "mergedPullRequests": 13,
       "firstContributionAt": "2026-04-30T08:14:51Z",
       "latestContributionAt": "2026-05-30T11:15:38Z"
@@ -16,19 +16,19 @@
       "login": "zipg",
       "avatarUrl": "https://avatars.githubusercontent.com/u/4047349?v=4",
       "profileUrl": "https://github.com/zipg",
-      "commits": 283,
-      "mergedPullRequests": 283,
+      "commits": 299,
+      "mergedPullRequests": 299,
       "firstContributionAt": "2026-06-22T06:10:59Z",
-      "latestContributionAt": "2026-07-19T00:53:20Z"
+      "latestContributionAt": "2026-07-20T05:52:06Z"
     },
     {
       "login": "eryajf",
       "avatarUrl": "https://avatars.githubusercontent.com/u/33259379?v=4",
       "profileUrl": "https://github.com/eryajf",
-      "commits": 81,
-      "mergedPullRequests": 80,
+      "commits": 85,
+      "mergedPullRequests": 85,
       "firstContributionAt": "2026-06-08T11:45:45Z",
-      "latestContributionAt": "2026-07-18T14:11:35Z"
+      "latestContributionAt": "2026-07-20T06:05:40Z"
     },
     {
       "login": "Abeautifulsnow",
@@ -43,10 +43,10 @@
       "login": "serenez",
       "avatarUrl": "https://avatars.githubusercontent.com/u/38424953?v=4",
       "profileUrl": "https://github.com/serenez",
-      "commits": 55,
-      "mergedPullRequests": 52,
+      "commits": 57,
+      "mergedPullRequests": 54,
       "firstContributionAt": "2026-04-30T04:27:54Z",
-      "latestContributionAt": "2026-07-19T01:58:04Z"
+      "latestContributionAt": "2026-07-19T17:24:32Z"
     },
     {
       "login": "CN-Scars",
@@ -214,10 +214,10 @@
       "login": "xddcode",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48708512?v=4",
       "profileUrl": "https://github.com/xddcode",
-      "commits": 9,
-      "mergedPullRequests": 9,
+      "commits": 10,
+      "mergedPullRequests": 10,
       "firstContributionAt": "2026-07-10T06:34:09Z",
-      "latestContributionAt": "2026-07-17T10:14:11Z"
+      "latestContributionAt": "2026-07-20T05:51:06Z"
     },
     {
       "login": "DengQingNian",
@@ -391,6 +391,15 @@
       "latestContributionAt": "2026-06-28T06:52:25Z"
     },
     {
+      "login": "mapan0424",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45232878?v=4",
+      "profileUrl": "https://github.com/mapan0424",
+      "commits": 3,
+      "mergedPullRequests": 3,
+      "firstContributionAt": "2026-07-17T05:42:50Z",
+      "latestContributionAt": "2026-07-19T06:56:36Z"
+    },
+    {
       "login": "vergil-lai",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2268937?v=4",
       "profileUrl": "https://github.com/vergil-lai",
@@ -472,6 +481,15 @@
       "latestContributionAt": "2026-06-20T16:04:52Z"
     },
     {
+      "login": "czs208112",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7848823?v=4",
+      "profileUrl": "https://github.com/czs208112",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-07-18T17:32:18Z",
+      "latestContributionAt": "2026-07-19T17:00:01Z"
+    },
+    {
       "login": "Doracoin",
       "avatarUrl": "https://avatars.githubusercontent.com/u/9206272?v=4",
       "profileUrl": "https://github.com/Doracoin",
@@ -533,15 +551,6 @@
       "mergedPullRequests": 2,
       "firstContributionAt": "2026-06-13T12:34:22Z",
       "latestContributionAt": "2026-06-17T18:01:01Z"
-    },
-    {
-      "login": "mapan0424",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/45232878?v=4",
-      "profileUrl": "https://github.com/mapan0424",
-      "commits": 2,
-      "mergedPullRequests": 2,
-      "firstContributionAt": "2026-07-17T05:42:50Z",
-      "latestContributionAt": "2026-07-19T01:58:49Z"
     },
     {
       "login": "onlyc0302",

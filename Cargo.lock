@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.61"
+version = "0.5.62"
 dependencies = [
  "anyhow",
  "axum",
@@ -1860,7 +1860,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.38"
+version = "0.4.39"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1912,6 +1912,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlparser",
+ "ssfmt",
  "sysinfo",
  "tiberius",
  "tokio",
@@ -1927,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.38"
+version = "0.4.39"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1944,7 +1945,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.61"
+version = "0.5.62"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -3278,6 +3279,17 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -4333,6 +4345,15 @@ dependencies = [
 
 [[package]]
 name = "lru"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
+dependencies = [
+ "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "lru"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b6180140927ee907000b0aa540091f6ea512ead4447c92b8fc35bc72788a5a6"
@@ -4722,7 +4743,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "keyed_priority_queue",
- "lru",
+ "lru 0.18.1",
  "mysql_common",
  "percent-encoding",
  "rand 0.10.1",
@@ -7664,6 +7685,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "ssfmt"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cafd85a137485737308ec6b94c19639833ca96bb83cbad2bc94a0e0eb763410"
+dependencies = [
+ "lru 0.16.4",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

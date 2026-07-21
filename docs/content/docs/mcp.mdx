@@ -42,7 +42,7 @@ AI agent → DBX MCP → your database → results
     }
     ```
 
-    If you installed the package globally, you can use `"command": "dbx-mcp-server"`. For Windows portable DBX, set `DBX_DATA_DIR` to the `data` directory next to `DBX.exe`.
+    If you installed the package globally, you can use `"command": "dbx-mcp-server"`. Manage the connection allowlist and execution mode centrally in **DBX Settings → MCP**; normal client configs do not need permission variables. For Windows portable DBX, set `DBX_DATA_DIR` to the `data` directory next to `DBX.exe`.
   </Step>
   <Step>
     ### Start Using
@@ -73,8 +73,8 @@ DBX MCP currently provides 10 tools:
 | Tool | Description |
 | --- | --- |
 | `dbx_list_connections` | List connections visible to the MCP session |
-| `dbx_add_connection` | Add a connection to local DBX storage |
-| `dbx_remove_connection` | Remove a connection from local DBX storage |
+| `dbx_add_connection` | Add a connection to DBX storage |
+| `dbx_remove_connection` | Remove a connection from DBX storage |
 | `dbx_list_tables` | List tables, views, or collections |
 | `dbx_describe_table` | Return columns and table metadata |
 | `dbx_get_schema_context` | Return compact schema context for an AI model |
@@ -105,7 +105,7 @@ PostgreSQL, MySQL, SQLite, compatible SQL databases, standalone Redis, and Mongo
 
 ### Agent/JDBC databases
 
-Dameng, Kingbase, Oracle, DB2, Hive, Trino, Snowflake, SAP HANA, and other Agent/JDBC connections require the matching DBX Agent, JDBC driver, and JRE. Install them in DBX before using MCP.
+Oracle, KingBase, and XuguDB require their matching native DBX Agent but no JRE. Dameng, DB2, Hive, Trino, Snowflake, SAP HANA, and other JDBC Agent connections require the matching Agent, JDBC driver, and JRE. Install the required component in DBX before using MCP.
 
 ### DBX Web and Docker mode
 
@@ -117,16 +117,26 @@ Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local connections
 
 ## Safety and Environment Variables
 
-Writes are enabled by default. Use `DBX_MCP_ALLOW_WRITES=0` for read-only operation. Dangerous SQL such as `DROP`, `TRUNCATE`, and `ALTER`, Redis destructive commands, and dangerous MongoDB mutations remain blocked unless `DBX_MCP_ALLOW_DANGEROUS_SQL=1` is set.
+DBX stores one authoritative MCP policy under **Settings → MCP** and reloads it for every request:
+
+| Permission mode | Allowed operations |
+| --- | --- |
+| Read only | Queries and metadata reads |
+| Data read/write | Regular inserts, effectively filtered updates/deletes, scoped MongoDB mutations, and ordinary Redis writes |
+| Full access | Also permits broad updates/deletes, DDL, `TRUNCATE`, MongoDB destructive operations, and Redis `FLUSH*` |
+
+An ineffective condition such as `WHERE TRUE`, `WHERE 1 = 1`, `_id: {$exists: true}`, or an opaque MongoDB filter remains high risk. Connection-level read-only protection, production protection, database credentials, and the MCP connection allowlist remain upper bounds in every mode.
+
+Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) still keeps MCP read-only until a central policy is saved for the first time. After that, the central policy is authoritative and the legacy permission variables are ignored. Legacy connection-scope variables can only narrow the DBX allowlist.
 
 | Variable | Purpose |
 | --- | --- |
 | `DBX_DATA_DIR` | Override the local DBX data directory |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
 | `DBX_WEB_PASSWORD` | Authenticate to DBX Web |
-| `DBX_MCP_ALLOW_WRITES` | Set to `0` to force read-only execution |
-| `DBX_MCP_ALLOW_DANGEROUS_SQL` | Allow dangerous SQL, Redis, and MongoDB operations |
-| `DBX_MCP_SCOPE_CONNECTION_ID` | Restrict the session to one connection ID |
+| `DBX_MCP_ALLOW_WRITES` | Upgrade compatibility only: `0`/`false` keeps an unconfigured policy read-only |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | Compatibility scope for one connection ID |
+| `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict the session to one connection name |
 | `DBX_MCP_SCOPE_DATABASE` | Restrict the session to one database |
 | `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |

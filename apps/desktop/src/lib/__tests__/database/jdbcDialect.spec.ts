@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -67,5 +67,11 @@ describe("query execution schema", () => {
 
   it("keeps generic JDBC Databend schema fallback", () => {
     expect(connectionQueryExecutionSchema({ db_type: "jdbc", connection_string: "jdbc:databend://localhost:8000/default" }, "analytics", undefined, false)).toBe("analytics");
+  });
+});
+
+describe("object tree node schema", () => {
+  it("uses the SQLite database alias to qualify attached tables", () => {
+    expect(connectionObjectTreeNodeSchema({ db_type: "sqlite" }, "analytics")).toBe("analytics");
   });
 });

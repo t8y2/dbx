@@ -1315,7 +1315,7 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
     }
 
     if queries.is_empty() {
-        format!("SELECT TOP (0) CAST('' AS NVARCHAR(128)) AS name, CAST('' AS NVARCHAR(128)) AS schema_name, CAST('' AS NVARCHAR(60)) AS object_type, CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, CAST(NULL AS NVARCHAR(128)) AS data_type")
+        "SELECT TOP (0) CAST('' AS NVARCHAR(128)) AS name, CAST('' AS NVARCHAR(128)) AS schema_name, CAST('' AS NVARCHAR(60)) AS object_type, CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, CAST(NULL AS NVARCHAR(128)) AS data_type".to_string()
     } else if queries.len() == 1 {
         format!("SELECT * FROM ({}) AS dbx_completion ORDER BY name", queries.remove(0))
     } else {

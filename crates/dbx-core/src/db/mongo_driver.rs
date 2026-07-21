@@ -1692,7 +1692,7 @@ fn parse_legacy_mongo_date_display(value: &str) -> Option<DateTime> {
     if !millis.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
     }
-    DateTime::parse_rfc3339_str(format!("{date}T{seconds}.{}Z", format!("{millis:0<3}"))).ok()
+    DateTime::parse_rfc3339_str(format!("{date}T{seconds}.{millis:0<3}Z")).ok()
 }
 
 fn parse_extended_json_date(obj: &serde_json::Map<String, serde_json::Value>) -> Option<DateTime> {
@@ -2003,7 +2003,7 @@ mod tests {
     #[test]
     fn document_id_filters_try_object_id_then_string_for_hex_ids() {
         let id = "507f1f77bcf86cd799439011";
-        let filters = document_id_filters(&id);
+        let filters = document_id_filters(id);
 
         assert_eq!(filters.len(), 2);
         assert!(matches!(filters[0].get("_id"), Some(Bson::ObjectId(_))));
@@ -2013,7 +2013,7 @@ mod tests {
     #[test]
     fn document_id_filters_use_string_only_for_non_hex_ids() {
         let id = "customer-42";
-        let filters = document_id_filters(&id);
+        let filters = document_id_filters(id);
 
         assert_eq!(filters.len(), 1);
         assert!(matches!(filters[0].get("_id"), Some(Bson::String(value)) if value == id));

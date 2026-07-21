@@ -20,7 +20,7 @@ describe("appendCreateDatabaseErrorHint", () => {
 
   it("does not alter unrelated or non-MySQL errors", () => {
     expect(appendCreateDatabaseErrorHint("mysql", "ERROR 1007: Can't create database; database exists", t)).toBe("ERROR 1007: Can't create database; database exists");
-    expect(appendCreateDatabaseErrorHint("postgresql", "ERROR 1044: permission denied", t)).toBe("ERROR 1044: permission denied");
+    expect(appendCreateDatabaseErrorHint("postgres", "ERROR 1044: permission denied", t)).toBe("ERROR 1044: permission denied");
   });
 
   it("does not append the same hint twice", () => {

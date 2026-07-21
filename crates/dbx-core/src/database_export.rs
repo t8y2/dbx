@@ -293,11 +293,30 @@ fn quote_export_sql_string(text: &str) -> String {
 }
 
 fn quote_export_sql_string_for_database(text: &str, database_type: Option<DatabaseType>) -> String {
-    if is_mysql_compatible_export_literal_target(database_type) {
-        quote_mysql_compatible_export_sql_string(text)
-    } else {
-        quote_export_sql_string(text)
+    match database_type {
+        Some(DatabaseType::Dameng) => quote_dameng_export_sql_string(text),
+        database_type if is_mysql_compatible_export_literal_target(database_type) => {
+            quote_mysql_compatible_export_sql_string(text)
+        }
+        _ => quote_export_sql_string(text),
     }
+}
+
+fn quote_dameng_export_sql_string(text: &str) -> String {
+    if !text.contains('\0') {
+        return quote_export_sql_string(text);
+    }
+
+    let mut parts = Vec::new();
+    for (index, segment) in text.split('\0').enumerate() {
+        if index > 0 {
+            parts.push("CHR(0)".to_string());
+        }
+        if !segment.is_empty() {
+            parts.push(quote_export_sql_string(segment));
+        }
+    }
+    parts.join(" || ")
 }
 
 fn quote_mysql_compatible_export_sql_string(text: &str) -> String {
@@ -2437,6 +2456,47 @@ mod tests {
             statements,
             vec!["INSERT INTO \"DBX_TEST\".\"FLAGS\" (\"ENABLED\", \"DELETED\", \"OPTIONAL\") VALUES (1, 0, NULL);"]
         );
+    }
+
+    #[test]
+    fn dameng_strings_export_nul_as_chr_expression() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Dameng),
+            schema: Some("DBX_TEST".to_string()),
+            table_name: Some("NUL_VALUES".to_string()),
+            qualified_table_name: None,
+            columns: vec![
+                "PLAIN".to_string(),
+                "TRAILING".to_string(),
+                "LEADING".to_string(),
+                "MIDDLE".to_string(),
+                "CONSECUTIVE".to_string(),
+                "ONLY_NUL".to_string(),
+            ],
+            column_types: vec![Some("VARCHAR".to_string()); 6],
+            column_extras: Vec::new(),
+            rows: vec![vec![
+                json!("plain"),
+                json!("eHall\0"),
+                json!("\0leading"),
+                json!("left\0right"),
+                json!("left\0\0right"),
+                json!("\0"),
+            ]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![concat!(
+                "INSERT INTO \"DBX_TEST\".\"NUL_VALUES\" ",
+                "(\"PLAIN\", \"TRAILING\", \"LEADING\", \"MIDDLE\", \"CONSECUTIVE\", \"ONLY_NUL\") ",
+                "VALUES ('plain', 'eHall' || CHR(0), CHR(0) || 'leading', 'left' || CHR(0) || 'right', ",
+                "'left' || CHR(0) || CHR(0) || 'right', CHR(0));"
+            )]
+        );
+        assert!(!statements[0].contains('\0'));
     }
 
     #[test]

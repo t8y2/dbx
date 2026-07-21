@@ -234,6 +234,22 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return pattern ? { ...result, rows: formatTemporalRowsForExport(result.rows, result.columnTypes, pattern) } : result;
   }
 
+  function normalizeCompleteLocalResult(result: QueryResult): { columns: string[]; columnTypes: string[]; rows: CellValue[][] } {
+    const hiddenColumnIndexes = new Set(result.hidden_column_indexes ?? []);
+    const exportedColumnIndexes = result.columns.map((_, index) => index).filter((index) => !hiddenColumnIndexes.has(index));
+    const hasHiddenColumns = exportedColumnIndexes.length !== result.columns.length;
+    const editorSettings = useSettingsStore().editorSettings;
+    const rows = editorSettings.exportRowLimitEnabled ? result.rows.slice(0, editorSettings.exportRowLimit) : result.rows;
+
+    // Internal key columns are query-only metadata. Keep every user column,
+    // including columns hidden manually in the grid, while preserving alignment.
+    return {
+      columns: hasHiddenColumns ? exportedColumnIndexes.map((index) => result.columns[index]!) : result.columns,
+      columnTypes: hasHiddenColumns ? exportedColumnIndexes.map((index) => result.column_types?.[index] ?? "") : (result.column_types ?? []),
+      rows: hasHiddenColumns ? rows.map((row) => exportedColumnIndexes.map((index) => row[index])) : rows,
+    };
+  }
+
   async function resultToExport(rowIds?: number[], onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, useFullExport = true, formatDateTime = true): Promise<{ columns: string[]; columnTypes: string[]; rows: CellValue[][] }> {
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
@@ -245,7 +261,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // and reflects client-side filters/search and unsaved edits, which would
     // silently change what the export contains.
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
-      return applyGlobalDateTimeExportFormat({ columns: completeLocalResult.value.columns, columnTypes: completeLocalResult.value.column_types ?? [], rows: completeLocalResult.value.rows }, formatDateTime);
+      return applyGlobalDateTimeExportFormat(normalizeCompleteLocalResult(completeLocalResult.value), formatDateTime);
     }
     return applyGlobalDateTimeExportFormat(
       {

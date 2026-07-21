@@ -13,7 +13,10 @@ use sqlparser::parser::Parser;
 use std::collections::HashSet;
 use std::future::Future;
 use std::ops::ControlFlow;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 #[cfg(feature = "duckdb-bundled")]
 use tokio::task::JoinHandle;
@@ -1022,6 +1025,84 @@ fn timeout_error_for(timeout_duration: Duration) -> String {
 
 pub fn canceled_error() -> String {
     QUERY_CANCELED.to_string()
+}
+
+pub(crate) struct StreamProgressClock {
+    started_at: tokio::time::Instant,
+    last_progress_ms: AtomicU64,
+}
+
+impl StreamProgressClock {
+    pub(crate) fn new() -> Self {
+        Self { started_at: tokio::time::Instant::now(), last_progress_ms: AtomicU64::new(0) }
+    }
+
+    pub(crate) fn mark(&self) {
+        self.last_progress_ms.store(self.started_at.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn elapsed_since_progress(&self) -> Duration {
+        let last_progress_ms = self.last_progress_ms.load(Ordering::Relaxed);
+        let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
+        Duration::from_millis(elapsed_ms.saturating_sub(last_progress_ms))
+    }
+}
+
+pub(crate) async fn await_stream_with_progress_timeout<F, T>(
+    stream_future: F,
+    timeout: Option<Duration>,
+    progress_clock: Arc<StreamProgressClock>,
+    cancel_token: Option<&CancellationToken>,
+    timeout_message: String,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let Some(timeout) = timeout else {
+        return match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => Err(canceled_error()),
+                    result = stream_future => result,
+                }
+            }
+            None => stream_future.await,
+        };
+    };
+
+    tokio::pin!(stream_future);
+    loop {
+        // Query timeout is an inactivity budget, not a cap on total stream duration.
+        let remaining = timeout.saturating_sub(progress_clock.elapsed_since_progress());
+        if remaining.is_zero() {
+            return Err(timeout_message.clone());
+        }
+        let sleep = tokio::time::sleep(remaining);
+        tokio::pin!(sleep);
+
+        match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(canceled_error()),
+                    result = &mut stream_future => return result,
+                    _ = &mut sleep => {},
+                }
+            }
+            None => {
+                tokio::select! {
+                    biased;
+                    result = &mut stream_future => return result,
+                    _ = &mut sleep => {},
+                }
+            }
+        }
+
+        if progress_clock.elapsed_since_progress() >= timeout {
+            return Err(timeout_message);
+        }
+    }
 }
 
 #[cfg(feature = "duckdb-bundled")]

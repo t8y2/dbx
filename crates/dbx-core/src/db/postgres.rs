@@ -21,7 +21,7 @@ use tokio_postgres::{NoTls, Row, SimpleQueryMessage};
 use tokio_util::sync::CancellationToken;
 
 use super::file_validator::validate_file_path;
-use crate::query::DbOperationBudget;
+use crate::query::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
@@ -2556,15 +2556,27 @@ pub async fn stream_select_query_with_cancel(
     }
 
     let pg_cancel_token = client.cancel_token();
-    let result = wait_postgres_query(
-        pg_cancel_token,
-        cancel_context,
-        cancel_token,
-        budget.query_timeout,
-        budget.cancel_timeout,
-        stream_select_query_inner(&client, sql, row_limit, &mut on_item),
+    let query_timeout = budget.query_timeout;
+    let timeout_error =
+        format!("Query timed out after {} seconds", query_timeout.map_or(0, |timeout| timeout.as_secs()));
+    let progress_clock = Arc::new(StreamProgressClock::new());
+    let progress_clock_for_stream = progress_clock.clone();
+    let mut on_stream_item = |item| {
+        on_item(item)?;
+        progress_clock_for_stream.mark();
+        Ok(())
+    };
+    let result = await_stream_with_progress_timeout(
+        stream_select_query_inner(&client, sql, row_limit, &mut on_stream_item),
+        query_timeout,
+        progress_clock,
+        cancel_token.as_ref(),
+        timeout_error.clone(),
     )
     .await;
+    if result.as_ref().is_err_and(|error| error == &timeout_error || error == crate::query::QUERY_CANCELED) {
+        cancel_postgres_query(pg_cancel_token, cancel_context.as_ref(), budget.cancel_timeout).await;
+    }
 
     if schema_was_set {
         let reset_result = reset_postgres_search_path(&client, budget.cleanup_timeout, start).await;

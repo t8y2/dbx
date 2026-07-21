@@ -1,9 +1,10 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use dbx_core::connection::AppState;
 use dbx_core::db::postgres;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
+use dbx_core::query::execute_sql_statement;
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::storage::Storage;
 
@@ -152,4 +153,116 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
     assert!(csv.contains("\"1\",\"1\""));
     assert!(csv.contains("\"2050\",\"1\""));
     assert_eq!(csv.lines().count(), 2051, "unexpected csv row count");
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_* env vars for a 650,000-row XLSX export"]
+async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arriving() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-postgres-query-export-timeout-{suffix}");
+    let config = live_postgres_config(&connection_id, &host, port, &user, &password, &database);
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-query-export-timeout-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let file_path = dir.join("result.xlsx");
+    let sql = "SELECT i AS id, repeat('x', 64) AS payload FROM generate_series(1, 650000) AS source(i)";
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-query-export-timeout-{suffix}"),
+        connection_id,
+        database,
+        schema: Some("public".to_string()),
+        sql: sql.to_string(),
+        query_base_sql: sql.to_string(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "xlsx".to_string(),
+        include_sql_sheet: false,
+        page_size: 10_000,
+        row_limit: None,
+        total_rows: Some(650_000),
+        timeout_secs: Some(1),
+        keyset_optimization_enabled: false,
+        client_session_id: None,
+        execution_id: Some(format!("live-postgres-query-export-timeout-{suffix}")),
+        date_time_format: None,
+    };
+    let rows_exported = AtomicU64::new(0);
+    let done_seen = AtomicBool::new(false);
+    let started_at = Instant::now();
+    let result = export_query_result_core(&state, &request, None, |progress| {
+        rows_exported.store(progress.rows_exported, Ordering::Relaxed);
+        if matches!(progress.status, ExportStatus::Done) {
+            done_seen.store(true, Ordering::Relaxed);
+        }
+    })
+    .await;
+    let elapsed = started_at.elapsed();
+    let file_len = std::fs::metadata(&file_path).map(|metadata| metadata.len()).unwrap_or(0);
+    let _ = std::fs::remove_dir_all(dir);
+
+    result.expect("stream 650,000 PostgreSQL rows to XLSX");
+    assert!(elapsed > Duration::from_secs(1), "export should outlive configured timeout: {elapsed:?}");
+    assert_eq!(rows_exported.load(Ordering::Relaxed), 650_000);
+    assert!(done_seen.load(Ordering::Relaxed));
+    assert!(file_len > 1_000_000);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_* env vars"]
+async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-postgres-query-export-stall-{suffix}");
+    let config = live_postgres_config(&connection_id, &host, port, &user, &password, &database);
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-query-export-stall-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let file_path = dir.join("result.csv");
+    let sql = "SELECT pg_sleep(5), 1 AS id";
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-query-export-stall-{suffix}"),
+        connection_id: connection_id.clone(),
+        database: database.clone(),
+        schema: Some("public".to_string()),
+        sql: sql.to_string(),
+        query_base_sql: sql.to_string(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "csv".to_string(),
+        include_sql_sheet: false,
+        page_size: 100,
+        row_limit: None,
+        total_rows: Some(1),
+        timeout_secs: Some(1),
+        keyset_optimization_enabled: false,
+        client_session_id: None,
+        execution_id: Some(format!("live-postgres-query-export-stall-{suffix}")),
+        date_time_format: None,
+    };
+    let started_at = Instant::now();
+    let result = export_query_result_core(&state, &request, None, |_| {}).await;
+    let elapsed = started_at.elapsed();
+    let recovery = execute_sql_statement(&state, &connection_id, &database, "SELECT 1 AS id", None, None).await;
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(result, Err("Query timed out after 1 seconds".to_string()));
+    assert!(elapsed < Duration::from_secs(5), "stalled query was not cancelled promptly: {elapsed:?}");
+    assert_eq!(recovery.expect("PostgreSQL connection should recover after export timeout").rows.len(), 1);
 }

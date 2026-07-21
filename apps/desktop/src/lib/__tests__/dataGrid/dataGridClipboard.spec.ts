@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { claimDataGridPaste, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
+import { claimDataGridPaste, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
+
+afterEach(() => clearDataGridClipboardCopy());
 
 function target(nativeClipboard: boolean): EventTarget {
   return {
@@ -70,5 +72,37 @@ describe("planDataGridPaste", () => {
   it("returns no cells for empty bounds", () => {
     expect(planDataGridPaste([["a"]], 0, 1)).toEqual([]);
     expect(planDataGridPaste([["a"]], 1, 0)).toEqual([]);
+  });
+});
+
+describe("parseDataGridClipboard", () => {
+  it("restores null values copied from the DBX grid", () => {
+    rememberDataGridClipboardCopy("NULL\tNULL", [[null, "NULL"]]);
+
+    expect(parseDataGridClipboard("NULL\tNULL")).toEqual([[null, "NULL"]]);
+  });
+
+  it("keeps null text from external clipboard content as strings", () => {
+    rememberDataGridClipboardCopy("NULL", [[null]]);
+    clearDataGridClipboardCopy();
+
+    expect(parseDataGridClipboard("NULL")).toEqual([["NULL"]]);
+    expect(parseDataGridClipboard("null")).toEqual([["null"]]);
+  });
+
+  it("does not reuse null metadata after a literal NULL is copied", () => {
+    rememberDataGridClipboardCopy("NULL", [[null]]);
+    rememberDataGridClipboardCopy("NULL", [["NULL"]]);
+
+    expect(parseDataGridClipboard("NULL")).toEqual([["NULL"]]);
+  });
+
+  it("restores null positions after copied headers", () => {
+    rememberDataGridClipboardCopy("name\tnote\nAda\tNULL", [["Ada", null]], true);
+
+    expect(parseDataGridClipboard("name\tnote\nAda\tNULL")).toEqual([
+      ["name", "note"],
+      ["Ada", null],
+    ]);
   });
 });

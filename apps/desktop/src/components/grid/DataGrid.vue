@@ -157,7 +157,7 @@ import { allNullColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
 import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
-import { parseClipboardTable, summarizeSelection } from "@/lib/dataGrid/gridSelection";
+import { summarizeSelection } from "@/lib/dataGrid/gridSelection";
 import {
   createDataGridCellContextMenuItems,
   createDataGridColumnContextMenuItems,
@@ -173,7 +173,7 @@ import {
 import { useToast } from "@/composables/useToast";
 import { useDataGridExport } from "@/composables/useDataGridExport";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
-import { claimDataGridPaste, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
+import { claimDataGridPaste, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { DATA_GRID_ROW_NUM_WIDTH, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
@@ -4912,6 +4912,10 @@ function resumeCanvasGridWork() {
   });
 }
 
+function clearInternalClipboardCopy() {
+  clearDataGridClipboardCopy();
+}
+
 onMounted(resumeCanvasGridWork);
 onActivated(resumeCanvasGridWork);
 onMounted(() => {
@@ -4920,6 +4924,8 @@ onMounted(() => {
   window.visualViewport?.addEventListener("resize", scheduleCanvasPixelRatioRefresh);
   window.addEventListener("dbx:ui-scale-applied", scheduleCanvasPixelRatioRefresh);
   window.addEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onTableDataGridColumnOrderChanged);
+  window.addEventListener("blur", clearInternalClipboardCopy);
+  document.addEventListener("visibilitychange", clearInternalClipboardCopy);
 });
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
@@ -4936,6 +4942,8 @@ onUnmounted(() => {
   window.visualViewport?.removeEventListener("resize", scheduleCanvasPixelRatioRefresh);
   window.removeEventListener("dbx:ui-scale-applied", scheduleCanvasPixelRatioRefresh);
   window.removeEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onTableDataGridColumnOrderChanged);
+  window.removeEventListener("blur", clearInternalClipboardCopy);
+  document.removeEventListener("visibilitychange", clearInternalClipboardCopy);
 });
 
 function setRowStatusFilter(value: string) {
@@ -5295,7 +5303,7 @@ async function pasteClipboardIntoSelection() {
 }
 
 function pasteTextIntoSelection(text: string): boolean {
-  const rows = parseClipboardTable(text);
+  const rows = parseDataGridClipboard(text);
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
 
   if (rows.length === 1 && rows[0]?.length === 1 && fillSelectionWithValue(rows[0][0])) {

@@ -1430,6 +1430,7 @@ const mcpInstalling = ref(false);
 const mcpInstallMessage = ref("");
 const mcpInstallError = ref(false);
 const mcpExecutionMode = computed(() => mcpExecutionModeFromPolicy(settingsStore.mcpGlobalPolicy));
+const mcpExecutionModeOptions: McpExecutionMode[] = ["read_only", "safe_write", "high_risk_write"];
 const mcpAllowedConnectionIds = computed(() => settingsStore.mcpGlobalPolicy.allowedConnectionIds);
 const mcpSelectableConnections = computed(() => connectionStore.connections);
 const mcpPolicyControlsDisabled = computed(() =>
@@ -1458,6 +1459,26 @@ function onMcpExecutionModeChange(mode: McpExecutionMode) {
     return;
   }
   void saveMcpPolicy(mcpPolicyFieldsForExecutionMode(mode));
+}
+
+function onMcpExecutionModeKeydown(event: KeyboardEvent, mode: McpExecutionMode) {
+  if (mcpPolicyControlsDisabled.value) return;
+  const currentIndex = mcpExecutionModeOptions.indexOf(mode);
+  let nextIndex: number | undefined;
+  if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = mcpExecutionModeOptions.length - 1;
+  else if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % mcpExecutionModeOptions.length;
+  else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex - 1 + mcpExecutionModeOptions.length) % mcpExecutionModeOptions.length;
+  if (nextIndex === undefined || nextIndex === currentIndex) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  const nextMode = mcpExecutionModeOptions[nextIndex];
+  // These cards visually replace native radios, so preserve the radio-group keyboard contract.
+  const currentTarget = event.currentTarget;
+  const group = currentTarget instanceof HTMLElement ? currentTarget.closest<HTMLElement>('[role="radiogroup"]') : null;
+  group?.querySelector<HTMLElement>(`[data-mcp-execution-mode="${nextMode}"]`)?.focus();
+  onMcpExecutionModeChange(nextMode);
 }
 
 function onMcpAllowedConnectionIdsChange(allowedConnectionIds: string[] | null) {
@@ -4887,24 +4908,34 @@ onUnmounted(cleanupPreviewEditor);
                     <Label id="mcp-execution-mode-label">{{ t("settings.mcpExecutionMode") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.mcpExecutionModeDescription") }}</p>
                   </div>
-                  <div class="grid grid-cols-1 p-1 sm:grid-cols-3 gap-2.5">
+                  <div class="grid grid-cols-1 p-1 sm:grid-cols-3 gap-2.5" role="radiogroup" aria-labelledby="mcp-execution-mode-label">
                     <Button
                       :disabled="mcpPolicyControlsDisabled"
                       type="button"
+                      role="radio"
+                      data-mcp-execution-mode="read_only"
+                      :aria-checked="mcpExecutionMode === 'read_only'"
+                      :tabindex="mcpExecutionMode === 'read_only' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
                       :class="mcpExecutionMode === 'read_only' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
                       @click="onMcpExecutionModeChange('read_only')"
+                      @keydown="onMcpExecutionModeKeydown($event, 'read_only')"
                     >
                       <span>{{ t("settings.mcpExecutionModeReadOnly") }}</span>
                     </Button>
                     <Button
                       :disabled="mcpPolicyControlsDisabled"
                       type="button"
+                      role="radio"
+                      data-mcp-execution-mode="safe_write"
+                      :aria-checked="mcpExecutionMode === 'safe_write'"
+                      :tabindex="mcpExecutionMode === 'safe_write' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
                       :class="mcpExecutionMode === 'safe_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
                       @click="onMcpExecutionModeChange('safe_write')"
+                      @keydown="onMcpExecutionModeKeydown($event, 'safe_write')"
                     >
                       <span>{{ t("settings.mcpExecutionModeSafeWrite") }}</span>
                       <span class="text-[10px] font-normal text-green-600 dark:text-green-400">{{ t("settings.mcpExecutionModeRecommended") }}</span>
@@ -4912,10 +4943,15 @@ onUnmounted(cleanupPreviewEditor);
                     <Button
                       :disabled="mcpPolicyControlsDisabled"
                       type="button"
+                      role="radio"
+                      data-mcp-execution-mode="high_risk_write"
+                      :aria-checked="mcpExecutionMode === 'high_risk_write'"
+                      :tabindex="mcpExecutionMode === 'high_risk_write' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
                       :class="mcpExecutionMode === 'high_risk_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
                       @click="onMcpExecutionModeChange('high_risk_write')"
+                      @keydown="onMcpExecutionModeKeydown($event, 'high_risk_write')"
                     >
                       <span>{{ t("settings.mcpExecutionModeHighRiskWrite") }}</span>
                     </Button>

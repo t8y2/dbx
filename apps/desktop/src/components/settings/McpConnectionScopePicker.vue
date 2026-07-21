@@ -75,6 +75,19 @@ function setScopeMode(mode: ScopeMode) {
   emitAllowedConnectionIds(mode === "all" ? null : [...connectionIds.value]);
 }
 
+function onScopeModeKeydown(event: KeyboardEvent, mode: ScopeMode) {
+  if (props.disabled || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const nextMode: ScopeMode = event.key === "Home" || event.key === "ArrowLeft" || event.key === "ArrowUp" ? "all" : "selected";
+  if (nextMode === mode) return;
+  // These cards visually replace native radios, so preserve the radio-group keyboard contract.
+  const currentTarget = event.currentTarget;
+  const group = currentTarget instanceof HTMLElement ? currentTarget.closest<HTMLElement>('[role="radiogroup"]') : null;
+  group?.querySelector<HTMLElement>(`[data-scope-mode="${nextMode}"]`)?.focus();
+  setScopeMode(nextMode);
+}
+
 function restorePendingFocus() {
   const pending = pendingFocus.value;
   if (!pending || props.busy) return;
@@ -129,22 +142,26 @@ watch([policyKey, () => groups.value.allowed.length], () => {
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0 space-y-1">
         <div class="flex flex-wrap items-center gap-2">
-          <div class="text-sm font-medium">{{ t("settings.mcpScopeConnection") }}</div>
+          <div :id="`${pickerId}-mode-label`" class="text-sm font-medium">{{ t("settings.mcpScopeConnection") }}</div>
           <Badge variant="outline" class="rounded-md font-normal">{{ allowedSummary }}</Badge>
         </div>
         <p class="text-xs text-muted-foreground">{{ t("settings.mcpScopeConnectionDescription") }}</p>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 p-1 sm:grid-cols-2 gap-2.5">
+    <div class="grid grid-cols-1 p-1 sm:grid-cols-2 gap-2.5" role="radiogroup" :aria-labelledby="`${pickerId}-mode-label`">
       <Button
         :disabled="disabled"
         type="button"
+        role="radio"
         data-scope-mode="all"
+        :aria-checked="scopeMode === 'all'"
+        :tabindex="scopeMode === 'all' ? 0 : -1"
         variant="outline"
         class="settings-choice-card h-auto justify-center border p-3"
         :class="[scopeMode === 'all' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : '', disabled ? 'cursor-not-allowed opacity-50' : '']"
         @click="setScopeMode('all')"
+        @keydown="onScopeModeKeydown($event, 'all')"
       >
         <div class="w-full min-w-0 text-center">
           <div class="text-sm font-medium">{{ t("settings.mcpScopeModeAll") }}</div>
@@ -154,11 +171,15 @@ watch([policyKey, () => groups.value.allowed.length], () => {
       <Button
         :disabled="disabled"
         type="button"
+        role="radio"
         data-scope-mode="selected"
+        :aria-checked="scopeMode === 'selected'"
+        :tabindex="scopeMode === 'selected' ? 0 : -1"
         variant="outline"
         class="settings-choice-card h-auto justify-center border p-3"
         :class="[scopeMode === 'selected' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : '', disabled ? 'cursor-not-allowed opacity-50' : '']"
         @click="setScopeMode('selected')"
+        @keydown="onScopeModeKeydown($event, 'selected')"
       >
         <div class="w-full min-w-0 text-center">
           <div class="text-sm font-medium">{{ t("settings.mcpScopeModeSelected") }}</div>

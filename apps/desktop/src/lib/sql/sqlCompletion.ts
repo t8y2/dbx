@@ -1393,6 +1393,8 @@ class SqlCompletionProvider {
     if (context.suggestKeywords && !context.exclusiveRoutineSuggestions && !pendingJoinKeyword) {
       this.items.push(...buildJoinModifierKeywordItems(context.prefix, this.input.keywordCase));
       this.items.push(...buildKeywordItems(context.prefix, context, this.databaseType, this.input.keywordCase));
+    } else if (shouldOfferKeywordPrefixContinuations(context, pendingJoinKeyword)) {
+      this.items.push(...buildKeywordPrefixContinuationItems(context.prefix, context, this.databaseType, this.input.keywordCase));
     }
 
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
@@ -4145,6 +4147,18 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
         boost: base + freqBoost,
       };
     });
+}
+
+function shouldOfferKeywordPrefixContinuations(context: SqlCompletionContext, pendingJoinKeyword: boolean): boolean {
+  return !!context.prefix && !pendingJoinKeyword && !context.qualifier && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions;
+}
+
+function buildKeywordPrefixContinuationItems(prefix: string, context: SqlCompletionContext, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+  const normalizedPrefix = prefix.toLowerCase();
+  return buildKeywordItems(prefix, context, databaseType, keywordCase).filter((item) => {
+    const normalizedLabel = item.label.toLowerCase();
+    return normalizedLabel.length > normalizedPrefix.length && normalizedLabel.startsWith(normalizedPrefix);
+  });
 }
 
 function matchesPrefix(candidate: string, prefix: string): boolean {

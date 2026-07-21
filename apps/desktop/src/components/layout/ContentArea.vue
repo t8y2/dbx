@@ -814,6 +814,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :connection-id="activeTab.connectionId"
               :database="activeTab.database"
               :schema="activeTab.schema"
+              :client-session-id="activeTab.id"
+              :completion-context-version="activeTab.completionContextVersion"
               :database-type="activeEffectiveDatabaseType"
               :dialect="editorDialect"
               :syntax-dialect="editorSyntaxDialect"

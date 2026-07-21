@@ -831,6 +831,8 @@ export interface QueryTab {
   explainExecutionId?: string;
   /** Per-run connection session for explain flows that require session state. */
   explainClientSessionId?: string;
+  /** Invalidates tab-scoped completion metadata after session context changes. */
+  completionContextVersion?: number;
   mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
   mqTenant?: string;
   mqInitialTab?: "topics";

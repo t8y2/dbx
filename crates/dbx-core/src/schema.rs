@@ -4213,6 +4213,20 @@ async fn retry_metadata_connection<T, F, Fut>(
     state: &AppState,
     connection_id: &str,
     database: Option<&str>,
+    operation: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    retry_metadata_connection_for_session(state, connection_id, database, None, operation).await
+}
+
+async fn retry_metadata_connection_for_session<T, F, Fut>(
+    state: &AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    client_session_id: Option<&str>,
     mut operation: F,
 ) -> Result<T, String>
 where
@@ -4222,7 +4236,7 @@ where
     let result = operation().await;
     match result {
         Err(error) if is_retryable_metadata_error(&error) => {
-            state.reconnect_pool(connection_id, database).await?;
+            state.reconnect_pool_for_session(connection_id, database, client_session_id).await?;
             operation().await
         }
         _ => result,
@@ -4240,8 +4254,21 @@ pub async fn get_columns_core(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::ColumnInfo>, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || async {
-        let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+    get_columns_core_for_session(state, connection_id, database, schema, table, None).await
+}
+
+pub async fn get_columns_core_for_session(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || async {
+        let pool_key = state
+            .get_or_create_pool_for_session(connection_id, Some(database), client_session_id)
+            .await?;
         #[cfg(feature = "duckdb-bundled")]
         let duckdb_attached_names = duckdb_attached_database_names(state, connection_id).await;
         let db_config = connection_config(state, connection_id).await;

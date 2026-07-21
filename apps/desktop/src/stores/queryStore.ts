@@ -186,6 +186,25 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
   return results;
 }
 
+function isOracleCurrentSchemaStatement(statement: string | undefined): boolean {
+  let remaining = statement?.trimStart() ?? "";
+  while (remaining) {
+    if (remaining.startsWith("--")) {
+      const newline = remaining.indexOf("\n");
+      remaining = newline < 0 ? "" : remaining.slice(newline + 1).trimStart();
+      continue;
+    }
+    if (remaining.startsWith("/*")) {
+      const end = remaining.indexOf("*/", 2);
+      if (end < 0) return false;
+      remaining = remaining.slice(end + 2).trimStart();
+      continue;
+    }
+    break;
+  }
+  return /^ALTER\s+SESSION\s+SET\s+CURRENT_SCHEMA\s*=/i.test(remaining);
+}
+
 function annotateQueryResultSource(result: QueryResult, sourceStatement: string, database?: string, databaseType?: DatabaseType, sourceRange?: { from: number; to: number }): QueryResult {
   result.sourceStatement = sourceStatement;
   if (sourceRange) {
@@ -514,6 +533,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function queueTabSessionReset(tab: QueryTab) {
+    tab.completionContextVersion = (tab.completionContextVersion ?? 0) + 1;
     const previousReset = pendingTabSessionResets.get(tab.id);
     const reset = (async () => {
       if (previousReset) await previousReset;
@@ -3412,6 +3432,7 @@ export const useQueryStore = defineStore("query", () => {
         executionPromise = api.executeMulti(tab.connectionId, executionDatabase, sqlToExecute, executionSchema, executionId, executionOptions);
       }
       const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset);
+      const successfulOracleSchemaChanges = effectiveDbType === "oracle" ? results.filter((result) => result.execution_error !== true && isOracleCurrentSchemaStatement(result.sourceStatement)).length : 0;
       if (hiddenPrimaryKeys.length > 0 && results.length === 1) {
         const hiddenIndexes = hiddenResultColumnIndexes(results[0]!.columns, hiddenPrimaryKeys);
         if (hiddenIndexes.length > 0) results[0]!.hidden_column_indexes = hiddenIndexes;
@@ -3428,6 +3449,9 @@ export const useQueryStore = defineStore("query", () => {
       });
       const current = tabs.value.find((t) => t.id === id);
       if (current?.executionId === executionId) {
+        if (successfulOracleSchemaChanges > 0) {
+          current.completionContextVersion = (current.completionContextVersion ?? 0) + successfulOracleSchemaChanges;
+        }
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;
         const shouldAppendResult = !!options?.appendResult && !!current.result;

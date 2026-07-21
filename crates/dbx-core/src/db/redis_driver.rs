@@ -9,7 +9,7 @@ use redis::{
     TlsMode, Value as RedisRawValue,
 };
 use serde::{Deserialize, Serialize};
-use std::future::Future;
+use std::{collections::HashMap, future::Future, time::Duration, time::Instant};
 use tokio::sync::{Mutex, MutexGuard};
 
 use super::json_value_for_js;
@@ -21,6 +21,9 @@ const DEFAULT_REDIS_DATABASES: u32 = 16;
 const CLUSTER_CURSOR_NODE_BITS: u64 = 16;
 const CLUSTER_CURSOR_NODE_MASK: u64 = (1 << CLUSTER_CURSOR_NODE_BITS) - 1;
 const CLUSTER_CURSOR_SCAN_MASK: u64 = (1 << (64 - CLUSTER_CURSOR_NODE_BITS)) - 1;
+const CLUSTER_SCAN_SESSION_LIMIT: usize = 128;
+const CLUSTER_SCAN_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_SAFE_INTEGER_CURSOR: u64 = (1 << 53) - 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisDatabaseInfo {
@@ -221,6 +224,70 @@ pub struct RedisClusterPool {
     pub tls_insecure: bool,
     pub username: String,
     pub password: String,
+    scan_sessions: Box<Mutex<RedisClusterScanSessions>>,
+}
+
+#[derive(Debug)]
+struct RedisClusterKeyScanSession {
+    master_nodes: Vec<RedisNodeEndpoint>,
+    node_index: usize,
+    node_cursor: u64,
+    pattern: String,
+    last_used: Instant,
+}
+
+impl RedisClusterKeyScanSession {
+    fn new(master_nodes: Vec<RedisNodeEndpoint>, pattern: &str) -> Self {
+        Self { master_nodes, node_index: 0, node_cursor: 0, pattern: pattern.to_string(), last_used: Instant::now() }
+    }
+}
+
+#[derive(Debug)]
+struct RedisClusterScanSessions {
+    next_cursor: u64,
+    entries: HashMap<u64, RedisClusterKeyScanSession>,
+}
+
+impl Default for RedisClusterScanSessions {
+    fn default() -> Self {
+        Self { next_cursor: 1, entries: HashMap::new() }
+    }
+}
+
+impl RedisClusterScanSessions {
+    fn take(&mut self, cursor: u64) -> Option<RedisClusterKeyScanSession> {
+        self.remove_expired();
+        self.entries.remove(&cursor)
+    }
+
+    fn insert(&mut self, cursor: Option<u64>, mut session: RedisClusterKeyScanSession) -> u64 {
+        self.remove_expired();
+        while self.entries.len() >= CLUSTER_SCAN_SESSION_LIMIT {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, entry)| entry.last_used).map(|(id, _)| *id) else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+
+        let cursor = cursor.filter(|value| *value > 0).unwrap_or_else(|| self.next_available_cursor());
+        session.last_used = Instant::now();
+        self.entries.insert(cursor, session);
+        cursor
+    }
+
+    fn remove_expired(&mut self) {
+        self.entries.retain(|_, entry| entry.last_used.elapsed() < CLUSTER_SCAN_SESSION_TTL);
+    }
+
+    fn next_available_cursor(&mut self) -> u64 {
+        loop {
+            let cursor = self.next_cursor;
+            self.next_cursor = if cursor >= MAX_SAFE_INTEGER_CURSOR { 1 } else { cursor + 1 };
+            if cursor != 0 && !self.entries.contains_key(&cursor) {
+                return cursor;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,6 +538,7 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
                     tls_insecure: config.redis_tls_insecure(),
                     username: auth.username,
                     password: auth.password,
+                    scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
                 });
             }
             Err(err) if last_error.is_none() || is_redis_auth_error(&err) => {
@@ -538,6 +606,7 @@ pub async fn connect_routed_cluster(
         tls_insecure: config.redis_tls_insecure(),
         username: auth.username,
         password: auth.password,
+        scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
     };
     if pool.node_routes.is_empty() {
         pool.node_routes = identity_routes(&unique_master_nodes(&pool.slot_ranges));
@@ -954,42 +1023,9 @@ pub async fn scan_cluster_keys_batch(
     max_iterations: usize,
     include_types: bool,
 ) -> Result<RedisScanResult, String> {
-    let cached_master_nodes = unique_master_nodes(&pool.slot_ranges);
-    let master_nodes =
-        if cached_master_nodes.is_empty() { cluster_master_nodes(pool).await? } else { cached_master_nodes };
-
-    let result =
-        scan_cluster_keys_batch_on_nodes(pool, &master_nodes, cursor, pattern, count, max_iterations, include_types)
-            .await;
-
-    if result.is_ok() || pool.slot_ranges.is_empty() {
-        return result;
-    }
-
-    let refreshed_master_nodes = cluster_master_nodes(pool).await?;
-    scan_cluster_keys_batch_on_nodes(
-        pool,
-        &refreshed_master_nodes,
-        cursor,
-        pattern,
-        count,
-        max_iterations,
-        include_types,
-    )
-    .await
-}
-
-async fn scan_cluster_keys_batch_on_nodes(
-    pool: &RedisClusterPool,
-    master_nodes: &[RedisNodeEndpoint],
-    cursor: u64,
-    pattern: &str,
-    count: usize,
-    max_iterations: usize,
-    include_types: bool,
-) -> Result<RedisScanResult, String> {
     scan_cluster_keys_batch_with(
-        master_nodes,
+        &pool.scan_sessions,
+        || async { cluster_master_nodes(pool).await },
         |endpoint| async move { connect_cluster_node(pool, &endpoint).await },
         cursor,
         pattern,
@@ -1000,9 +1036,10 @@ async fn scan_cluster_keys_batch_on_nodes(
     .await
 }
 
-async fn scan_cluster_keys_batch_with<C, Connect, ConnectFuture>(
-    master_nodes: &[RedisNodeEndpoint],
-    mut connect_node: Connect,
+async fn scan_cluster_keys_batch_with<C, Discover, DiscoverFuture, Connect, ConnectFuture>(
+    sessions: &Mutex<RedisClusterScanSessions>,
+    mut discover_master_nodes: Discover,
+    connect_node: Connect,
     cursor: u64,
     pattern: &str,
     count: usize,
@@ -1011,22 +1048,71 @@ async fn scan_cluster_keys_batch_with<C, Connect, ConnectFuture>(
 ) -> Result<RedisScanResult, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
+    Discover: FnMut() -> DiscoverFuture,
+    DiscoverFuture: Future<Output = Result<Vec<RedisNodeEndpoint>, String>>,
     Connect: FnMut(RedisNodeEndpoint) -> ConnectFuture,
     ConnectFuture: Future<Output = Result<C, String>>,
 {
-    if master_nodes.is_empty() {
-        return Ok(RedisScanResult { cursor: 0, keys: Vec::new(), total_keys: 0 });
+    let previous_session = if cursor == 0 { None } else { sessions.lock().await.take(cursor) };
+    let (mut session, can_continue) = match previous_session {
+        Some(session) if session.pattern == pattern => (session, true),
+        _ => {
+            let master_nodes = canonical_cluster_master_nodes(discover_master_nodes().await?);
+            if master_nodes.is_empty() {
+                return Ok(RedisScanResult { cursor: 0, keys: Vec::new(), total_keys: 0 });
+            }
+            (RedisClusterKeyScanSession::new(master_nodes, pattern), false)
+        }
+    };
+    let include_total_keys = !can_continue;
+
+    let batch = scan_cluster_keys_batch_on_session(
+        &mut session,
+        connect_node,
+        pattern,
+        count,
+        max_iterations,
+        include_types,
+        include_total_keys,
+    )
+    .await?;
+
+    if batch.complete {
+        return Ok(RedisScanResult { cursor: 0, keys: batch.keys, total_keys: batch.total_keys });
     }
 
-    let (mut node_index, node_cursor) = decode_cluster_cursor(cursor);
-    if node_index >= master_nodes.len() {
-        node_index = 0;
+    let session_cursor = sessions.lock().await.insert(can_continue.then_some(cursor), session);
+    Ok(RedisScanResult { cursor: session_cursor, keys: batch.keys, total_keys: batch.total_keys })
+}
+
+struct RedisClusterKeyScanBatch {
+    keys: Vec<RedisKeyInfo>,
+    total_keys: u64,
+    complete: bool,
+}
+
+async fn scan_cluster_keys_batch_on_session<C, Connect, ConnectFuture>(
+    session: &mut RedisClusterKeyScanSession,
+    mut connect_node: Connect,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+    include_total_keys: bool,
+) -> Result<RedisClusterKeyScanBatch, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+    Connect: FnMut(RedisNodeEndpoint) -> ConnectFuture,
+    ConnectFuture: Future<Output = Result<C, String>>,
+{
+    if session.master_nodes.is_empty() || session.node_index >= session.master_nodes.len() {
+        return Ok(RedisClusterKeyScanBatch { keys: Vec::new(), total_keys: 0, complete: true });
     }
 
-    let mut connections: Vec<Option<C>> = std::iter::repeat_with(|| None).take(master_nodes.len()).collect();
+    let mut connections: Vec<Option<C>> = std::iter::repeat_with(|| None).take(session.master_nodes.len()).collect();
     let mut total_keys = 0;
-    if cursor == 0 {
-        for (index, endpoint) in master_nodes.iter().cloned().enumerate() {
+    if include_total_keys {
+        for (index, endpoint) in session.master_nodes.iter().cloned().enumerate() {
             let Ok(mut connection) = connect_node(endpoint).await else {
                 continue;
             };
@@ -1037,34 +1123,41 @@ where
 
     let iterations = max_iterations.max(1);
     let target_keys = count.max(1);
-    let mut current_cursor = node_cursor;
     let mut all_keys = Vec::new();
 
     for _ in 0..iterations {
-        if connections[node_index].is_none() {
-            connections[node_index] = Some(connect_node(master_nodes[node_index].clone()).await?);
+        if connections[session.node_index].is_none() {
+            connections[session.node_index] =
+                Some(connect_node(session.master_nodes[session.node_index].clone()).await?);
         }
-        let connection = connections[node_index].as_mut().ok_or("Redis cluster node connection unavailable")?;
-        let page = scan_keys_batch_inner(connection, current_cursor, pattern, count, 1, include_types, false).await?;
+        let connection = connections[session.node_index].as_mut().ok_or("Redis cluster node connection unavailable")?;
+        let page =
+            scan_keys_batch_inner(connection, session.node_cursor, pattern, count, 1, include_types, false).await?;
         all_keys.extend(page.keys);
 
-        let next_cursor = if page.cursor != 0 {
-            current_cursor = page.cursor;
-            encode_cluster_cursor(node_index, current_cursor)?
-        } else if node_index + 1 < master_nodes.len() {
-            node_index += 1;
-            current_cursor = 0;
-            encode_cluster_cursor(node_index, 0)?
+        let complete = if page.cursor != 0 {
+            session.node_cursor = page.cursor;
+            false
+        } else if session.node_index + 1 < session.master_nodes.len() {
+            session.node_index += 1;
+            session.node_cursor = 0;
+            false
         } else {
-            0
+            true
         };
 
-        if next_cursor == 0 || all_keys.len() >= target_keys {
-            return Ok(RedisScanResult { cursor: next_cursor, keys: all_keys, total_keys });
+        if complete || all_keys.len() >= target_keys {
+            return Ok(RedisClusterKeyScanBatch { keys: all_keys, total_keys, complete });
         }
     }
 
-    Ok(RedisScanResult { cursor: encode_cluster_cursor(node_index, current_cursor)?, keys: all_keys, total_keys })
+    Ok(RedisClusterKeyScanBatch { keys: all_keys, total_keys, complete: false })
+}
+
+fn canonical_cluster_master_nodes(mut master_nodes: Vec<RedisNodeEndpoint>) -> Vec<RedisNodeEndpoint> {
+    master_nodes.sort_unstable_by(|left, right| left.host.cmp(&right.host).then(left.port.cmp(&right.port)));
+    master_nodes.dedup();
+    master_nodes
 }
 
 pub async fn scan_cluster_values_page(
@@ -2838,7 +2931,7 @@ mod tests {
         redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint,
         redis_value_matches_query, redis_value_to_bytes, RedisAuthCandidate, RedisBlob, RedisBlobEncoding,
         RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint,
-        RedisRawValue, RedisSetItem, RedisStreamEntry, RedisStreamField, RedisValue, RedisValueData,
+        RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamEntry, RedisStreamField, RedisValue, RedisValueData,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -3187,6 +3280,7 @@ mod tests {
 
     #[tokio::test]
     async fn cluster_key_batch_reuses_node_connections_across_scan_iterations() {
+        let sessions = tokio::sync::Mutex::new(super::RedisClusterScanSessions::default());
         let masters = vec![
             RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
             RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
@@ -3216,9 +3310,16 @@ mod tests {
         ]);
         let connect_count = Arc::new(AtomicUsize::new(0));
         let connector_count = connect_count.clone();
+        let topology_count = Arc::new(AtomicUsize::new(0));
+        let discovery_count = topology_count.clone();
+        let discovered_masters = masters.clone();
 
         let result = super::scan_cluster_keys_batch_with(
-            &masters,
+            &sessions,
+            move || {
+                discovery_count.fetch_add(1, Ordering::Relaxed);
+                ready(Ok(discovered_masters.clone()))
+            },
             move |endpoint| {
                 connector_count.fetch_add(1, Ordering::Relaxed);
                 ready(connections.remove(&endpoint).ok_or_else(|| format!("unexpected reconnect to {}", endpoint.host)))
@@ -3234,19 +3335,29 @@ mod tests {
 
         assert_eq!(result.total_keys, 600);
         assert_eq!(result.keys.len(), 1);
-        assert_eq!(result.cursor, encode_cluster_cursor(2, 0).unwrap());
+        assert!(result.cursor > 0);
+        assert!(result.cursor <= super::MAX_SAFE_INTEGER_CURSOR);
+        assert_eq!(topology_count.load(Ordering::Relaxed), 1);
         assert_eq!(connect_count.load(Ordering::Relaxed), 3);
         assert_eq!(logs.iter().map(|log| tracked_command_count(log, "DBSIZE")).sum::<usize>(), 3);
         assert_eq!(logs.iter().map(|log| tracked_command_count(log, "SCAN")).sum::<usize>(), 4);
+        assert_eq!(sessions.lock().await.entries.len(), 1);
     }
 
     #[tokio::test]
     async fn cluster_key_batch_continuation_skips_dbsize_and_advances_masters() {
+        let pattern = "membership:saas:base:token:*";
         let masters = vec![
             RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
             RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
             RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
         ];
+        let mut saved_session = super::RedisClusterKeyScanSession::new(masters.clone(), pattern);
+        saved_session.node_index = 1;
+        saved_session.node_cursor = 7;
+        let mut saved_sessions = super::RedisClusterScanSessions::default();
+        let cursor = saved_sessions.insert(None, saved_session);
+        let sessions = tokio::sync::Mutex::new(saved_sessions);
         let logs: Vec<_> = (0..masters.len()).map(|_| Arc::new(StdMutex::new(Vec::new()))).collect();
         let mut connections = HashMap::from([
             (masters[1].clone(), TrackedRedisConnection::new(vec![scan_response("0", vec![])], logs[1].clone())),
@@ -3260,17 +3371,23 @@ mod tests {
         ]);
         let connect_count = Arc::new(AtomicUsize::new(0));
         let connector_count = connect_count.clone();
+        let topology_count = Arc::new(AtomicUsize::new(0));
+        let discovery_count = topology_count.clone();
 
         let result = super::scan_cluster_keys_batch_with(
-            &masters,
+            &sessions,
+            move || {
+                discovery_count.fetch_add(1, Ordering::Relaxed);
+                ready(Err("continuation must not rediscover topology".to_string()))
+            },
             move |endpoint| {
                 connector_count.fetch_add(1, Ordering::Relaxed);
                 ready(
                     connections.remove(&endpoint).ok_or_else(|| format!("unexpected connection to {}", endpoint.host)),
                 )
             },
-            encode_cluster_cursor(1, 7).unwrap(),
-            "membership:saas:base:token:*",
+            cursor,
+            pattern,
             1000,
             2,
             false,
@@ -3281,9 +3398,222 @@ mod tests {
         assert_eq!(result.cursor, 0);
         assert_eq!(result.total_keys, 0);
         assert_eq!(result.keys.len(), 1);
+        assert_eq!(topology_count.load(Ordering::Relaxed), 0);
         assert_eq!(connect_count.load(Ordering::Relaxed), 2);
         assert_eq!(logs.iter().map(|log| tracked_command_count(log, "DBSIZE")).sum::<usize>(), 0);
         assert_eq!(logs.iter().map(|log| tracked_command_count(log, "SCAN")).sum::<usize>(), 2);
+        assert!(sessions.lock().await.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_refreshes_healthy_cached_masters_before_scanning() {
+        let pattern = "membership:saas:base:token:*";
+        let cached_masters = [
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+        ];
+        let current_masters = [
+            cached_masters[0].clone(),
+            cached_masters[1].clone(),
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let sessions = tokio::sync::Mutex::new(super::RedisClusterScanSessions::default());
+        let logs: Vec<_> = (0..current_masters.len()).map(|_| Arc::new(StdMutex::new(Vec::new()))).collect();
+        let mut connections = HashMap::from([
+            (
+                current_masters[0].clone(),
+                TrackedRedisConnection::new(vec![RedisRawValue::Int(100), scan_response("0", vec![])], logs[0].clone()),
+            ),
+            (
+                current_masters[1].clone(),
+                TrackedRedisConnection::new(vec![RedisRawValue::Int(200), scan_response("0", vec![])], logs[1].clone()),
+            ),
+            (
+                current_masters[2].clone(),
+                TrackedRedisConnection::new(
+                    vec![RedisRawValue::Int(300), scan_response("0", vec!["membership:saas:base:token:new-master"])],
+                    logs[2].clone(),
+                ),
+            ),
+        ]);
+        let discovered_masters = vec![
+            current_masters[2].clone(),
+            current_masters[0].clone(),
+            current_masters[1].clone(),
+            current_masters[2].clone(),
+        ];
+        let topology_count = Arc::new(AtomicUsize::new(0));
+        let discovery_count = topology_count.clone();
+
+        let result = super::scan_cluster_keys_batch_with(
+            &sessions,
+            move || {
+                discovery_count.fetch_add(1, Ordering::Relaxed);
+                ready(Ok(discovered_masters.clone()))
+            },
+            move |endpoint| {
+                ready(connections.remove(&endpoint).ok_or_else(|| format!("unexpected reconnect to {}", endpoint.host)))
+            },
+            0,
+            pattern,
+            1000,
+            3,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor, 0);
+        assert_eq!(result.total_keys, 600);
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(result.keys[0].key_display, "membership:saas:base:token:new-master");
+        assert_eq!(topology_count.load(Ordering::Relaxed), 1);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "DBSIZE")).sum::<usize>(), 3);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "SCAN")).sum::<usize>(), 3);
+        assert!(sessions.lock().await.entries.is_empty());
+    }
+
+    #[test]
+    fn cluster_scan_routes_discovered_advertised_endpoint_through_existing_mapping() {
+        let advertised = RedisNodeEndpoint { host: "redis.internal".to_string(), port: 7000 };
+        let forwarded = RedisNodeEndpoint { host: "127.0.0.1".to_string(), port: 17_000 };
+        let pool = super::RedisClusterPool {
+            connection: None,
+            seed_nodes: vec![advertised.clone()],
+            seed_routes: Vec::new(),
+            slot_ranges: Vec::new(),
+            node_routes: vec![RedisNodeRoute { advertised: advertised.clone(), connect: forwarded.clone() }],
+            tls: false,
+            tls_insecure: false,
+            username: String::new(),
+            password: String::new(),
+            scan_sessions: Box::new(tokio::sync::Mutex::new(super::RedisClusterScanSessions::default())),
+        };
+
+        assert_eq!(super::mapped_cluster_endpoint(&pool, &advertised), forwarded);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_continuation_uses_stable_node_identity_without_rediscovery() {
+        let pattern = "membership:*";
+        let masters = vec![
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let mut saved_session = super::RedisClusterKeyScanSession::new(masters.clone(), pattern);
+        saved_session.node_index = 1;
+        saved_session.node_cursor = 7;
+        let mut saved_sessions = super::RedisClusterScanSessions::default();
+        let cursor = saved_sessions.insert(None, saved_session);
+        let sessions = tokio::sync::Mutex::new(saved_sessions);
+        let commands = Arc::new(StdMutex::new(Vec::new()));
+        let mut connections = HashMap::from([(
+            masters[1].clone(),
+            TrackedRedisConnection::new(vec![scan_response("9", vec!["membership:stable-node"])], commands.clone()),
+        )]);
+
+        let result = super::scan_cluster_keys_batch_with(
+            &sessions,
+            || ready(Err("continuation must not rediscover topology".to_string())),
+            move |endpoint| {
+                ready(
+                    connections.remove(&endpoint).ok_or_else(|| format!("unexpected connection to {}", endpoint.host)),
+                )
+            },
+            cursor,
+            pattern,
+            1,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor, cursor);
+        assert_eq!(result.total_keys, 0);
+        assert_eq!(result.keys[0].key_display, "membership:stable-node");
+        assert_eq!(tracked_command_count(&commands, "DBSIZE"), 0);
+        assert_eq!(tracked_command_count(&commands, "SCAN"), 1);
+        let continued = sessions.lock().await.take(cursor).unwrap();
+        assert_eq!(continued.master_nodes[continued.node_index], masters[1]);
+        assert_eq!(continued.node_cursor, 9);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_restarts_an_unknown_continuation_cursor() {
+        let sessions = tokio::sync::Mutex::new(super::RedisClusterScanSessions::default());
+        let master = RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 };
+        let commands = Arc::new(StdMutex::new(Vec::new()));
+        let mut connection = Some(TrackedRedisConnection::new(
+            vec![RedisRawValue::Int(100), scan_response("0", vec!["membership:restarted"])],
+            commands.clone(),
+        ));
+        let discovered_master = master.clone();
+
+        let result = super::scan_cluster_keys_batch_with(
+            &sessions,
+            move || ready(Ok(vec![discovered_master.clone()])),
+            move |endpoint| {
+                ready(if endpoint == master {
+                    connection.take().ok_or_else(|| "unexpected reconnect".to_string())
+                } else {
+                    Err(format!("unexpected connection to {}", endpoint.host))
+                })
+            },
+            999,
+            "membership:*",
+            1000,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor, 0);
+        assert_eq!(result.total_keys, 100);
+        assert_eq!(result.keys[0].key_display, "membership:restarted");
+        assert_eq!(tracked_command_count(&commands, "DBSIZE"), 1);
+        assert_eq!(tracked_command_count(&commands, "SCAN"), 1);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_reports_new_scan_topology_failure() {
+        let sessions = tokio::sync::Mutex::new(super::RedisClusterScanSessions::default());
+
+        let error = super::scan_cluster_keys_batch_with::<TrackedRedisConnection, _, _, _, _>(
+            &sessions,
+            || ready(Err("topology unavailable".to_string())),
+            |_| ready(Err("scan connection must not be opened".to_string())),
+            0,
+            "membership:*",
+            1000,
+            1,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "topology unavailable");
+        assert!(sessions.lock().await.entries.is_empty());
+    }
+
+    #[test]
+    fn cluster_scan_sessions_expire_and_remain_bounded() {
+        let master = RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 };
+        let mut sessions = super::RedisClusterScanSessions::default();
+        let expired_cursor = sessions.insert(None, super::RedisClusterKeyScanSession::new(vec![master.clone()], "*"));
+        sessions.entries.get_mut(&expired_cursor).unwrap().last_used =
+            std::time::Instant::now() - super::CLUSTER_SCAN_SESSION_TTL - std::time::Duration::from_secs(1);
+
+        for index in 0..=super::CLUSTER_SCAN_SESSION_LIMIT {
+            sessions
+                .insert(None, super::RedisClusterKeyScanSession::new(vec![master.clone()], &format!("key:{index}:*")));
+        }
+
+        assert!(!sessions.entries.contains_key(&expired_cursor));
+        assert_eq!(sessions.entries.len(), super::CLUSTER_SCAN_SESSION_LIMIT);
+        assert!(sessions.entries.keys().all(|cursor| *cursor > 0 && *cursor <= super::MAX_SAFE_INTEGER_CURSOR));
     }
 
     #[tokio::test]

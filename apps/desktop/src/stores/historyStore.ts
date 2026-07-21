@@ -3,7 +3,6 @@ import { uuid } from "@/lib/common/utils";
 import { ref } from "vue";
 import * as api from "@/lib/backend/api";
 import type { HistoryConnectionOption, HistoryCursor, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
-import { historyEntryMatchesSearch } from "@/lib/history/historySearch";
 
 const DEFAULT_HISTORY_SEARCH: HistorySearchRequest = {
   search_text: "",
@@ -32,10 +31,33 @@ export const useHistoryStore = defineStore("history", () => {
   const activeRequest = ref<HistorySearchRequest>(copyRequest(DEFAULT_HISTORY_SEARCH));
   // Ignore stale responses when filters change faster than the backend can respond.
   let requestSerial = 0;
+  let mutationGeneration = 0;
+  let destructiveMutations = 0;
+  let hasLoaded = false;
+  let latestRequestedSearch = copyRequest(DEFAULT_HISTORY_SEARCH);
+
+  function beginDestructiveMutation() {
+    requestSerial += 1;
+    mutationGeneration += 1;
+    destructiveMutations += 1;
+    loading.value = false;
+    loadingMore.value = false;
+  }
+
+  function endDestructiveMutation() {
+    destructiveMutations = Math.max(0, destructiveMutations - 1);
+    // Invalidate searches started while the backend mutation was still pending.
+    mutationGeneration += 1;
+    requestSerial += 1;
+    loading.value = false;
+    loadingMore.value = false;
+  }
 
   async function search(request: HistorySearchRequest, append = false) {
     const serial = ++requestSerial;
+    const generation = mutationGeneration;
     const baseRequest = copyRequest({ ...request, cursor: undefined });
+    if (!append) latestRequestedSearch = copyRequest(baseRequest);
     const actualRequest = copyRequest({
       ...baseRequest,
       cursor: append ? (nextCursor.value ?? undefined) : undefined,
@@ -45,7 +67,7 @@ export const useHistoryStore = defineStore("history", () => {
     error.value = "";
     try {
       const result = await api.searchHistory(actualRequest);
-      if (serial !== requestSerial) return;
+      if (serial !== requestSerial || generation !== mutationGeneration || destructiveMutations > 0) return;
       activeRequest.value = baseRequest;
       if (append) {
         // A new entry may shift page boundaries while loading; deduplicate before appending.
@@ -56,8 +78,9 @@ export const useHistoryStore = defineStore("history", () => {
       }
       total.value = result.total;
       nextCursor.value = result.next_cursor ?? null;
+      hasLoaded = true;
     } catch (searchError) {
-      if (serial !== requestSerial) return;
+      if (serial !== requestSerial || generation !== mutationGeneration || destructiveMutations > 0) return;
       error.value = searchError instanceof Error ? searchError.message : String(searchError);
       throw searchError;
     } finally {
@@ -106,14 +129,23 @@ export const useHistoryStore = defineStore("history", () => {
     };
     await api.saveHistory(full);
     addConnectionOption(full);
-    if (historyEntryMatchesSearch(full, activeRequest.value)) {
-      entries.value.unshift(full);
-      total.value += 1;
+    if (hasLoaded) {
+      try {
+        // Re-query SQLite so eviction, totals, cursors, and text matching stay authoritative.
+        await search(latestRequestedSearch);
+      } catch {
+        // The history panel exposes refresh failures without failing the completed query execution.
+      }
     }
   }
 
   async function remove(id: string) {
-    await api.deleteHistoryEntry(id);
+    beginDestructiveMutation();
+    try {
+      await api.deleteHistoryEntry(id);
+    } finally {
+      endDestructiveMutation();
+    }
     const wasVisible = entries.value.some((entry) => entry.id === id);
     entries.value = entries.value.filter((entry) => entry.id !== id);
     if (wasVisible) total.value = Math.max(0, total.value - 1);
@@ -121,7 +153,12 @@ export const useHistoryStore = defineStore("history", () => {
   }
 
   async function clear() {
-    await api.clearHistory();
+    beginDestructiveMutation();
+    try {
+      await api.clearHistory();
+    } finally {
+      endDestructiveMutation();
+    }
     entries.value = [];
     connectionOptions.value = [];
     total.value = 0;

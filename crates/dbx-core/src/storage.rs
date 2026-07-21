@@ -671,13 +671,29 @@ fn delete_secret_prefix_in_tx(
 
 // History
 
-fn append_history_connection_clause(
+fn history_filter_targets_connection(connection: &HistoryConnectionFilter, database: &HistoryDatabaseFilter) -> bool {
+    if !connection.connection_id.is_empty() || !database.connection_id.is_empty() {
+        !connection.connection_id.is_empty() && connection.connection_id == database.connection_id
+    } else {
+        !connection.connection_name.is_empty() && connection.connection_name == database.connection_name
+    }
+}
+
+fn append_history_scope_clause(
     clauses: &mut Vec<String>,
     values: &mut Vec<Value>,
     connections: &[HistoryConnectionFilter],
+    databases: &[HistoryDatabaseFilter],
 ) {
     let mut alternatives = Vec::new();
     for connection in connections {
+        // Database selections narrow only their owning connection; other selected connections remain whole scopes.
+        if databases
+            .iter()
+            .any(|database| !database.database.is_empty() && history_filter_targets_connection(connection, database))
+        {
+            continue;
+        }
         if !connection.connection_id.is_empty() {
             alternatives.push("connection_id = ?".to_string());
             values.push(Value::Text(connection.connection_id.clone()));
@@ -687,17 +703,6 @@ fn append_history_connection_clause(
             values.push(Value::Text(connection.connection_name.clone()));
         }
     }
-    if !alternatives.is_empty() {
-        clauses.push(format!("({})", alternatives.join(" OR ")));
-    }
-}
-
-fn append_history_database_clause(
-    clauses: &mut Vec<String>,
-    values: &mut Vec<Value>,
-    databases: &[HistoryDatabaseFilter],
-) {
-    let mut alternatives = Vec::new();
     for database in databases.iter().filter(|database| !database.database.is_empty()) {
         if !database.connection_id.is_empty() {
             alternatives.push("(connection_id = ? AND database = ?)".to_string());
@@ -722,8 +727,7 @@ fn escape_history_like_pattern(value: &str) -> String {
 fn history_search_predicate(request: &HistorySearchRequest) -> (String, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
-    append_history_connection_clause(&mut clauses, &mut values, &request.connections);
-    append_history_database_clause(&mut clauses, &mut values, &request.databases);
+    append_history_scope_clause(&mut clauses, &mut values, &request.connections, &request.databases);
 
     if let Some(kind) = request.activity_kind.as_ref().filter(|kind| !kind.is_empty()) {
         clauses.push("activity_kind = ?".to_string());
@@ -3349,6 +3353,51 @@ mod tests {
         assert_eq!(options.len(), 3);
         assert!(options.iter().any(|option| option.connection_id == "conn-a" && option.databases == ["sales"]));
         assert!(options.iter().any(|option| option.connection_id.is_empty() && option.connection_name == "Legacy"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn history_search_combines_whole_connections_with_narrowed_database_scopes() {
+        let path = temp_db_path("history-search-hierarchical-scope");
+        let storage = Storage::open(&path).await.unwrap();
+        let entries = [
+            history_entry("a-sales", "conn-a", "Primary", "sales", "select 1", "2026-07-18T01:00:00Z", true),
+            history_entry("a-archive", "conn-a", "Primary", "archive", "select 2", "2026-07-18T02:00:00Z", true),
+            history_entry("b-sales", "conn-b", "Replica", "sales", "select 3", "2026-07-18T03:00:00Z", true),
+            history_entry("b-archive", "conn-b", "Replica", "archive", "select 4", "2026-07-18T04:00:00Z", true),
+        ];
+        for entry in &entries {
+            storage.save_history_entry(entry).await.unwrap();
+        }
+
+        let result = storage
+            .search_history_entries(HistorySearchRequest {
+                connections: vec![
+                    HistoryConnectionFilter {
+                        connection_id: "conn-a".to_string(),
+                        connection_name: "Primary".to_string(),
+                    },
+                    HistoryConnectionFilter {
+                        connection_id: "conn-b".to_string(),
+                        connection_name: "Replica".to_string(),
+                    },
+                ],
+                databases: vec![HistoryDatabaseFilter {
+                    connection_id: "conn-b".to_string(),
+                    connection_name: "Replica".to_string(),
+                    database: "sales".to_string(),
+                }],
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
+            vec!["b-sales", "a-archive", "a-sales"]
+        );
+        assert_eq!(result.total, 3);
         let _ = std::fs::remove_file(path);
     }
 

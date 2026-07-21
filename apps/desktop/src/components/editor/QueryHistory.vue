@@ -2,7 +2,7 @@
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
-import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
+import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, Minus, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -15,6 +15,7 @@ import { resolveHistoryActivityKind } from "@/lib/history/historyActivityKind";
 import { canRollbackHistoryEntry } from "@/lib/history/historyAiAnalysis";
 import { hasHistoryDateRange, historyDateRangeIsValid, type HistoryDateRange } from "@/lib/history/historyTimeRange";
 import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "@/lib/history/historyVirtualList";
+import { historyConnectionHasSelectedDatabase } from "@/lib/history/historySearch";
 import type { HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -71,9 +72,10 @@ const dateRangeSummary = computed(() => {
 });
 
 const hasScopeFilter = computed(() => selectedConnections.value.length > 0 || selectedDatabases.value.length > 0);
+const wholeConnectionCount = computed(() => selectedConnections.value.filter((connection) => !isConnectionNarrowed(connection)).length);
 const scopeSummary = computed(() => {
   const parts: string[] = [];
-  if (selectedConnections.value.length > 0) parts.push(t("history.scope.connectionCount", { count: selectedConnections.value.length }));
+  if (wholeConnectionCount.value > 0) parts.push(t("history.scope.connectionCount", { count: wholeConnectionCount.value }));
   if (selectedDatabases.value.length > 0) parts.push(t("history.scope.databaseCount", { count: selectedDatabases.value.length }));
   return parts.join(" / ");
 });
@@ -163,8 +165,16 @@ function isConnectionSelected(connection: HistoryConnectionFilter) {
   return selectedConnections.value.some((candidate) => connectionKey(candidate) === key);
 }
 
+function isConnectionNarrowed(connection: HistoryConnectionFilter) {
+  return historyConnectionHasSelectedDatabase(connection, selectedDatabases.value);
+}
+
 function toggleConnection(connection: HistoryConnectionFilter) {
   const key = connectionKey(connection);
+  if (isConnectionNarrowed(connection)) {
+    selectedDatabases.value = selectedDatabases.value.filter((database) => connectionKey(database) !== key);
+    return;
+  }
   if (isConnectionSelected(connection)) {
     selectedConnections.value = selectedConnections.value.filter((candidate) => connectionKey(candidate) !== key);
     selectedDatabases.value = selectedDatabases.value.filter((database) => connectionKey(database) !== key);
@@ -182,6 +192,10 @@ function toggleDatabase(database: HistoryDatabaseFilter) {
   const key = databaseKey(database);
   if (isDatabaseSelected(database)) {
     selectedDatabases.value = selectedDatabases.value.filter((candidate) => databaseKey(candidate) !== key);
+    if (!historyConnectionHasSelectedDatabase(database, selectedDatabases.value)) {
+      const parentKey = connectionKey(database);
+      selectedConnections.value = selectedConnections.value.filter((connection) => connectionKey(connection) !== parentKey);
+    }
     return;
   }
   if (!isConnectionSelected(database)) {
@@ -538,7 +552,8 @@ onBeforeUnmount(() => {
             <div class="max-h-32 overflow-y-auto rounded border">
               <button v-for="connection in visibleConnectionOptions" :key="connectionKey(connection)" type="button" class="flex w-full items-center gap-2 border-b px-2 py-1.5 text-left text-xs last:border-b-0 hover:bg-accent" @click="toggleConnection(connection)">
                 <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="{ 'border-primary bg-primary text-primary-foreground': isConnectionSelected(connection) }">
-                  <Check v-if="isConnectionSelected(connection)" class="h-3 w-3" />
+                  <Minus v-if="isConnectionNarrowed(connection)" class="h-3 w-3" />
+                  <Check v-else-if="isConnectionSelected(connection)" class="h-3 w-3" />
                 </span>
                 <span class="min-w-0 flex-1 truncate">{{ connection.connection_name || t("history.scope.unknownConnection") }}</span>
                 <span class="shrink-0 text-[10px] text-muted-foreground">{{ connection.databases.length }}</span>

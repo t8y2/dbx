@@ -2357,6 +2357,14 @@ export const useQueryStore = defineStore("query", () => {
 
   async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; sourceOffset?: number }) {
     if (!activeTabId.value) return;
+    const tab = tabs.value.find((item) => item.id === activeTabId.value);
+    if (tab?.mode === "query") {
+      tab.resultSortColumn = undefined;
+      tab.resultSortColumnIndex = undefined;
+      tab.resultSortDirection = undefined;
+      tab.resultSortMode = undefined;
+      tab.resultSortedSql = undefined;
+    }
     await executeTabSql(activeTabId.value, sql, { resultBaseSql: sql, resultSortedSql: undefined, ...options });
   }
 

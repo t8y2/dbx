@@ -35,6 +35,7 @@ import {
   PanelRight,
   TableProperties,
   Database,
+  Eraser,
   Columns3,
   PencilRuler,
   WandSparkles,
@@ -492,7 +493,7 @@ function sortMenuItems(column: string, columnIndex: number) {
       currentPageDescending: t("grid.sortCurrentPageDescending"),
       clear: t("grid.clearSort"),
     },
-    icons: { database: Database, ascending: ArrowUp, descending: ArrowDown, clear: ArrowUpDown },
+    icons: { database: Database, ascending: ArrowUp, descending: ArrowDown, clear: Eraser },
   });
 }
 
@@ -7364,7 +7365,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         localDescending: t("grid.sortCurrentPageDescending"),
         clearSort: t("grid.clearSort"),
       },
-      icons: { copy: Copy, columnDetails: TableProperties, database: Database, ascending: ArrowUp, descending: ArrowDown, clearSort: ArrowUpDown },
+      icons: { copy: Copy, columnDetails: TableProperties, database: Database, ascending: ArrowUp, descending: ArrowDown, clearSort: Eraser },
       actions: { copyName: copyHeaderColumn, copyNames: copyColumnNames, details: openContextColumnDetailDialog, copyAlterSql: copyAlterColumnSql, sort: applyContextSort },
       filterSubmenu: filterSubmenu(),
     }),
@@ -7847,9 +7848,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           :items="sortMenuItems(col.name, col.actualColIdx)"
                           :open="headerSortMenuOpenColumn === col.actualColIdx"
                           :selected-value="selectedSortMenuValue(col.name, col.actualColIdx)"
+                          check-position="none"
                           align="end"
                           content-class="w-max min-w-28 p-0.5"
-                          item-class="gap-1 px-1.5 py-0.5 text-xs"
+                          item-class="gap-1 rounded-none px-1.5 py-0.5 text-xs"
                           item-icon-class="h-3 w-3"
                           :match-trigger-width="false"
                           @update:open="(value: boolean) => (headerSortMenuOpenColumn = value ? col.actualColIdx : null)"
@@ -7858,8 +7860,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <template #trigger="{ open, toggle }">
                             <button
                               type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
-                              :class="columnIsSorted(col.name, col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
+                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded"
+                              :class="columnIsSorted(col.name, col.actualColIdx) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
                               :title="t('grid.sort')"
                               :aria-expanded="open"
                               @mousedown.stop

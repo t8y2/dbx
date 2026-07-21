@@ -332,6 +332,27 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
   });
 
+  it("clears result sorting when the editor SQL is executed again", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.resultSortColumn = "name";
+    tab.resultSortColumnIndex = 0;
+    tab.resultSortDirection = "desc";
+    tab.resultSortMode = "database";
+    tab.resultSortedSql = "SELECT name FROM users ORDER BY name DESC";
+
+    await store.executeCurrentSql("SELECT name FROM users");
+
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortColumnIndex).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.resultSortMode).toBeUndefined();
+    expect(tab.resultSortedSql).toBeUndefined();
+    expect(executeMulti).toHaveBeenLastCalledWith("mysql-1", "app", "SELECT name, `id` AS `__DBX_PK_0` FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+  });
+
   it("preserves the original query behavior when the primary key is already returned", async () => {
     analyzeEditableQueryEditability.mockResolvedValue({
       editable: true,

@@ -467,6 +467,7 @@ function handleTab(view: EditorViewType): boolean {
 
 interface RequestExecuteOptions {
   ignoreSelection?: boolean;
+  bypassPicker?: boolean;
 }
 
 function requestExecute(options: RequestExecuteOptions = {}) {
@@ -486,11 +487,13 @@ function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, 
     emit("execute", sqlExecutionSnapshotFromView(currentView));
     return true;
   }
-  // No selection → show the execution target picker.
+  // No selection → resolve the execution target, optionally via the picker.
   const doc = currentView.state.doc.toString();
   const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType);
   if (candidates.length === 0) return false;
-  if (!settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType)) {
+  // The execution shortcut keeps executing the configured target (cursor/all) directly:
+  // it stays keyboard-driven and never pops the picker, which is reserved for click entry points.
+  if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType)) {
     const preferredKind = settingsStore.editorSettings.executeMode === "current" ? "cursor" : "all";
     const candidate = candidates.find((item) => item.kind === preferredKind) ?? candidates[0];
     emit("execute", candidate.sql);
@@ -1161,8 +1164,9 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorPrec;
   const binding = (shortcut: string, run: (view: EditorViewType) => boolean) => (shortcut ? [{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run }] : []);
-  // Keep the shortcut on the shared path so selection, picker, and execute-mode behavior stay aligned with other execution entry points.
-  const executeBindings = props.hideExecutionControls ? [] : binding(shortcuts.executeSql, () => requestExecute());
+  // Keep the shortcut on the shared execution-mode path (selection priority + configured cursor/all target),
+  // but bypass the picker so the keyboard shortcut always executes directly instead of popping a dialog.
+  const executeBindings = props.hideExecutionControls ? [] : binding(shortcuts.executeSql, () => requestExecute({ bypassPicker: true }));
   return [
     Prec?.high(
       codeMirrorKeymap.of([

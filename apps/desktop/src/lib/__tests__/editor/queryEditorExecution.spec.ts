@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
 describe("QueryEditor execution routing", () => {
-  it("routes the execution shortcut through the shared execution-mode contract", () => {
-    expect(queryEditorSource).toContain("binding(shortcuts.executeSql, () => requestExecute())");
+  it("routes the execution shortcut through the shared execution-mode contract while bypassing the picker", () => {
+    expect(queryEditorSource).toContain("binding(shortcuts.executeSql, () => requestExecute({ bypassPicker: true }))");
     expect(queryEditorSource).not.toContain("forceCurrent");
   });
 
@@ -15,5 +15,10 @@ describe("QueryEditor execution routing", () => {
 
     expect(selectionBranch).toBeGreaterThan(-1);
     expect(executeModeBranch).toBeGreaterThan(selectionBranch);
+  });
+
+  it("lets the shortcut skip the picker without affecting other execution entry points", () => {
+    // The picker guard must also honor the shortcut's bypass flag, otherwise Ctrl+Enter would keep popping the dialog.
+    expect(queryEditorSource).toContain("if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker");
   });
 });

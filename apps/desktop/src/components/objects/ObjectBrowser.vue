@@ -2591,9 +2591,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
                   :class="{
                     'bg-accent/40': sourceRow?.id === item.id,
+                    'bg-primary/10': sidePanelRow?.id === item.id && !selectedTableIds.has(item.id),
                     'bg-primary/5': selectedTableIds.has(item.id),
                   }"
-                  :style="{ gridTemplateColumns }"
+                  :style="{ gridTemplateColumns, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 hsl(var(--primary))' : undefined }"
                   @click="onRowClick(item, $event)"
                   @contextmenu="onContextMenu"
                 >
@@ -2650,6 +2651,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     :class="{
                       'border-primary bg-primary/5': selectedTableIds.has(item.id),
                       'border-primary/60': sourceRow?.id === item.id && !selectedTableIds.has(item.id),
+                      'border-primary bg-primary/8 shadow-sm': sidePanelRow?.id === item.id && !selectedTableIds.has(item.id),
                     }"
                     :title="item.displayName"
                     @click="onRowClick(item, $event)"

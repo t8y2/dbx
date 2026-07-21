@@ -1,4 +1,5 @@
-import { eventTargetUsesNativeClipboard } from "@/lib/common/clipboard";
+import { eventTargetUsesNativeClipboard, getClipboardWriteRevision } from "@/lib/common/clipboard";
+import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { parseClipboardTable } from "@/lib/dataGrid/gridSelection";
 
 export type DataGridPasteIntent = "native" | "block" | "paste";
@@ -11,7 +12,8 @@ export interface DataGridPasteCell {
 
 interface InternalDataGridClipboardCopy {
   text: string;
-  nullCells: Set<string>;
+  rows: Array<Array<string | null>>;
+  writeRevision: number;
 }
 
 let internalClipboardCopy: InternalDataGridClipboardCopy | null = null;
@@ -34,20 +36,22 @@ export function clearDataGridClipboardCopy(): void {
 }
 
 export function rememberDataGridClipboardCopy(text: string, rows: readonly (readonly unknown[])[], includeHeader = false): void {
-  const rowOffset = includeHeader ? 1 : 0;
-  const nullCells = new Set<string>();
-  rows.forEach((row, rowIndex) => {
-    row.forEach((value, columnIndex) => {
-      if (value === null) nullCells.add(`${rowIndex + rowOffset}:${columnIndex}`);
-    });
-  });
-  internalClipboardCopy = nullCells.size > 0 ? { text, nullCells } : null;
+  if (!rows.some((row) => row.some((value) => value === null))) {
+    internalClipboardCopy = null;
+    return;
+  }
+
+  // Preserve the logical grid matrix because plain TSV cannot escape embedded tabs or newlines.
+  const headerRows = includeHeader ? parseClipboardTable(text).slice(0, 1) : [];
+  const copiedRows = rows.map((row) => row.map((value) => (value === null ? null : displayCellValue(value as CellValue))));
+  internalClipboardCopy = { text, rows: [...headerRows, ...copiedRows], writeRevision: getClipboardWriteRevision() };
 }
 
 export function parseDataGridClipboard(text: string): Array<Array<string | null>> {
-  const rows = parseClipboardTable(text);
-  if (internalClipboardCopy?.text !== text) return rows;
-  return rows.map((row, rowIndex) => row.map((value, columnIndex) => (internalClipboardCopy?.nullCells.has(`${rowIndex}:${columnIndex}`) ? null : value)));
+  if (internalClipboardCopy?.text === text && internalClipboardCopy.writeRevision === getClipboardWriteRevision()) {
+    return internalClipboardCopy.rows.map((row) => [...row]);
+  }
+  return parseClipboardTable(text);
 }
 
 export function planDataGridPaste(rows: readonly (readonly (string | null)[])[], maxRows: number, maxColumns: number): DataGridPasteCell[] {

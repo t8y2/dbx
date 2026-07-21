@@ -1653,7 +1653,7 @@ async function handleQuickOpenSelect(item: any) {
 
     const schema = item.schema || item.database;
     try {
-      const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType);
+      const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType, item.signature);
       const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${item.objectName || item.tableName}`);
       queryStore.updateSql(tabId, result.source);
       if (item.type !== "sequence" && item.type !== "trigger" && item.type !== "type" && item.type !== "type-body") {
@@ -1661,6 +1661,7 @@ async function handleQuickOpenSelect(item: any) {
           schema,
           name: item.objectName || item.tableName,
           objectType,
+          signature: item.signature,
         });
       }
       queryStore.markTabClean(queryStore.tabs.find((tab) => tab.id === tabId));

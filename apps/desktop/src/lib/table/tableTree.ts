@@ -668,7 +668,8 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
     if (!name) continue;
     const t = normalizeObjectType(obj.object_type);
     const objectSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
-    const key = `${t}\0${objectSchema.toLowerCase()}\0${name.toLowerCase()}`;
+    const signature = (obj.signature ?? "").trim();
+    const key = `${t}\0${objectSchema.toLowerCase()}\0${name.toLowerCase()}\0${signature.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const arr = buckets.get(t) ?? [];
@@ -695,10 +696,14 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
           const objectType = normalizeObjectType(obj.object_type);
           const childType = typeof def.childType === "function" ? def.childType(objectType) : def.childType;
           const objectTypeSuffix = objectType === "PACKAGE" || objectType === "PACKAGE_BODY" || objectType === "TYPE" || objectType === "TYPE_BODY" ? `:${objectType}` : "";
+          const signature = obj.signature?.trim() || "";
+          const signatureIdPart = signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `:${signature}` : "";
           return {
-            id: `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${objectTypeSuffix}`,
-            label: obj.name,
+            id: `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${signatureIdPart}${objectTypeSuffix}`,
+            label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${obj.name}(${signature})` : obj.name,
             type: childType,
+            objectName: obj.name,
+            signature: signature || undefined,
             comment: obj.comment,
             valid: obj.valid ?? undefined,
             connectionId,

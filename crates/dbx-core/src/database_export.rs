@@ -783,9 +783,8 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
 
     for table in options.tables {
         if let Some(ddl) = table.ddl.as_ref().map(|ddl| ddl.trim()).filter(|ddl| !ddl.is_empty()) {
-            let ddl = normalize_export_table_ddl(ddl, table.database_type);
             lines.push(format!("-- Structure for {}", table.display_name));
-            lines.push(format!("{};", ddl.trim_end_matches(';')));
+            lines.push(format_export_table_ddl(ddl, table.database_type));
             lines.push(String::new());
         }
 
@@ -842,6 +841,12 @@ fn normalize_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>) ->
         std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)\bROW_FORMAT\s*=\s*(COMPACT|REDUNDANT)\b").unwrap());
 
     LEGACY_MYSQL_ROW_FORMAT_RE.replace_all(ddl, "ROW_FORMAT=DYNAMIC").into_owned()
+}
+
+fn format_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>) -> String {
+    let ddl = normalize_export_table_ddl(ddl, database_type);
+    let ddl = ddl.trim().trim_end_matches(';').trim_end();
+    format!("{ddl};")
 }
 
 fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String {
@@ -1534,8 +1539,8 @@ pub async fn export_database_sql_core(
             };
             match ddl_result {
                 Ok(ddl) => {
-                    let ddl = normalize_export_table_ddl(&ddl, Some(db_type));
-                    writeln!(file, "{};\n", ddl).map_err(|e| format!("Failed to write file: {e}"))?;
+                    let ddl = format_export_table_ddl(&ddl, Some(db_type));
+                    writeln!(file, "{ddl}\n").map_err(|e| format!("Failed to write file: {e}"))?;
                 }
                 Err(e) => {
                     record_export_error(
@@ -1952,7 +1957,7 @@ mod tests {
     use super::concurrent_metadata_prefetch_allowed;
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal,
+        drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
         generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, normalize_export_table_ddl,
         record_export_error, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, ExportedTableSql,
@@ -2626,6 +2631,17 @@ mod tests {
                 String::new(),
             ]
             .join("\n")
+        );
+    }
+
+    #[test]
+    fn table_ddl_export_has_one_statement_terminator() {
+        let ddl = "CREATE TABLE `users` (`id` int);;\n";
+
+        assert_eq!(format_export_table_ddl(ddl, Some(DatabaseType::Mysql)), "CREATE TABLE `users` (`id` int);");
+        assert_eq!(
+            format_export_table_ddl("CREATE TABLE users (id int)", Some(DatabaseType::Postgres)),
+            "CREATE TABLE users (id int);"
         );
     }
 

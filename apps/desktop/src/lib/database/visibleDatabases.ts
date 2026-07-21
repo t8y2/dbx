@@ -26,7 +26,6 @@ const SYSTEM_DATABASE_RULES: Partial<Record<DatabaseType, ReadonlySet<string>>> 
     "audsys",
     "ctxsys",
     "dbsnmp",
-    "dip",
     "dvf",
     "dvsys",
     "exfsys",

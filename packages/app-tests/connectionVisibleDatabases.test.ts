@@ -107,6 +107,10 @@ test("Dameng default SYSDBA user remains selectable", () => {
   assert.deepEqual(filterDatabaseNamesForConnection(["SYS", "SYSDBA", "SYSAUDITOR"], config({ db_type: "dameng" })), ["SYSDBA"]);
 });
 
+test("Oracle keeps an existing DIP user visible", () => {
+  assert.deepEqual(filterSchemaNamesForConnection(["DBX_TEST", "DIP", "SYSTEM"], config({ db_type: "oracle", database: "XE" }), "XE"), ["DBX_TEST", "DIP"]);
+});
+
 test("visible database selection is stale when connection target changes", () => {
   const previous = config({ host: "db.internal", visible_databases: ["app"] });
   assert.equal(visibleDatabaseSelectionIsStale(previous, config({ host: "db.internal" })), false);

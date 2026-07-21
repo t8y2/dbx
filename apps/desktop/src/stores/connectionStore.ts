@@ -2281,7 +2281,7 @@ export const useConnectionStore = defineStore("connection", () => {
           } else if (config && connectionUsesVisibleSchemaFilter(config)) {
             const schemaFilterConfig = config;
             const effectiveDb = schemaFilterConfig.database || "";
-            const cacheKey = schemaCacheKey(connectionId, effectiveDb, "schemas");
+            const cacheKey = schemaCacheKey(connectionId, effectiveDb, config.db_type === "oracle" ? "schemas-v2" : "schemas");
             if (!options?.force) {
               const cached = await loadPersistedTreeChildren(node, cacheKey);
               if (cached.hit) {
@@ -4782,7 +4782,10 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string): Promise<SqlCompletionColumn[]> {
-    if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(getConfig(connectionId)) && !schema) {
+    const config = getConfig(connectionId);
+    const completionSchema = schema?.trim() || undefined;
+    const usesOracleCurrentSchema = config?.db_type === "oracle" && !completionSchema;
+    if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !completionSchema && !usesOracleCurrentSchema) {
       return [];
     }
     const cacheKey = `${connectionId}:${database}:${schema || ""}:${table}`;
@@ -4792,7 +4795,7 @@ export const useConnectionStore = defineStore("connection", () => {
         async () => {
           await ensureConnected(connectionId);
           try {
-            const assistantColumns = await listCompletionAssistantColumns(connectionId, database, table, schema);
+            const assistantColumns = await listCompletionAssistantColumns(connectionId, database, table, completionSchema);
             if (assistantColumns.length > 0) {
               completionColumnsCache.value[cacheKey] = assistantColumns.map((column) => ({
                 name: column.name,
@@ -4812,7 +4815,7 @@ export const useConnectionStore = defineStore("connection", () => {
           } catch {
             // Fall back to the existing metadata path below.
           }
-          const querySchema = metadataQuerySchema(connectionId, database, schema);
+          const querySchema = usesOracleCurrentSchema ? "" : metadataQuerySchema(connectionId, database, completionSchema);
           completionColumnsCache.value[cacheKey] = await api.getColumns(connectionId, database, querySchema, table);
           evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
         },
@@ -4823,7 +4826,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const columns = completionColumnsCache.value[cacheKey].map((column) => ({
       name: column.name,
       table,
-      schema,
+      schema: completionSchema,
       dataType: column.data_type,
       isNullable: column.is_nullable,
       comment: column.comment,

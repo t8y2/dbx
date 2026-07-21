@@ -232,6 +232,39 @@ describe("connectionStore completion assistant", () => {
     ]);
   });
 
+  it("lets Oracle resolve CURRENT_SCHEMA for unqualified column completion", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const getColumns = vi.fn().mockResolvedValue([{ name: "REPORT_ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    const columns = await store.listCompletionColumns("oracle-1", "ORCL", "ORDERS");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schema: null,
+        parent_schema: null,
+        parent_name: "ORDERS",
+      }),
+    );
+    expect(getColumns).toHaveBeenCalledWith("oracle-1", "ORCL", "", "ORDERS");
+    expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
+  });
+
   it("maps Oracle package members without scanning every schema", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [{ name: "CALCULATE_BONUS", kind: "function", schema: "HR", parent_schema: "HR", parent_name: "PAYROLL", data_type: "FUNCTION" }],

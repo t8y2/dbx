@@ -3283,19 +3283,32 @@ pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, Stri
         .collect())
 }
 
-pub async fn list_extensions(pool: &Pool, schema: &str) -> Result<Vec<ExtensionInfo>, String> {
+pub async fn list_extensions(pool: &Pool, schema: Option<&str>) -> Result<Vec<ExtensionInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
-         FROM pg_catalog.pg_extension e \
-         JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
-         LEFT JOIN pg_catalog.pg_description d ON d.objoid = e.oid AND d.classoid = 'pg_extension'::regclass \
-         WHERE n.nspname = $1 \
-         ORDER BY e.extname",
-        &[&schema],
-    )
-    .await
+    let rows = if let Some(schema) = schema.filter(|value| !value.is_empty()) {
+        postgres_query_cached(
+            &client,
+            "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
+             FROM pg_catalog.pg_extension e \
+             JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+             LEFT JOIN pg_catalog.pg_description d ON d.objoid = e.oid AND d.classoid = 'pg_extension'::regclass \
+             WHERE n.nspname = $1 \
+             ORDER BY e.extname",
+            &[&schema],
+        )
+        .await
+    } else {
+        postgres_query_cached(
+            &client,
+            "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
+             FROM pg_catalog.pg_extension e \
+             JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+             LEFT JOIN pg_catalog.pg_description d ON d.objoid = e.oid AND d.classoid = 'pg_extension'::regclass \
+             ORDER BY n.nspname, e.extname",
+            &[],
+        )
+        .await
+    }
     .map_err(|e| e.to_string())?;
 
     Ok(rows
@@ -3304,7 +3317,7 @@ pub async fn list_extensions(pool: &Pool, schema: &str) -> Result<Vec<ExtensionI
             name: pg_row_try_string(row, 0),
             version: pg_row_try_string(row, 1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
-            schema: Some(schema.to_string()),
+            schema: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
         })
         .collect())
 }

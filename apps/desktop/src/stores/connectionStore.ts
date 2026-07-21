@@ -1109,6 +1109,18 @@ export const useConnectionStore = defineStore("connection", () => {
     return sortSidebarNames([...byName.keys()]).map((name) => byName.get(name)!);
   }
 
+  function buildExtensionManagementNode(connectionId: string, database: string): TreeNode {
+    return {
+      id: `${connectionId}:${database}:__extensions`,
+      label: "tree.extensions",
+      type: "group-extensions",
+      connectionId,
+      database,
+      isExpanded: false,
+      children: [],
+    };
+  }
+
   function objectGroupCacheKey(node: TreeNode): string {
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v5");
   }
@@ -2838,7 +2850,7 @@ export const useConnectionStore = defineStore("connection", () => {
         try {
           await ensureConnected(connectionId);
           if (useCachedChildren(node, options)) return;
-          const cacheKey = schemaCacheKey(connectionId, database, "schemas-v2");
+          const cacheKey = schemaCacheKey(connectionId, database, "schemas-v3");
           if (!options?.force) {
             const cached = await loadPersistedTreeChildren(node, cacheKey);
             if (cached.hit) {
@@ -2871,6 +2883,9 @@ export const useConnectionStore = defineStore("connection", () => {
                 children: [],
               };
             });
+          if (isPostgresLikeForExtensions(getConfig(connectionId)?.db_type)) {
+            children.push(buildExtensionManagementNode(connectionId, database));
+          }
           if (isSidebarSearchQueryChanged(options)) return;
           if (!canApplyTreeMetadataResult(node)) return;
           setChildren(node, children);
@@ -3188,7 +3203,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (useCachedChildren(node, options)) return;
           const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v5" : "objects-grouped-v5");
+          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v5" : "objects-grouped-v6");
           const searchFilter = activeTreeLoadSearchFilter(options);
           const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
           if (!options?.force && !searchFilter) {
@@ -3229,17 +3244,8 @@ export const useConnectionStore = defineStore("connection", () => {
               schema: effectiveSchema,
               objectTypes: supportedSidebarObjectTypes(config),
             });
-            if (isPostgresLikeForExtensions(config?.db_type)) {
-              children.push({
-                id: `${nodeId}:__extensions`,
-                label: "tree.extensions",
-                type: "group-extensions",
-                connectionId,
-                database,
-                schema: effectiveSchema,
-                isExpanded: false,
-                children: [],
-              });
+            if (!schema && isPostgresLikeForExtensions(config?.db_type)) {
+              children.push(buildExtensionManagementNode(connectionId, database));
             }
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
@@ -3369,35 +3375,6 @@ export const useConnectionStore = defineStore("connection", () => {
     );
   }
 
-  async function loadExtensions(connectionId: string, database: string, schema: string) {
-    const node = findNode(treeNodes.value, `${connectionId}:${database}:${schema}:__extensions`);
-    if (!node) return;
-    node.isLoading = true;
-    try {
-      await ensureConnected(connectionId);
-      if (useCachedChildren(node)) return;
-      const extensions = await withMetadataLoadTimeout(connectionId, api.listExtensions(connectionId, database, schema), "extensions");
-      const children: TreeNode[] = extensions.map((ext) => ({
-        id: `${node.id}:${ext.name}`,
-        label: ext.name,
-        type: "extension" as const,
-        connectionId,
-        database,
-        schema,
-        comment: ext.comment ?? null,
-        meta: ext,
-        isExpanded: false,
-      }));
-      setChildren(node, children);
-      node.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e);
-      throw e;
-    } finally {
-      node.isLoading = false;
-    }
-  }
-
   async function loadMoreObjectGroupChildren(node: TreeNode) {
     if (node.type !== "load-more" || !node.loadMore) return;
     const loadMore = node.loadMore;
@@ -3504,6 +3481,36 @@ export const useConnectionStore = defineStore("connection", () => {
         }
       },
     );
+  }
+
+  async function loadExtensions(connectionId: string, database: string) {
+    const node = findNode(treeNodes.value, `${connectionId}:${database}:__extensions`);
+    if (!node) return;
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      if (useCachedChildren(node)) return;
+      const extensions = await withMetadataLoadTimeout(connectionId, api.listExtensions(connectionId, database), "extensions");
+      const children: TreeNode[] = extensions.map((ext) => ({
+        id: `${node.id}:${ext.schema || ""}:${ext.name}`,
+        label: ext.name,
+        type: "extension" as const,
+        connectionId,
+        database,
+        schema: ext.schema ?? undefined,
+        comment: ext.comment ?? null,
+        meta: ext,
+        isExpanded: false,
+      }));
+      setChildren(node, children);
+      node.objectCount = children.length;
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
   }
 
   async function loadTableForLocate(target: LocateTableTarget): Promise<boolean> {
@@ -3985,7 +3992,7 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if (node.type === "group-partitions") {
       node.isExpanded = true;
     } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
-      await loadExtensions(node.connectionId, node.database || "", node.schema || "");
+      await loadExtensions(node.connectionId, node.database || "");
     }
   }
 

@@ -1171,7 +1171,7 @@ export async function listOwners(connectionId: string, database: string, schema:
   return invoke("list_owners", { connectionId, database, schema });
 }
 
-export async function listExtensions(connectionId: string, database: string, schema: string): Promise<ExtensionInfo[]> {
+export async function listExtensions(connectionId: string, database: string, schema?: string): Promise<ExtensionInfo[]> {
   return invoke("list_extensions", { connectionId, database, schema });
 }
 

@@ -458,8 +458,7 @@ pub async fn list_extensions(
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let database = q.database.as_deref().unwrap_or("");
-    let schema = q.schema.as_deref().unwrap_or("");
-    let result = dbx_core::schema::list_extensions_core(&state.app, &q.connection_id, database, schema)
+    let result = dbx_core::schema::list_extensions_core(&state.app, &q.connection_id, database, q.schema.as_deref())
         .await
         .map_err(AppError)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError(e.to_string()))?))

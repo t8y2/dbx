@@ -4745,7 +4745,7 @@ pub async fn list_extensions_core(
     state: &AppState,
     connection_id: &str,
     database: &str,
-    schema: &str,
+    schema: Option<&str>,
 ) -> Result<Vec<db::ExtensionInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;

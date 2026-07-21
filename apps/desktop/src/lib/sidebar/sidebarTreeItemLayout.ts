@@ -23,6 +23,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "saved-sql-file",
   "table-search-control",
   "load-more",
+  "extension",
 ]);
 
 const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index"]);

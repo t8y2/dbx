@@ -699,7 +699,7 @@ export async function listOwners(connectionId: string, database: string, schema:
   return get(`/api/schema/owners?${qs({ connection_id: connectionId, database, schema })}`);
 }
 
-export async function listExtensions(connectionId: string, database: string, schema: string): Promise<ExtensionInfo[]> {
+export async function listExtensions(connectionId: string, database: string, schema?: string): Promise<ExtensionInfo[]> {
   return get(`/api/schema/extensions?${qs({ connection_id: connectionId, database, schema })}`);
 }
 

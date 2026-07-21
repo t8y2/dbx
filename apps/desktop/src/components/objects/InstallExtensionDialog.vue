@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { buildCreateExtensionSql, buildDropExtensionSql } from "@/lib/database/dbAdminSql";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -23,14 +24,33 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: [];
+  changed: [];
 }>();
 
 const open = ref(false);
 const available = ref<ExtensionInfo[]>([]);
 const installed = ref<ExtensionInfo[]>([]);
+const schemas = ref<string[]>([]);
+const selectedSchema = ref<string>("__default__");
 const loading = ref(false);
 const installing = ref<string | null>(null);
 const dropping = ref<string | null>(null);
+
+function normalizeSchemaOptions(value: string[]): string[] {
+  return [...new Set(value.map((item) => item.trim()).filter(Boolean))];
+}
+
+function preferredSchemaOption(options: string[]): string {
+  if (options.includes("public")) return "public";
+  return options[0] ?? "__default__";
+}
+
+function installedExtensionSummary(ext: ExtensionInfo): string {
+  const parts = [ext.version];
+  if (ext.schema) parts.push(`schema: ${ext.schema}`);
+  if (ext.comment) parts.push(ext.comment);
+  return parts.filter(Boolean).join(" - ");
+}
 
 function show() {
   open.value = true;
@@ -41,9 +61,21 @@ async function loadData() {
   if (!props.node.connectionId || !props.node.database) return;
   loading.value = true;
   try {
-    const [avail, inst] = await Promise.all([api.listAvailableExtensions(props.node.connectionId, props.node.database).catch(() => [] as ExtensionInfo[]), api.listExtensions(props.node.connectionId, props.node.database, props.node.schema || "public").catch(() => [] as ExtensionInfo[])]);
-    available.value = avail;
-    installed.value = inst;
+    const [availResult, instResult, schemaResult] = await Promise.allSettled([
+      api.listAvailableExtensions(props.node.connectionId, props.node.database),
+      api.listExtensions(props.node.connectionId, props.node.database, props.node.schema),
+      api.listSchemaInfos(props.node.connectionId, props.node.database),
+    ]);
+
+    available.value = availResult.status === "fulfilled" ? availResult.value : [];
+    installed.value = instResult.status === "fulfilled" ? instResult.value : [];
+    schemas.value = schemaResult.status === "fulfilled" ? normalizeSchemaOptions(schemaResult.value.map((schema) => schema.name)) : [];
+    selectedSchema.value = props.node.schema && schemas.value.includes(props.node.schema) ? props.node.schema : selectedSchema.value !== "__default__" && schemas.value.includes(selectedSchema.value) ? selectedSchema.value : preferredSchemaOption(schemas.value);
+
+    const firstError = [availResult, instResult, schemaResult].find((result): result is PromiseRejectedResult => result.status === "rejected")?.reason;
+    if (firstError) {
+      throw firstError;
+    }
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   } finally {
@@ -55,17 +87,18 @@ async function installExtension(name: string) {
   if (!props.node.connectionId || !props.node.database) return;
   installing.value = name;
   try {
-    const sql = buildCreateExtensionSql(name, props.node.schema ?? null);
+    const schema = selectedSchema.value === "__default__" ? null : selectedSchema.value;
+    const sql = buildCreateExtensionSql(name, schema);
     const result = await executeWithProductionSqlGuard({
       connection: connectionStore.getConfig(props.node.connectionId),
       database: props.node.database,
       sql,
       source: t("production.sourceExtension"),
-      execute: () => api.executeQuery(props.node.connectionId!, props.node.database!, sql, props.node.schema ?? undefined),
+      execute: () => api.executeQuery(props.node.connectionId!, props.node.database!, sql, schema ?? undefined),
     });
     if (!result) return;
     await loadData();
-    emit("close");
+    emit("changed");
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   } finally {
@@ -87,6 +120,7 @@ async function dropExtension(name: string) {
     });
     if (!result) return;
     await loadData();
+    emit("changed");
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   } finally {
@@ -109,9 +143,20 @@ defineExpose({ show });
       </div>
 
       <div v-else class="grid flex-1 min-h-0 grid-cols-1 gap-4 sm:grid-cols-2">
-        <!-- Left: Available -->
         <div class="flex min-h-0 flex-col">
-          <div class="flex items-center gap-1.5 mb-2 text-sm font-medium text-muted-foreground">
+          <div class="mb-3 flex items-center gap-2">
+            <div class="w-16 text-xs font-medium text-muted-foreground">Schema</div>
+            <Select v-model="selectedSchema">
+              <SelectTrigger class="h-8">
+                <SelectValue :placeholder="'Schema'" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default__">{{ t("common.default") }}</SelectItem>
+                <SelectItem v-for="schema in schemas" :key="schema" :value="schema">{{ schema }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div class="mb-2 flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
             <Package class="h-4 w-4" />
             {{ t("extension.available") }}
             <span class="ml-auto text-xs">({{ available.length }})</span>
@@ -123,7 +168,7 @@ defineExpose({ show });
             <div v-else class="divide-y">
               <div v-for="ext in available" :key="ext.name" class="flex items-center justify-between gap-2 px-3 py-2">
                 <div class="min-w-0 flex-1">
-                  <div class="text-sm font-medium truncate">{{ ext.name }}</div>
+                  <div class="truncate text-sm font-medium">{{ ext.name }}</div>
                   <div class="text-xs text-muted-foreground">{{ ext.comment || ext.version }}</div>
                 </div>
                 <Button size="sm" variant="outline" :disabled="installing === ext.name" @click="installExtension(ext.name)">
@@ -136,9 +181,8 @@ defineExpose({ show });
           </ScrollArea>
         </div>
 
-        <!-- Right: Installed -->
         <div class="flex min-h-0 flex-col">
-          <div class="flex items-center gap-1.5 mb-2 text-sm font-medium text-muted-foreground">
+          <div class="mb-2 flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
             <Package class="h-4 w-4" />
             {{ t("extension.installed") }}
             <span class="ml-auto text-xs">({{ installed.length }})</span>
@@ -150,8 +194,8 @@ defineExpose({ show });
             <div v-else class="divide-y">
               <div v-for="ext in installed" :key="ext.name" class="flex items-center justify-between gap-2 px-3 py-2">
                 <div class="min-w-0 flex-1">
-                  <div class="text-sm font-medium truncate">{{ ext.name }}</div>
-                  <div class="text-xs text-muted-foreground">{{ ext.version }}{{ ext.comment ? ` — ${ext.comment}` : "" }}</div>
+                  <div class="truncate text-sm font-medium">{{ ext.name }}</div>
+                  <div class="text-xs text-muted-foreground">{{ installedExtensionSummary(ext) }}</div>
                 </div>
                 <Button size="sm" variant="outline" :disabled="dropping === ext.name" @click="dropExtension(ext.name)">
                   <Loader2 v-if="dropping === ext.name" class="mr-1 h-3 w-3 animate-spin" />

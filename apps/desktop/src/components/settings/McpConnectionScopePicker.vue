@@ -136,30 +136,36 @@ watch([policyKey, () => groups.value.allowed.length], () => {
       </div>
     </div>
 
-    <fieldset :disabled="disabled" class="grid grid-cols-2 rounded-md bg-muted p-1" :aria-label="t('settings.mcpScopeMode')">
-      <label
-        :class="[
-          'flex min-h-11 cursor-pointer flex-col items-center justify-center rounded px-2 py-1.5 text-center transition-colors has-[:focus-visible]:ring-[3px] has-[:focus-visible]:ring-ring/50',
-          scopeMode === 'all' ? 'bg-background text-foreground shadow-sm dark:bg-input/30' : 'text-muted-foreground hover:text-foreground',
-          disabled ? 'cursor-not-allowed opacity-50' : '',
-        ]"
+    <div class="grid grid-cols-1 p-1 sm:grid-cols-2 gap-2.5">
+      <Button
+        :disabled="disabled"
+        type="button"
+        data-scope-mode="all"
+        variant="outline"
+        class="settings-choice-card h-auto justify-center border p-3"
+        :class="[scopeMode === 'all' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : '', disabled ? 'cursor-not-allowed opacity-50' : '']"
+        @click="setScopeMode('all')"
       >
-        <input class="sr-only" type="radio" name="mcp-scope-mode" value="all" :checked="scopeMode === 'all'" @change="setScopeMode('all')" />
-        <span class="text-sm font-medium">{{ t("settings.mcpScopeModeAll") }}</span>
-        <span class="mcp-scope-mode-description text-[11px] leading-tight text-muted-foreground">{{ t("settings.mcpScopeModeAllDescription") }}</span>
-      </label>
-      <label
-        :class="[
-          'flex min-h-11 cursor-pointer flex-col items-center justify-center rounded px-2 py-1.5 text-center transition-colors has-[:focus-visible]:ring-[3px] has-[:focus-visible]:ring-ring/50',
-          scopeMode === 'selected' ? 'bg-background text-foreground shadow-sm dark:bg-input/30' : 'text-muted-foreground hover:text-foreground',
-          disabled ? 'cursor-not-allowed opacity-50' : '',
-        ]"
+        <div class="w-full min-w-0 text-center">
+          <div class="text-sm font-medium">{{ t("settings.mcpScopeModeAll") }}</div>
+          <div class="text-xs text-muted-foreground truncate">{{ t("settings.mcpScopeModeAllDescription") }}</div>
+        </div>
+      </Button>
+      <Button
+        :disabled="disabled"
+        type="button"
+        data-scope-mode="selected"
+        variant="outline"
+        class="settings-choice-card h-auto justify-center border p-3"
+        :class="[scopeMode === 'selected' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : '', disabled ? 'cursor-not-allowed opacity-50' : '']"
+        @click="setScopeMode('selected')"
       >
-        <input class="sr-only" type="radio" name="mcp-scope-mode" value="selected" :checked="scopeMode === 'selected'" @change="setScopeMode('selected')" />
-        <span class="text-sm font-medium">{{ t("settings.mcpScopeModeSelected") }}</span>
-        <span class="mcp-scope-mode-description text-[11px] leading-tight text-muted-foreground">{{ t("settings.mcpScopeModeSelectedDescription") }}</span>
-      </label>
-    </fieldset>
+        <div class="w-full min-w-0 text-center">
+          <div class="text-sm font-medium">{{ t("settings.mcpScopeModeSelected") }}</div>
+          <div class="text-xs text-muted-foreground truncate">{{ t("settings.mcpScopeModeSelectedDescription") }}</div>
+        </div>
+      </Button>
+    </div>
 
     <div class="relative">
       <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />

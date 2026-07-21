@@ -82,7 +82,7 @@ describe("MCP policy settings state", () => {
     expect(settingsDialogSource).toContain("if (mcpPolicyControlsDisabled.value) return;");
     expect(settingsDialogSource).toContain(':disabled="mcpPolicyControlsDisabled"');
     expect(settingsDialogSource).toContain('@update:allowed-connection-ids="onMcpAllowedConnectionIdsChange"');
-    expect(settingsDialogSource).toContain('<fieldset :disabled="mcpPolicyControlsDisabled"');
+    expect(settingsDialogSource).toContain('<Button :disabled="mcpPolicyControlsDisabled"');
 
     const loadingStart = settingsDialogSource.indexOf("mcpPolicyLoading.value = true;");
     const policyLoad = settingsDialogSource.indexOf("await settingsStore.initMcpGlobalPolicy(true);");

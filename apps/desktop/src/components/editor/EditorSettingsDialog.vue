@@ -1452,10 +1452,9 @@ async function saveMcpPolicy(partial: { readOnly?: boolean; allowDangerousSql?: 
   }
 }
 
-function onMcpExecutionModeChange(event: Event, mode: McpExecutionMode) {
+function onMcpExecutionModeChange(mode: McpExecutionMode) {
   if (mode === mcpExecutionMode.value) return;
   if (mode === "high_risk_write" && !window.confirm(t("settings.mcpExecutionModeHighRiskConfirm"))) {
-    event.preventDefault();
     return;
   }
   void saveMcpPolicy(mcpPolicyFieldsForExecutionMode(mode));
@@ -4888,42 +4887,39 @@ onUnmounted(cleanupPreviewEditor);
                     <Label id="mcp-execution-mode-label">{{ t("settings.mcpExecutionMode") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.mcpExecutionModeDescription") }}</p>
                   </div>
-                  <fieldset :disabled="mcpPolicyControlsDisabled" :aria-busy="mcpPolicyLoading" aria-labelledby="mcp-execution-mode-label">
-                    <legend class="sr-only">{{ t("settings.mcpExecutionMode") }}</legend>
-                    <div class="grid grid-cols-1 rounded-md bg-muted p-1 sm:grid-cols-3">
-                      <label
-                        :class="[
-                          'flex min-h-10 items-center justify-center rounded px-3 py-2 text-center text-sm font-medium transition-colors has-[:focus-visible]:ring-[3px] has-[:focus-visible]:ring-ring/50',
-                          mcpExecutionMode === 'read_only' ? 'bg-background text-foreground shadow-sm dark:bg-input/30' : 'text-muted-foreground',
-                          mcpPolicyControlsDisabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:text-foreground',
-                        ]"
-                      >
-                        <input class="sr-only" type="radio" name="mcp-execution-mode" value="read_only" :checked="mcpExecutionMode === 'read_only'" @click="onMcpExecutionModeChange($event, 'read_only')" />
-                        <span>{{ t("settings.mcpExecutionModeReadOnly") }}</span>
-                      </label>
-                      <label
-                        :class="[
-                          'flex min-h-10 items-center justify-center gap-1.5 rounded px-3 py-2 text-center text-sm font-medium transition-colors has-[:focus-visible]:ring-[3px] has-[:focus-visible]:ring-ring/50',
-                          mcpExecutionMode === 'safe_write' ? 'bg-background text-foreground shadow-sm dark:bg-input/30' : 'text-muted-foreground',
-                          mcpPolicyControlsDisabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:text-foreground',
-                        ]"
-                      >
-                        <input class="sr-only" type="radio" name="mcp-execution-mode" value="safe_write" :checked="mcpExecutionMode === 'safe_write'" @click="onMcpExecutionModeChange($event, 'safe_write')" />
-                        <span>{{ t("settings.mcpExecutionModeSafeWrite") }}</span>
-                        <span class="text-[10px] font-normal text-green-600 dark:text-green-400">{{ t("settings.mcpExecutionModeRecommended") }}</span>
-                      </label>
-                      <label
-                        :class="[
-                          'flex min-h-10 items-center justify-center rounded px-3 py-2 text-center text-sm font-medium transition-colors has-[:focus-visible]:ring-[3px] has-[:focus-visible]:ring-ring/50',
-                          mcpExecutionMode === 'high_risk_write' ? 'bg-background text-foreground shadow-sm dark:bg-input/30' : 'text-muted-foreground',
-                          mcpPolicyControlsDisabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer hover:text-foreground',
-                        ]"
-                      >
-                        <input class="sr-only" type="radio" name="mcp-execution-mode" value="high_risk_write" :checked="mcpExecutionMode === 'high_risk_write'" @click="onMcpExecutionModeChange($event, 'high_risk_write')" />
-                        <span>{{ t("settings.mcpExecutionModeHighRiskWrite") }}</span>
-                      </label>
-                    </div>
-                  </fieldset>
+                  <div class="grid grid-cols-1 p-1 sm:grid-cols-3 gap-2.5">
+                    <Button
+                      :disabled="mcpPolicyControlsDisabled"
+                      type="button"
+                      variant="outline"
+                      class="settings-choice-card h-auto justify-center border p-3"
+                      :class="mcpExecutionMode === 'read_only' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      @click="onMcpExecutionModeChange('read_only')"
+                    >
+                      <span>{{ t("settings.mcpExecutionModeReadOnly") }}</span>
+                    </Button>
+                    <Button
+                      :disabled="mcpPolicyControlsDisabled"
+                      type="button"
+                      variant="outline"
+                      class="settings-choice-card h-auto justify-center border p-3"
+                      :class="mcpExecutionMode === 'safe_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      @click="onMcpExecutionModeChange('safe_write')"
+                    >
+                      <span>{{ t("settings.mcpExecutionModeSafeWrite") }}</span>
+                      <span class="text-[10px] font-normal text-green-600 dark:text-green-400">{{ t("settings.mcpExecutionModeRecommended") }}</span>
+                    </Button>
+                    <Button
+                      :disabled="mcpPolicyControlsDisabled"
+                      type="button"
+                      variant="outline"
+                      class="settings-choice-card h-auto justify-center border p-3"
+                      :class="mcpExecutionMode === 'high_risk_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      @click="onMcpExecutionModeChange('high_risk_write')"
+                    >
+                      <span>{{ t("settings.mcpExecutionModeHighRiskWrite") }}</span>
+                    </Button>
+                  </div>
                   <!-- Keep every translation in one grid cell so mode changes cannot reflow the capability matrix. -->
                   <div data-mcp-execution-mode-description class="grid text-xs">
                     <p class="col-start-1 row-start-1 text-muted-foreground" :class="mcpExecutionMode === 'read_only' ? 'visible' : 'invisible'">

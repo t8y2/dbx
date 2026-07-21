@@ -11,6 +11,28 @@ export interface CanGoNextDataGridPageOptions {
   allRowsLoaded?: boolean;
 }
 
+export interface CompleteLocalDataGridResultOptions {
+  isResultsContext: boolean;
+  rowCount: number;
+  pageLimit?: number;
+  pageOffset?: number;
+  totalRowCount?: number;
+  truncated?: boolean;
+  hasMore?: boolean;
+}
+
+export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridResultOptions): boolean {
+  if (!options.isResultsContext || options.truncated === true || options.hasMore === true) return false;
+  if (options.pageLimit === undefined) return true;
+  if ((options.pageOffset ?? 0) !== 0) return false;
+
+  const pageLimit = Math.max(1, options.pageLimit);
+  if (options.rowCount < pageLimit) return true;
+
+  const totalRowCount = options.totalRowCount;
+  return typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0 && options.rowCount >= totalRowCount;
+}
+
 export function canGoNextDataGridPage(options: CanGoNextDataGridPageOptions): boolean {
   if (options.hasMore === true) return true;
 

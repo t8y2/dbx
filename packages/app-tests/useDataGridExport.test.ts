@@ -56,6 +56,7 @@ function buildExportHarness(
     columnTypes?: Array<string | undefined>;
     rows?: QueryResult["rows"];
     allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
+    completeLocalResult?: QueryResult;
   } = {},
 ) {
   const exportColumns = options.columns ?? ["id", "name"];
@@ -124,6 +125,8 @@ function buildExportHarness(
     hasRowSelection: computed(() => false),
     fullExportResult,
     queryResultExportRequest,
+    hasCompleteLocalResult: computed(() => !!options.completeLocalResult),
+    completeLocalResult: computed(() => options.completeLocalResult),
     allExportResults: computed(() => options.allExportResults),
     currentResultLabel: computed(() => options.currentResultLabel),
     exportFileBaseName: computed(() => options.exportFileBaseName),
@@ -666,6 +669,29 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
   assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
+});
+
+test("complete local query result XLSX export does not re-execute the query", async () => {
+  const completeLocalResult: QueryResult = {
+    columns: ["id", "name"],
+    column_types: ["int4", "text"],
+    rows: [
+      [1, "Ada"],
+      [2, "Lin"],
+    ],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    truncated: false,
+    has_more: false,
+  };
+  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ completeLocalResult });
+
+  await composable.exportXlsx();
+
+  assert.equal(fullExportResult.mock.calls.length, 0);
+  assert.equal(queryResultExportRequest.mock.calls.length, 0);
+  assert.equal(apiMock.startQueryResultExport.mock.calls.length, 0);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1), ["Export", ["id", "name"], ["int4", "text"], completeLocalResult.rows]);
 });
 
 test("full query result CSV export defaults to the saved SQL title", async () => {

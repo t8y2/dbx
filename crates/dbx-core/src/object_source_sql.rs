@@ -121,6 +121,11 @@ pub fn build_routine_rename_object_source_statements(
 
 pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlInput) -> Result<Vec<String>, String> {
     let source = input.source.trim();
+    let source = if is_opengauss_like(input.database_type) && input.object_type == ObjectSourceKind::Procedure {
+        strip_standalone_trailing_slash(source)
+    } else {
+        source
+    };
     if input.database_type == DatabaseType::SqlServer {
         if input.object_type == ObjectSourceKind::View {
             return Ok(vec![build_sqlserver_alter_view_sql(input.schema.as_deref(), &input.name, source)]);
@@ -234,6 +239,11 @@ pub fn build_export_object_source_sql(
     source: &str,
 ) -> String {
     let source = source.trim();
+    let source = if is_opengauss_like(database_type) && object_type == ObjectSourceKind::Procedure {
+        strip_standalone_trailing_slash(source)
+    } else {
+        source
+    };
     if source.is_empty() {
         return String::new();
     }
@@ -296,6 +306,10 @@ fn is_postgres_like(database_type: DatabaseType) -> bool {
     )
 }
 
+fn is_opengauss_like(database_type: DatabaseType) -> bool {
+    matches!(database_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss)
+}
+
 fn is_mysql_like(database_type: DatabaseType) -> bool {
     matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb)
 }
@@ -333,6 +347,18 @@ fn ensure_semicolon(sql: &str) -> String {
         trimmed.to_string()
     } else {
         format!("{trimmed};")
+    }
+}
+
+fn strip_standalone_trailing_slash(sql: &str) -> &str {
+    let trimmed = sql.trim();
+    let Some(without_slash) = trimmed.strip_suffix('/') else {
+        return trimmed;
+    };
+    if without_slash.ends_with('\n') || without_slash.ends_with('\r') {
+        without_slash.trim_end()
+    } else {
+        trimmed
     }
 }
 
@@ -1617,6 +1643,20 @@ mod tests {
         });
 
         assert_eq!(sql, "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END;");
+    }
+
+    #[test]
+    fn opengauss_procedure_source_omits_gsql_trailing_slash() {
+        let source = "CREATE OR REPLACE PROCEDURE public.refresh_cache()\nAS DECLARE BEGIN\n  NULL;\nEND;\n/";
+        let expected = "CREATE OR REPLACE PROCEDURE public.refresh_cache()\nAS DECLARE BEGIN\n  NULL;\nEND;";
+
+        for database_type in [DatabaseType::Gaussdb, DatabaseType::OpenGauss] {
+            let editable = build_editable_object_source(input(database_type, ObjectSourceKind::Procedure, source));
+            assert_eq!(editable, expected);
+
+            let exported = build_export_object_source_sql(database_type, ObjectSourceKind::Procedure, source);
+            assert_eq!(exported, expected);
+        }
     }
 
     #[test]

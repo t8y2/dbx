@@ -131,16 +131,25 @@ func catalogExists(db *sql.DB, catalog string) bool {
 }
 
 func detectMySQLCompatMode(db *sql.DB) bool {
-	for _, query := range []string{
-		"SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'",
-		"SELECT 'mysql' FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'",
-	} {
-		var value string
-		if db.QueryRow(query).Scan(&value) == nil && strings.EqualFold(value, "mysql") {
-			return true
-		}
+	var databaseMode string
+	switch err := db.QueryRow("SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'").Scan(&databaseMode); {
+	case err == nil:
+		// Treat database_mode as authoritative when the server exposes it. This
+		// avoids misclassifying Oracle-compatible servers that also publish
+		// sql_mode for MySQL syntax toggles such as ANSI_QUOTES.
+		return strings.EqualFold(strings.TrimSpace(databaseMode), "mysql")
+	case errors.Is(err, sql.ErrNoRows):
+		// Older Kingbase versions may not expose database_mode. Fall back to the
+		// legacy sql_mode existence probe in that case.
+	default:
+		// Ignore metadata errors and fall back to the legacy probe below.
 	}
-	return false
+	return mysqlSQLModeExists(db)
+}
+
+func mysqlSQLModeExists(db *sql.DB) bool {
+	var value int
+	return db.QueryRow("SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'").Scan(&value) == nil
 }
 
 func (s *server) connectionInfo() (map[string]any, error) {

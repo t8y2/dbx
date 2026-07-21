@@ -19,6 +19,8 @@ var registerTestDriver sync.Once
 var testDriverState atomic.Pointer[fakeDriverState]
 var registerExpressionFallbackDriver sync.Once
 var expressionFallbackState atomic.Pointer[fallbackDriverState]
+var registerModeDetectionDriver sync.Once
+var modeDetectionState atomic.Pointer[modeDetectionDriverState]
 
 type fakeDriverState struct {
 	queryArgs int
@@ -44,6 +46,20 @@ type fallbackDriver struct{}
 
 type fallbackConn struct {
 	state *fallbackDriverState
+}
+
+type modeDetectionDriverState struct {
+	mu            sync.Mutex
+	queries       []string
+	databaseMode  *string
+	sqlModeExists bool
+	databaseErr   error
+}
+
+type modeDetectionDriver struct{}
+
+type modeDetectionConn struct {
+	state *modeDetectionDriverState
 }
 
 type valueRows struct {
@@ -113,6 +129,42 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	return nil, errors.New("unexpected query: " + query)
 }
 
+func (modeDetectionDriver) Open(string) (driver.Conn, error) {
+	return &modeDetectionConn{state: modeDetectionState.Load()}, nil
+}
+
+func (*modeDetectionConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+
+func (*modeDetectionConn) Close() error { return nil }
+
+func (*modeDetectionConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (connection *modeDetectionConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	connection.state.mu.Lock()
+	connection.state.queries = append(connection.state.queries, query)
+	connection.state.mu.Unlock()
+
+	switch {
+	case strings.Contains(query, "LOWER(name) = 'database_mode'"):
+		if connection.state.databaseErr != nil {
+			return nil, connection.state.databaseErr
+		}
+		rows := [][]driver.Value{}
+		if connection.state.databaseMode != nil {
+			rows = append(rows, []driver.Value{*connection.state.databaseMode})
+		}
+		return &valueRows{columns: []string{"setting"}, rows: rows}, nil
+	case strings.Contains(query, "LOWER(name) = 'sql_mode'"):
+		rows := [][]driver.Value{}
+		if connection.state.sqlModeExists {
+			rows = append(rows, []driver.Value{int64(1)})
+		}
+		return &valueRows{columns: []string{"value"}, rows: rows}, nil
+	default:
+		return nil, errors.New("unexpected query: " + query)
+	}
+}
+
 func (rows *valueRows) Columns() []string { return rows.columns }
 
 func (*valueRows) Close() error { return nil }
@@ -138,6 +190,19 @@ func openFakeDB(t *testing.T, rowCount int) (*sql.DB, *fakeDriverState) {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	return db, state
+}
+
+func openModeDetectionDB(t *testing.T, state *modeDetectionDriverState) *sql.DB {
+	t.Helper()
+	registerModeDetectionDriver.Do(func() { sql.Register("kingbase-mode-detection-test", modeDetectionDriver{}) })
+	modeDetectionState.Store(state)
+	db, err := sql.Open("kingbase-mode-detection-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func TestHandshakeAdvertisesMultiSession(t *testing.T) {
@@ -266,6 +331,40 @@ func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 	}
 	if sysCalls != 1 || pgCalls != 2 {
 		t.Fatalf("fallback choice was not cached: sys=%d pg=%d queries=%v", sysCalls, pgCalls, state.queries)
+	}
+}
+
+func TestDetectMySQLCompatModePrefersDatabaseModeOverSQLModePresence(t *testing.T) {
+	oracle := "oracle"
+	state := &modeDetectionDriverState{
+		databaseMode:  &oracle,
+		sqlModeExists: true,
+	}
+	db := openModeDetectionDB(t, state)
+
+	if detectMySQLCompatMode(db) {
+		t.Fatal("oracle-compatible server with sql_mode should not be treated as MySQL-compatible")
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "database_mode") {
+		t.Fatalf("database_mode should be authoritative when present: %v", state.queries)
+	}
+}
+
+func TestDetectMySQLCompatModeFallsBackToSQLModeWhenDatabaseModeMissing(t *testing.T) {
+	state := &modeDetectionDriverState{sqlModeExists: true}
+	db := openModeDetectionDB(t, state)
+
+	if !detectMySQLCompatMode(db) {
+		t.Fatal("legacy server with sql_mode but no database_mode should still use MySQL compatibility")
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 2 {
+		t.Fatalf("expected database_mode probe followed by sql_mode fallback, got: %v", state.queries)
 	}
 }
 

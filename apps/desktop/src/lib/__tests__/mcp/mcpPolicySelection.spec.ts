@@ -106,7 +106,7 @@ describe("MCP policy settings state", () => {
   it("keeps execution mode cards accessible as a keyboard radio group", () => {
     expect(settingsDialogSource).toContain('role="radiogroup" aria-labelledby="mcp-execution-mode-label"');
     expect(settingsDialogSource.match(/role="radio"/g)).toHaveLength(3);
-    expect(settingsDialogSource).toContain(':aria-checked="mcpExecutionMode === \'safe_write\'"');
+    expect(settingsDialogSource).toContain(":aria-checked=\"mcpExecutionMode === 'safe_write'\"");
     expect(settingsDialogSource).toContain("onMcpExecutionModeKeydown($event, 'safe_write')");
   });
 });

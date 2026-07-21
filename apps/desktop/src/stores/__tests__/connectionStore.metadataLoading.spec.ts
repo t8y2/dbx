@@ -209,7 +209,8 @@ describe("connectionStore metadata loading", () => {
     expect(result).toBe("done");
     expect(listTables).toHaveBeenCalledWith(connection.id, "app", "public", undefined, 1001, 0);
     expect(listObjects).toHaveBeenCalled();
-    expect(schemaNode.children?.map((node) => node.label)).toEqual(["users"]);
+    const tableLabels = schemaNode.children?.filter((node) => node.type !== "favorites").map((node) => node.label) ?? [];
+    expect(tableLabels).toEqual(["users"]);
   });
 
   it("clears a stale connection error after a schema metadata retry succeeds", async () => {
@@ -262,7 +263,8 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app", { force: true });
 
     expect(store.connectionErrors[connection.id]).toBeUndefined();
-    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public"]);
+    const schemaLabels = store.treeNodes[0]?.children?.[0]?.children?.filter((node) => node.type !== "favorites").map((node) => node.label) ?? [];
+    expect(schemaLabels).toEqual(["public"]);
   });
 
   it("clears a failed metadata warning when the driver hint finishes during retry", async () => {
@@ -444,10 +446,10 @@ describe("connectionStore metadata loading", () => {
       },
     ];
 
-    const storedSchema = store.treeNodes[0].children?.[0].children?.[0];
+    const storedSchema = store.treeNodes[0].children?.[0].children?.find((node) => node.id === schemaNode.id);
     await store.loadSchemas(connection.id, "app", { force: true });
 
-    const refreshedSchema = store.treeNodes[0].children?.[0].children?.[0];
+    const refreshedSchema = store.treeNodes[0].children?.[0].children?.find((node) => node.id === schemaNode.id);
     expect(refreshedSchema).toBe(storedSchema);
     expect(refreshedSchema?.isExpanded).toBe(true);
     expect(refreshedSchema?.isLoading).toBe(true);

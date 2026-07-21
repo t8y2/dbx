@@ -1263,6 +1263,21 @@ impl Storage {
         Ok(array.iter().filter_map(|item| item.as_str().map(|value| value.to_string())).collect())
     }
 
+    /// Persist the entire structured favorites state (groups + items). Stored
+    /// as a single JSON document so groups and items update atomically.
+    pub async fn save_favorites_state(&self, state: &serde_json::Value) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.insert("favorites_state".to_string(), state.clone());
+        self.save_app_settings_json(&settings).await
+    }
+
+    /// Load the structured favorites state, returning `None` when nothing has
+    /// been persisted yet. Callers should seed defaults on `None`.
+    pub async fn load_favorites_state(&self) -> Result<Option<serde_json::Value>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings.get("favorites_state").cloned())
+    }
+
     async fn save_app_state_value(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
         let key = key.to_string();
         let value_json = serde_json::to_string(value).map_err(|e| e.to_string())?;

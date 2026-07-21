@@ -607,6 +607,10 @@ async fn main() {
             "/app-settings/pinned-tree-node-ids",
             get(routes::app_settings::load_pinned_tree_node_ids).post(routes::app_settings::save_pinned_tree_node_ids),
         )
+        .route(
+            "/app-settings/favorites-state",
+            get(routes::app_settings::load_favorites_state).post(routes::app_settings::save_favorites_state),
+        )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync
         .route("/cloud-sync/webdav/test", post(routes::cloud_sync::webdav_sync_test))

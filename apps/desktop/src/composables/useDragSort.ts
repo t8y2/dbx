@@ -31,7 +31,7 @@ let pending: {
   y: number;
   sourceEl: HTMLElement | null;
 } | null = null;
-let onDropCallback: ((draggedId: string, targetId: string, position: DropPosition) => void) | null = null;
+let onDropCallback: ((draggedId: string, draggedType: string, targetId: string, position: DropPosition) => void) | null = null;
 let ghostEl: HTMLElement | null = null;
 
 function createGhost(sourceEl: HTMLElement, x: number, y: number) {
@@ -101,8 +101,8 @@ function onMouseMove(event: MouseEvent) {
 }
 
 function onMouseUp() {
-  if (state.active && state.draggedId && state.targetId && state.dropPosition && onDropCallback) {
-    onDropCallback(state.draggedId, state.targetId, state.dropPosition);
+  if (state.active && state.draggedId && state.draggedType && state.targetId && state.dropPosition && onDropCallback) {
+    onDropCallback(state.draggedId, state.draggedType, state.targetId, state.dropPosition);
   }
   reset();
 }
@@ -130,7 +130,7 @@ function ensureListeners() {
   listenersAttached = true;
 }
 
-export function useDragSort(onDrop: (draggedId: string, targetId: string, position: DropPosition) => void) {
+export function useDragSort(onDrop: (draggedId: string, draggedType: string, targetId: string, position: DropPosition) => void) {
   ensureListeners();
   onDropCallback = onDrop;
 

@@ -633,6 +633,66 @@ const groupDefs: Array<{
 
 const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-packages", "group-types"]);
 
+const FAVORITES_GROUP_KEY = "__favorites";
+const FAVORITES_GROUP_LABEL = "tree.favorites";
+
+export const FAVORITES_NODE_TYPE: TreeNodeType = "favorites";
+export const FAVORITES_GROUP_NODE_TYPE: TreeNodeType = "favorites-group";
+const FAVORITES_SUBGROUP_KEY = "__favorites_group_";
+
+export function buildFavoritesPlaceholderNode({ nodeId, connectionId, database, schema }: { nodeId: string; connectionId: string; database: string; schema?: string }): TreeNode {
+  return {
+    id: `${nodeId}:${FAVORITES_GROUP_KEY}`,
+    label: FAVORITES_GROUP_LABEL,
+    type: FAVORITES_NODE_TYPE,
+    connectionId,
+    database,
+    schema,
+    isExpanded: false,
+    children: [],
+  };
+}
+
+export function isFavoritesPlaceholderNode(node: TreeNode): boolean {
+  return node.type === FAVORITES_NODE_TYPE;
+}
+
+/** Build a subnode for a single favorites group. Renders as a collapsible row
+ *  inside the favorites placeholder so the user can see which group an item
+ *  belongs to. The `id` embeds the group id so callers can look it up. */
+export function buildFavoritesGroupSubnode({ parentId, group }: { parentId: string; group: { id: string; name: string; connectionId: string; database?: string; schema?: string; collapsed: boolean } }): TreeNode {
+  return {
+    id: `${parentId}${FAVORITES_SUBGROUP_KEY}${group.id}`,
+    label: group.name,
+    type: FAVORITES_GROUP_NODE_TYPE,
+    connectionId: group.connectionId,
+    database: group.database,
+    schema: group.schema,
+    isExpanded: !group.collapsed,
+    children: [],
+  };
+}
+
+export function isFavoritesGroupSubnode(node: TreeNode): boolean {
+  return node.type === FAVORITES_GROUP_NODE_TYPE;
+}
+
+/** Extract the underlying group id from a favorites group subnode id. */
+export function extractFavoriteGroupIdFromSubnode(node: TreeNode): string | null {
+  if (!isFavoritesGroupSubnode(node)) return null;
+  const idx = node.id.lastIndexOf(FAVORITES_SUBGROUP_KEY);
+  if (idx < 0) return null;
+  return node.id.slice(idx + FAVORITES_SUBGROUP_KEY.length);
+}
+
+/** Returns the database (or schema) node id that owns a favorites placeholder. */
+export function favoritesNodeParentId(node: TreeNode): string | null {
+  if (!isFavoritesPlaceholderNode(node)) return null;
+  const suffixStart = node.id.lastIndexOf(`:${FAVORITES_GROUP_KEY}`);
+  if (suffixStart < 0) return null;
+  return node.id.slice(0, suffixStart);
+}
+
 export function buildObjectGroupPlaceholderNodes({ nodeId, connectionId, database, schema, objectTypes }: { nodeId: string; connectionId: string; database: string; schema?: string; objectTypes: DatabaseObjectTreeKind[] }): TreeNode[] {
   const supported = new Set(objectTypes);
   return groupDefs

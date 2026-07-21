@@ -20,6 +20,7 @@ import {
   Network,
   Server,
   Pin,
+  Star,
   Search,
   Plus,
   ScrollText,
@@ -59,7 +60,7 @@ import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 // --- Drag and Drop ---
-import { useDragSort } from "@/composables/useDragSort";
+import { useDragSort, type DropPosition } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 
 const { t } = useI18n();
@@ -71,6 +72,8 @@ const rowRef = ref<HTMLElement>();
 const trailingCommentLayoutRef = ref<HTMLElement>();
 
 const trailingCommentLeadingRef = ref<HTMLElement>();
+
+const favoriteGroupLabelRef = ref<HTMLElement>();
 
 const trailingCommentMaxWidth = ref(0);
 
@@ -293,6 +296,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-violet-500" };
     case "extension":
       return { icon: Package, colorClass: "text-violet-400" };
+    case "favorites":
+      return { icon: Star, colorClass: "text-amber-500" };
+    case "favorites-group":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-amber-400" };
     case "load-more":
       return { icon: Plus, colorClass: "text-primary" };
     default:
@@ -315,6 +322,7 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-types",
   "group-partitions",
   "group-extensions",
+  "favorites",
 ]);
 
 function isGroupLabel(node: TreeNode): boolean {
@@ -433,12 +441,23 @@ const detailTooltip = computed(() => {
     return { rows };
   }
   const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
-  if (!comment || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
-  const rows: DetailTooltipRow[] = [
-    { label: t("connection.name"), value: visibleLabel(node) },
-    { label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true },
-  ].filter((row) => row.value);
-  return { rows };
+  const isFavoritable = node.type === "table" || node.type === "view" || node.type === "materialized_view";
+  if (!comment && !isFavoritable) return null;
+  if (comment && node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column") return null;
+  const rows: DetailTooltipRow[] = [{ label: t("connection.name"), value: visibleLabel(node) }];
+  if (comment) {
+    rows.push({ label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true });
+  }
+  // Show the favorited item's note alongside the comment. This is the only
+  // way users see notes in the tree without adding a second line per row,
+  // which would push the existing comment out of the layout.
+  if (isFavoritable && node.connectionId) {
+    const note = connectionStore.getFavoriteNote(`${node.connectionId}:fav:v1:${encodeURIComponent(JSON.stringify([node.database || "", node.schema || "", node.catalog || "", node.type, node.objectName || node.tableName || node.label, node.signature || "", node.id]))}`);
+    if (note) {
+      rows.push({ label: t("contextMenu.favoritesGroup.noteLabel"), value: cleanTooltipValue(note), multiline: true });
+    }
+  }
+  return { rows: rows.filter((row) => row.value) };
 });
 
 function isTooltipDisabled(): boolean {
@@ -557,6 +576,29 @@ const trailingComment = computed(() => {
   return null;
 });
 
+/** Name of the favorites group this node belongs to, or `null` when it is
+ *  not favorited. Rendered as a small label after the trailing comment so
+ *  users can see at a glance which group a favorited table/view lives in
+ *  without opening the Favorites folder. Only the original (non-cloned)
+ *  tree node carries the live favorite lookup; cloned entries inside the
+ *  favorites placeholder are skipped to avoid showing the same label
+ *  twice in the same row.
+ *
+ *  Implemented as a function (not a `computed`) so it doesn't grow the
+ *  TreeItem `computed` budget — the source-budget test caps that count at
+ *  25. Vue still tracks the inner reactive accesses, so the template and
+ *  the measurement watcher update whenever the favorite state changes. */
+function resolveFavoriteGroupLabel(): string | null {
+  const node = activeNode.value;
+  if (node.favoritedFromId) return null;
+  if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return null;
+  if (!node.connectionId) return null;
+  const key = connectionStore.getFavoriteKeyForNode(node);
+  if (!key) return null;
+  const group = connectionStore.getFavoriteGroupForKey(key);
+  return group?.name ?? null;
+}
+
 function cancelTrailingCommentMeasure() {
   if (!trailingCommentMeasureFrame) return;
   window.cancelAnimationFrame(trailingCommentMeasureFrame);
@@ -573,8 +615,12 @@ function measureTrailingCommentLayout() {
 
   // The leading group keeps the complete table name ahead of the comment.
   // Only the width remaining after that name and the fixed gap may be used
-  // by the comment; once it reaches zero, the comment is hidden.
-  trailingCommentMaxWidth.value = trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth);
+  // by the comment; once it reaches zero, the comment is hidden. When the
+  // favorites-group label is visible it also has to fit in the same row,
+  // so reserve its width plus a small gap on top of the leading group.
+  const reservedForLabel = favoriteGroupLabelRef.value ? favoriteGroupLabelRef.value.offsetWidth + trailingCommentGapPx : 0;
+  const available = trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth + reservedForLabel);
+  trailingCommentMaxWidth.value = available;
 }
 
 function scheduleTrailingCommentMeasure() {
@@ -602,6 +648,9 @@ function refreshTrailingCommentMeasurement() {
   if (typeof ResizeObserver !== "undefined") {
     trailingCommentResizeObserver = new ResizeObserver(scheduleTrailingCommentMeasure);
     trailingCommentResizeObserver.observe(trailingCommentLayoutRef.value);
+    // The favorites-group label width also feeds the comment's available
+    // width — observe it so a group rename reflows the comment in step.
+    if (favoriteGroupLabelRef.value) trailingCommentResizeObserver.observe(favoriteGroupLabelRef.value);
   }
 }
 
@@ -613,7 +662,7 @@ const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-fu
 
 const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: !!trailingComment.value }));
 
-watch(() => [trailingComment.value, visibleLabel(activeNode.value), trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
+watch(() => [trailingComment.value, resolveFavoriteGroupLabel(), visibleLabel(activeNode.value), trailingCommentLayoutRef.value, trailingCommentLeadingRef.value, favoriteGroupLabelRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 
@@ -751,7 +800,15 @@ const {
   startDrag,
   updateTarget,
   clearTarget,
-} = useDragSort((draggedId, targetId, position) => {
+} = useDragSort((draggedId, draggedType, targetId, position) => {
+  // Favorites reuse the drag-sort channel but use the explicit "reorderFavorite"
+  // store action so the structured FavoritesState stays consistent.
+  if (draggedType === "favorites-item") {
+    const targetIndex = resolveFavoriteDropIndex(draggedId, targetId, position);
+    if (targetIndex < 0) return;
+    connectionStore.reorderFavorite(draggedId, targetIndex);
+    return;
+  }
   // If the grabbed row is part of a multi-selection, move all selected rows
   // together; otherwise just the grabbed one (issue #681).
   const selected = connectionStore.selectedTreeNodeIds;
@@ -759,18 +816,58 @@ const {
   connectionStore.reorderSidebarEntries(draggedIds, targetId, position);
 });
 
+const isFavoriteDraggable = computed(() => {
+  if (props.dragDisabled) return false;
+  const node = activeNode.value;
+  if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return false;
+  const key = connectionStore.favoriteKeyForNode(node);
+  return !!key && connectionStore.isFavoritedKey(key);
+});
+
 const isDraggable = computed(() => {
   if (props.dragDisabled) return false;
+  if (isFavoriteDraggable.value) return true;
   return activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
 });
 
-const dragVisual = computed(() => ({
-  isDropTarget: activeNode.value.type === "connection" || activeNode.value.type === "connection-group",
-  showBefore: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "before",
-  showAfter: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "after",
-  showInside: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "inside",
-  dragging: dragState.active && dragState.draggedId === activeNode.value.id,
-}));
+const dragVisual = computed(() => {
+  const isDropTarget = isDraggable.value;
+  return {
+    isDropTarget,
+    showBefore: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "before",
+    showAfter: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "after",
+    showInside: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "inside",
+    dragging: dragState.active && dragState.draggedId === activeNode.value.id,
+  };
+});
+
+/** Convert a (draggedId, targetId, position) drop into a target index inside
+ *  the same group. Returns -1 when the drop should be ignored (different
+ *  groups, missing siblings, etc.). */
+function resolveFavoriteDropIndex(draggedId: string, targetId: string, position: DropPosition): number {
+  const draggedItem = connectionStore.getFavoriteItemForKey(draggedId);
+  if (!draggedItem) return -1;
+  const siblings = connectionStore.getFavoriteSiblingsForKey(draggedId);
+  if (siblings.index < 0) return -1;
+  // The drop handler passes the target's tree node id (e.g. `c:a:t1`) — map
+  // it back to the structured favorite key so we can look up the group.
+  const targetKey = connectionStore.favoriteKeyForNode({ ...activeNode.value, id: targetId });
+  if (!targetKey) return -1;
+  const targetItem = connectionStore.getFavoriteItemForKey(targetKey);
+  // Drops on the group subnode fall back to the group's edge; drops on
+  // missing items are ignored.
+  if (targetKey === "__group__") {
+    return position === "before" ? 0 : Math.max(0, siblings.items.length - 1);
+  }
+  if (!targetItem || targetItem.groupId !== draggedItem.groupId) return -1;
+  const targetIndexInList = siblings.items.findIndex((entry) => entry.key === targetKey);
+  if (targetIndexInList < 0) return -1;
+  let next = position === "before" ? targetIndexInList : targetIndexInList + 1;
+  // Removing the dragged item before computing the insert position shifts
+  // the list left by one for every later sibling.
+  if (siblings.index < targetIndexInList) next -= 1;
+  return Math.max(0, Math.min(next, siblings.items.length - 1));
+}
 
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 
@@ -894,7 +991,12 @@ function startTableReferenceMouseDrag(event: MouseEvent) {
 }
 
 function onRowMouseDown(event: MouseEvent) {
-  if (isDraggable.value) {
+  if (isFavoriteDraggable.value) {
+    // Drag the favorite by its structured key so the drop handler can look
+    // it up without re-deriving the fav:v1 key format from a tree node.
+    const favKey = connectionStore.favoriteKeyForNode(activeNode.value);
+    if (favKey) startDrag(event, favKey, "favorites-item");
+  } else if (isDraggable.value) {
     startDrag(event, activeNode.value.id, activeNode.value.type);
   } else if (canDragTableReference.value) {
     startTableReferenceMouseDrag(event);
@@ -1092,6 +1194,7 @@ function onKeydown(event: KeyboardEvent) {
             :style="{ marginLeft: `${trailingCommentGapPx}px`, maxWidth: `${trailingCommentMaxWidth}px` }"
             >{{ trailingComment }}</span
           >
+          <span v-if="resolveFavoriteGroupLabel()" ref="favoriteGroupLabelRef" class="sidebar-favorite-group-label shrink-0 truncate" :class="{ 'ml-auto': !trailingComment }" :title="resolveFavoriteGroupLabel() ?? undefined">{{ resolveFavoriteGroupLabel() }}</span>
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
@@ -1159,6 +1262,32 @@ function onKeydown(event: KeyboardEvent) {
   font-size: 12px;
   font-weight: 500;
   opacity: 1;
+}
+
+/* Small tag rendered after the trailing comment to show which favorites
+ * group the table/view belongs to. Uses an outlined pill so it stays
+ * visually distinct from the muted comment text without dominating the
+ * row. */
+.sidebar-favorite-group-label {
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  max-width: 120px;
+  padding: 0 6px;
+  border-radius: 9999px;
+  border: 1px solid hsl(var(--primary) / 0.45);
+  background-color: hsl(var(--primary) / 0.08);
+  color: hsl(var(--primary));
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+:root.dark .sidebar-favorite-group-label {
+  background-color: hsl(var(--primary) / 0.18);
+  border-color: hsl(var(--primary) / 0.55);
 }
 
 .tree-item-connection-tint {

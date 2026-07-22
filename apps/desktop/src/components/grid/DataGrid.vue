@@ -4328,9 +4328,7 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
           ? "rgb(51, 51, 55)"
           : "rgb(243, 243, 243)"
         : item.displayIndex % 2 === 1
-          ? dark
-            ? DATA_GRID_DARK_STRIPED_ROW_BG
-            : DATA_GRID_LIGHT_STRIPED_ROW_BG
+          ? `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
           : dark
             ? "rgb(19, 20, 22)"
             : "rgb(255, 255, 255)";
@@ -9060,7 +9058,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 @reference "../../styles/globals.css";
 
 [data-grid-root] {
-  --data-grid-row-muted-bg: rgb(243, 243, 243);
+  --data-grid-row-muted-bg: rgb(240, 240, 240);
   --data-grid-row-new-bg: rgb(243, 243, 243);
   --data-grid-row-deleted-bg: rgb(255, 244, 244);
   --data-grid-cell-active-bg: rgb(232, 232, 232);

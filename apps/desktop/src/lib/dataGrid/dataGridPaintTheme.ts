@@ -35,7 +35,7 @@ export const DATA_GRID_DARK_SEARCH_COLORS = {
   current: "rgb(116, 87, 0)",
   currentBorder: "rgb(239, 177, 0)",
 } as const;
-export const DATA_GRID_LIGHT_STRIPED_ROW_BG = "rgb(243, 243, 243)";
+export const DATA_GRID_LIGHT_STRIPED_ROW_BG = "rgb(240, 240, 240)";
 export const DATA_GRID_DARK_STRIPED_ROW_BG = "rgb(40, 40, 43)";
 export const DATA_GRID_DARK_ROW_NUMBER_BG = "rgb(35, 37, 42)";
 const DATA_GRID_DARK_ROW_NUMBER_NEW_BG = "rgb(33, 45, 40)";

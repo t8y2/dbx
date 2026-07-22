@@ -26,6 +26,14 @@ test("fitCanvasText truncates only when text exceeds the available cell width", 
 test("data grid paint themes use the increased striped row contrast", () => {
   const getVar = () => "";
 
-  assert.equal(resolveDataGridPaintTheme({ getVar, isDark: false }).rowMuted, DATA_GRID_LIGHT_STRIPED_ROW_BG);
+  const lightTheme = resolveDataGridPaintTheme({ getVar, isDark: false });
+  assert.equal(lightTheme.rowMuted, DATA_GRID_LIGHT_STRIPED_ROW_BG);
+  assert.notEqual(lightTheme.rowMuted, lightTheme.rowNew);
   assert.equal(resolveDataGridPaintTheme({ getVar, isDark: true }).rowMuted, DATA_GRID_DARK_STRIPED_ROW_BG);
+});
+
+test("data grid paint theme uses the resolved striped row token", () => {
+  const getVar = (name: string) => (name === "--data-grid-row-muted-bg" ? "rgb(235, 239, 244)" : "");
+
+  assert.equal(resolveDataGridPaintTheme({ getVar, isDark: false }).rowMuted, "rgb(235, 239, 244)");
 });

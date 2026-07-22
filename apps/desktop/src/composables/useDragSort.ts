@@ -101,8 +101,22 @@ function onMouseMove(event: MouseEvent) {
 }
 
 function onMouseUp() {
+  // Snapshot the drop intent before reset() clears it. Wrapping the callback
+  // in try/finally guarantees the drag session is torn down (cursor restored,
+  // ghost removed, state cleared) even if the user's drop handler throws —
+  // without it, a single bad handler would leave the user with a stuck
+  // "grabbing" cursor and no way to start a new drag.
   if (state.active && state.draggedId && state.draggedType && state.targetId && state.dropPosition && onDropCallback) {
-    onDropCallback(state.draggedId, state.draggedType, state.targetId, state.dropPosition);
+    const draggedId = state.draggedId;
+    const draggedType = state.draggedType;
+    const targetId = state.targetId;
+    const position = state.dropPosition;
+    try {
+      onDropCallback(draggedId, draggedType, targetId, position);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error("[useDragSort] drop handler threw", error);
+    }
   }
   reset();
 }
@@ -126,7 +140,17 @@ let listenersAttached = false;
 function ensureListeners() {
   if (listenersAttached) return;
   document.addEventListener("mousemove", onMouseMove, true);
+  // Listen for mouseup both on document (capture phase, default) and on
+  // window (capture phase). The window listener is a safety net: if some
+  // inner code attaches a non-capture listener that calls
+  // stopImmediatePropagation on the same target, the document-capture
+  // listener still fires, but in some browsers the document-capture
+  // listener can be missed when an ancestor (e.g. <html>) swallows the
+  // event. Listening on window covers that edge case so the drag session
+  // can ALWAYS be torn down — otherwise a single rogue handler could
+  // leave the user with a stuck "grabbing" cursor.
   document.addEventListener("mouseup", onMouseUp, true);
+  window.addEventListener("mouseup", onMouseUp, true);
   listenersAttached = true;
 }
 

@@ -15,12 +15,15 @@ pub struct ChClient {
     base_url: String,
     username: Option<String>,
     password: Option<String>,
+    /// 用户在连接配置「URL 参数」中填写的自定义 HTTP query 参数（已归一化），
+    /// 例如 `dialect_type=ANSI`，会追加到每次请求的 URL query string 上。
+    extra_params: Option<String>,
 }
 
 impl ChClient {
     pub fn new(url: &str, username: Option<String>, password: Option<String>, timeout: Duration) -> Self {
         let http = http_client_builder(timeout).build().unwrap_or_else(|_| HttpClient::new());
-        Self { http, base_url: url.trim_end_matches('/').to_string(), username, password }
+        Self { http, base_url: url.trim_end_matches('/').to_string(), username, password, extra_params: None }
     }
 
     pub fn new_with_ca_cert(
@@ -28,6 +31,7 @@ impl ChClient {
         username: Option<String>,
         password: Option<String>,
         ca_cert_path: Option<&str>,
+        extra_params: Option<&str>,
         timeout: Duration,
     ) -> Result<Self, String> {
         let mut builder = http_client_builder(timeout);
@@ -41,7 +45,24 @@ impl ChClient {
             builder = builder.add_root_certificate(cert);
         }
         let http = builder.build().map_err(|e| format!("Failed to configure ClickHouse HTTP client: {e}"))?;
-        Ok(Self { http, base_url: url.trim_end_matches('/').to_string(), username, password })
+        Ok(Self {
+            http,
+            base_url: url.trim_end_matches('/').to_string(),
+            username,
+            password,
+            extra_params: normalize_extra_params(extra_params),
+        })
+    }
+}
+
+/// 归一化用户填写的「URL 参数」：去除首尾空白与开头的 `?`/`&`，
+/// 返回可直接拼接到 query string 的片段；为空时返回 None。
+fn normalize_extra_params(params: Option<&str>) -> Option<String> {
+    let trimmed = params?.trim().trim_start_matches('?').trim_start_matches('&').trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -77,6 +98,7 @@ impl Clone for ChClient {
             base_url: self.base_url.clone(),
             username: self.username.clone(),
             password: self.password.clone(),
+            extra_params: self.extra_params.clone(),
         }
     }
 }
@@ -124,8 +146,13 @@ pub enum ClickHouseQueryStreamItem {
     Row(Vec<serde_json::Value>),
 }
 
-fn build_query_url(base_url: &str, database: Option<&str>, limit: QueryResultLimit) -> String {
-    build_query_url_with_format(base_url, database, limit, QueryResultFormat::JsonCompact)
+fn build_query_url(
+    base_url: &str,
+    database: Option<&str>,
+    limit: QueryResultLimit,
+    extra_params: Option<&str>,
+) -> String {
+    build_query_url_with_format(base_url, database, limit, QueryResultFormat::JsonCompact, extra_params)
 }
 
 fn build_query_url_with_format(
@@ -133,6 +160,7 @@ fn build_query_url_with_format(
     database: Option<&str>,
     limit: QueryResultLimit,
     format: QueryResultFormat,
+    extra_params: Option<&str>,
 ) -> String {
     let mut url = format!("{}/?default_format={}", base_url, format.as_str());
     if let Some(db) = database {
@@ -140,6 +168,11 @@ fn build_query_url_with_format(
     }
     if let QueryResultLimit::Limited(max_rows) = limit {
         url.push_str(&format!("&max_result_rows={max_rows}&result_overflow_mode=break"));
+    }
+    // 用户自定义 URL 参数放在最后追加，允许其覆盖前面的默认设置（ClickHouse 取同名参数的最后一个值）
+    if let Some(params) = normalize_extra_params(extra_params) {
+        url.push('&');
+        url.push_str(&params);
     }
     url
 }
@@ -250,7 +283,7 @@ async fn ch_query_with_limit(
     database: Option<&str>,
     limit: QueryResultLimit,
 ) -> Result<ChJsonResult, String> {
-    let url = build_query_url(&client.base_url, database, limit);
+    let url = build_query_url(&client.base_url, database, limit, client.extra_params.as_deref());
     log::info!("[clickhouse] query url={url} user={:?} has_pass={}", client.username, client.password.is_some());
     let req = build_request(client, client.http.post(&url).body(sql.to_string()));
     let resp = req.send().await.map_err(|e| format!("ClickHouse request failed: {e}"))?;
@@ -278,6 +311,7 @@ pub async fn stream_query_with_max_rows(
         Some(database),
         limit,
         QueryResultFormat::JsonCompactEachRowWithNamesAndTypes,
+        client.extra_params.as_deref(),
     );
     log::info!("[clickhouse] stream query url={url} user={:?} has_pass={}", client.username, client.password.is_some());
     let req = build_request(client, client.http.post(&url).body(sql.to_string()));
@@ -463,7 +497,11 @@ fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows:
 }
 
 pub async fn test_connection(client: &ChClient, timeout: Duration) -> Result<(), String> {
-    let url = format!("{}/?query=SELECT%201", client.base_url);
+    let mut url = format!("{}/?query=SELECT%201", client.base_url);
+    if let Some(params) = normalize_extra_params(client.extra_params.as_deref()) {
+        url.push('&');
+        url.push_str(&params);
+    }
     let req = build_request(client, client.http.get(&url));
     let resp = with_connection_timeout("ClickHouse", timeout, async {
         req.send().await.map_err(|e| format!("ClickHouse connection failed: {e}"))
@@ -601,7 +639,12 @@ pub async fn execute_query_with_max_rows(
         let result = ch_query_with_limit(client, sql, Some(database), QueryResultLimit::Limited(row_limit + 1)).await?;
         Ok(limited_query_result(result, start.elapsed().as_millis(), Some(row_limit)))
     } else {
-        let url = build_query_url(&client.base_url, Some(database), QueryResultLimit::Unlimited);
+        let url = build_query_url(
+            &client.base_url,
+            Some(database),
+            QueryResultLimit::Unlimited,
+            client.extra_params.as_deref(),
+        );
         let req = build_request(client, client.http.post(&url).body(sql.to_string()));
         let resp = req.send().await.map_err(|e| format!("ClickHouse request failed: {e}"))?;
         if !resp.status().is_success() {
@@ -632,6 +675,7 @@ mod tests {
             "http://localhost:8123",
             Some("analytics"),
             QueryResultLimit::Limited(crate::query::MAX_ROWS + 1),
+            None,
         );
 
         assert_eq!(
@@ -641,12 +685,42 @@ mod tests {
     }
 
     #[test]
+    fn query_url_appends_custom_url_params() {
+        // 用户在「URL 参数」填 dialect_type=ANSI，应追加到 query string 末尾
+        let url = build_query_url(
+            "http://localhost:8123",
+            Some("analytics"),
+            QueryResultLimit::Unlimited,
+            Some("dialect_type=ANSI"),
+        );
+
+        assert_eq!(url, "http://localhost:8123/?default_format=JSONCompact&database=analytics&dialect_type=ANSI");
+    }
+
+    #[test]
+    fn query_url_normalizes_leading_symbols_and_ignores_blank_params() {
+        // 允许用户带上开头的 ? 或 &，也允许多个参数
+        let url = build_query_url(
+            "http://localhost:8123",
+            None,
+            QueryResultLimit::Unlimited,
+            Some("?dialect_type=ANSI&max_threads=8"),
+        );
+        assert_eq!(url, "http://localhost:8123/?default_format=JSONCompact&dialect_type=ANSI&max_threads=8");
+
+        // 空白参数不产生多余的 &
+        let url = build_query_url("http://localhost:8123", None, QueryResultLimit::Unlimited, Some("   "));
+        assert_eq!(url, "http://localhost:8123/?default_format=JSONCompact");
+    }
+
+    #[test]
     fn stream_query_url_uses_line_delimited_names_and_types_format() {
         let url = build_query_url_with_format(
             "http://localhost:8123",
             Some("analytics"),
             QueryResultLimit::Limited(500),
             QueryResultFormat::JsonCompactEachRowWithNamesAndTypes,
+            None,
         );
 
         assert_eq!(

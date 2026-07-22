@@ -17,7 +17,7 @@ test("SQL file execution dialog SFC compiles", () => {
 });
 
 test("SQL file execution dialog keeps actions visible within narrow viewports", () => {
-  assert.match(dialogSource, /DialogScrollContent class="[^"]*max-h-\[calc\(100dvh-6rem\)\][^"]*flex-col[^"]*overflow-hidden/);
+  assert.match(dialogSource, /DialogScrollContent class="[^"]*max-h-\[calc\(var\(--dbx-viewport-height\)-6rem\)\][^"]*flex-col[^"]*overflow-hidden/);
   assert.match(dialogSource, /<DialogHeader class="shrink-0">/);
   assert.match(dialogSource, /class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3"/);
   assert.match(dialogSource, /class="grid grid-cols-1 gap-3 sm:grid-cols-2"/);

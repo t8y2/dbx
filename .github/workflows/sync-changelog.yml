@@ -39,8 +39,47 @@ jobs:
               --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
               --content-type application/json
           fi
+          aws s3 cp latest-notes.json "s3://${R2_BUCKET_NAME}/changelog/latest-notes.json" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/json
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+
+      - name: Synchronize updater notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          set -euo pipefail
+          TAG="$(jq -r '.version' latest-notes.json)"
+          mkdir -p updater-assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir updater-assets --clobber
+          NOTES="$(jq -r '.notes' latest-notes.json)"
+          jq --arg notes "$NOTES" '.notes = $notes' updater-assets/latest.json > updater-assets/latest.json.tmp
+          mv updater-assets/latest.json.tmp updater-assets/latest.json
+          gh release upload "$TAG" updater-assets/latest.json --repo "$GITHUB_REPOSITORY" --clobber
+
+          mkdir -p cnb-assets
+          cp updater-assets/latest.json cnb-assets/latest.json
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft > updater-release.json
+          node .github/scripts/sync-cnb-release.mjs \
+            --github-release updater-release.json \
+            --assets-dir cnb-assets \
+            --overwrite-existing
+
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" r2-latest.json --endpoint-url "$ENDPOINT"
+          jq --arg notes "$NOTES" '.notes = $notes' r2-latest.json > r2-latest.json.tmp
+          mv r2-latest.json.tmp r2-latest.json
+          aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/${TAG}/latest.json" \
+            --endpoint-url "$ENDPOINT" --content-type application/json --cache-control no-cache
+          aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" \
+            --endpoint-url "$ENDPOINT" --content-type application/json --cache-control no-cache

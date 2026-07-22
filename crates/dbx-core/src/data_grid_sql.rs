@@ -1795,8 +1795,18 @@ pub fn format_grid_sql_literal(
     } else {
         text
     };
+    if database_type == Some(DatabaseType::Postgres) && literal_text.contains('\\') {
+        // Escape strings have stable backslash semantics regardless of the
+        // session's standard_conforming_strings setting.
+        let escaped_text = literal_text.replace('\\', "\\\\").replace('\'', "''");
+        return format!("E'{escaped_text}'");
+    }
     let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
         literal_text.replace('\\', "\\\\").replace('\'', "\\'")
+    } else if is_sqlite_literal_database(database_type) {
+        // SQLite-family engines do not treat backslash as a string-literal
+        // escape character, so only the quote delimiter needs escaping.
+        literal_text.replace('\'', "''")
     } else {
         literal_text.replace('\\', "\\\\").replace('\'', "''")
     };
@@ -1806,6 +1816,13 @@ pub fn format_grid_sql_literal(
     } else {
         escaped
     }
+}
+
+fn is_sqlite_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+    )
 }
 
 fn format_grid_save_sql_literal(
@@ -4752,6 +4769,38 @@ mod tests {
             "b'10101010'"
         );
         assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Postgres), Some(&bit)), "'0'");
+    }
+
+    #[test]
+    fn postgres_literals_use_escape_strings_for_stable_backslash_semantics() {
+        let value = json!(r#"{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}"#);
+        assert_eq!(
+            format_grid_sql_literal(&value, Some(DatabaseType::Postgres), None),
+            r#"E'{"json_raw":"{\\"foo\\":1,\\"bar\\":\\"sometext\\"}"}'"#
+        );
+        assert_eq!(format_grid_sql_literal(&json!("it's"), Some(DatabaseType::Postgres), None), "'it''s'");
+    }
+
+    #[test]
+    fn sqlite_family_literals_do_not_double_escape_backslashes() {
+        let value = json!(r#"{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}"#);
+        for database_type in
+            [DatabaseType::Sqlite, DatabaseType::Rqlite, DatabaseType::Turso, DatabaseType::CloudflareD1]
+        {
+            assert_eq!(
+                format_grid_sql_literal(&value, Some(database_type), None),
+                r#"'{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}'"#
+            );
+            assert_eq!(format_grid_sql_literal(&json!("it's"), Some(database_type), None), "'it''s'");
+        }
+    }
+
+    #[test]
+    fn mysql_and_neo4j_literals_keep_doubling_backslashes() {
+        // MySQL (default sql_mode, without NO_BACKSLASH_ESCAPES) and Neo4j do treat
+        // backslash as an escape character, so this behavior must be preserved.
+        assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::Mysql), None), r"'a\\b'");
+        assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::Neo4j), None), r"'a\\b'");
     }
 
     #[test]

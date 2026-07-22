@@ -43,10 +43,10 @@ pub async fn start_query_result_export(
     let ext = match req.format.as_str() {
         "csv" => "csv",
         "xlsx" => "xlsx",
-        _ => return Err(AppError(format!("Unsupported query result export format: {}", req.format))),
+        _ => return Err(AppError::from(format!("Unsupported query result export format: {}", req.format))),
     };
     let tmp_dir = state.data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError(e.to_string()))?;
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError::from(e.to_string()))?;
     let tmp_file = tmp_dir.join(format!("query_result_export_{export_id}.{ext}"));
     let file_path = tmp_file.to_string_lossy().to_string();
     req.file_path = file_path.clone();
@@ -146,15 +146,15 @@ pub async fn query_result_export_download(
         .write()
         .await
         .remove(&export_id)
-        .ok_or_else(|| AppError("Export file not found".to_string()))?;
+        .ok_or_else(|| AppError::from("Export file not found".to_string()))?;
 
-    let data = tokio::fs::read(&file_path).await.map_err(|e| AppError(e.to_string()))?;
+    let data = tokio::fs::read(&file_path).await.map_err(|e| AppError::from(e.to_string()))?;
     let _ = tokio::fs::remove_file(&file_path).await;
 
     let (content_type, file_ext) = match format.as_str() {
         "csv" => ("text/csv; charset=utf-8", "csv"),
         "xlsx" => ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
-        _ => return Err(AppError(format!("Unknown format: {format}"))),
+        _ => return Err(AppError::from(format!("Unknown format: {format}"))),
     };
 
     let filename = format!("query_result_export_{export_id}.{file_ext}");
@@ -164,5 +164,5 @@ pub async fn query_result_export_download(
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
         .body(Body::from(data))
-        .map_err(|e| AppError(e.to_string()))
+        .map_err(|e| AppError::from(e.to_string()))
 }

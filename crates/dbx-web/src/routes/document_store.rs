@@ -20,11 +20,11 @@ where
         let token = query.token();
         tokio::select! {
             biased;
-            _ = token.cancelled() => Err(AppError(dbx_core::query::canceled_error())),
-            result = future => result.map_err(AppError),
+            _ = token.cancelled() => Err(AppError::from(dbx_core::query::canceled_error())),
+            result = future => result.map_err(AppError::from),
         }
     } else {
-        future.await.map_err(AppError)
+        future.await.map_err(AppError::from)
     }
 }
 
@@ -34,7 +34,7 @@ async fn ensure_writable(
     action: &str,
 ) -> Result<(), AppError> {
     if let Some(name) = dbx_core::query::connection_readonly_name(app, connection_id).await {
-        return Err(AppError(format!(
+        return Err(AppError::from(format!(
             "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
             name, action
         )));
@@ -149,7 +149,8 @@ pub async fn list_databases(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentListDatabasesRequest>,
 ) -> Result<Json<Vec<String>>, AppError> {
-    let result = dbx_core::document_ops::list_databases_core(&state.app, &req.connection_id).await.map_err(AppError)?;
+    let result =
+        dbx_core::document_ops::list_databases_core(&state.app, &req.connection_id).await.map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -159,7 +160,7 @@ pub async fn list_collections(
 ) -> Result<Json<Vec<dbx_core::document_ops::CollectionInfo>>, AppError> {
     let result = dbx_core::document_ops::list_collections_core(&state.app, &req.connection_id, &req.database)
         .await
-        .map_err(AppError)?;
+        .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -200,7 +201,7 @@ pub async fn insert_document(
         req.routing.as_deref(),
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -219,7 +220,7 @@ pub async fn update_document(
         req.routing.as_deref(),
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -237,7 +238,7 @@ pub async fn delete_document(
         req.routing.as_deref(),
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -254,7 +255,7 @@ pub async fn list_gridfs_files(
         req.sort.as_deref(),
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -270,7 +271,7 @@ pub async fn list_gridfs_buckets(
         req.sort.as_deref(),
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -281,7 +282,7 @@ pub async fn create_gridfs_bucket(
     ensure_writable(&state.app, &req.connection_id, "Create GridFS bucket").await?;
     dbx_core::document_ops::create_gridfs_bucket_core(&state.app, &req.connection_id, &req.database, &req.bucket)
         .await
-        .map_err(AppError)?;
+        .map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -292,7 +293,7 @@ pub async fn delete_gridfs_bucket(
     ensure_writable(&state.app, &req.connection_id, "Delete GridFS bucket").await?;
     dbx_core::document_ops::delete_gridfs_bucket_core(&state.app, &req.connection_id, &req.database, &req.bucket)
         .await
-        .map_err(AppError)?;
+        .map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -308,7 +309,7 @@ pub async fn download_gridfs_file(
         &req.file_id,
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -323,14 +324,14 @@ pub async fn upload_gridfs_file(
     let mut content_type: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| AppError(e.to_string()))? {
+    while let Some(field) = multipart.next_field().await.map_err(|e| AppError::from(e.to_string()))? {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
-            "connectionId" => connection_id = Some(field.text().await.map_err(|e| AppError(e.to_string()))?),
-            "database" => database = Some(field.text().await.map_err(|e| AppError(e.to_string()))?),
-            "bucket" => bucket = Some(field.text().await.map_err(|e| AppError(e.to_string()))?),
-            "fileName" => file_name = Some(field.text().await.map_err(|e| AppError(e.to_string()))?),
-            "contentType" => content_type = Some(field.text().await.map_err(|e| AppError(e.to_string()))?),
+            "connectionId" => connection_id = Some(field.text().await.map_err(|e| AppError::from(e.to_string()))?),
+            "database" => database = Some(field.text().await.map_err(|e| AppError::from(e.to_string()))?),
+            "bucket" => bucket = Some(field.text().await.map_err(|e| AppError::from(e.to_string()))?),
+            "fileName" => file_name = Some(field.text().await.map_err(|e| AppError::from(e.to_string()))?),
+            "contentType" => content_type = Some(field.text().await.map_err(|e| AppError::from(e.to_string()))?),
             "file" => {
                 if file_name.is_none() {
                     file_name = field.file_name().map(str::to_string);
@@ -338,7 +339,7 @@ pub async fn upload_gridfs_file(
                 if content_type.is_none() {
                     content_type = field.content_type().map(str::to_string);
                 }
-                file_bytes = Some(field.bytes().await.map_err(|e| AppError(e.to_string()))?.to_vec());
+                file_bytes = Some(field.bytes().await.map_err(|e| AppError::from(e.to_string()))?.to_vec());
             }
             _ => {
                 let _ = field.bytes().await;
@@ -346,11 +347,11 @@ pub async fn upload_gridfs_file(
         }
     }
 
-    let connection_id = connection_id.ok_or_else(|| AppError("Missing connectionId".to_string()))?;
-    let database = database.ok_or_else(|| AppError("Missing database".to_string()))?;
-    let bucket = bucket.ok_or_else(|| AppError("Missing bucket".to_string()))?;
-    let file_name = file_name.ok_or_else(|| AppError("Missing fileName".to_string()))?;
-    let file_bytes = file_bytes.ok_or_else(|| AppError("No file uploaded".to_string()))?;
+    let connection_id = connection_id.ok_or_else(|| AppError::from("Missing connectionId".to_string()))?;
+    let database = database.ok_or_else(|| AppError::from("Missing database".to_string()))?;
+    let bucket = bucket.ok_or_else(|| AppError::from("Missing bucket".to_string()))?;
+    let file_name = file_name.ok_or_else(|| AppError::from("Missing fileName".to_string()))?;
+    let file_bytes = file_bytes.ok_or_else(|| AppError::from("No file uploaded".to_string()))?;
 
     ensure_writable(&state.app, &connection_id, "Upload GridFS file").await?;
     let result = dbx_core::document_ops::upload_gridfs_file_core(
@@ -363,7 +364,7 @@ pub async fn upload_gridfs_file(
         content_type.as_deref(),
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -380,6 +381,6 @@ pub async fn delete_gridfs_file(
         &req.file_id,
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(()))
 }

@@ -228,12 +228,12 @@ fn mongo_field_predicate_is_exists_true(value: &serde_json::Value) -> bool {
 }
 
 async fn load_policy(state: &Arc<WebState>) -> Result<McpGlobalPolicy, AppError> {
-    state.app.storage.load_mcp_global_policy().await.map(|state| state.policy()).map_err(AppError)
+    state.app.storage.load_mcp_global_policy().await.map(|state| state.policy()).map_err(AppError::from)
 }
 
 fn ensure_allowed(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), AppError> {
     if policy.allowed_connection_ids.as_ref().is_some_and(|allowed| !allowed.iter().any(|id| id == connection_id)) {
-        return Err(AppError(format!(
+        return Err(AppError::from(format!(
             "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by DBX MCP settings"
         )));
     }
@@ -241,7 +241,7 @@ fn ensure_allowed(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), A
 }
 
 fn connection_read_only_error(message: impl Into<String>) -> AppError {
-    AppError(format!("CONNECTION_READ_ONLY: {}", message.into()))
+    AppError::from(format!("CONNECTION_READ_ONLY: {}", message.into()))
 }
 
 async fn load_connection(state: &Arc<WebState>, connection_id: &str) -> Result<ConnectionConfig, AppError> {
@@ -250,10 +250,10 @@ async fn load_connection(state: &Arc<WebState>, connection_id: &str) -> Result<C
         .storage
         .load_connections()
         .await
-        .map_err(AppError)?
+        .map_err(AppError::from)?
         .into_iter()
         .find(|config| config.id == connection_id)
-        .ok_or_else(|| AppError(format!("Connection with id '{connection_id}' not found")))
+        .ok_or_else(|| AppError::from(format!("Connection with id '{connection_id}' not found")))
 }
 
 pub async fn ensure_scope(state: &Arc<WebState>, headers: &HeaderMap, connection_id: &str) -> Result<(), AppError> {
@@ -295,7 +295,7 @@ pub async fn ensure_mongo_pipeline_target(
     }
     let config = load_connection(state, connection_id).await?;
     if dbx_core::production_safety::mongo_pipeline_targets_production_database(&config, database, pipeline_json) {
-        return Err(AppError(
+        return Err(AppError::from(
             "PRODUCTION_DATABASE_READ_ONLY: MongoDB aggregate write targeting production scope is blocked.".to_string(),
         ));
     }
@@ -316,10 +316,12 @@ async fn ensure_write_with_risk(
     let policy = load_policy(state).await?;
     ensure_allowed(&policy, connection_id)?;
     if policy.read_only {
-        return Err(AppError(format!("MCP_READ_ONLY: DBX MCP read-only mode is enabled. {action} blocked.")));
+        return Err(AppError::from(format!("MCP_READ_ONLY: DBX MCP read-only mode is enabled. {action} blocked.")));
     }
     if dangerous && !policy.allow_dangerous_sql {
-        return Err(AppError(format!("SQL_BLOCKED: High-risk operation '{action}' is disabled in DBX MCP settings.")));
+        return Err(AppError::from(format!(
+            "SQL_BLOCKED: High-risk operation '{action}' is disabled in DBX MCP settings."
+        )));
     }
     let config = load_connection(state, connection_id).await?;
     if config.read_only {
@@ -329,7 +331,7 @@ async fn ensure_write_with_risk(
         )));
     }
     if dbx_core::production_safety::is_production_database(&config, database) {
-        return Err(AppError(format!(
+        return Err(AppError::from(format!(
             "PRODUCTION_DATABASE_READ_ONLY: {action} blocked for production database '{database}'."
         )));
     }
@@ -350,21 +352,23 @@ pub async fn ensure_sql(
     ensure_allowed(&policy, connection_id)?;
     let config = load_connection(state, connection_id).await?;
     if dbx_core::sql_risk::mcp_sql_has_forbidden_database_switch(sql, config.db_type) {
-        return Err(AppError("SQL_BLOCKED: MCP does not allow USE or persistent database switching.".to_string()));
+        return Err(AppError::from(
+            "SQL_BLOCKED: MCP does not allow USE or persistent database switching.".to_string(),
+        ));
     }
     let is_write = dbx_core::query_execution_sql::is_write_sql_for_database(sql, config.db_type);
     if policy.read_only && is_write {
-        return Err(AppError("MCP_READ_ONLY: DBX MCP read-only mode is enabled. SQL write blocked.".to_string()));
+        return Err(AppError::from("MCP_READ_ONLY: DBX MCP read-only mode is enabled. SQL write blocked.".to_string()));
     }
     if !policy.allow_dangerous_sql && dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type) {
-        return Err(AppError("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string()));
+        return Err(AppError::from("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string()));
     }
     if config.read_only {
         dbx_core::query_execution_sql::check_read_only(sql, &config.name, config.db_type)
             .map_err(connection_read_only_error)?;
     }
     if is_write && dbx_core::production_safety::targets_production_database(&config, database, sql) {
-        return Err(AppError(
+        return Err(AppError::from(
             "PRODUCTION_DATABASE_READ_ONLY: SQL write targeting production scope is blocked.".to_string(),
         ));
     }
@@ -377,7 +381,7 @@ mod tests {
 
     #[test]
     fn connection_read_only_errors_use_the_stable_mcp_code() {
-        assert_eq!(connection_read_only_error("write blocked").0, "CONNECTION_READ_ONLY: write blocked");
+        assert_eq!(connection_read_only_error("write blocked").message, "CONNECTION_READ_ONLY: write blocked");
     }
 
     #[test]

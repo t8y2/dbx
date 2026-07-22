@@ -40,6 +40,10 @@ export function buildMcpJsonConfig(config?: McpLaunchConfig): string {
   return JSON.stringify({ mcpServers: { dbx } }, null, 2);
 }
 
+export function buildMcpTraeConfig(config?: McpLaunchConfig, nativeBinPath?: string): string {
+  return buildMcpJsonConfig(nativeBinPath ? { command: nativeBinPath } : config);
+}
+
 export function buildMcpVsCodeConfig(config?: McpLaunchConfig): string {
   const dbx: Record<string, unknown> = {
     type: "stdio",

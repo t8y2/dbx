@@ -1,4 +1,4 @@
-import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, TransportLayerConfig, TunnelProfile } from "@/types/database";
 
 export const CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS = 2_000;
 export const MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS = 30_000;
@@ -50,11 +50,23 @@ function positiveSeconds(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-export function connectionAttemptTimeoutMs(config: Pick<ConnectionConfig, "connect_timeout_secs" | "transport_layers"> & Partial<Pick<ConnectionConfig, "db_type">>): number {
+export type TunnelProfileResolver = (profileId: string) => TunnelProfile | undefined;
+
+function resolvedTimeoutLayer(layer: TransportLayerConfig, resolveTunnelProfile?: TunnelProfileResolver): TransportLayerConfig {
+  if (!layer.profile_id || !resolveTunnelProfile) return layer;
+  const profile = resolveTunnelProfile(layer.profile_id);
+  // The backend rejects missing or mismatched profiles; retain the stub here so
+  // the UI deadline never masks that lifecycle error with invented settings.
+  if (!profile || profile.type !== layer.type) return layer;
+  return { ...profile, id: layer.id, enabled: layer.enabled, profile_id: layer.profile_id } as TransportLayerConfig;
+}
+
+export function connectionAttemptTimeoutMs(config: Pick<ConnectionConfig, "connect_timeout_secs" | "transport_layers"> & Partial<Pick<ConnectionConfig, "db_type">>, resolveTunnelProfile?: TunnelProfileResolver): number {
   const baseTimeoutSecs = positiveSeconds(config.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS);
   const agentMinTimeoutSecs = config.db_type === "access" ? ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS : AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS;
   const timeouts = [DRIVER_STARTUP_FLOOR_TYPES.has(config.db_type as DatabaseType) ? Math.max(baseTimeoutSecs, agentMinTimeoutSecs) : baseTimeoutSecs];
-  for (const layer of config.transport_layers ?? []) {
+  for (const unresolvedLayer of config.transport_layers ?? []) {
+    const layer = resolvedTimeoutLayer(unresolvedLayer, resolveTunnelProfile);
     if (layer.enabled === false) continue;
     if (layer.type === "ssh" || layer.type === "http_tunnel") {
       timeouts.push(positiveSeconds(layer.connect_timeout_secs, DEFAULT_CONNECT_TIMEOUT_SECS));

@@ -4,7 +4,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>app.dbx</groupId>
   <artifactId>dbx-jdbc-plugin</artifactId>
-  <version>0.1.24</version>
+  <version>0.1.25</version>
 
   <properties>
     <maven.compiler.source>17</maven.compiler.source>

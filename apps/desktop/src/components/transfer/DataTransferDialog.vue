@@ -15,7 +15,7 @@ import * as api from "@/lib/backend/api";
 import type { TransferMode, TransferTableNameCase } from "@/lib/backend/api";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { ArrowRightLeft, ArrowLeftRight, Loader2, Square, CheckSquare } from "@lucide/vue";
 
@@ -99,8 +99,9 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
   if (!connectionId) return;
   try {
     await store.ensureConnected(connectionId);
-    const rawNames = isMongoConnection(connectionId) ? await api.mongoListDatabases(connectionId) : (await api.listDatabases(connectionId)).map((d) => d.name);
-    const names = databaseOptionsForConnection(rawNames, store.getConfig(connectionId));
+    const config = store.getConfig(connectionId);
+    if (!config) return;
+    const names = isMongoConnection(connectionId) ? databaseOptionsForConnection(await api.mongoListDatabases(connectionId), config) : await fetchNamespaceOptionsForConnection(connectionId, config);
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -188,7 +189,12 @@ watch(sourceConnectionId, (id) => {
 watch(sourceDatabase, async (db) => {
   if (db) {
     const config = store.getConfig(sourceConnectionId.value);
-    if (isSchemaAware(config?.db_type)) {
+    if (namespaceOptionsAreSchemas(config)) {
+      // Dameng has no selectable catalog, so the top-level namespace option is
+      // also the schema used for metadata lookup and qualified transfer SQL.
+      sourceSchemas.value = [];
+      sourceSchema.value = db;
+    } else if (isSchemaAware(config?.db_type)) {
       await loadSchemas(sourceConnectionId.value, db, "source");
     } else {
       sourceSchema.value = db;
@@ -208,7 +214,10 @@ watch(targetConnectionId, (id) => {
 watch(targetDatabase, async (db) => {
   if (db) {
     const config = store.getConfig(targetConnectionId.value);
-    if (isSchemaAware(config?.db_type)) {
+    if (namespaceOptionsAreSchemas(config)) {
+      targetSchemas.value = [];
+      targetSchema.value = db;
+    } else if (isSchemaAware(config?.db_type)) {
       await loadSchemas(targetConnectionId.value, db, "target");
     } else {
       targetSchema.value = db;

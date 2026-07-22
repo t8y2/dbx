@@ -119,6 +119,8 @@ type DataGridHandle = {
 type SearchableBrowserHandle = {
   focusSearch: () => boolean;
   refresh?: () => boolean;
+  insertCommand?: (command: string) => Promise<boolean>;
+  executeCommand?: (command: string) => Promise<boolean>;
 };
 
 const props = defineProps<{
@@ -127,6 +129,7 @@ const props = defineProps<{
   executableSql: string;
   activeOutputView: "result" | "summary" | "explain" | "chart";
   formatSqlRequest: { id: number; tabId: string } | null;
+  compressSqlRequest: { id: number; tabId: string } | null;
   selectedSql: string;
   cursorPos: number;
   blockDangerousRedisCommands: boolean;
@@ -788,7 +791,17 @@ function applyTableStructureChanges() {
   return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
 }
 
-defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition, applyTableStructureChanges });
+async function insertRedisCommand(command: string): Promise<boolean> {
+  if (props.activeTab.mode !== "redis") return false;
+  return (await redisKeyBrowserRef.value?.insertCommand?.(command)) ?? false;
+}
+
+async function executeRedisCommand(command: string): Promise<boolean> {
+  if (props.activeTab.mode !== "redis") return false;
+  return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
+}
+
+defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition, applyTableStructureChanges, insertRedisCommand, executeRedisCommand });
 </script>
 
 <template>
@@ -821,6 +834,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :syntax-dialect="editorSyntaxDialect"
               :format-dialect="activeSqlFormatDialect"
               :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
+              :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
               :execution-error="activeQueryError"
               :execution-error-sql="activeTab.lastExecutedSql"
               :statement-execution-markers="activeStatementExecutionMarkers"

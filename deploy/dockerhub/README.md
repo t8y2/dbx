@@ -1,6 +1,6 @@
 # DBX
 
-DBX is a lightweight, self-hosted database client for the browser. It supports more than 60 databases, including MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, and Elasticsearch.
+DBX is a lightweight, self-hosted database client for the browser. It supports 70+ databases, including MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, and Elasticsearch.
 
 - Official website: https://dbxio.com
 - Documentation: https://dbxio.com/en/docs/getting-started

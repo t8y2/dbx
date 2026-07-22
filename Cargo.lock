@@ -1914,6 +1914,7 @@ dependencies = [
  "sqlparser",
  "ssfmt",
  "sysinfo",
+ "tempfile",
  "tiberius",
  "tokio",
  "tokio-postgres",

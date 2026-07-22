@@ -27,14 +27,44 @@ impl TaskSupervisor {
         F: FnOnce(CancellationToken) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        let key = key.into();
+        let mut tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
         if !self.accepting.load(Ordering::Acquire) {
             return false;
         }
         let handle = tokio::spawn(task(self.cancellation.child_token()));
-        if let Some(previous) = self.tasks.lock().unwrap_or_else(|error| error.into_inner()).insert(key.into(), handle)
-        {
+        if let Some(previous) = tasks.insert(key, handle) {
             previous.abort();
         }
+        true
+    }
+
+    pub fn spawn_once<F, Fut>(&self, key: impl Into<String>, task: F) -> bool
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        // One-shot cleanup tasks are keyed so duplicate requests do not accumulate, and
+        // completed handles remove themselves from the supervisor.
+        let key = key.into();
+        let mut tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+        if !self.accepting.load(Ordering::Acquire) || tasks.contains_key(&key) {
+            return false;
+        }
+        let cleanup = self.clone();
+        let task_key = key.clone();
+        // Do not let a very short task finish before its handle is registered in the map.
+        let (start, started) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            if started.await.is_err() {
+                return;
+            }
+            task(cleanup.cancellation.child_token()).await;
+            cleanup.remove_completed(&task_key);
+        });
+        tasks.insert(key, handle);
+        drop(tasks);
+        let _ = start.send(());
         true
     }
 
@@ -60,6 +90,10 @@ impl TaskSupervisor {
 
     pub fn active_count(&self) -> usize {
         self.tasks.lock().unwrap_or_else(|error| error.into_inner()).len()
+    }
+
+    fn remove_completed(&self, key: &str) {
+        self.tasks.lock().unwrap_or_else(|error| error.into_inner()).remove(key);
     }
 
     pub async fn shutdown(&self, deadline: Duration) {
@@ -115,5 +149,24 @@ mod tests {
         assert!(cancelled.load(Ordering::SeqCst));
         assert_eq!(supervisor.active_count(), 0);
         assert!(!supervisor.spawn_replace("late", |_| async {}));
+    }
+
+    #[tokio::test]
+    async fn spawn_once_removes_completed_task() {
+        let supervisor = TaskSupervisor::new();
+        assert!(supervisor.spawn_once("one-shot", |_| async {}));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(supervisor.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn spawn_once_rejects_duplicate_active_key() {
+        let supervisor = TaskSupervisor::new();
+        assert!(supervisor.spawn_once("one-shot", |token| async move {
+            token.cancelled().await;
+        }));
+        assert!(!supervisor.spawn_once("one-shot", |_| async {}));
+        assert_eq!(supervisor.active_count(), 1);
+        supervisor.shutdown(Duration::from_secs(1)).await;
     }
 }

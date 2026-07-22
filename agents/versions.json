@@ -16,7 +16,7 @@
   "hive": "0.1.33",
   "spark": "0.1.5",
   "informix": "0.1.34",
-  "kingbase": "0.1.34",
+  "kingbase": "0.1.35",
   "kylin": "0.1.33",
   "neo4j": "0.1.33",
   "oceanbase-oracle": "0.1.28",

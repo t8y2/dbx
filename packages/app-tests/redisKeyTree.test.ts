@@ -66,6 +66,7 @@ test("collectExpandedGroupIds and flattenVisibleRedisKeyTree expand all search p
     rows.map(({ node, depth }) => `${depth}:${node.kind}:${node.label}`),
     ["0:group:user", "1:group:profile", "2:leaf:name", "1:leaf:settings"],
   );
+  assert.ok(rows.every((row) => row.id === row.node.id));
 });
 
 test("flattenVisibleRedisKeyTree handles very large expanded groups without stack overflow", () => {
@@ -83,12 +84,14 @@ test("flattenVisibleRedisKeyTree handles very large expanded groups without stac
   assert.equal(rows[0]?.node.label, "user");
   assert.equal(rows[1]?.depth, 1);
   assert.equal(rows.at(-1)?.depth, 1);
+  assert.ok(rows.every((row) => row.id === row.node.id));
 });
 
 test("redisKeyToFlatTreeRow keeps search results flat with the full key label", () => {
   const row = redisKeyToFlatTreeRow(makeKey("user:profile:1", "user:profile:1", ""), 0);
 
   assert.equal(row.depth, 0);
+  assert.equal(row.id, row.node.id);
   assert.equal(row.node.kind, "leaf");
   if (row.node.kind !== "leaf") return;
   assert.equal(row.node.label, "user:profile:1");

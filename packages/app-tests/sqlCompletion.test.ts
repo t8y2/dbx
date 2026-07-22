@@ -133,6 +133,46 @@ test("suggests database-specific data types and functions", () => {
     columnsByTable: new Map(),
     databaseType: "mysql",
   });
+  const mysqlCurrentDateItems = buildSqlCompletionItems("select current_d", "select current_d".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlCurrentTimestampItems = buildSqlCompletionItems("select current_t", "select current_t".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlCurdateItems = buildSqlCompletionItems("select curd", "select curd".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlIfnullItems = buildSqlCompletionItems("select ifn", "select ifn".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlDateAddItems = buildSqlCompletionItems("select date_a", "select date_a".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlDateSubItems = buildSqlCompletionItems("select date_s", "select date_s".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlSubstringIndexItems = buildSqlCompletionItems("select substring_i", "select substring_i".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlLeftItems = buildSqlCompletionItems("select lef", "select lef".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
   const postgresDateItems = buildSqlCompletionItems("select date_f", "select date_f".length, {
     tables: [],
     columnsByTable: new Map(),
@@ -144,10 +184,48 @@ test("suggests database-specific data types and functions", () => {
   assert.ok(functionItems.some((item) => item.type === "function" && item.label === "JSONB_BUILD_OBJECT"));
   assert.ok(mysqlFunctionItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"));
   assert.ok(mysqlSysdateItems.some((item) => item.type === "function" && item.label === "SYSDATE"));
+  assert.ok(mysqlCurrentDateItems.some((item) => item.type === "function" && item.label === "CURRENT_DATE"));
+  assert.ok(mysqlCurrentTimestampItems.some((item) => item.type === "function" && item.label === "CURRENT_TIMESTAMP"));
+  assert.ok(mysqlCurrentTimestampItems.some((item) => item.type === "function" && item.label === "CURRENT_TIME"));
+  assert.ok(mysqlCurdateItems.some((item) => item.type === "function" && item.label === "CURDATE"));
+  assert.ok(mysqlIfnullItems.some((item) => item.type === "function" && item.label === "IFNULL"));
+  assert.equal(
+    mysqlDateAddItems.find((item) => item.type === "function" && item.label === "DATE_ADD")?.apply,
+    "DATE_ADD(${date}, INTERVAL ${expr} ${unit})",
+  );
+  assert.equal(
+    mysqlDateSubItems.find((item) => item.type === "function" && item.label === "DATE_SUB")?.apply,
+    "DATE_SUB(${date}, INTERVAL ${expr} ${unit})",
+  );
+  assert.ok(mysqlSubstringIndexItems.some((item) => item.type === "function" && item.label === "SUBSTRING_INDEX"));
+  assert.ok(mysqlLeftItems.some((item) => item.type === "function" && item.label === "LEFT"));
+  assert.ok(mysqlLeftItems.some((item) => item.type === "keyword" && item.label === "LEFT"));
   assert.equal(
     postgresDateItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"),
     false,
   );
+
+  const mysqlDateTypeItems = buildSqlCompletionItems("CREATE TABLE t (d dat", "CREATE TABLE t (d dat".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlTimeTypeItems = buildSqlCompletionItems("CREATE TABLE t (tm tim", "CREATE TABLE t (tm tim".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  assert.equal(mysqlDateTypeItems[0]?.label, "DATE");
+  assert.equal(mysqlDateTypeItems.some((item) => item.type === "function" && item.label === "DATE"), false);
+  assert.equal(mysqlTimeTypeItems[0]?.label, "TIME");
+  assert.equal(mysqlTimeTypeItems.some((item) => item.type === "function" && item.label === "TIME"), false);
+
+  const mysqlCreateViewItems = buildSqlCompletionItems("CREATE VIEW v AS SELECT dat", "CREATE VIEW v AS SELECT dat".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  assert.ok(mysqlCreateViewItems.some((item) => item.type === "function" && item.label === "DATE"));
 });
 
 test("suggests Oracle SQL, PL/SQL, and data type keywords", () => {
@@ -770,6 +848,25 @@ test("suggests compound JOIN keywords while typing a join modifier", () => {
   assert.ok(leftIndex >= 0);
   assert.ok(leftJoinIndex < leftIndex, "LEFT JOIN should rank ahead of the single LEFT token");
   assert.equal(items[leftJoinIndex]?.apply, "LEFT JOIN ");
+});
+
+test("keeps MySQL LEFT JOIN ranking when LEFT() is also a function", () => {
+  const sql = "select * from users le";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  const leftJoinIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT JOIN");
+  const leftKeywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT");
+  const leftFunctionIndex = items.findIndex((item) => item.type === "function" && item.label === "LEFT");
+
+  assert.ok(leftJoinIndex >= 0);
+  assert.ok(leftKeywordIndex >= 0);
+  assert.ok(leftFunctionIndex >= 0);
+  assert.ok(leftJoinIndex < leftKeywordIndex, "LEFT JOIN should rank ahead of LEFT keyword");
+  assert.ok(leftJoinIndex < leftFunctionIndex, "LEFT JOIN should rank ahead of LEFT()");
 });
 
 test("suggests JOIN after a join modifier", () => {
@@ -1957,7 +2054,51 @@ test("detects INSERT INTO column list with three-part qualified table", () => {
   const context = getSqlCompletionContext(sql, sql.length);
 
   assert.equal(context.insertTable, "users");
+  assert.equal(context.insertDatabase, "analytics");
   assert.equal(context.insertSchema, "public");
+});
+
+test("detects SQL Server bracket-qualified database, schema, and table references", () => {
+  const sql = "SELECT * FROM [DatabaseA].[IN].[orders] a LEFT JOIN [DatabaseB].[OUT].[orders] b ON b.";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ name, database, schema, alias }) => ({ name, database, schema, alias })),
+    [
+      { name: "orders", database: "DatabaseA", schema: "IN", alias: "a" },
+      { name: "orders", database: "DatabaseB", schema: "OUT", alias: "b" },
+    ],
+  );
+});
+
+test("scopes SQL Server cross-database alias columns to the referenced database", () => {
+  const sql = "SELECT * FROM [DatabaseA].[OUT].[orders] a LEFT JOIN [DatabaseB].[OUT].[orders] b ON b.";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map([
+      ["DatabaseA.OUT.orders", [{ name: "source_marker", table: "orders", schema: "OUT" }]],
+      ["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]],
+    ]),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.deepEqual(
+    items.filter((item) => item.type === "column").map((item) => item.label),
+    ["target_marker"],
+  );
+});
+
+test("suggests INSERT columns for a SQL Server three-part target", () => {
+  const sql = "INSERT INTO [DatabaseB].[OUT].[orders] (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map([["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]]]),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.equal(items.find((item) => item.type === "snippet" && item.label === "orders.*")?.apply, "target_marker");
 });
 
 test("detects MySQL backtick-qualified INSERT INTO column list context", () => {

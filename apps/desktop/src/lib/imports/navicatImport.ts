@@ -1,4 +1,4 @@
-import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, SshTunnelConfig } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
@@ -95,6 +95,40 @@ async function decryptNavicatPassword(value: string) {
   } catch {
     return "";
   }
+}
+
+function parseNavicatPort(value: string, fallback: number) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+async function parseSshTunnel(values: Record<string, string>): Promise<({ type: "ssh" } & SshTunnelConfig) | null> {
+  const enabled = getAny(values, ["ssh", "useSsh", "sshEnabled", "enableSsh", "useSshTunnel", "sshTunnelEnabled"]);
+  if (!truthyNavicatFlag(enabled)) return null;
+
+  const host = getAny(values, ["sshHost", "sshTunnelHost", "tunnelHost"]);
+  const user = getAny(values, ["sshUserName", "sshUsername", "sshUser", "sshTunnelUserName", "sshTunnelUsername", "tunnelUserName"]);
+  // A half-populated tunnel makes an otherwise valid imported connection unusable.
+  if (!host || !user) return null;
+
+  const authValue = normalizeKey(getAny(values, ["sshAuthenMethod", "sshAuthMethod", "sshAuthenticationMethod", "sshAuthentication", "sshAuthType"]));
+  const keyPath = getAny(values, ["sshPrivateKey", "sshKeyFile", "sshKeyPath", "sshIdentityFile", "sshTunnelPrivateKey"]);
+  const usesKey = authValue.includes("key") || (!authValue.includes("password") && !!keyPath);
+  const password = usesKey ? "" : await decryptNavicatPassword(getAny(values, ["sshPassword", "sshTunnelPassword"]));
+  const keyPassphrase = usesKey ? await decryptNavicatPassword(getAny(values, ["sshPassphrase", "sshKeyPassphrase", "sshPrivateKeyPassphrase"])) : "";
+
+  return {
+    type: "ssh",
+    id: uuid(),
+    enabled: true,
+    host,
+    port: parseNavicatPort(getAny(values, ["sshPort", "sshTunnelPort", "tunnelPort"]), 22),
+    user,
+    password,
+    key_path: usesKey ? keyPath : "",
+    key_passphrase: keyPassphrase,
+    auth_method: usesKey ? "key" : "password",
+  };
 }
 
 function inferProfile(rawType: string, tag: string, port?: number) {
@@ -194,6 +228,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
   const keepaliveFlag = getAny(node.values, ["keepAlive", "keepalive", "useKeepAlive", "enableKeepAlive"]);
   const keepaliveEnabled = !keepaliveFlag || truthyNavicatFlag(keepaliveFlag);
   const keepaliveInterval = Number.isFinite(keepaliveValue) && keepaliveValue > 0 && keepaliveEnabled ? keepaliveValue : 0;
+  const sshTunnel = await parseSshTunnel(node.values);
 
   const config: PartialConnection = {
     name,
@@ -207,7 +242,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     password,
     database: database || undefined,
     color: "",
-    transport_layers: [],
+    transport_layers: sshTunnel ? [sshTunnel] : [],
     connect_timeout_secs: 10,
     query_timeout_secs: 30,
     keepalive_interval_secs: keepaliveInterval,

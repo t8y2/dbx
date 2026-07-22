@@ -678,6 +678,130 @@ fn iris_drop_index_includes_table_name() {
 }
 
 #[test]
+fn iris_ignores_comment_changes_but_keeps_supported_column_alters() {
+    let mut renamed = column("DISPLAY_NAME");
+    renamed.data_type = "VARCHAR(40)".to_string();
+    renamed.is_nullable = true;
+    renamed.default_value = "'after'".to_string();
+    renamed.comment = "new description".to_string();
+    renamed.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "VARCHAR(20)".to_string(),
+        is_nullable: false,
+        column_default: Some("before".to_string()),
+        is_primary_key: false,
+        extra: None,
+        comment: Some("old description".to_string()),
+        ..Default::default()
+    });
+    let mut created_at = column("CREATED_AT");
+    created_at.data_type = "TIMESTAMP".to_string();
+    created_at.default_value = "CURRENT_TIMESTAMP".to_string();
+    created_at.comment = "creation time".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Iris),
+        schema: Some("SQLUSER".to_string()),
+        table_name: "DBX_ISSUE_1678".to_string(),
+        columns: vec![renamed, created_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("new table description".to_string()),
+        original_table_comment: Some("old table description".to_string()),
+    });
+
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SQLUSER\".\"DBX_ISSUE_1678\" ALTER COLUMN \"NAME\" RENAME \"DISPLAY_NAME\";",
+            "ALTER TABLE \"SQLUSER\".\"DBX_ISSUE_1678\" MODIFY (\"DISPLAY_NAME\" VARCHAR(40) DEFAULT 'after' NULL);",
+            "ALTER TABLE \"SQLUSER\".\"DBX_ISSUE_1678\" ADD (\"CREATED_AT\" TIMESTAMP DEFAULT CURRENT_TIMESTAMP);",
+        ]
+    );
+    assert_eq!(
+        result.warnings,
+        vec![
+            "Column comments are not supported for iris from this editor; the comment change for \"NAME\" was ignored.",
+            "Column comments are not supported for iris from this editor; the comment for \"CREATED_AT\" was ignored.",
+            "Table comments are not supported for iris from this editor; the comment change was ignored.",
+        ]
+    );
+    assert!(result.statements.iter().all(|statement| !statement.contains("COMMENT ON")));
+}
+
+#[test]
+fn iris_comment_only_change_returns_warning_without_sql() {
+    let mut name = column("NAME");
+    name.comment = "new description".to_string();
+    name.original = Some(ColumnInfo {
+        name: "NAME".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: Some("old description".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Iris),
+        schema: Some("SQLUSER".to_string()),
+        table_name: "DBX_ISSUE_1678".to_string(),
+        column: name,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(
+        result.warnings,
+        vec![
+            "Column comments are not supported for iris from this editor; the comment change for \"NAME\" was ignored."
+        ]
+    );
+}
+
+#[test]
+fn oracle_compatible_databases_keep_comment_on_sql() {
+    for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+        let mut name = column("NAME");
+        name.comment = "new description".to_string();
+        name.original = Some(ColumnInfo {
+            name: "NAME".to_string(),
+            data_type: "varchar(255)".to_string(),
+            is_nullable: true,
+            column_default: None,
+            is_primary_key: false,
+            extra: None,
+            comment: Some("old description".to_string()),
+            ..Default::default()
+        });
+
+        let result = build_table_structure_change_sql(TableStructureSqlOptions {
+            database_type: Some(database_type),
+            schema: Some("APP".to_string()),
+            table_name: "USERS".to_string(),
+            columns: vec![name],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            table_comment: Some("new table description".to_string()),
+            original_table_comment: Some("old table description".to_string()),
+        });
+
+        assert_eq!(result.warnings, Vec::<String>::new(), "{database_type:?}");
+        assert_eq!(
+            result.statements,
+            vec![
+                "COMMENT ON COLUMN \"APP\".\"USERS\".\"NAME\" IS 'new description';",
+                "COMMENT ON TABLE \"APP\".\"USERS\" IS 'new table description';",
+            ],
+            "{database_type:?}"
+        );
+    }
+}
+
+#[test]
 fn mysql_create_index_with_comment() {
     let mut col = column("name");
     col.data_type = "varchar(120)".to_string();

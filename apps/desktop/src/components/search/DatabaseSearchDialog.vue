@@ -268,7 +268,7 @@ function openResult(item: SearchResultItem) {
 
 <template>
   <Dialog v-model:open="dialogOpen">
-    <DialogScrollContent class="flex max-h-[calc(100dvh-6rem)] min-h-0 max-w-4xl flex-col overflow-hidden gap-0 p-0">
+    <DialogScrollContent class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 max-w-4xl flex-col overflow-hidden gap-0 p-0">
       <DialogHeader class="shrink-0 border-b px-5 py-4">
         <DialogTitle class="flex items-center gap-2">
           <Search class="h-5 w-5" />

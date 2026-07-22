@@ -409,6 +409,7 @@ function parseTableSource(state: ParseState, nameIndex: number, introducer: stri
     columns: cte?.columns ? mergeColumnAliases(cte.columns, alias.columns) : undefined,
     columnAliases: alias.columns,
     metadataTarget: {
+      database: qualifierParts.length >= 2 ? qualifierParts[qualifierParts.length - 2] : undefined,
       schema: qualifierParts[qualifierParts.length - 1],
       table: name,
     },
@@ -640,7 +641,11 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
 
   if (
     trailing.qualifierParts.length > 0 &&
-    (previous === "from" || previous === "join" || TABLE_INTRODUCERS.has(previous) || TABLE_INTRODUCERS.has(wordBeforeReplacement) || (!!targetSource && !targetSource.alias && TABLE_INTRODUCERS.has(wordBeforePosition(tokens, targetSource.sourceSpan.start))))
+    (previous === "from" ||
+      previous === "join" ||
+      TABLE_INTRODUCERS.has(previous) ||
+      TABLE_INTRODUCERS.has(wordBeforeReplacement) ||
+      (!!targetSource && !targetSource.alias && trailing.replacementRange.start <= targetSource.sourceSpan.end + 1 && TABLE_INTRODUCERS.has(wordBeforePosition(tokens, targetSource.sourceSpan.start))))
   ) {
     const role = dialect.qualifierRole(trailing.qualifierParts, "table");
     return { kind: role === "catalog" ? "catalog" : "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "medium" };

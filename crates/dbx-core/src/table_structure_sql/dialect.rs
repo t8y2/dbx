@@ -210,25 +210,35 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_type: true,
             ..base
         },
-        Some(
-            DatabaseType::Oracle
-            | DatabaseType::OceanbaseOracle
-            | DatabaseType::Iris
-            | DatabaseType::Yashandb
-            | DatabaseType::Xugu,
-        ) => TableStructureCapabilities {
+        Some(DatabaseType::Iris) => TableStructureCapabilities {
             dialect: StructureDialect::Oracle,
             add_column: true,
             drop_column: true,
             rename_column: true,
             alter_existing_column: true,
-            comment: true,
+            // IRIS supports %DESCRIPTION while defining tables/columns, but cannot alter existing descriptions.
+            comment: false,
             create_index: true,
             drop_index: true,
             rebuild_index: true,
             index_type: true,
             ..base
         },
+        Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Yashandb | DatabaseType::Xugu) => {
+            TableStructureCapabilities {
+                dialect: StructureDialect::Oracle,
+                add_column: true,
+                drop_column: true,
+                rename_column: true,
+                alter_existing_column: true,
+                comment: true,
+                create_index: true,
+                drop_index: true,
+                rebuild_index: true,
+                index_type: true,
+                ..base
+            }
+        }
         Some(DatabaseType::H2) => TableStructureCapabilities {
             dialect: StructureDialect::H2,
             add_column: true,

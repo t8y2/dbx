@@ -37,6 +37,19 @@ function mysqlConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function oracleConnection(): ConnectionConfig {
+  return {
+    id: "oracle-1",
+    name: "Oracle",
+    db_type: "oracle",
+    host: "127.0.0.1",
+    port: 1521,
+    username: "SYSTEM",
+    password: "",
+    database: "XE",
+  } as ConnectionConfig;
+}
+
 function procedure(name: string): ObjectInfo {
   return {
     name,
@@ -212,6 +225,85 @@ describe("connectionStore metadata loading", () => {
     expect(schemaNode.children?.map((node) => node.label)).toEqual(["users"]);
   });
 
+  it("bypasses Oracle object-group caches created before DIP visibility was fixed", async () => {
+    const listTables = vi.fn().mockResolvedValue([
+      { name: "V_ONE", table_type: "VIEW", comment: null },
+      { name: "V_TWO", table_type: "VIEW", comment: null },
+      { name: "V_THREE", table_type: "VIEW", comment: null },
+    ] satisfies TableInfo[]);
+    const legacyChildren: TreeNode[] = [
+      { id: "oracle-1:XE:DIP:__views:DIP:V_ONE", label: "V_ONE", type: "view", connectionId: "oracle-1", database: "XE", schema: "DIP", isExpanded: false },
+      { id: "oracle-1:XE:DIP:__views:DIP:V_TWO", label: "V_TWO", type: "view", connectionId: "oracle-1", database: "XE", schema: "DIP", isExpanded: false },
+    ];
+    const loadSchemaCache = vi.fn(async (key: string) =>
+      key.endsWith(":objects-v5")
+        ? {
+            version: 2,
+            cachedAt: new Date().toISOString(),
+            children: legacyChildren,
+          }
+        : null,
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache,
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().desktopSettings.sidebar_table_page_size = 200;
+    const connection = oracleConnection();
+    const viewGroup: TreeNode = {
+      id: "oracle-1:XE:DIP:__views",
+      label: "tree.views",
+      type: "group-views",
+      connectionId: connection.id,
+      database: "XE",
+      schema: "DIP",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "oracle-1:XE:DIP",
+            label: "DIP",
+            type: "schema",
+            connectionId: connection.id,
+            database: "XE",
+            schema: "DIP",
+            isExpanded: true,
+            children: [viewGroup],
+          },
+        ],
+      },
+    ];
+
+    const storedViewGroup = store.treeNodes[0].children?.[0].children?.[0];
+    expect(storedViewGroup?.type).toBe("group-views");
+    await store.loadObjectGroupChildren(storedViewGroup!);
+
+    expect(loadSchemaCache).toHaveBeenCalledWith("oracle-1:XE:DIP:group-views:objects-v6");
+    expect(listTables).toHaveBeenCalledWith(connection.id, "XE", "DIP", undefined, 201, 0, ["VIEW"]);
+    expect(storedViewGroup?.children?.map((node) => node.label)).toEqual(["V_ONE", "V_THREE", "V_TWO"]);
+  });
+
   it("clears a stale connection error after a schema metadata retry succeeds", async () => {
     const listSchemaInfos = vi
       .fn()
@@ -262,7 +354,7 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app", { force: true });
 
     expect(store.connectionErrors[connection.id]).toBeUndefined();
-    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public"]);
+    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions"]);
   });
 
   it("clears a failed metadata warning when the driver hint finishes during retry", async () => {

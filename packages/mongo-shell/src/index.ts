@@ -9,6 +9,7 @@ export {
   parseMongoObjectArgument,
   quoteUnquotedObjectKeys,
   splitTopLevel,
+  stripMongoJsonComments,
   trimMongoOuterComments,
 } from "./json.js";
 

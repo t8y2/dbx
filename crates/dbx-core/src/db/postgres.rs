@@ -1828,6 +1828,40 @@ pub async fn get_table_comment(pool: &Pool, schema: &str, table: &str) -> Result
     Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()).filter(|s| !s.is_empty()))
 }
 
+pub async fn get_table_partition_key(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    // Probe relkind first so PostgreSQL-compatible servers without the PG10
+    // pg_get_partkeydef function keep ordinary-table DDL unchanged.
+    if postgres_query_cached(&client, postgres_partitioned_parent_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?
+        .is_empty()
+    {
+        return Ok(None);
+    }
+    let rows = postgres_query_cached(&client, postgres_table_partition_key_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()).filter(|s| !s.is_empty()))
+}
+
+fn postgres_partitioned_parent_sql() -> &'static str {
+    "SELECT 1 \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'p' \
+     LIMIT 1"
+}
+
+fn postgres_table_partition_key_sql() -> &'static str {
+    "SELECT pg_catalog.pg_get_partkeydef(c.oid) AS partition_key \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'p' \
+     LIMIT 1"
+}
+
 fn postgres_table_comment_sql() -> &'static str {
     "SELECT obj_description(c.oid) AS table_comment \
      FROM pg_catalog.pg_class c \
@@ -3295,19 +3329,32 @@ pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, Stri
         .collect())
 }
 
-pub async fn list_extensions(pool: &Pool, schema: &str) -> Result<Vec<ExtensionInfo>, String> {
+pub async fn list_extensions(pool: &Pool, schema: Option<&str>) -> Result<Vec<ExtensionInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
-         FROM pg_catalog.pg_extension e \
-         JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
-         LEFT JOIN pg_catalog.pg_description d ON d.objoid = e.oid AND d.classoid = 'pg_extension'::regclass \
-         WHERE n.nspname = $1 \
-         ORDER BY e.extname",
-        &[&schema],
-    )
-    .await
+    let rows = if let Some(schema) = schema.filter(|value| !value.is_empty()) {
+        postgres_query_cached(
+            &client,
+            "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
+             FROM pg_catalog.pg_extension e \
+             JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+             LEFT JOIN pg_catalog.pg_description d ON d.objoid = e.oid AND d.classoid = 'pg_extension'::regclass \
+             WHERE n.nspname = $1 \
+             ORDER BY e.extname",
+            &[&schema],
+        )
+        .await
+    } else {
+        postgres_query_cached(
+            &client,
+            "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
+             FROM pg_catalog.pg_extension e \
+             JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+             LEFT JOIN pg_catalog.pg_description d ON d.objoid = e.oid AND d.classoid = 'pg_extension'::regclass \
+             ORDER BY n.nspname, e.extname",
+            &[],
+        )
+        .await
+    }
     .map_err(|e| e.to_string())?;
 
     Ok(rows
@@ -3316,7 +3363,7 @@ pub async fn list_extensions(pool: &Pool, schema: &str) -> Result<Vec<ExtensionI
             name: pg_row_try_string(row, 0),
             version: pg_row_try_string(row, 1),
             comment: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
-            schema: Some(schema.to_string()),
+            schema: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
         })
         .collect())
 }
@@ -4115,6 +4162,21 @@ mod tests {
     }
 
     #[test]
+    fn postgres_table_partition_key_sql_targets_partitioned_parents() {
+        let parent_sql = postgres_partitioned_parent_sql();
+        let sql = postgres_table_partition_key_sql();
+
+        assert!(parent_sql.contains("n.nspname = $1"));
+        assert!(parent_sql.contains("c.relname = $2"));
+        assert!(parent_sql.contains("c.relkind = 'p'"));
+        assert!(sql.contains("pg_catalog.pg_get_partkeydef(c.oid)"));
+        assert!(sql.contains("n.nspname = $1"));
+        assert!(sql.contains("c.relname = $2"));
+        assert!(sql.contains("c.relkind = 'p'"));
+        assert!(!sql.contains("pg_get_expr(c.relpartbound"));
+    }
+
+    #[test]
     fn postgres_column_metadata_reads_identity_extra() {
         assert!(POSTGRES_COLUMNS_SQL.contains("a.attidentity"));
         assert!(POSTGRES_COLUMNS_SQL.contains("pg_sequence"));
@@ -4223,6 +4285,38 @@ mod tests {
         assert!(info.is_nullable);
         // int4 1 should be interpreted as true for is_primary_key
         assert!(info.is_primary_key);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_partition_key_metadata_reads_parent_only() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_partition_meta_{}", std::process::id());
+        let schema_ident = pg_quote_ident(&schema);
+        let parent = format!("{schema_ident}.parent");
+        let child = format!("{schema_ident}.child");
+
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+        let client = pool.get().await.expect("get postgres client");
+        client
+            .batch_execute(&format!(
+                "CREATE TABLE {parent} (id integer, payload text) PARTITION BY RANGE (id); \
+                 CREATE TABLE {child} PARTITION OF {parent} FOR VALUES FROM (1) TO (10)"
+            ))
+            .await
+            .expect("create partitioned tables");
+
+        let parent_key = get_table_partition_key(&pool, &schema, "parent").await.expect("parent metadata");
+        let child_key = get_table_partition_key(&pool, &schema, "child").await.expect("child metadata");
+        let parent_ddl = crate::schema::pg_ddl(&pool, &schema, "parent").await.expect("parent ddl");
+
+        execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await.expect("drop schema");
+
+        assert_eq!(parent_key, Some("RANGE (id)".to_string()));
+        assert_eq!(child_key, None);
+        assert!(parent_ddl.contains(") PARTITION BY RANGE (id);"), "ddl: {parent_ddl}");
+        assert!(!parent_ddl.contains("PARTITION OF"));
     }
 
     #[test]

@@ -82,7 +82,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     checkingUpdates.value = true;
     updateCheckMessage.value = "";
     try {
-      const info = await api.checkForUpdates(currentLocale());
+      const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource));
       updateInfo.value = info;
       if (info.update_available) {
         if (shouldOpenUpdateDialog({ silent: options.silent })) {

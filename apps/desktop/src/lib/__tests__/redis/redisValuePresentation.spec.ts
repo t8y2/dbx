@@ -7,6 +7,7 @@ import {
   getRedisMemberSelectionKey,
   normalizeRedisJsonDraft,
   preferredRedisValueFormat,
+  redisClipboardSafeText,
   redisJsonValueText,
   redisMemberCopyText,
   redisValueCopyText,
@@ -29,6 +30,10 @@ describe("redisValuePresentation", () => {
     expect(sanitizeRedisDisplayText("line1\nline2\tvalue\r\n")).toBe("line1\nline2\tvalue\r\n");
   });
 
+  it("escapes clipboard-unsafe controls without changing normal UTF-8 whitespace", () => {
+    expect(redisClipboardSafeText("普通文本\n下一行\t值\x00\x06\u0085结束")).toBe("普通文本\n下一行\t值\\x00\\x06\\x85结束");
+  });
+
   it("strips utf8 c1 control bytes for display", () => {
     expect(sanitizeRedisDisplayText("before\u0085after")).toBe("beforeafter");
   });
@@ -37,6 +42,10 @@ describe("redisValuePresentation", () => {
     const raw = "send_message_to_esb\x06\x16";
 
     expect(getRedisMemberSelectionKey("member", raw)).toBe(`member\n${raw}`);
+  });
+
+  it("copies the complete Redis member when UTF-8 text contains NUL", () => {
+    expect(redisMemberCopyText("before\x00after")).toBe("before\\x00after");
   });
 
   it("can disambiguate duplicate stream fields with an explicit identity", () => {

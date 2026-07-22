@@ -479,6 +479,59 @@ func TestColumnSQLUsesLowPrivilegeDictionary(t *testing.T) {
 	}
 }
 
+func TestLegacyColumnSQLSupportsServersWithoutOnNullMetadata(t *testing.T) {
+	sqlText := strings.ToUpper(xuguLegacyListColumnsSQL)
+
+	for _, want := range []string{"ALL_COLUMNS", "ALL_TABLES", "ALL_SCHEMAS", "COMMENTS", `"VARYING"`} {
+		if !strings.Contains(sqlText, want) {
+			t.Fatalf("legacy column listing should query %s, got: %s", want, xuguLegacyListColumnsSQL)
+		}
+	}
+	if strings.Contains(sqlText, "ON_NULL") {
+		t.Fatalf("legacy column listing should not require ON_NULL, got: %s", xuguLegacyListColumnsSQL)
+	}
+}
+
+func TestXuguMissingOnNullColumnErrorDetection(t *testing.T) {
+	if !isXuguMissingOnNullColumnError(errors.New("[E10049 L2 C57] 字段变量或函数\"C\".\"ON_NULL\"不存在\x00")) {
+		t.Fatal("expected the Xugu 12.0 missing ON_NULL error to use the legacy column query")
+	}
+	if !isXuguMissingOnNullColumnError(errors.New(`column C.ON_NULL does not exist`)) {
+		t.Fatal("expected an English missing ON_NULL error to use the legacy column query")
+	}
+	for _, err := range []error{
+		errors.New("network timeout"),
+		errors.New("column C.OTHER_COLUMN does not exist"),
+		errors.New("permission denied for C.ON_NULL"),
+	} {
+		if isXuguMissingOnNullColumnError(err) {
+			t.Fatalf("unexpected legacy column fallback for %q", err)
+		}
+	}
+}
+
+func TestGetColumnsFallsBackWhenOnNullMetadataIsUnavailable(t *testing.T) {
+	db, err := sql.Open("xugu-test-legacy-columns", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	columns, err := s.getColumns("SYSDBA", "PRODUCTS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 1 {
+		t.Fatalf("expected one legacy column, got %#v", columns)
+	}
+	column := columns[0]
+	if column.Name != "PRODUCT_ID" || column.DataType != "INTEGER" || !column.IsPrimaryKey || column.IsNullable {
+		t.Fatalf("unexpected legacy column metadata: %#v", column)
+	}
+}
+
 func TestIndexSQLUsesLowPrivilegeDictionary(t *testing.T) {
 	sqlText := strings.ToUpper(xuguListIndexesSQL)
 
@@ -831,11 +884,59 @@ func contains(values []string, target string) bool {
 	return false
 }
 
-// -- fake drivers for timeout tests --
+// -- fake drivers for agent tests --
 
 func init() {
 	sql.Register("xugu-test-blocking", &xuguBlockingDriver{})
 	sql.Register("xugu-test-fast", &xuguFastDriver{})
+	sql.Register("xugu-test-legacy-columns", &xuguLegacyColumnsDriver{})
+}
+
+type xuguLegacyColumnsDriver struct{}
+
+func (d *xuguLegacyColumnsDriver) Open(name string) (driver.Conn, error) {
+	return &xuguLegacyColumnsConn{}, nil
+}
+
+type xuguLegacyColumnsConn struct{}
+
+func (c *xuguLegacyColumnsConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguLegacyColumnsConn) Close() error              { return nil }
+func (c *xuguLegacyColumnsConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+func (c *xuguLegacyColumnsConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	switch {
+	case strings.Contains(upper, "ALL_CONSTRAINTS"):
+		return &xuguStaticRows{columns: []string{"DEFINE"}, values: [][]driver.Value{{`PRIMARY KEY ("PRODUCT_ID")`}}}, nil
+	case strings.Contains(upper, "ON_NULL"):
+		return nil, errors.New("[E10049 L2 C57] 字段变量或函数\"C\".\"ON_NULL\"不存在\x00")
+	case strings.Contains(upper, "ALL_COLUMNS"):
+		return &xuguStaticRows{
+			columns: []string{"COL_NAME", "TYPE_NAME", "NOT_NULL", "DEF_VAL", "COMMENTS", "SCALE", "VARYING"},
+			values:  [][]driver.Value{{"PRODUCT_ID", "INTEGER", true, nil, nil, int64(-1), false}},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unexpected query: %s", query)
+	}
+}
+
+type xuguStaticRows struct {
+	columns []string
+	values  [][]driver.Value
+	index   int
+}
+
+func (r *xuguStaticRows) Columns() []string { return r.columns }
+func (r *xuguStaticRows) Close() error      { return nil }
+func (r *xuguStaticRows) Next(dest []driver.Value) error {
+	if r.index >= len(r.values) {
+		return io.EOF
+	}
+	copy(dest, r.values[r.index])
+	r.index++
+	return nil
 }
 
 var xuguBlockingUnblock chan struct{}
@@ -942,8 +1043,8 @@ func TestXuguWatchdogFiresKillAndCancel(t *testing.T) {
 
 	select {
 	case <-killCh:
-	default:
-		t.Fatal("killSession was not called when watchdog fired")
+	case <-time.After(time.Second):
+		t.Fatal("killSession was not called after watchdog cancellation")
 	}
 }
 

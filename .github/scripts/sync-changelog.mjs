@@ -11,6 +11,7 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
 const OUT_CN = "releases-cn.json";
 const OUT_EN = "releases-en.json";
 const LATEST_EN_OUT = "latest-en.json";
+const LATEST_NOTES_OUT = "latest-notes.json";
 const EN_CACHE_URL = process.env.CHANGELOG_EN_CACHE_URL || "https://dl.dbxio.com/changelog/releases-en.json";
 
 const SECTION_MAP = {
@@ -156,6 +157,14 @@ function buildLatestEnNotes(enReleasesJson) {
   };
 }
 
+export function buildLatestReleaseNotes(releases) {
+  const latest = releases
+    .filter((release) => !release.draft && !release.prerelease && !release.tag_name.startsWith("agents-"))
+    .sort((a, b) => new Date(b.published_at) - new Date(a.published_at))[0];
+  if (!latest) return null;
+  return { version: latest.tag_name, notes: latest.body || "" };
+}
+
 export async function fetchCachedEnglish({ cacheUrl = EN_CACHE_URL, fetchImpl = fetch } = {}) {
   try {
     const res = await fetchImpl(cacheUrl, { headers: { Accept: "application/json" } });
@@ -261,6 +270,12 @@ async function main() {
 
   writeFileSync(OUT_CN, JSON.stringify(cnJson, null, 2));
   console.log(`Wrote ${OUT_CN}`);
+
+  const latestNotes = buildLatestReleaseNotes(releases);
+  if (latestNotes) {
+    writeFileSync(LATEST_NOTES_OUT, JSON.stringify(latestNotes, null, 2));
+    console.log(`Wrote ${LATEST_NOTES_OUT}`);
+  }
 
   console.log("Fetching cached English changelog...");
   const cachedEnJson = await fetchCachedEnglish();

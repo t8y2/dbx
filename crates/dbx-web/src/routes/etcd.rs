@@ -14,7 +14,7 @@ async fn ensure_writable(
     action: &str,
 ) -> Result<(), AppError> {
     if let Some(name) = dbx_core::query::connection_readonly_name(app, connection_id).await {
-        return Err(AppError(format!(
+        return Err(AppError::from(format!(
             "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
             name, action
         )));
@@ -59,7 +59,7 @@ pub async fn list_prefix(
         req.continuation.as_deref(),
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -67,7 +67,8 @@ pub async fn get(
     State(state): State<Arc<WebState>>,
     Json(req): Json<EtcdKeyRequest>,
 ) -> Result<Json<dbx_core::agent_kv::KvGetResponse>, AppError> {
-    let result = dbx_core::agent_kv::kv_get_core(&state.app, &req.connection_id, &req.key).await.map_err(AppError)?;
+    let result =
+        dbx_core::agent_kv::kv_get_core(&state.app, &req.connection_id, &req.key).await.map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -78,7 +79,7 @@ pub async fn put(
     ensure_writable(&state.app, &req.connection_id, "Put").await?;
     let result = dbx_core::agent_kv::kv_put_core(&state.app, &req.connection_id, &req.key, req.value, req.lease)
         .await
-        .map_err(AppError)?;
+        .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -88,6 +89,6 @@ pub async fn delete(
 ) -> Result<Json<dbx_core::agent_kv::KvDeleteResponse>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "Delete").await?;
     let result =
-        dbx_core::agent_kv::kv_delete_core(&state.app, &req.connection_id, &req.key).await.map_err(AppError)?;
+        dbx_core::agent_kv::kv_delete_core(&state.app, &req.connection_id, &req.key).await.map_err(AppError::from)?;
     Ok(Json(result))
 }

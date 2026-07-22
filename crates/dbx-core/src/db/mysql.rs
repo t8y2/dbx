@@ -1629,11 +1629,13 @@ pub async fn list_tables_filtered(
     Ok(tables)
 }
 
+// `Option::is_none_or` requires Rust 1.82, while DBX still supports Rust 1.77.2.
+#[allow(clippy::unnecessary_map_or)]
 fn should_fallback_empty_list_tables(filter: Option<&str>) -> bool {
     // MySQL proxies such as MyCat can return an empty information_schema.TABLES
     // even when SHOW TABLES exposes objects. Avoid the fallback for active
     // searches so normal MySQL "no match" queries do not rescan large schemas.
-    !filter.is_some_and(|filter| !filter.trim().is_empty())
+    filter.map_or(true, |filter| filter.trim().is_empty())
 }
 
 fn filter_list_tables_fallback(

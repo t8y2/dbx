@@ -23,6 +23,7 @@ pub struct McpServerStatus {
     pub latest_version: Option<String>,
     pub update_available: bool,
     pub bin_path: Option<String>,
+    pub native_bin_path: Option<String>,
     pub script_path: Option<String>,
     pub install_command: String,
     pub update_command: String,
@@ -48,6 +49,7 @@ struct NodeRuntime {
     mcp_version: Option<String>,
     mcp_script_path: Option<PathBuf>,
     mcp_bin_path: Option<PathBuf>,
+    mcp_native_bin_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -81,8 +83,20 @@ impl NodeRuntime {
         // Resolve the package-declared launcher so npm layout changes do not break the built-in AI assistant.
         let mcp_script_path = package.filter(|_| package_is_compatible).map(|package| package.script_path);
         let mcp_bin_path = mcp_bin_path(&npm_prefix);
+        // TRAE on Windows splits executable paths containing spaces, so expose the native package binary as a safe direct launch option.
+        let mcp_native_bin_path =
+            package_is_compatible.then(|| mcp_native_binary_path(&package_root, &npm_root)).flatten();
 
-        Some(Self { node_path, npm_cli_path, npm_root, node_version, mcp_version, mcp_script_path, mcp_bin_path })
+        Some(Self {
+            node_path,
+            npm_cli_path,
+            npm_root,
+            node_version,
+            mcp_version,
+            mcp_script_path,
+            mcp_bin_path,
+            mcp_native_bin_path,
+        })
     }
 
     fn has_mcp_package(&self) -> bool {
@@ -124,6 +138,8 @@ pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
     let current_version = runtime.as_ref().and_then(|runtime| runtime.mcp_version.clone());
     let script_path =
         runtime.as_ref().and_then(|runtime| runtime.mcp_script_path.as_ref()).map(|path| path_string(path));
+    let native_bin_path =
+        runtime.as_ref().and_then(|runtime| runtime.mcp_native_bin_path.as_ref()).map(|path| path_string(path));
     let bin_path = fallback_bin.as_ref().map(|path| path_string(path));
     let latest_version = latest_version.ok();
     let update_available = current_version
@@ -145,6 +161,7 @@ pub async fn check_mcp_server_status() -> Result<McpServerStatus, String> {
         latest_version,
         update_available,
         bin_path,
+        native_bin_path,
         script_path,
         install_command: MCP_INSTALL_COMMAND.to_string(),
         update_command: MCP_INSTALL_COMMAND.to_string(),
@@ -562,6 +579,43 @@ fn mcp_package(package_root: &Path) -> Option<McpPackage> {
     Some(McpPackage { version, script_path, minimum_node_version })
 }
 
+fn mcp_native_binary_path(package_root: &Path, npm_root: &Path) -> Option<PathBuf> {
+    let (package_name, binary_name) = mcp_native_package()?;
+    mcp_native_binary_path_for(package_root, npm_root, package_name, binary_name)
+}
+
+fn mcp_native_binary_path_for(
+    package_root: &Path,
+    npm_root: &Path,
+    package_name: &str,
+    binary_name: &str,
+) -> Option<PathBuf> {
+    [
+        package_root.join("node_modules").join(package_name).join("bin").join(binary_name),
+        npm_root.join(package_name).join("bin").join(binary_name),
+    ]
+    .into_iter()
+    .find_map(|path| canonical_runtime_path(&path))
+}
+
+fn mcp_native_package() -> Option<(&'static str, &'static str)> {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some(("@dbx-app/mcp-darwin-arm64", "dbx-mcp"))
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some(("@dbx-app/mcp-darwin-x64", "dbx-mcp"))
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some(("@dbx-app/mcp-linux-arm64-gnu", "dbx-mcp"))
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some(("@dbx-app/mcp-linux-x64-gnu", "dbx-mcp"))
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        Some(("@dbx-app/mcp-win32-arm64", "dbx-mcp.exe"))
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some(("@dbx-app/mcp-win32-x64", "dbx-mcp.exe"))
+    } else {
+        None
+    }
+}
+
 fn parse_minimum_node_version(requirement: &str) -> Option<NodeVersion> {
     let version = requirement.trim().strip_prefix(">=")?.split_whitespace().next()?;
     parse_node_version(version)
@@ -854,10 +908,10 @@ mod tests {
     #[cfg(not(windows))]
     use super::{bash_login_script, canonical_runtime_path, NodeRuntimeCandidate};
     use super::{
-        is_mcp_compatible_node_version, mcp_command_for_runtime, mcp_package, normalized_reported_path,
-        npm_cli_candidates, parse_minimum_node_version, parse_node_version, prefer_runtime, prefixed_output_path,
-        require_managed_mcp_command, resolve_managed_mcp_command, stdout_after_shell_marker, NodeRuntime, NodeVersion,
-        MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME, SHELL_COMMAND_MARKER,
+        is_mcp_compatible_node_version, mcp_command_for_runtime, mcp_native_binary_path_for, mcp_package,
+        normalized_reported_path, npm_cli_candidates, parse_minimum_node_version, parse_node_version, prefer_runtime,
+        prefixed_output_path, require_managed_mcp_command, resolve_managed_mcp_command, stdout_after_shell_marker,
+        NodeRuntime, NodeVersion, MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME, SHELL_COMMAND_MARKER,
     };
     #[cfg(not(windows))]
     use super::{shell_command_script, shell_quote};
@@ -881,6 +935,7 @@ mod tests {
             mcp_version: script_path.map(|_| "0.4.29".to_string()),
             mcp_script_path: script_path.map(PathBuf::from),
             mcp_bin_path: None,
+            mcp_native_bin_path: None,
         }
     }
 
@@ -1015,6 +1070,38 @@ mod tests {
         assert_eq!(legacy.version.as_deref(), Some("0.4.32"));
         assert_eq!(legacy.script_path, canonical_runtime_path(&legacy_entry).unwrap());
         assert_eq!(legacy.minimum_node_version, Some(NodeVersion { major: 22, minor: 13, patch: 0 }));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn native_binary_resolves_nested_and_hoisted_optional_packages() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("dbx-mcp-native-package-test-{}-{nonce}", std::process::id()));
+        let npm_root = dir.join("node_modules");
+        let package_root = npm_root.join("@dbx-app").join("mcp-server");
+        let package_name = "@dbx-app/mcp-win32-x64";
+        let binary_name = "dbx-mcp.exe";
+        let nested_binary = package_root.join("node_modules").join(package_name).join("bin").join(binary_name);
+        std::fs::create_dir_all(nested_binary.parent().unwrap()).unwrap();
+        std::fs::write(&nested_binary, "nested binary").unwrap();
+
+        assert_eq!(
+            mcp_native_binary_path_for(&package_root, &npm_root, package_name, binary_name),
+            canonical_runtime_path(&nested_binary)
+        );
+
+        std::fs::remove_file(&nested_binary).unwrap();
+        let hoisted_binary = npm_root.join(package_name).join("bin").join(binary_name);
+        std::fs::create_dir_all(hoisted_binary.parent().unwrap()).unwrap();
+        std::fs::write(&hoisted_binary, "hoisted binary").unwrap();
+
+        assert_eq!(
+            mcp_native_binary_path_for(&package_root, &npm_root, package_name, binary_name),
+            canonical_runtime_path(&hoisted_binary)
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

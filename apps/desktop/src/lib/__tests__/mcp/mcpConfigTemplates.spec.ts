@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
+import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
 
 describe("MCP config templates", () => {
   it("builds the standard mcpServers JSON used by Claude, Cursor, TRAE, and Windsurf", () => {
@@ -24,6 +24,21 @@ describe("MCP config templates", () => {
           args: ["C:\\Users\\zhiyo\\AppData\\Roaming\\npm\\node_modules\\@dbx-app\\mcp-server\\dist\\index.js"],
         },
       },
+    });
+  });
+
+  it("uses the native binary for TRAE when Windows Node lives under Program Files", () => {
+    const nodeLaunch = {
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: ["C:\\Users\\supervisor\\AppData\\Roaming\\npm\\node_modules\\@dbx-app\\mcp-server\\bin\\dbx-mcp-server.js"],
+    };
+    const nativeBinPath = "C:\\Users\\supervisor\\AppData\\Roaming\\npm\\node_modules\\@dbx-app\\mcp-win32-x64\\bin\\dbx-mcp.exe";
+
+    expect(JSON.parse(buildMcpTraeConfig(nodeLaunch, nativeBinPath))).toEqual({
+      mcpServers: { dbx: { command: nativeBinPath } },
+    });
+    expect(JSON.parse(buildMcpTraeConfig(nodeLaunch))).toEqual({
+      mcpServers: { dbx: nodeLaunch },
     });
   });
 

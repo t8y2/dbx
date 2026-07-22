@@ -59,6 +59,46 @@ describe("sqlCompletionLookupTarget", () => {
     });
   });
 
+  it.each(["sqlserver", "trino", "prestosql"])("routes %s three-part table completion to the qualified database or catalog", () => {
+    const target = resolveSqlCompletionTableLookupTarget({
+      currentDatabase: "default_db",
+      currentSchema: "dbo",
+      supportsDatabaseQualifier: false,
+      supportsDatabaseSchemaQualifier: true,
+      knownDatabases: ["Reporting"],
+      completionContext: {
+        qualifier: "reporting.OUT",
+        qualifierParts: ["reporting", "OUT"],
+        prefix: "ord",
+        suggestTables: true,
+      },
+    });
+
+    expect(target).toEqual({
+      database: "Reporting",
+      schema: "OUT",
+      filter: "ord",
+      qualifierDatabase: "Reporting",
+    });
+  });
+
+  it("keeps PostgreSQL schema completion in the current database", () => {
+    const target = resolveSqlCompletionTableLookupTarget({
+      currentDatabase: "app",
+      currentSchema: "public",
+      supportsDatabaseQualifier: false,
+      supportsDatabaseSchemaQualifier: false,
+      completionContext: {
+        qualifier: "sales",
+        qualifierParts: ["sales"],
+        prefix: "ord",
+        suggestTables: true,
+      },
+    });
+
+    expect(target).toEqual({ database: "app", schema: "sales", filter: "ord" });
+  });
+
   it("uses the current schema for unqualified table completion", () => {
     const target = resolveSqlCompletionTableLookupTarget({
       currentDatabase: "app",

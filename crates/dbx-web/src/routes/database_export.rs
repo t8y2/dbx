@@ -40,7 +40,7 @@ pub async fn start_database_export(
     // CWD, unreachable by the browser). The file is served back via the download
     // endpoint after the export completes.
     let tmp_dir = state.data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError(e.to_string()))?;
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError::from(e.to_string()))?;
     let tmp_file = tmp_dir.join(format!("database_export_{export_id}.sql"));
     let tmp_file_path = tmp_file.to_string_lossy().to_string();
     req.file_path = tmp_file_path.clone();
@@ -128,7 +128,7 @@ pub async fn database_export_progress(
     Path(export_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     let channels = state.sse_channels.read().await;
-    let tx = channels.get(&export_id).ok_or_else(|| AppError("Export not found".to_string()))?;
+    let tx = channels.get(&export_id).ok_or_else(|| AppError::from("Export not found".to_string()))?;
     let rx = tx.subscribe();
     drop(channels);
     Ok(crate::sse::sse_from_channel(rx))
@@ -151,9 +151,9 @@ pub async fn database_export_download(
         .write()
         .await
         .remove(&export_id)
-        .ok_or_else(|| AppError("Export file not found".to_string()))?;
+        .ok_or_else(|| AppError::from("Export file not found".to_string()))?;
 
-    let data = tokio::fs::read(&file_path).await.map_err(|e| AppError(e.to_string()))?;
+    let data = tokio::fs::read(&file_path).await.map_err(|e| AppError::from(e.to_string()))?;
     // Clean up temp file
     let _ = tokio::fs::remove_file(&file_path).await;
 
@@ -162,5 +162,5 @@ pub async fn database_export_download(
         .header(header::CONTENT_TYPE, "application/sql; charset=utf-8")
         .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{download_filename}\""))
         .body(Body::from(data))
-        .map_err(|e| AppError(e.to_string()))
+        .map_err(|e| AppError::from(e.to_string()))
 }

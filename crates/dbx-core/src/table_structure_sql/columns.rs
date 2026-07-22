@@ -1,9 +1,9 @@
 use super::column_alter::{
     build_clickhouse_existing_column_sql, build_doris_existing_column_sql, build_h2_existing_column_sql,
-    build_informix_existing_column_sql, build_mysql_existing_column_sql, build_oracle_like_existing_column_sql,
-    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
-    build_sqlserver_existing_column_sql, build_xugu_existing_column_sql, has_column_extra_change,
-    has_existing_column_attribute_change,
+    build_informix_existing_column_sql, build_iris_existing_column_sql, build_mysql_existing_column_sql,
+    build_oracle_like_existing_column_sql, build_postgres_existing_column_sql, build_questdb_existing_column_sql,
+    build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
+    has_column_extra_change, has_existing_column_attribute_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
@@ -106,9 +106,16 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 ));
                 continue;
             }
+            if !capabilities.comment && !clean(&column.comment).is_empty() {
+                warnings.push(format!(
+                    "Column comments are not supported for {database_label} from this editor; the comment for \"{}\" was ignored.",
+                    column.name
+                ));
+            }
             statements.extend(build_add_column_sql(
                 dialect,
                 options.database_type,
+                capabilities.comment,
                 &table,
                 column,
                 &position_clause,
@@ -128,14 +135,21 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         }
         let original = column.original.as_ref().unwrap();
         let has_rename = column.name != original.name;
+        let has_comment_change = clean(&column.comment) != original_comment(column);
         let has_attribute_change = column.data_type.trim() != original.data_type.trim()
             || column.is_nullable != original.is_nullable
             || normalize_default(Some(&column.default_value)) != original_default(column)
-            || clean(&column.comment) != original_comment(column)
+            || (has_comment_change && capabilities.comment)
             || (is_mysql_character_data_type(&column.data_type)
                 && (column.character_set.trim() != original.character_set.as_deref().unwrap_or("")
                     || column.collation.trim() != original.collation.as_deref().unwrap_or("")))
             || has_column_extra_change(column);
+        if has_comment_change && !capabilities.comment {
+            warnings.push(format!(
+                "Column comments are not supported for {database_label} from this editor; the comment change for \"{}\" was ignored.",
+                original.name
+            ));
+        }
         if has_position_change && !capabilities.reorder_column {
             warnings.push(format!("Reordering columns is not supported for {database_label} from this editor."));
         }
@@ -151,6 +165,9 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         {
             continue;
         }
+        if !has_rename && !has_attribute_change && !has_position_change {
+            continue;
+        }
 
         match dialect {
             StructureDialect::Mysql => statements.extend(build_mysql_existing_column_sql(
@@ -161,7 +178,9 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, column, "")),
             StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, column)),
             StructureDialect::Oracle | StructureDialect::Dameng => {
-                if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
+                if options.database_type == Some(crate::models::connection::DatabaseType::Iris) {
+                    statements.extend(build_iris_existing_column_sql(&table, column));
+                } else if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
                     statements.extend(build_xugu_existing_column_sql(&table, column));
                 } else {
                     statements.extend(build_oracle_like_existing_column_sql(dialect, &table, column))
@@ -285,6 +304,7 @@ fn is_sqlserver_identity_compatible_type(data_type: &str) -> bool {
 pub(super) fn build_add_column_sql(
     dialect: StructureDialect,
     database_type: Option<crate::models::connection::DatabaseType>,
+    supports_comments: bool,
     table: &str,
     column: &EditableStructureColumn,
     position_clause: &str,
@@ -304,7 +324,8 @@ pub(super) fn build_add_column_sql(
         };
         vec![format!("ALTER TABLE {table} {add_keyword} {definition}{position_clause};")]
     };
-    if matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng)
+    if supports_comments
+        && matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng)
         && !clean(&column.comment).is_empty()
     {
         statements.push(format!(

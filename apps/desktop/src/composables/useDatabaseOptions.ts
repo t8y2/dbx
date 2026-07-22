@@ -5,7 +5,7 @@ import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
-type SqlFileTargetConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "visible_databases" | "visible_schemas">;
+type NamespaceOptionsConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "visible_databases" | "visible_schemas">;
 
 export function databaseOptionsForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "visible_databases"> | undefined): string[] {
   const names = filterDatabaseNamesForConnection(databaseNames, connection);
@@ -13,7 +13,11 @@ export function databaseOptionsForConnection(databaseNames: string[], connection
   return names;
 }
 
-export async function fetchSqlFileTargetOptions(connectionId: string, connection: SqlFileTargetConnection): Promise<string[]> {
+export function namespaceOptionsAreSchemas(connection: Pick<ConnectionConfig, "db_type"> | undefined): boolean {
+  return connection?.db_type === "dameng";
+}
+
+export async function fetchNamespaceOptionsForConnection(connectionId: string, connection: NamespaceOptionsConnection): Promise<string[]> {
   if (connection.db_type === "dameng") {
     const database = connection.database || "";
     // Dameng users and schemas are not interchangeable: independent schemas
@@ -27,6 +31,10 @@ export async function fetchSqlFileTargetOptions(connectionId: string, connection
     databases.map((database) => database.name),
     connection,
   );
+}
+
+export async function fetchSqlFileTargetOptions(connectionId: string, connection: NamespaceOptionsConnection): Promise<string[]> {
+  return fetchNamespaceOptionsForConnection(connectionId, connection);
 }
 
 export function useDatabaseOptions() {

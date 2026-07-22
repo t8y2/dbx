@@ -554,7 +554,36 @@ public final class DbxJdbcPlugin {
         }
         String value = Integer.toString(connectTimeoutSecs);
         properties.putIfAbsent("loginTimeout", value);
-        properties.putIfAbsent("connectTimeout", value);
+        if (!jdbcUrlHasParameter(jdbcUrl(connection), "connectTimeout")) {
+            properties.putIfAbsent("connectTimeout", connectTimeoutPropertyValue(connection, connectTimeoutSecs));
+        }
+    }
+
+    private static String connectTimeoutPropertyValue(JsonNode connection, int connectTimeoutSecs) {
+        if (usesMillisecondConnectTimeout(connection)) {
+            return Integer.toString(connectTimeoutSecs * 1000);
+        }
+        return Integer.toString(connectTimeoutSecs);
+    }
+
+    private static boolean usesMillisecondConnectTimeout(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        if (
+            urlMatchesPrefix(url, "jdbc:mysql:") ||
+            urlMatchesPrefix(url, "jdbc:mariadb:") ||
+            urlMatchesPrefix(url, "jdbc:starrocks:") ||
+            urlMatchesPrefix(url, "jdbc:doris:")
+        ) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.equals("com.mysql.cj.jdbc.driver") ||
+            normalized.equals("com.mysql.jdbc.driver") ||
+            normalized.equals("org.mariadb.jdbc.driver");
     }
 
     private static boolean isPrestoOrTrinoConnection(JsonNode connection) {
@@ -2396,6 +2425,13 @@ public final class DbxJdbcPlugin {
     }
 
     private static boolean urlHasQueryParam(String url, String key) {
+        return jdbcUrlHasParameter(url, key);
+    }
+
+    private static boolean jdbcUrlHasParameter(String url, String key) {
+        if (url == null) {
+            return false;
+        }
         int queryStart = url.indexOf('?');
         if (queryStart < 0) {
             return false;

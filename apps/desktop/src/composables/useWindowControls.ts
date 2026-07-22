@@ -35,8 +35,10 @@ export function shouldShowWindowControls(isMac: boolean, isDesktop = true): bool
   return isDesktop && !isMac;
 }
 
-export function shouldDrawDesktopWindowFrame(isMac: boolean, isDesktop = true): boolean {
-  return isDesktop && !isMac;
+export function shouldDrawDesktopWindowFrame(isMac: boolean, isDesktop = true, isWindows = false): boolean {
+  // Windows frameless+shadow windows already get a DWM 1px border on all sides.
+  // An extra CSS top hairline stacks on that edge and no longer matches left/right/bottom.
+  return isDesktop && !isMac && !isWindows;
 }
 
 export function useWindowControls() {

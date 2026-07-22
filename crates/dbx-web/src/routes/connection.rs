@@ -111,14 +111,14 @@ pub async fn test_connection(
     run_temporary_connection_test(&state.app, body.config, false)
         .await
         .map(|result| Json(result.message))
-        .map_err(AppError)
+        .map_err(AppError::from)
 }
 
 pub async fn test_connection_with_info(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<ConnectionTestResult>, AppError> {
-    run_temporary_connection_test(&state.app, body.config, true).await.map(Json).map_err(AppError)
+    run_temporary_connection_test(&state.app, body.config, true).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn connect_db(
@@ -132,7 +132,7 @@ pub async fn connect_db(
             &config.password,
             !config.attached_databases.is_empty(),
         )
-        .map_err(AppError)?;
+        .map_err(AppError::from)?;
     }
     let app = &state.app;
     let connection_id = config.id.clone();
@@ -142,7 +142,7 @@ pub async fn connect_db(
     app.reset_connection_transport_for_config(&connection_id, &config).await;
     app.configs.write().await.insert(connection_id.clone(), config.clone());
 
-    app.get_or_create_pool_for_connection_attempt(&connection_id, None, attempt).await.map_err(AppError)?;
+    app.get_or_create_pool_for_connection_attempt(&connection_id, None, attempt).await.map_err(AppError::from)?;
 
     Ok(Json(connection_id))
 }
@@ -151,7 +151,12 @@ pub async fn connected_database_info(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectionIdentifierQuoteRequest>,
 ) -> Result<Json<Option<DatabaseConnectionInfo>>, AppError> {
-    state.app.connection_database_info(&body.connection_id, body.database.as_deref()).await.map(Json).map_err(AppError)
+    state
+        .app
+        .connection_database_info(&body.connection_id, body.database.as_deref())
+        .await
+        .map(Json)
+        .map_err(AppError::from)
 }
 
 pub async fn save_connection_database_info(
@@ -163,7 +168,7 @@ pub async fn save_connection_database_info(
         .save_connection_database_info(&body.connection_id, body.database_info)
         .await
         .map(|_| Json(()))
-        .map_err(AppError)
+        .map_err(AppError::from)
 }
 
 pub async fn connection_final_proxy_port(
@@ -172,7 +177,7 @@ pub async fn connection_final_proxy_port(
 ) -> Result<Json<u16>, AppError> {
     let runtime_config = body.config.canonicalized();
     if !runtime_config.has_effective_transport_layers() {
-        return Err(AppError("Connection has no configured transport layers".to_string()));
+        return Err(AppError::from("Connection has no configured transport layers".to_string()));
     }
     if runtime_config.db_type == dbx_core::models::connection::DatabaseType::Sqlite {
         dbx_core::db::sqlite::validate_persistent_attachments(
@@ -180,7 +185,7 @@ pub async fn connection_final_proxy_port(
             &runtime_config.password,
             !runtime_config.attached_databases.is_empty(),
         )
-        .map_err(AppError)?;
+        .map_err(AppError::from)?;
     }
 
     let app = &state.app;
@@ -188,7 +193,7 @@ pub async fn connection_final_proxy_port(
     let db_config = dbx_core::connection::metadata_connection_config(&runtime_config);
     app.configs.write().await.insert(connection_id.clone(), runtime_config);
 
-    let (_, port) = app.connection_host_port(&connection_id, &db_config).await.map_err(AppError)?;
+    let (_, port) = app.connection_host_port(&connection_id, &db_config).await.map_err(AppError::from)?;
     Ok(Json(port))
 }
 
@@ -224,7 +229,7 @@ pub async fn check_connection_health(
     State(state): State<Arc<WebState>>,
     Json(body): Json<DisconnectRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.check_connection_health(&body.connection_id).await.map_err(AppError)?;
+    state.app.check_connection_health(&body.connection_id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -237,7 +242,7 @@ pub async fn connection_identifier_quote(
         .connection_identifier_quote(&body.connection_id, body.database.as_deref())
         .await
         .map(Json)
-        .map_err(AppError)
+        .map_err(AppError::from)
 }
 
 pub async fn close_database_connection(
@@ -246,7 +251,7 @@ pub async fn close_database_connection(
 ) -> Result<Json<bool>, AppError> {
     let database = body.database.trim();
     let database = if database.is_empty() { None } else { Some(database) };
-    state.app.close_database_pool(&body.connection_id, database).await.map(Json).map_err(AppError)
+    state.app.close_database_pool(&body.connection_id, database).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn save_connections(
@@ -260,10 +265,10 @@ pub async fn save_connections(
                 &config.password,
                 !config.attached_databases.is_empty(),
             )
-            .map_err(AppError)?;
+            .map_err(AppError::from)?;
         }
     }
-    state.app.storage.save_connections(&body.configs).await.map_err(AppError)?;
+    state.app.storage.save_connections(&body.configs).await.map_err(AppError::from)?;
     let sync = sync_connection_configs(&state, &body.configs).await;
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
@@ -275,7 +280,7 @@ pub async fn mcp_add_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<McpAddConnectionRequest>,
 ) -> Result<Json<ConnectionConfig>, AppError> {
-    let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError)?;
+    let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError::from)?;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
     Ok(Json(saved))
 }
@@ -285,7 +290,7 @@ pub async fn mcp_remove_connection(
     Json(body): Json<McpRemoveConnectionRequest>,
 ) -> Result<Json<bool>, AppError> {
     let connection_id = body.connection_id;
-    let removed = state.app.storage.remove_connection_for_mcp(&connection_id).await.map_err(AppError)?;
+    let removed = state.app.storage.remove_connection_for_mcp(&connection_id).await.map_err(AppError::from)?;
     if removed {
         state.app.configs.write().await.remove(&connection_id);
         state.app.remove_connection_pools_detached(&connection_id).await;
@@ -297,7 +302,7 @@ pub async fn mcp_remove_connection(
 }
 
 pub async fn load_connections(State(state): State<Arc<WebState>>) -> Result<Json<Vec<ConnectionConfig>>, AppError> {
-    let configs = state.app.storage.load_connections().await.map_err(AppError)?;
+    let configs = state.app.storage.load_connections().await.map_err(AppError::from)?;
     let sync = sync_connection_configs(&state, &configs).await;
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
@@ -488,6 +493,7 @@ mod tests {
             password_hash: RwLock::new(None),
             sessions: RwLock::new(HashSet::new()),
             sse_channels: RwLock::new(HashMap::new()),
+            table_import_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
             export_files: RwLock::new(HashMap::new()),
@@ -507,13 +513,13 @@ mod tests {
             Json(ConnectRequest { config: config.clone(), client_attempt: None }),
         )
         .await
-        .unwrap_or_else(|error| panic!("{}", error.0));
+        .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(legacy.0, "Connection successful");
 
         let detailed =
             test_connection_with_info(State(state.clone()), Json(ConnectRequest { config, client_attempt: None }))
                 .await
-                .unwrap_or_else(|error| panic!("{}", error.0));
+                .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(detailed.0.message, "Connection successful");
         assert_eq!(detailed.0.database_info, None);
         assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
@@ -545,7 +551,7 @@ mod tests {
             connect_db(State(state.clone()), Json(ConnectRequest { config: invalid.clone(), client_attempt: None }))
                 .await
                 .unwrap_err();
-        assert!(connect_error.0.contains("in-memory main database"), "{}", connect_error.0);
+        assert!(connect_error.message.contains("in-memory main database"), "{}", connect_error.message);
 
         invalid.transport_layers.push(TransportLayerConfig::Proxy(ProxyTunnelConfig {
             id: "proxy".to_string(),
@@ -565,7 +571,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(proxy_error.0.contains("in-memory main database"), "{}", proxy_error.0);
+        assert!(proxy_error.message.contains("in-memory main database"), "{}", proxy_error.message);
 
         assert!(state.app.connections.read().await.contains_key(&initial.id));
         assert_eq!(state.app.configs.read().await.get(&initial.id), Some(&initial));
@@ -681,7 +687,7 @@ mod tests {
             Json(McpRemoveConnectionRequest { connection_id: removed.id.clone() }),
         )
         .await
-        .unwrap_or_else(|error| panic!("{}", error.0));
+        .unwrap_or_else(|error| panic!("{}", error.message));
         assert!(removed_result.0);
         assert_eq!(state.app.storage.load_connections().await.unwrap()[0].id, kept.id);
 
@@ -691,7 +697,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(scope_error.0.starts_with("CONNECTION_OUT_OF_SCOPE:"));
+        assert!(scope_error.message.starts_with("CONNECTION_OUT_OF_SCOPE:"));
 
         state
             .app
@@ -709,7 +715,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(read_only_error.0.starts_with("MCP_READ_ONLY:"));
+        assert!(read_only_error.message.starts_with("MCP_READ_ONLY:"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

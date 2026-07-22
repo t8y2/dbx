@@ -25,6 +25,7 @@ pub mod mongo_cmd;
 pub mod mq_cmd;
 pub mod nacos_cmd;
 pub mod plugins;
+pub mod prompt_template;
 pub mod query;
 pub mod query_cancel;
 pub mod query_result_export;

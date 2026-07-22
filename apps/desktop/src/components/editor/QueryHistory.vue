@@ -2,7 +2,7 @@
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
-import { CalendarClock, Copy, Database, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
+import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, Minus, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -13,9 +13,10 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { resolveHistoryActivityKind } from "@/lib/history/historyActivityKind";
 import { canRollbackHistoryEntry } from "@/lib/history/historyAiAnalysis";
-import { hasHistoryDateRange, historyDateRangeIsValid, historyEntryMatchesDateRange, type HistoryDateRange } from "@/lib/history/historyTimeRange";
+import { hasHistoryDateRange, historyDateRangeIsValid, type HistoryDateRange } from "@/lib/history/historyTimeRange";
 import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "@/lib/history/historyVirtualList";
-import type { HistoryEntry } from "@/lib/backend/api";
+import { historyConnectionHasSelectedDatabase } from "@/lib/history/historySearch";
+import type { HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
@@ -25,6 +26,11 @@ const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
 const store = useHistoryStore();
 const connectionStore = useConnectionStore();
+
+const props = defineProps<{
+  currentConnectionId?: string;
+  currentDatabase?: string;
+}>();
 
 const emit = defineEmits<{
   restore: [sql: string, entry: HistoryEntry];
@@ -39,6 +45,10 @@ const activeFilter = ref<HistoryFilter>("all");
 const dateRange = ref<HistoryDateRange>({ startDate: "", endDate: "" });
 const dateRangeDraft = ref<HistoryDateRange>({ startDate: "", endDate: "" });
 const dateRangeOpen = ref(false);
+const scopeFilterOpen = ref(false);
+const scopeSearchText = ref("");
+const selectedConnections = ref<HistoryConnectionFilter[]>([]);
+const selectedDatabases = ref<HistoryDatabaseFilter[]>([]);
 const startDateInputRef = ref<HTMLInputElement | null>(null);
 const endDateInputRef = ref<HTMLInputElement | null>(null);
 const selectedEntry = ref<HistoryEntry | null>(null);
@@ -49,6 +59,7 @@ const deleteTargetId = ref<string | null>(null);
 const filterScrollRef = ref<HTMLElement | null>(null);
 const filtersScrollable = ref(false);
 let filterScrollResizeObserver: ResizeObserver | null = null;
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const filters: HistoryFilter[] = ["all", "query", "data_change", "schema_change", "failed"];
 const hasDateFilter = computed(() => hasHistoryDateRange(dateRange.value));
@@ -60,19 +71,15 @@ const dateRangeSummary = computed(() => {
   return `${start} -> ${end}`;
 });
 
-const filtered = computed(() => {
-  const q = searchText.value.toLowerCase();
-  return store.entries.filter((entry) => {
-    if (activeFilter.value === "failed" && entry.success) return false;
-    if (activeFilter.value !== "all" && activeFilter.value !== "failed" && activityKind(entry) !== activeFilter.value) {
-      return false;
-    }
-    if (!historyEntryMatchesDateRange(entry.executed_at, dateRange.value)) return false;
-    if (!q) return true;
-    return [entry.sql, entry.connection_name, entry.database, entry.operation, entry.target].filter(Boolean).some((value) => String(value).toLowerCase().includes(q));
-  });
+const hasScopeFilter = computed(() => selectedConnections.value.length > 0 || selectedDatabases.value.length > 0);
+const wholeConnectionCount = computed(() => selectedConnections.value.filter((connection) => !isConnectionNarrowed(connection)).length);
+const scopeSummary = computed(() => {
+  const parts: string[] = [];
+  if (wholeConnectionCount.value > 0) parts.push(t("history.scope.connectionCount", { count: wholeConnectionCount.value }));
+  if (selectedDatabases.value.length > 0) parts.push(t("history.scope.databaseCount", { count: selectedDatabases.value.length }));
+  return parts.join(" / ");
 });
-const emptyMessage = computed(() => (store.entries.length > 0 ? t("history.emptyFilteredRecent") : t("history.empty")));
+const emptyMessage = computed(() => (hasScopeFilter.value || hasDateFilter.value || activeFilter.value !== "all" || searchText.value ? t("history.emptyFiltered") : t("history.empty")));
 
 function activityKind(entry: HistoryEntry) {
   return resolveHistoryActivityKind(entry);
@@ -106,7 +113,7 @@ function executeDelete() {
 }
 
 function confirmClearHistory() {
-  if (store.entries.length > 0) {
+  if (store.total > 0 || store.connectionOptions.length > 0) {
     showClearConfirm.value = true;
   }
 }
@@ -143,6 +150,135 @@ function entrySubtitle(entry: HistoryEntry) {
 
 function filterLabel(filter: HistoryFilter) {
   return t(`history.filters.${filter}`);
+}
+
+function connectionKey(connection: HistoryConnectionFilter) {
+  return connection.connection_id ? `id:${connection.connection_id}` : `legacy:${connection.connection_name}`;
+}
+
+function databaseKey(database: HistoryDatabaseFilter) {
+  return `${connectionKey(database)}\0${database.database}`;
+}
+
+function isConnectionSelected(connection: HistoryConnectionFilter) {
+  const key = connectionKey(connection);
+  return selectedConnections.value.some((candidate) => connectionKey(candidate) === key);
+}
+
+function isConnectionNarrowed(connection: HistoryConnectionFilter) {
+  return historyConnectionHasSelectedDatabase(connection, selectedDatabases.value);
+}
+
+function toggleConnection(connection: HistoryConnectionFilter) {
+  const key = connectionKey(connection);
+  if (isConnectionNarrowed(connection)) {
+    selectedDatabases.value = selectedDatabases.value.filter((database) => connectionKey(database) !== key);
+    return;
+  }
+  if (isConnectionSelected(connection)) {
+    selectedConnections.value = selectedConnections.value.filter((candidate) => connectionKey(candidate) !== key);
+    selectedDatabases.value = selectedDatabases.value.filter((database) => connectionKey(database) !== key);
+  } else {
+    selectedConnections.value = [...selectedConnections.value, { ...connection }];
+  }
+}
+
+function isDatabaseSelected(database: HistoryDatabaseFilter) {
+  const key = databaseKey(database);
+  return selectedDatabases.value.some((candidate) => databaseKey(candidate) === key);
+}
+
+function toggleDatabase(database: HistoryDatabaseFilter) {
+  const key = databaseKey(database);
+  if (isDatabaseSelected(database)) {
+    selectedDatabases.value = selectedDatabases.value.filter((candidate) => databaseKey(candidate) !== key);
+    if (!historyConnectionHasSelectedDatabase(database, selectedDatabases.value)) {
+      const parentKey = connectionKey(database);
+      selectedConnections.value = selectedConnections.value.filter((connection) => connectionKey(connection) !== parentKey);
+    }
+    return;
+  }
+  if (!isConnectionSelected(database)) {
+    selectedConnections.value = [...selectedConnections.value, { connection_id: database.connection_id, connection_name: database.connection_name }];
+  }
+  selectedDatabases.value = [...selectedDatabases.value, { ...database }];
+}
+
+const visibleConnectionOptions = computed(() => {
+  const query = scopeSearchText.value.trim().toLowerCase();
+  return store.connectionOptions.filter((option) => {
+    if (!query) return true;
+    return option.connection_name.toLowerCase().includes(query) || option.databases.some((database) => database.toLowerCase().includes(query));
+  });
+});
+
+const visibleDatabaseOptions = computed<HistoryDatabaseFilter[]>(() => {
+  const selectedKeys = new Set(selectedConnections.value.map(connectionKey));
+  const query = scopeSearchText.value.trim().toLowerCase();
+  return store.connectionOptions
+    .filter((connection) => selectedKeys.size === 0 || selectedKeys.has(connectionKey(connection)))
+    .flatMap((connection) =>
+      connection.databases
+        .filter((database) => !query || database.toLowerCase().includes(query) || connection.connection_name.toLowerCase().includes(query))
+        .map((database) => ({
+          connection_id: connection.connection_id,
+          connection_name: connection.connection_name,
+          database,
+        })),
+    );
+});
+
+const currentConnectionOption = computed(() => store.connectionOptions.find((option) => option.connection_id === props.currentConnectionId));
+
+function selectCurrentScope() {
+  const connection = currentConnectionOption.value;
+  if (!connection) return;
+  selectedConnections.value = [{ connection_id: connection.connection_id, connection_name: connection.connection_name }];
+  selectedDatabases.value = props.currentDatabase && connection.databases.includes(props.currentDatabase) ? [{ connection_id: connection.connection_id, connection_name: connection.connection_name, database: props.currentDatabase }] : [];
+  scopeFilterOpen.value = false;
+}
+
+function resetScopeFilter() {
+  selectedConnections.value = [];
+  selectedDatabases.value = [];
+}
+
+// Preserve local-day boundaries before converting date-only input to UTC ISO timestamps.
+function localDateBoundary(value: string, endOfDay: boolean): string | undefined {
+  if (!value) return undefined;
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return undefined;
+  return new Date(year, month - 1, day, endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0).toISOString();
+}
+
+function buildHistorySearchRequest(): HistorySearchRequest {
+  return {
+    search_text: searchText.value,
+    connections: selectedConnections.value.map((connection) => ({ ...connection })),
+    databases: selectedDatabases.value.map((database) => ({ ...database })),
+    activity_kind: activeFilter.value !== "all" && activeFilter.value !== "failed" ? activeFilter.value : undefined,
+    success: activeFilter.value === "failed" ? false : undefined,
+    started_at: localDateBoundary(dateRange.value.startDate, false),
+    ended_at: localDateBoundary(dateRange.value.endDate, true),
+    limit: 100,
+  };
+}
+
+async function runHistorySearch() {
+  try {
+    await store.search(buildHistorySearchRequest());
+  } catch {
+    // The panel already renders the backend error; avoid a duplicate toast.
+  }
+}
+
+// Debounce all filter changes through one timer to avoid redundant history scans.
+function scheduleHistorySearch() {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    searchDebounceTimer = null;
+    void runHistorySearch();
+  }, 250);
 }
 
 function updateFilterScrollability() {
@@ -282,8 +418,12 @@ watch(
   },
 );
 
+watch([searchText, activeFilter, () => dateRange.value.startDate, () => dateRange.value.endDate, () => selectedConnections.value.map(connectionKey).join("\0"), () => selectedDatabases.value.map(databaseKey).join("\0")], scheduleHistorySearch);
+
 onMounted(() => {
-  store.load();
+  store.setHistoryPanelActive(true);
+  void store.loadConnectionOptions().catch(() => {});
+  void runHistorySearch();
   void nextTick(updateFilterScrollability);
 
   if (filterScrollRef.value) {
@@ -293,6 +433,9 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  store.setHistoryPanelActive(false);
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = null;
   filterScrollResizeObserver?.disconnect();
   filterScrollResizeObserver = null;
 });
@@ -302,8 +445,9 @@ onBeforeUnmount(() => {
   <div class="h-full flex flex-col overflow-hidden border-l">
     <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
       <span class="text-xs font-medium">{{ t("history.title") }}</span>
+      <span v-if="store.total > 0" class="text-[10px] text-muted-foreground">{{ store.total }}</span>
       <span class="flex-1" />
-      <Button v-if="store.entries.length > 0" variant="ghost" size="icon" class="h-5 w-5" @click="confirmClearHistory">
+      <Button v-if="store.total > 0 || store.connectionOptions.length > 0" variant="ghost" size="icon" class="h-5 w-5" @click="confirmClearHistory">
         <Trash2 class="h-3 w-3" />
       </Button>
       <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
@@ -376,21 +520,83 @@ onBeforeUnmount(() => {
             </div>
           </PopoverContent>
         </Popover>
+        <Popover :open="scopeFilterOpen" @update:open="scopeFilterOpen = $event">
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              class="ml-1 flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors"
+              :class="hasScopeFilter ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
+              :title="t('history.scope.title')"
+            >
+              <ListFilter class="h-3 w-3" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="end" class="w-72 max-w-[calc(100vw-24px)] p-3" @click.stop @keydown.stop>
+            <div class="mb-2 flex items-center justify-between gap-2">
+              <div class="text-xs font-medium">{{ t("history.scope.title") }}</div>
+              <Button variant="ghost" size="sm" class="h-6 px-2 text-[11px]" :disabled="!hasScopeFilter" @click="resetScopeFilter">
+                {{ t("history.scope.reset") }}
+              </Button>
+            </div>
+            <div class="relative mb-2">
+              <Search class="pointer-events-none absolute left-2 top-2 h-3 w-3 text-muted-foreground" />
+              <input v-model="scopeSearchText" class="h-7 w-full rounded border bg-background pl-7 pr-2 text-xs outline-none focus:border-ring" :placeholder="t('history.scope.search')" />
+            </div>
+            <div class="mb-2 flex gap-1">
+              <Button variant="outline" size="sm" class="h-7 flex-1 px-2 text-[11px]" @click="resetScopeFilter">
+                {{ t("history.scope.allConnections") }}
+              </Button>
+              <Button v-if="currentConnectionOption" variant="outline" size="sm" class="h-7 flex-1 px-2 text-[11px]" @click="selectCurrentScope">
+                {{ t("history.scope.current") }}
+              </Button>
+            </div>
+            <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ t("history.scope.connections") }}</div>
+            <div class="max-h-32 overflow-y-auto rounded border">
+              <button v-for="connection in visibleConnectionOptions" :key="connectionKey(connection)" type="button" class="flex w-full items-center gap-2 border-b px-2 py-1.5 text-left text-xs last:border-b-0 hover:bg-accent" @click="toggleConnection(connection)">
+                <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="{ 'border-primary bg-primary text-primary-foreground': isConnectionSelected(connection) }">
+                  <Minus v-if="isConnectionNarrowed(connection)" class="h-3 w-3" />
+                  <Check v-else-if="isConnectionSelected(connection)" class="h-3 w-3" />
+                </span>
+                <span class="min-w-0 flex-1 truncate">{{ connection.connection_name || t("history.scope.unknownConnection") }}</span>
+                <span class="shrink-0 text-[10px] text-muted-foreground">{{ connection.databases.length }}</span>
+              </button>
+              <div v-if="visibleConnectionOptions.length === 0" class="px-2 py-3 text-center text-[11px] text-muted-foreground">{{ t("history.scope.noOptions") }}</div>
+            </div>
+            <div class="mb-1 mt-3 text-[11px] font-medium text-muted-foreground">{{ t("history.scope.databases") }}</div>
+            <div class="max-h-32 overflow-y-auto rounded border">
+              <button v-for="database in visibleDatabaseOptions" :key="databaseKey(database)" type="button" class="flex w-full items-center gap-2 border-b px-2 py-1.5 text-left text-xs last:border-b-0 hover:bg-accent" @click="toggleDatabase(database)">
+                <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="{ 'border-primary bg-primary text-primary-foreground': isDatabaseSelected(database) }">
+                  <Check v-if="isDatabaseSelected(database)" class="h-3 w-3" />
+                </span>
+                <span class="min-w-0 flex-1 truncate">{{ database.database }}</span>
+                <span class="max-w-24 shrink-0 truncate text-[10px] text-muted-foreground">{{ database.connection_name }}</span>
+              </button>
+              <div v-if="visibleDatabaseOptions.length === 0" class="px-2 py-3 text-center text-[11px] text-muted-foreground">{{ t("history.scope.noOptions") }}</div>
+            </div>
+          </PopoverContent>
+        </Popover>
       </div>
-      <div v-if="hasDateFilter" class="flex items-center gap-1 px-2 pb-2">
-        <button type="button" class="flex min-w-0 items-center gap-1 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15" :title="t('history.dateRange.title')" @click="setDateRangeOpen(true)">
+      <div v-if="hasDateFilter || hasScopeFilter" class="flex flex-wrap items-center gap-1 px-2 pb-2">
+        <button v-if="hasDateFilter" type="button" class="flex min-w-0 items-center gap-1 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15" :title="t('history.dateRange.title')" @click="setDateRangeOpen(true)">
           <CalendarClock class="h-3 w-3 shrink-0" />
           <span class="shrink-0">{{ t("history.dateRange.label") }}</span>
           <span class="min-w-0 truncate tabular-nums">{{ dateRangeSummary }}</span>
         </button>
-        <button type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('history.dateRange.clear')" @click="clearDateRangeFilter">
+        <button v-if="hasDateFilter" type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('history.dateRange.clear')" @click="clearDateRangeFilter">
+          <X class="h-3 w-3" />
+        </button>
+        <button v-if="hasScopeFilter" type="button" class="flex min-w-0 items-center gap-1 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15" :title="t('history.scope.title')" @click="scopeFilterOpen = true">
+          <ListFilter class="h-3 w-3 shrink-0" />
+          <span class="min-w-0 truncate">{{ scopeSummary }}</span>
+        </button>
+        <button v-if="hasScopeFilter" type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('history.scope.reset')" @click="resetScopeFilter">
           <X class="h-3 w-3" />
         </button>
       </div>
     </div>
 
-    <div class="min-h-0 flex-1">
-      <RecycleScroller v-if="shouldVirtualizeHistory(filtered.length)" class="h-full" :items="filtered" :item-size="HISTORY_ROW_HEIGHT" :buffer="HISTORY_SCROLL_BUFFER" :skip-hover="true" key-field="id">
+    <div class="flex min-h-0 flex-1 flex-col">
+      <RecycleScroller v-if="shouldVirtualizeHistory(store.entries.length)" class="min-h-0 flex-1" :items="store.entries" :item-size="HISTORY_ROW_HEIGHT" :buffer="HISTORY_SCROLL_BUFFER" :skip-hover="true" key-field="id">
         <template #default="{ item: entry }">
           <CustomContextMenu :items="getHistoryMenuItems(entry)" v-slot="{ onContextMenu }">
             <div class="h-[72px] cursor-pointer border-b border-border/50 px-3 py-2 text-xs hover:bg-accent/50" @click="selectedEntry = entry" @contextmenu="onContextMenu">
@@ -418,9 +624,20 @@ onBeforeUnmount(() => {
         </template>
       </RecycleScroller>
 
-      <div v-if="filtered.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
+      <div v-if="store.loading && store.entries.length === 0" class="flex items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground">
+        <LoaderCircle class="h-3.5 w-3.5 animate-spin" />
+        {{ t("common.loading") }}
+      </div>
+      <div v-else-if="store.error && store.entries.length === 0" class="px-3 py-8 text-center text-xs text-destructive">
+        {{ store.error }}
+      </div>
+      <div v-else-if="store.entries.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
         {{ emptyMessage }}
       </div>
+      <button v-if="store.nextCursor" type="button" class="flex h-8 shrink-0 items-center justify-center gap-1 border-t text-xs text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-60" :disabled="store.loadingMore" @click="store.loadMore">
+        <LoaderCircle v-if="store.loadingMore" class="h-3.5 w-3.5 animate-spin" />
+        {{ store.loadingMore ? t("common.loading") : t("history.loadMore") }}
+      </button>
     </div>
 
     <Dialog :open="!!selectedEntry" @update:open="(value) => !value && (selectedEntry = null)">

@@ -33,11 +33,11 @@ pub async fn start_transfer(
     Json(body): Json<StartTransferRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
-    transfer::validate_transfer_target_table_names(&req).map_err(AppError)?;
+    transfer::validate_transfer_target_table_names(&req).map_err(AppError::from)?;
 
     // Reject transfer early if the target connection is read-only
     if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.target_connection_id).await {
-        return Err(AppError(format!(
+        return Err(AppError::from(format!(
             "Read-only mode: target connection '{}' has read-only protection enabled. Transfer blocked.",
             name
         )));
@@ -353,13 +353,19 @@ pub async fn preview_transfer_ownership(
     Json(body): Json<PreviewTransferOwnershipRequest>,
 ) -> Result<Json<dbx_core::transfer::TransferOwnershipPreview>, AppError> {
     let req = body.request;
-    transfer::validate_transfer_target_table_names(&req).map_err(AppError)?;
-    let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError)?;
-    let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError)?;
-    let source_pool_key =
-        state.app.get_or_create_pool(&req.source_connection_id, Some(&req.source_database)).await.map_err(AppError)?;
-    let target_pool_key =
-        state.app.get_or_create_pool(&req.target_connection_id, Some(&req.target_database)).await.map_err(AppError)?;
+    transfer::validate_transfer_target_table_names(&req).map_err(AppError::from)?;
+    let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
+    let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
+    let source_pool_key = state
+        .app
+        .get_or_create_pool(&req.source_connection_id, Some(&req.source_database))
+        .await
+        .map_err(AppError::from)?;
+    let target_pool_key = state
+        .app
+        .get_or_create_pool(&req.target_connection_id, Some(&req.target_database))
+        .await
+        .map_err(AppError::from)?;
     let preview = transfer::preview_transfer_ownership(
         &state.app,
         &req,
@@ -369,7 +375,7 @@ pub async fn preview_transfer_ownership(
         &target_pool_key,
     )
     .await
-    .map_err(AppError)?;
+    .map_err(AppError::from)?;
     Ok(Json(preview))
 }
 
@@ -378,7 +384,7 @@ pub async fn transfer_progress(
     Path(transfer_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     let channels = state.sse_channels.read().await;
-    let tx = channels.get(&transfer_id).ok_or_else(|| AppError("Transfer not found".to_string()))?;
+    let tx = channels.get(&transfer_id).ok_or_else(|| AppError::from("Transfer not found".to_string()))?;
     let rx = tx.subscribe();
     drop(channels);
     Ok(crate::sse::sse_from_channel(rx))
@@ -416,5 +422,5 @@ pub async fn sort_tables_by_fk_dependency(
     )
     .await
     .map(Json)
-    .map_err(AppError)
+    .map_err(AppError::from)
 }

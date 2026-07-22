@@ -525,6 +525,7 @@ function typeColorClass(t: string): string {
 const contextCell = ref<{ rowId: number; rowIndex: number; col: number } | null>(null);
 const contextHeaderColumn = ref<string | null>(null);
 const contextHeaderColumnIndex = ref<number | null>(null);
+const contextHeaderVisibleColIdx = ref<number | null>(null);
 const bulkEditDialogOpen = ref(false);
 const bulkEditValue = ref("");
 const generateIncrementDialogOpen = ref(false);
@@ -1670,6 +1671,10 @@ const {
   toggleAllNullColumns,
   resetColumnVisibility,
   onTableDataGridColumnOrderChanged,
+  frozenColumnCount,
+  freezeToColumn,
+  freezeSelectedColumns,
+  unfreezeAllColumns,
 } = useDataGridColumnLayoutState({
   columns: computed(() => props.result.columns),
   sourceColumns: computed(() => props.sourceColumns),
@@ -1831,6 +1836,7 @@ const {
   suppressHeaderClickIfNeeded,
   columnHeaderDragClass,
   columnHeaderStyle,
+  horizontalColumnWindowBeforeWidth,
 } = useDataGridColumnLayout({
   columnNames: computed(() => props.result.columns),
   visibleColumnIndexes,
@@ -1847,6 +1853,7 @@ const {
   onCanvasDrawSchedule: scheduleCanvasDraw,
   onRefreshMetrics: () => nextTick(refreshGridScrollerMetrics),
   onPersistColumnOrder: persistColumnOrder,
+  frozenColumnCount,
 });
 
 function onHeaderClickCapture(event: MouseEvent) {
@@ -4528,7 +4535,15 @@ function canvasHitTest(event: MouseEvent): { rowIndex: number; visibleColIdx: nu
   const rowIndex = Math.floor((scroller.scrollTop + y) / CANVAS_DATA_GRID_ROW_HEIGHT);
   if (rowIndex < 0 || rowIndex >= displayRowCount.value) return null;
   if (x < DATA_GRID_ROW_NUM_WIDTH) return { rowIndex, visibleColIdx: -1, rowNumber: true };
-  const visibleColIdx = canvasColumnAt(scroller.scrollLeft + x - DATA_GRID_ROW_NUM_WIDTH);
+  // 冻结列区域不受 scrollLeft 影响，需要特殊处理
+  const frozenWidth = frozenColumnCount.value > 0 ? (renderedColumnOffsets.value[frozenColumnCount.value] ?? 0) : 0;
+  let contentX: number;
+  if (frozenWidth > 0 && x - DATA_GRID_ROW_NUM_WIDTH < frozenWidth) {
+    contentX = x - DATA_GRID_ROW_NUM_WIDTH;
+  } else {
+    contentX = scroller.scrollLeft + x - DATA_GRID_ROW_NUM_WIDTH;
+  }
+  const visibleColIdx = canvasColumnAt(contentX);
   if (visibleColIdx < 0) return null;
   return { rowIndex, visibleColIdx, rowNumber: false };
 }
@@ -4744,7 +4759,9 @@ function canvasCellViewportRect(rowIndex: number, visibleColIdx: number) {
   const widths = renderedColumnWidths.value;
   const colWidth = widths[visibleColIdx];
   if (colWidth === undefined) return null;
-  const left = DATA_GRID_ROW_NUM_WIDTH + (renderedColumnOffsets.value[visibleColIdx] ?? 0) - gridHorizontalScrollLeft.value;
+  // 冻结列不受 scrollLeft 影响
+  const isFrozen = visibleColIdx < frozenColumnCount.value;
+  const left = DATA_GRID_ROW_NUM_WIDTH + (renderedColumnOffsets.value[visibleColIdx] ?? 0) - (isFrozen ? 0 : gridHorizontalScrollLeft.value);
   return {
     left,
     top: rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - canvasScrollTop.value,
@@ -4886,6 +4903,7 @@ function drawCanvasGrid() {
     infiniteScrollEnabled: infiniteScrollEnabled.value,
     pageSize: pageSize.value,
     currentPage: currentPage.value,
+    frozenColumnCount: frozenColumnCount.value,
   });
 }
 
@@ -4920,6 +4938,7 @@ watch(
     detailCell,
     showCellDetail,
     editingCell,
+    frozenColumnCount,
     // Pending edit structures can contain large nested cell maps; the editor
     // version ref gives the canvas a cheap invalidation signal without a deep watch.
     pendingChangesVersion,
@@ -5270,6 +5289,7 @@ function selectTransposeCell(rowIndex: number, actualColIdx: number, event: Mous
   if (visibleColIdx < 0) return;
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
+  contextHeaderVisibleColIdx.value = null;
   clearRowSelection();
   if (event.shiftKey || event.metaKey || event.ctrlKey) {
     extendCellSelectionTo(rowIndex, visibleColIdx);
@@ -5285,6 +5305,7 @@ function showTransposeCellDetails(rowIndex: number, actualColIdx: number) {
   if (visibleColIdx < 0) return;
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
+  contextHeaderVisibleColIdx.value = null;
   clearRowSelection();
   selectSingleCell(rowIndex, visibleColIdx);
   transposeRowIndex.value = rowIndex;
@@ -5604,13 +5625,16 @@ function scrollCellIntoView(rowIndex: number, colIndex: number) {
 function scrollGridColumnIntoView(visibleColIdx: number) {
   const scroller = gridRef.value?.querySelector<HTMLElement>(".data-grid-scroller");
   if (!scroller) return;
+  // 冻结列始终可见，不需要滚动
+  if (visibleColIdx < frozenColumnCount.value) return;
   const colLeft = columnContentOffsetLeft(visibleColIdx);
   const colRight = colLeft + (renderedColumnWidths.value[visibleColIdx] ?? 0);
-  const viewportLeft = scroller.scrollLeft + DATA_GRID_ROW_NUM_WIDTH;
+  const frozenWidth = frozenColumnCount.value > 0 ? (renderedColumnOffsets.value[frozenColumnCount.value] ?? 0) : 0;
+  const viewportLeft = scroller.scrollLeft + DATA_GRID_ROW_NUM_WIDTH + frozenWidth;
   const viewportRight = scroller.scrollLeft + scroller.clientWidth;
 
   if (colLeft < viewportLeft) {
-    scroller.scrollLeft = Math.max(0, colLeft - DATA_GRID_ROW_NUM_WIDTH);
+    scroller.scrollLeft = Math.max(0, colLeft - DATA_GRID_ROW_NUM_WIDTH - frozenWidth);
   } else if (colRight > viewportRight) {
     scroller.scrollLeft = Math.max(0, colRight - scroller.clientWidth);
   }
@@ -6321,6 +6345,7 @@ function selectTransposeRecord(rowIndex: number, event?: MouseEvent) {
   transposeRowIndex.value = rowIndex;
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
+  contextHeaderVisibleColIdx.value = null;
   const item = displayItemAt(rowIndex);
   if (item) {
     if (event) {
@@ -6413,6 +6438,7 @@ function onHeaderContext(col: string, columnIndex: number) {
   }
   contextHeaderColumn.value = col;
   contextHeaderColumnIndex.value = columnIndex;
+  contextHeaderVisibleColIdx.value = visibleColIdx >= 0 ? visibleColIdx : null;
 }
 async function copyHeaderColumn() {
   if (!contextHeaderColumn.value) return;
@@ -6476,6 +6502,7 @@ function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleC
   clearNativeTextSelection();
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
+  contextHeaderVisibleColIdx.value = null;
   contextCell.value = { rowId, rowIndex, col: colIdx };
   if (hasRowSelection.value && isRowSelected(rowId)) {
     return;
@@ -6613,6 +6640,7 @@ watch(editValue, scheduleActiveCellEditTextareaResize);
 function onRowContext(rowId: number, rowIndex: number) {
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
+  contextHeaderVisibleColIdx.value = null;
   contextCell.value = { rowId, rowIndex, col: -1 };
   if (!isRowSelected(rowId)) {
     clearCellSelection();
@@ -7376,6 +7404,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       canFilter: canUseWhereSearch.value,
       hasSort: !!sortCol.value,
       sortMode: sortMode.value,
+      frozenColumnCount: frozenColumnCount.value,
+      contextVisibleColIdx: contextHeaderVisibleColIdx.value ?? undefined,
+      hasColumnSelection: hasColumnSelection.value,
       labels: {
         copyName: t("grid.copyColumnName"),
         copyNames: t("grid.copyColumnNames"),
@@ -7386,9 +7417,33 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         localAscending: t("grid.sortCurrentPageAscending"),
         localDescending: t("grid.sortCurrentPageDescending"),
         clearSort: t("grid.clearSort"),
+        freezeToColumn: t("grid.freezeToColumn"),
+        freezeSelectedColumns: t("grid.freezeSelectedColumns"),
+        unfreezeColumns: t("grid.unfreezeColumns"),
       },
       icons: { copy: Copy, columnDetails: TableProperties, database: Database, ascending: ArrowUp, descending: ArrowDown, clearSort: Eraser },
-      actions: { copyName: copyHeaderColumn, copyNames: copyColumnNames, details: openContextColumnDetailDialog, copyAlterSql: copyAlterColumnSql, sort: applyContextSort },
+      actions: {
+        copyName: copyHeaderColumn,
+        copyNames: copyColumnNames,
+        details: openContextColumnDetailDialog,
+        copyAlterSql: copyAlterColumnSql,
+        sort: applyContextSort,
+        freezeToColumn: () => {
+          const idx = contextHeaderVisibleColIdx.value;
+          if (idx !== null && idx >= 0) {
+            freezeToColumn(idx);
+            clearCellSelection();
+          }
+        },
+        freezeSelectedColumns: () => {
+          freezeSelectedColumns(selectedVisibleColumnIndexes());
+          clearCellSelection();
+        },
+        unfreezeColumns: () => {
+          unfreezeAllColumns();
+          clearCellSelection();
+        },
+      },
       filterSubmenu: filterSubmenu(),
     }),
     createDataGridCellContextMenuItems({
@@ -7831,7 +7886,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   >
                     #
                   </div>
-                  <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.beforeWidth}px` }" />
+                  <div class="shrink-0" :style="{ width: `${horizontalColumnWindowBeforeWidth}px` }" />
                   <DataGridColumnHeader
                     v-for="col in renderedGridColumns"
                     :key="`${col.name}-${col.actualColIdx}`"
@@ -7841,6 +7896,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     :selected="highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx)"
                     :search-match="currentSearchMatch?.kind === 'column' && currentSearchMatch.col === col.actualColIdx"
                     :dark="isDark"
+                    :frozen="col.visibleColIdx < frozenColumnCount"
+                    :frozen-separator="frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1"
                     :tooltip-disabled="columnHeaderTooltipsDisabled"
                     :column-type="headerColumnType(col.name, col.actualColIdx)"
                     :column-comment="headerColumnComment(col.name)"
@@ -8353,13 +8410,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     >
                       {{ rowNumberText(item) }}
                     </div>
-                    <div class="shrink-0" :style="{ width: `${horizontalColumnWindow.beforeWidth}px` }" />
+                    <div class="shrink-0" :style="{ width: `${horizontalColumnWindowBeforeWidth}px` }" />
                     <div
                       v-for="col in renderedGridColumns"
                       :key="col.actualColIdx"
                       class="data-grid-cell group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none inline-block items-center tabular-nums"
                       :style="renderedColumnStyle(col.visibleColIdx)"
                       :class="{
+                        'data-grid-cell--frozen': col.visibleColIdx < frozenColumnCount,
+                        'data-grid-cell--frozen-separator': frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1,
                         'text-muted-foreground italic': isNull(item.data[col.actualColIdx]),
                         'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
                         'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
@@ -9121,6 +9180,16 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 .data-grid-cell {
   background-color: var(--data-grid-cell-bg);
+}
+
+/* 冻结列：不透明背景遮挡滚动的非冻结列；状态 class 的 !important 会覆盖此项 */
+.data-grid-cell--frozen {
+  background-color: var(--data-grid-cell-bg, rgb(255, 255, 255)) !important;
+}
+
+/* 冻结列分隔线：与 Canvas 模式和列头一致（2px 深色右边框） */
+.data-grid-cell--frozen-separator {
+  border-right: 2px solid rgb(100, 116, 139) !important;
 }
 
 .data-grid-row-number {

@@ -14,6 +14,17 @@ env:
   CNB_REGISTRY: "docker.cnb.cool"
 
 jobs:
+  nix-packaging:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build Nix desktop package
+        run: nix build .#dbx-desktop --no-link --print-build-logs
+
   bump-jdbc-plugin-version:
     runs-on: ubuntu-latest
     outputs:
@@ -381,7 +392,8 @@ jobs:
             --clobber
 
   publish:
-    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin]
+    # Keep the release as a draft until every platform and the Nix package pass.
+    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, nix-packaging]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release

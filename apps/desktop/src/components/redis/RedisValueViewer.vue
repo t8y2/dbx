@@ -33,6 +33,7 @@ import {
   redisCollectionPageItems,
   redisJsonValueText,
   normalizeRedisJsonDraft,
+  redisClipboardSafeText,
   redisMemberCopyText,
   redisValueCopyText,
   redisValueCollectionItems,
@@ -1667,7 +1668,7 @@ onBeforeUnmount(() => {
             <Pencil class="h-4 w-4" />
             {{ t("redis.editMember") }}
           </Button>
-          <Button variant="outline" @click="copyText(detailTextForFormat(selectedMemberDetail, memberValueView))">
+          <Button variant="outline" @click="copyText(redisClipboardSafeText(detailTextForFormat(selectedMemberDetail, memberValueView)))">
             <Copy class="h-4 w-4" />
             {{ t("redis.copyMember") }}
           </Button>

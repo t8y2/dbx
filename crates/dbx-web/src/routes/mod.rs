@@ -16,6 +16,7 @@ pub mod mongo;
 pub mod mq;
 pub mod nacos;
 pub mod plugins;
+pub mod prompt_template;
 pub mod query;
 pub mod query_result_export;
 pub mod redis;

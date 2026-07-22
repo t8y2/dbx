@@ -437,9 +437,9 @@ pub async fn list_extensions(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
-    schema: String,
+    schema: Option<String>,
 ) -> Result<Vec<db::ExtensionInfo>, String> {
-    dbx_core::schema::list_extensions_core(&state, &connection_id, &database, &schema).await
+    dbx_core::schema::list_extensions_core(&state, &connection_id, &database, schema.as_deref()).await
 }
 
 #[tauri::command]

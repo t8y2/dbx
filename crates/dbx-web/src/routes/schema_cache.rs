@@ -28,7 +28,7 @@ pub async fn save_schema_cache(
     State(state): State<Arc<WebState>>,
     Json(body): Json<SaveSchemaCacheRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_schema_cache(&body.cache_key, &body.payload).await.map_err(AppError)?;
+    state.app.storage.save_schema_cache(&body.cache_key, &body.payload).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -36,7 +36,7 @@ pub async fn load_schema_cache(
     State(state): State<Arc<WebState>>,
     Query(query): Query<SchemaCacheKeyQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let payload = state.app.storage.load_schema_cache(&query.cache_key).await.map_err(AppError)?;
+    let payload = state.app.storage.load_schema_cache(&query.cache_key).await.map_err(AppError::from)?;
     Ok(Json(payload.unwrap_or(serde_json::json!(null))))
 }
 
@@ -44,6 +44,6 @@ pub async fn delete_schema_cache_prefix(
     State(state): State<Arc<WebState>>,
     Query(query): Query<SchemaCachePrefixQuery>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.delete_schema_cache_prefix(&query.prefix).await.map_err(AppError)?;
+    state.app.storage.delete_schema_cache_prefix(&query.prefix).await.map_err(AppError::from)?;
     Ok(Json(()))
 }

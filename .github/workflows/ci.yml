@@ -276,6 +276,19 @@ jobs:
       - name: JDBC plugin package check
         run: ./plugins/jdbc/package.sh
 
+  nix-packaging:
+    needs: changes
+    if: needs.changes.outputs.nix == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Validate pnpm dependency hash
+        run: nix build .#dbx-pnpm-deps --no-link --print-build-logs
+
   changes:
     runs-on: ubuntu-22.04
     outputs:
@@ -285,6 +298,7 @@ jobs:
       rust_full: ${{ steps.rust-mode.outputs.full }}
       jdbc: ${{ steps.filter.outputs.jdbc }}
       agents: ${{ steps.filter.outputs.agents }}
+      nix: ${{ steps.filter.outputs.nix }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -325,6 +339,16 @@ jobs:
               - 'plugins/jdbc/**'
             agents:
               - 'agents/**'
+            nix:
+              # This fast check validates only the fixed-output pnpm dependency closure.
+              - 'package.json'
+              - 'packages/**/package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'flake.nix'
+              - 'flake.lock'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/update-nix-pnpm-hash.yml'
 
       - name: Select Rust feature coverage
         id: rust-mode

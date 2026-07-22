@@ -106,10 +106,10 @@ const isMaximized = ref(false);
 const dialogStyle = computed(() => {
   if (isMaximized.value) {
     return {
-      width: "100vw",
-      height: "100vh",
-      maxWidth: "100vw",
-      maxHeight: "100vh",
+      width: "100%",
+      height: "100%",
+      maxWidth: "100%",
+      maxHeight: "100%",
       borderRadius: "0",
     };
   }
@@ -131,6 +131,13 @@ const dialogStyle = computed(() => {
 
 function toggleMaximize() {
   isMaximized.value = !isMaximized.value;
+}
+
+function handleDialogEscape(event: KeyboardEvent) {
+  if (!showOptionsPanel.value) return;
+
+  event.preventDefault();
+  showOptionsPanel.value = false;
 }
 
 let resizeObserver: ResizeObserver | null = null;
@@ -679,7 +686,7 @@ const targetConnectionInfo = computed(() => {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :class="['min-w-[800px] flex flex-col overflow-hidden', isMaximized ? '' : 'resize']" :style="dialogStyle" @interact-outside.prevent>
+    <DialogContent :class="['flex flex-col overflow-hidden', isMaximized ? 'min-w-0' : 'min-w-[800px] resize']" :portal-class="isMaximized ? 'p-0' : undefined" :style="dialogStyle" @interact-outside.prevent @escape-key-down="handleDialogEscape">
       <Button variant="ghost" size="icon-sm" class="absolute top-2 right-10 z-10" @click="toggleMaximize">
         <Maximize2 v-if="!isMaximized" class="w-4 h-4" />
         <Minimize2 v-else class="w-4 h-4" />

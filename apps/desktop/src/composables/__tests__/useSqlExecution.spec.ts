@@ -294,6 +294,35 @@ describe("useSqlExecution", () => {
     expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: "relation does not exist" }));
   });
 
+  it("keeps the full dangerous script pending and executes it unchanged after confirmation", async () => {
+    const activeTab = ref<QueryTab | undefined>(queryTab("app"));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const sql = Array.from({ length: 40_000 }, (_, index) => `${index === 0 ? "DROP TABLE IF EXISTS t;" : ""} INSERT INTO t VALUES (${index});`).join("\n");
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 40_000, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showDangerDialog.value).toBe(true);
+    expect(execution.pendingDangerSql.value).toBe(sql);
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+
+    await execution.onDangerConfirm();
+
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
+  });
+
   it("requires production confirmation even when ordinary danger prompts are disabled", async () => {
     const activeTab = ref<QueryTab | undefined>(queryTab("prod_app"));
     const activeConnection = ref<ConnectionConfig | undefined>({ ...connection("mysql"), production_databases: ["prod_app"] });

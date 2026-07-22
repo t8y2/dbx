@@ -1,6 +1,7 @@
 import type { AiConfig } from "@/stores/settingsStore";
 import { uuid } from "@/lib/common/utils";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, QueryResult, QueryTab } from "@/types/database";
+import type { PromptTemplate } from "@/types/promptTemplate";
 import * as api from "@/lib/backend/api";
 import { currentLocale, type Locale } from "@/i18n";
 import { aiTableMentionKey, type AiTableMention } from "@/lib/ai/aiTableMentions";
@@ -96,9 +97,30 @@ export interface AiRequestInput {
   allowWriteSql?: boolean;
 }
 
-function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[]): { messages: api.AiMessage[]; systemPrompt: string; taskContract: api.AiTaskContract; maxTokens: number } {
+export interface CustomPromptContext {
+  globalInstructions?: string;
+  activeTemplates?: PromptTemplate[];
+}
+
+function buildCustomInstructionLines(custom: CustomPromptContext | undefined, isZh: boolean): string[] {
+  const global = custom?.globalInstructions?.trim() ?? "";
+  const templates = (custom?.activeTemplates ?? []).filter((t) => t.content.trim());
+  if (!global && templates.length === 0) return [];
+
+  const parts: string[] = [];
+  if (global) parts.push(global);
+  parts.push(...templates.map((t) => `### ${t.name}\n${t.content}`));
+
+  return [
+    isZh
+      ? `## 用户自定义规范（补充性）\n以下为用户定义的规范与模板；上方核心安全及方言规则优先级更高。\n\n${parts.join("\n\n")}`
+      : `## Custom Instructions (supplementary)\nThe following are user-defined conventions and templates. Core safety and dialect rules above take precedence.\n\n${parts.join("\n\n")}`,
+  ];
+}
+
+function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[], custom?: CustomPromptContext): { messages: api.AiMessage[]; systemPrompt: string; taskContract: api.AiTaskContract; maxTokens: number } {
   const isZh = isChineseLocale(currentLocale());
-  const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
+  const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode, custom);
   const userPrompt = buildUserPrompt(input.action, input.context, input.instruction, isZh);
   const taskContract: api.AiTaskContract = {
     action: input.action,
@@ -113,8 +135,8 @@ function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[]): { 
   return { messages, systemPrompt, taskContract, maxTokens };
 }
 
-export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[]): Promise<string> {
-  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history);
+export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[], custom?: CustomPromptContext): Promise<string> {
+  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history, custom);
   return api.aiComplete({
     config: input.config,
     systemPrompt,
@@ -124,8 +146,8 @@ export async function runAiAction(input: AiRequestInput, history?: api.AiMessage
   });
 }
 
-export async function runAiStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onDelta: (delta: string) => void, sessionId?: string, onReasoningDelta?: (delta: string) => void): Promise<void> {
-  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history);
+export async function runAiStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onDelta: (delta: string) => void, sessionId?: string, onReasoningDelta?: (delta: string) => void, custom?: CustomPromptContext): Promise<void> {
+  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history, custom);
   const sid = sessionId || uuid();
 
   await api.aiStream(
@@ -146,8 +168,8 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
   );
 }
 
-export async function runAgentStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onEvent: (event: AgentEvent) => void, sessionId?: string): Promise<string> {
-  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history);
+export async function runAgentStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onEvent: (event: AgentEvent) => void, sessionId?: string, custom?: CustomPromptContext): Promise<string> {
+  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history, custom);
   const sid = sessionId || uuid();
 
   return api.aiAgentStream(
@@ -199,9 +221,9 @@ export function extractSql(text: string): string {
   return text.trim();
 }
 
-export function buildSystemPrompt(action: AiAction, context: AiContext, mode: AiAssistantMode = "ask"): string {
+export function buildSystemPrompt(action: AiAction, context: AiContext, mode: AiAssistantMode = "ask", custom?: CustomPromptContext): string {
   if (isVectorDbType(context.databaseType)) {
-    return buildVectorSystemPrompt(context, mode);
+    return buildVectorSystemPrompt(context, mode, custom);
   }
   const schema = formatSchema(context);
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
@@ -211,7 +233,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
 
   const isZh = isChineseLocale(currentLocale());
 
-  const lines: string[] = [...buildBasePromptLines(isZh), ...buildModePromptLines(mode, isZh), ...buildActionPromptLines(action, isZh)];
+  const lines: string[] = [...buildBasePromptLines(isZh), ...buildModePromptLines(mode, isZh), ...buildActionPromptLines(action, isZh), ...buildCustomInstructionLines(custom, isZh)];
 
   if (schemaScope === "focused_table") {
     lines.push(
@@ -271,7 +293,7 @@ function buildBasePromptLines(isZh: boolean): string[] {
   ];
 }
 
-function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode): string {
+function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode, custom?: CustomPromptContext): string {
   const isZh = isChineseLocale(currentLocale());
   const schema = formatSchema(context);
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
@@ -281,6 +303,7 @@ function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode): str
     isZh ? `你是 DBX 内置的向量数据库助手。当前连接的是 ${dbLabel(context.databaseType)} 数据库。用中文回复。` : `You are DBX's vector database assistant. Connected to ${dbLabel(context.databaseType)}. Reply in English.`,
     isZh ? "数据存储在集合（collections）中，每条记录包含唯一标识及可选的元数据负载（payload/metadata）。" : "Data is stored in collections. Each record has a unique identifier and optional metadata payload.",
     ...buildVectorModePromptLines(context, mode, isZh),
+    ...buildCustomInstructionLines(custom, isZh),
     "",
     `Database type: ${context.databaseType}`,
     `Connection: ${context.connectionName}`,

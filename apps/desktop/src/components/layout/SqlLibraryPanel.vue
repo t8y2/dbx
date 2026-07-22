@@ -235,7 +235,6 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
 
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    const { readTextFile } = await import("@tauri-apps/plugin-fs");
     const selected = await open({
       directory: true,
       multiple: false,
@@ -253,7 +252,7 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
     const takenNames = new Set((targetFolder ? savedSqlStore.filesInFolder(targetFolder.id) : savedSqlStore.filesWithoutFolder()).filter((file) => !orphanedIds.value.has(file.id)).map((file) => file.name));
 
     for (const path of sqlPaths) {
-      const content = await readTextFile(path);
+      const content = await api.readExternalSqlFile(path);
       const displayName = uniqueImportedName(relativeImportName(selected, path), takenNames);
       await savedSqlStore.saveFile({
         connectionId,

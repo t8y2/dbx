@@ -30,6 +30,7 @@
     "test:db-env": "node --test scripts/database-env.test.mjs",
     "bench:redis-key-search": "node scripts/bench/redis-key-search.mjs",
     "bench:mongodb-count": "node scripts/bench/mongodb-count.mjs",
+    "bench:table-import": "cargo run -p dbx-core --no-default-features --example table_import_bench --release --",
     "lint": "oxlint --vue-plugin apps/desktop/src",
     "fmt": "oxfmt \"apps/desktop/src/**/*.{ts,vue}\"",
     "test": "vitest run",

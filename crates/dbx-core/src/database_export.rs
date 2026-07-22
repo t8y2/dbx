@@ -52,6 +52,43 @@ pub struct DatabaseExportRequest {
     pub batch_size: usize,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DatabaseExportObjectCounts {
+    tables: usize,
+    views: usize,
+    sequences: usize,
+    extensions: usize,
+    procedures: usize,
+    functions: usize,
+}
+
+fn exports_database_tables(request: &DatabaseExportRequest) -> bool {
+    request.include_structure || request.include_data
+}
+
+fn exports_database_routines(request: &DatabaseExportRequest) -> bool {
+    // Routine export is schema-wide, so an explicit table selection must not
+    // add unrelated procedures or functions to either execution or progress.
+    request.include_objects && request.selected_tables.is_empty()
+}
+
+fn database_export_total_objects(request: &DatabaseExportRequest, counts: &DatabaseExportObjectCounts) -> usize {
+    let mut total = 0;
+    if exports_database_tables(request) {
+        total += counts.tables;
+    }
+    if request.include_structure {
+        total += counts.sequences + counts.extensions;
+    }
+    if request.include_objects {
+        total += counts.views;
+    }
+    if exports_database_routines(request) {
+        total += counts.procedures + counts.functions;
+    }
+    total
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseBackupSnapshot {
@@ -1263,8 +1300,13 @@ pub async fn export_database_sql_core(
             PostgresExtensionMembers::default()
         };
     let postgres_extensions = if request.include_structure && matches!(db_type, DatabaseType::Postgres) {
-        match crate::schema::list_extensions_core(state, &request.connection_id, &request.database, &request.schema)
-            .await
+        match crate::schema::list_extensions_core(
+            state,
+            &request.connection_id,
+            &request.database,
+            Some(&request.schema),
+        )
+        .await
         {
             Ok(extensions) => extensions
                 .into_iter()
@@ -1333,14 +1375,11 @@ pub async fn export_database_sql_core(
         }
     }
 
-    // 8. Calculate total objects
-    let mut total_objects = tables.len() + views.len() + postgres_sequences.len() + postgres_extensions.len();
-
-    // We'll add procedures/functions count later if include_objects
+    // 8. Discover optional schema-wide objects before calculating workload.
     let mut procedures: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut functions: Vec<crate::types::ObjectInfo> = Vec::new();
 
-    if request.include_objects && request.selected_tables.is_empty() {
+    if exports_database_routines(request) {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -1369,8 +1408,21 @@ pub async fn export_database_sql_core(
             Err(error) if request.fail_on_error => return Err(format!("Failed to list database objects: {error}")),
             Err(_) => {}
         }
-        total_objects += procedures.len() + functions.len();
     }
+
+    // A determinate total must describe the same object categories guarded by
+    // the execution branches below, not every object discovered in the schema.
+    let total_objects = database_export_total_objects(
+        request,
+        &DatabaseExportObjectCounts {
+            tables: tables.len(),
+            views: views.len(),
+            sequences: postgres_sequences.len(),
+            extensions: postgres_extensions.len(),
+            procedures: procedures.len(),
+            functions: functions.len(),
+        },
+    );
 
     let mut object_index: usize = 0;
 
@@ -1442,7 +1494,7 @@ pub async fn export_database_sql_core(
             Err(_) => false,
         };
     if concurrent_prefetch_is_safe
-        && (request.include_structure || request.include_data)
+        && exports_database_tables(request)
         && !tables.is_empty()
         && !is_export_cancelled(&request.export_id).await
     {
@@ -1499,7 +1551,7 @@ pub async fn export_database_sql_core(
         }
     }
 
-    for (table_index, table_info) in tables.iter().enumerate() {
+    for (table_index, table_info) in tables.iter().enumerate().filter(|_| exports_database_tables(request)) {
         // Check cancellation
         if is_export_cancelled(&request.export_id).await {
             on_progress(ExportProgress {
@@ -1996,12 +2048,13 @@ mod tests {
     use super::concurrent_metadata_prefetch_allowed;
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
-        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, normalize_export_table_ddl,
-        record_export_error, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, DdlNormalizeOptions,
-        ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        database_export_total_objects, drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal,
+        format_export_table_ddl, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
+        generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
+        is_postgres_extension_member_routine, normalize_export_table_ddl, record_export_error,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, DatabaseExportObjectCounts,
+        DatabaseExportRequest, DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
+        PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
     use crate::models::connection::DatabaseType;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
@@ -2030,6 +2083,72 @@ mod tests {
             parent_schema: None,
             parent_name: None,
         }
+    }
+
+    fn export_request(
+        include_structure: bool,
+        include_data: bool,
+        include_objects: bool,
+        selected_tables: Vec<String>,
+    ) -> DatabaseExportRequest {
+        DatabaseExportRequest {
+            export_id: "export-1".to_string(),
+            connection_id: "connection-1".to_string(),
+            database: "database-1".to_string(),
+            schema: "public".to_string(),
+            file_path: "export.sql".to_string(),
+            selected_tables,
+            excluded_tables: Vec::new(),
+            include_structure,
+            include_data,
+            include_objects,
+            drop_table_if_exists: false,
+            omit_auto_increment: false,
+            fail_on_error: false,
+            snapshot_session_id: None,
+            batch_size: 1000,
+        }
+    }
+
+    #[test]
+    fn export_progress_total_counts_only_requested_object_categories() {
+        let counts = DatabaseExportObjectCounts {
+            tables: 2,
+            views: 1,
+            sequences: 2,
+            extensions: 1,
+            procedures: 1,
+            functions: 1,
+        };
+
+        let cases = [
+            ("structure", export_request(true, false, false, Vec::new()), 5),
+            ("data", export_request(false, true, false, Vec::new()), 2),
+            ("objects", export_request(false, false, true, Vec::new()), 3),
+            ("all", export_request(true, true, true, Vec::new()), 8),
+            ("nothing", export_request(false, false, false, Vec::new()), 0),
+        ];
+
+        for (name, request, expected) in cases {
+            assert_eq!(database_export_total_objects(&request, &counts), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn export_progress_total_excludes_schema_routines_for_selected_tables() {
+        // Counts are already filtered to the selected table/view set before
+        // workload calculation; schema-wide routines remain intentionally out.
+        let counts = DatabaseExportObjectCounts {
+            tables: 1,
+            views: 1,
+            sequences: 1,
+            extensions: 1,
+            procedures: 4,
+            functions: 5,
+        };
+        let request = export_request(true, true, true, vec!["users".to_string(), "active_users".to_string()]);
+
+        assert_eq!(database_export_total_objects(&request, &counts), 4);
     }
 
     #[test]

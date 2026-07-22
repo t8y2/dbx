@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 import * as api from "@/lib/backend/api";
 
 const props = defineProps<{
@@ -40,11 +40,12 @@ const descriptionKey = computed(() => (isSchemaFilterMode.value ? "visibleSchema
 const searchPlaceholderKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.searchPlaceholder" : "visibleDatabases.searchPlaceholder"));
 const emptySelectionKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.emptySelection" : "visibleDatabases.emptySelection"));
 const loadFailedKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.loadFailed" : "visibleDatabases.loadFailed"));
-const listedObjectNames = computed(() => {
-  if (isSchemaFilterMode.value) return objectNames.value;
-  if (showSystemDatabases.value) return objectNames.value;
+const showSystemObjectsKey = computed(() => (isSchemaFilterMode.value ? "visibleSchemas.showSystemSchemas" : "visibleDatabases.showSystemDatabases"));
+const defaultObjectNames = computed(() => {
+  if (isSchemaFilterMode.value) return filterSchemaNamesForVisiblePicker(objectNames.value, connection.value);
   return filterDatabaseNamesForVisiblePicker(objectNames.value, connection.value);
 });
+const listedObjectNames = computed(() => (showSystemDatabases.value ? objectNames.value : defaultObjectNames.value));
 const filteredObjectNames = computed(() => {
   const query = searchText.value.trim().toLowerCase();
   if (!query) return listedObjectNames.value;
@@ -53,7 +54,7 @@ const filteredObjectNames = computed(() => {
 const selectedCount = computed(() => selectedNames.value.size);
 const totalCount = computed(() => listedObjectNames.value.length);
 const canSaveSelection = computed(() => canSaveVisibleDatabaseSelection([...selectedNames.value]));
-const hasSystemDatabases = computed(() => !isSchemaFilterMode.value && objectNames.value.some((database) => isSystemDatabaseName(connection.value?.db_type, database)));
+const hasSystemObjects = computed(() => defaultObjectNames.value.length < objectNames.value.length);
 const showAllDisabled = computed(() => {
   if (isSchemaFilterMode.value) {
     return !connection.value?.visible_schemas?.[databaseKey.value];
@@ -73,7 +74,8 @@ watch(
 
 watch(showSystemDatabases, (show) => {
   if (show) return;
-  selectedNames.value = new Set([...selectedNames.value].filter((database) => !isSystemDatabaseName(connection.value?.db_type, database)));
+  const visible = new Set(listedObjectNames.value);
+  selectedNames.value = new Set([...selectedNames.value].filter((name) => visible.has(name)));
 });
 
 async function loadDatabases() {
@@ -83,10 +85,12 @@ async function loadDatabases() {
   try {
     const names = await loadObjectNames();
     objectNames.value = names;
+    showSystemDatabases.value = false;
     const configured = isSchemaFilterMode.value ? connection.value?.visible_schemas?.[databaseKey.value] : connection.value?.visible_databases;
     const initialSelection = Array.isArray(configured) ? normalizeVisibleDatabaseSelection(configured, names) : listedObjectNames.value;
     selectedNames.value = new Set(initialSelection);
-    showSystemDatabases.value = !isSchemaFilterMode.value && initialSelection.some((database) => isSystemDatabaseName(connection.value?.db_type, database));
+    const defaultVisible = new Set(defaultObjectNames.value);
+    showSystemDatabases.value = initialSelection.some((name) => !defaultVisible.has(name));
   } catch (e: any) {
     objectNames.value = [];
     selectedNames.value = new Set();
@@ -190,9 +194,9 @@ async function saveSelection() {
         {{ t(emptySelectionKey) }}
       </p>
 
-      <label v-if="hasSystemDatabases" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
+      <label v-if="hasSystemObjects" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
         <input v-model="showSystemDatabases" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="isLoading || !!errorMessage" />
-        <span>{{ t("visibleDatabases.showSystemDatabases") }}</span>
+        <span>{{ t(showSystemObjectsKey) }}</span>
       </label>
 
       <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">

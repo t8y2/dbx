@@ -51,6 +51,15 @@ WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND UPPER(t.TABLE_NAME) = UPPER(?)
   AND (c.IS_HIDE IS NULL OR c.IS_HIDE = FALSE)
 ORDER BY c.COL_NO`
+const xuguLegacyListColumnsSQL = `
+SELECT c.COL_NAME, c.TYPE_NAME, c.NOT_NULL, c.DEF_VAL, c.COMMENTS, c.SCALE, c."VARYING"
+FROM ALL_COLUMNS c
+JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND UPPER(t.TABLE_NAME) = UPPER(?)
+  AND (c.IS_HIDE IS NULL OR c.IS_HIDE = FALSE)
+ORDER BY c.COL_NO`
 const xuguListIndexesSQL = `
 SELECT i.INDEX_NAME, i.KEYS, i.IS_UNIQUE, i.IS_PRIMARY, i.INDEX_TYPE, i.FILTER
 FROM ALL_INDEXES i
@@ -1250,6 +1259,17 @@ func isXuguMetadataAccessError(err error) bool {
 		strings.Contains(message, "SYS_TRIGGERS")
 }
 
+func isXuguMissingOnNullColumnError(err error) bool {
+	message := strings.ToUpper(strings.TrimSpace(strings.TrimRight(err.Error(), "\x00")))
+	if !strings.Contains(message, "ON_NULL") {
+		return false
+	}
+	return strings.Contains(message, "E10049") ||
+		strings.Contains(message, "不存在") ||
+		strings.Contains(message, "DOES NOT EXIST") ||
+		strings.Contains(message, "UNKNOWN COLUMN")
+}
+
 func xuguDSNValue(dsn string, key string) string {
 	for _, part := range strings.Split(dsn, ";") {
 		name, value, ok := strings.Cut(part, "=")
@@ -1569,7 +1589,7 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.queryRows(xuguListColumnsSQL, []any{schema, table})
+	rows, hasDefaultOnNull, err := s.queryColumnRows(schema, table)
 	if err != nil {
 		if isXuguMetadataAccessError(err) {
 			return s.columnsFromSelect(schema, table, primaryKeys)
@@ -1584,16 +1604,12 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 		var onNull any
 		var scale *int
 		var varying any
-		if err := rows.Scan(
-			&item.Name,
-			&item.DataType,
-			&notNull,
-			&item.ColumnDefault,
-			&onNull,
-			&item.Comment,
-			&scale,
-			&varying,
-		); err != nil {
+		destinations := []any{&item.Name, &item.DataType, &notNull, &item.ColumnDefault}
+		if hasDefaultOnNull {
+			destinations = append(destinations, &onNull)
+		}
+		destinations = append(destinations, &item.Comment, &scale, &varying)
+		if err := rows.Scan(destinations...); err != nil {
 			return nil, err
 		}
 		item.DataType = normalizeXuguColumnType(item.DataType, varying)
@@ -1604,6 +1620,19 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
+}
+
+func (s *server) queryColumnRows(schema, table string) (*sql.Rows, bool, error) {
+	args := []any{schema, table}
+	rows, err := s.queryRows(xuguListColumnsSQL, args)
+	if err == nil {
+		return rows, true, nil
+	}
+	if !isXuguMissingOnNullColumnError(err) {
+		return nil, false, err
+	}
+	rows, err = s.queryRows(xuguLegacyListColumnsSQL, args)
+	return rows, false, err
 }
 
 func (s *server) columnsFromSelect(schema, table string, primaryKeys map[string]bool) ([]columnInfo, error) {

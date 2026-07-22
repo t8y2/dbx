@@ -404,14 +404,14 @@ export class FavoritesController {
     // placeholder that names the (schema, object) pair.
     const collectedKeys = new Set(collected.map((node) => treeNodeFavoriteKey(node)));
     const missing = scopeItems.filter((item) => !collectedKeys.has(item.key));
-    const missingNodes = missing.map((item) => decodeFavoriteKeyToStub(item.key, connectionId, database) ?? {
+    const missingNodes = (missing.map((item) => decodeFavoriteKeyToStub(item.key, connectionId, database) ?? {
       id: `${parentId}::fav_missing::${item.key}`,
       label: "Unresolved favorite",
       type: "favorites-missing" as const,
       connectionId,
       database,
       isExpanded: false,
-    });
+    })) as TreeNode[];
 
     const groupIdByKey = new Map<string, string>();
     for (const item of scopeItems) groupIdByKey.set(item.key, item.groupId);

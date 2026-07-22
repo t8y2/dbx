@@ -54,7 +54,7 @@ pub async fn save_pinned_tree_node_ids(
 pub async fn load_favorites_state(
     State(state): State<Arc<WebState>>,
 ) -> Result<Json<Option<serde_json::Value>>, AppError> {
-    let value = state.app.storage.load_favorites_state().await.map_err(AppError)?;
+    let value = state.app.storage.load_favorites_state().await.map_err(AppError::from)?;
     Ok(Json(value))
 }
 
@@ -62,7 +62,8 @@ pub async fn save_favorites_state(
     State(state): State<Arc<WebState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_favorites_state(&body).await.map_err(AppError)
+    state.app.storage.save_favorites_state(&body).await.map_err(AppError::from)?;
+    Ok(Json(()))
 }
 
 pub async fn load_mcp_global_policy(
@@ -76,21 +77,6 @@ pub async fn save_mcp_global_policy(
     Json(policy): Json<McpGlobalPolicy>,
 ) -> Result<Json<()>, AppError> {
     state.app.storage.save_mcp_global_policy(&policy).await.map_err(AppError::from)?;
-    Ok(Json(()))
-}
-
-pub async fn load_favorites_state(
-    State(state): State<Arc<WebState>>,
-) -> Result<Json<Option<serde_json::Value>>, AppError> {
-    let value = state.app.storage.load_favorites_state().await.map_err(AppError)?;
-    Ok(Json(value))
-}
-
-pub async fn save_favorites_state(
-    State(state): State<Arc<WebState>>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<Json<()>, AppError> {
-    state.app.storage.save_favorites_state(&body).await.map_err(AppError)?;
     Ok(Json(()))
 }
 

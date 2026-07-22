@@ -1593,18 +1593,22 @@ impl Storage {
     }
 
     /// Persist the entire structured favorites state (groups + items). Stored
-    /// as a single JSON document so groups and items update atomically.
+    /// in the `app_state` table (key `favorites_state`) rather than the
+    /// shared `app_settings` row so concurrent saves of pinned tree node
+    /// ids, sidebar layout, etc. can never silently clobber a favorites
+    /// write. PR #4140 review flagged the previous "read whole app_settings
+    /// row → insert one key → write the whole row back" pattern as a
+    /// lost-update hazard; routing the state through `app_state` makes the
+    /// race window disappear because the row is independent.
     pub async fn save_favorites_state(&self, state: &serde_json::Value) -> Result<(), String> {
-        let mut settings = self.load_app_settings_json().await?;
-        settings.insert("favorites_state".to_string(), state.clone());
-        self.save_app_settings_json(&settings).await
+        self.save_app_state_value("favorites_state", state).await
     }
 
-    /// Load the structured favorites state, returning `None` when nothing has
-    /// been persisted yet. Callers should seed defaults on `None`.
+    /// Load the structured favorites state, returning `None` when nothing
+    /// has been persisted yet. Callers should seed defaults on `None`.
+    /// Stored in the `app_state` table (key `favorites_state`).
     pub async fn load_favorites_state(&self) -> Result<Option<serde_json::Value>, String> {
-        let settings = self.load_app_settings_json().await?;
-        Ok(settings.get("favorites_state").cloned())
+        self.load_app_state_value("favorites_state").await
     }
 
     async fn save_app_state_value(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {

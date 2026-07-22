@@ -1,7 +1,8 @@
 export const LARGE_PASTE_NATIVE_RECOVERY_THRESHOLD = 120 * 1024;
+export const LARGE_PASTE_HISTORY_USER_EVENT = "input.type.paste";
 
 export function normalizeQueryEditorPasteText(text: string): string {
-  return text.replace(/\r\n?|\u2028|\u2029/g, "\n");
+  return text.replace(/\r\n?/g, "\n");
 }
 
 export function shouldRecoverLargeTauriPaste(eventText: string, tauriRuntime: boolean): boolean {

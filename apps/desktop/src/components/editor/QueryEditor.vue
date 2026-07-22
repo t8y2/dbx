@@ -3,6 +3,7 @@ import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, sha
 import { CaseLower, CaseUpper, Code2, FileCode, Pencil, PencilRuler, Play, Copy, List, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
+import { Transaction } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
@@ -68,7 +69,7 @@ import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
-import { normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
+import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
@@ -1014,11 +1015,14 @@ function recoverLargeTauriPaste(event: ClipboardEvent, currentView: EditorViewTy
   const insertedText = normalizeQueryEditorPasteText(eventText);
   const insertedFrom = selection.from;
   const insertedTo = insertedFrom + insertedText.length;
+  const pasteStartedAt = Date.now();
   currentView.dispatch({
     changes: { from: selection.from, to: selection.to, insert: insertedText },
     selection: { anchor: insertedTo },
     scrollIntoView: true,
-    userEvent: "input.paste",
+    // CodeMirror only joins input.type history events; keep one timestamp so delayed recovery is one undo step.
+    annotations: Transaction.time.of(pasteStartedAt),
+    userEvent: LARGE_PASTE_HISTORY_USER_EVENT,
   });
 
   void readTextFromClipboard()
@@ -1032,7 +1036,8 @@ function recoverLargeTauriPaste(event: ClipboardEvent, currentView: EditorViewTy
         changes: { from: insertedTo, insert: suffix },
         ...(selectionRemainedAtPasteEnd ? { selection: { anchor: insertedTo + suffix.length } } : {}),
         scrollIntoView: selectionRemainedAtPasteEnd,
-        userEvent: "input.paste",
+        annotations: Transaction.time.of(pasteStartedAt),
+        userEvent: LARGE_PASTE_HISTORY_USER_EVENT,
       });
     })
     .catch(() => {});

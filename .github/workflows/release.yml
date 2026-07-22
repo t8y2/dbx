@@ -258,9 +258,15 @@ jobs:
           $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
           $zipName = "DBX_${version}_${arch}-portable.zip"
           $exePath = "target/${{ matrix.target }}/release/dbx.exe"
+          $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
 
           if (!(Test-Path $exePath)) {
             Write-Error "Missing Windows executable: $exePath"
+            exit 1
+          }
+          if (!$appVersion -or $appVersion -ne $version) {
+            Write-Error "Release tag version $version does not match the built DBX package version $appVersion"
             exit 1
           }
 
@@ -269,6 +275,16 @@ jobs:
           Copy-Item "LICENSE" (Join-Path $portableDir "LICENSE") -Force
           Copy-Item "README.md" (Join-Path $portableDir "README.md") -Force
           Set-Content -Path (Join-Path $portableDir "portable.dbx") -Value "" -NoNewline
+
+          $portableExe = Join-Path $portableDir "DBX.exe"
+          $manifest = [ordered]@{
+            schema_version = 1
+            version = $appVersion
+            arch = $arch
+            executable = "DBX.exe"
+            executable_sha256 = (Get-FileHash -LiteralPath $portableExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json
+          Set-Content -Path (Join-Path $portableDir "portable-update.json") -Value $manifest -Encoding utf8NoBOM
 
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
           pnpm tauri signer sign $zipName

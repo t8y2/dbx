@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::update_portable;
 pub use dbx_core::update::UpdateInfo;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -42,7 +43,7 @@ enum PendingUpdate {
 
 enum ReadyUpdate {
     Installer { update: Box<Update>, bytes: Vec<u8> },
-    Portable { archive: Vec<u8>, version: String },
+    Portable { archive: Vec<u8>, version: Version },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -228,16 +229,18 @@ pub async fn download_update(
     source: UpdateDownloadSource,
     latest_version: Option<String>,
 ) -> Result<(), String> {
+    let portable_version = if crate::data_dir::is_portable_mode() {
+        let requested_version =
+            latest_version.as_deref().ok_or_else(|| "Latest version is required for portable updates.".to_string())?;
+        Some(update_portable::validate_requested_portable_version(requested_version, env!("CARGO_PKG_VERSION"))?)
+    } else {
+        None
+    };
     state.begin_download()?;
-    let result = if crate::data_dir::is_portable_mode() {
-        let version =
-            latest_version.as_deref().ok_or_else(|| "Latest version is required for portable updates.".to_string());
-        match version {
-            Ok(version) => download_portable_update_inner(&app, &source, version).await.map(|archive| {
-                ReadyUpdate::Portable { archive, version: version.trim().trim_start_matches('v').to_string() }
-            }),
-            Err(error) => Err(error),
-        }
+    let result = if let Some(version) = portable_version {
+        download_portable_update_inner(&app, &source, &version)
+            .await
+            .map(|archive| ReadyUpdate::Portable { archive, version })
     } else {
         download_update_inner(&app, &source, latest_version.as_deref())
             .await
@@ -312,9 +315,10 @@ async fn download_update_inner(
 async fn download_portable_update_inner(
     app: &AppHandle,
     source: &UpdateDownloadSource,
-    latest_version: &str,
+    latest_version: &Version,
 ) -> Result<Vec<u8>, String> {
-    let candidates = source.portable_asset_candidates(latest_version, std::env::consts::ARCH)?;
+    let latest_version_text = latest_version.to_string();
+    let candidates = source.portable_asset_candidates(&latest_version_text, std::env::consts::ARCH)?;
     let client = portable_update_http_client()?;
     let mut failures = Vec::new();
 
@@ -327,7 +331,7 @@ async fn download_portable_update_inner(
                 .map_err(|error| format!("Portable update signature is not valid UTF-8: {error}"))?;
             let archive =
                 download_bounded_bytes(&client, &candidate.archive_url, MAX_PORTABLE_ARCHIVE_BYTES, Some(app)).await?;
-            update_portable::verify_portable_archive(&archive, &signature)?;
+            update_portable::verify_portable_archive(&archive, &signature, latest_version, std::env::consts::ARCH)?;
             Ok::<Vec<u8>, String>(archive)
         }
         .await;
@@ -399,7 +403,10 @@ pub fn install_downloaded_update(app: AppHandle, state: tauri::State<'_, Pending
         ReadyUpdate::Installer { update, bytes } => {
             update.install(bytes).map_err(|error| format!("Failed to install update: {error}"))
         }
-        ReadyUpdate::Portable { archive, version } => update_portable::launch_portable_update_helper(archive, version),
+        ReadyUpdate::Portable { archive, version } => {
+            update_portable::ensure_portable_version_is_newer(version, env!("CARGO_PKG_VERSION"))
+                .and_then(|_| update_portable::launch_portable_update_helper(archive, version))
+        }
     };
     if let Err(error) = install_result {
         state.restore_ready(ready)?;

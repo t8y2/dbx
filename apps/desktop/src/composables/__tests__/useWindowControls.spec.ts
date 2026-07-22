@@ -14,10 +14,11 @@ describe("window controls", () => {
     expect(shouldShowWindowControls(false, false)).toBe(false);
   });
 
-  it("draws an app frame only for self-decorated desktop windows", () => {
-    expect(shouldDrawDesktopWindowFrame(false, true)).toBe(true);
-    expect(shouldDrawDesktopWindowFrame(true, true)).toBe(false);
-    expect(shouldDrawDesktopWindowFrame(false, false)).toBe(false);
+  it("draws an app frame only for self-decorated non-Windows desktop windows", () => {
+    expect(shouldDrawDesktopWindowFrame(false, true, false)).toBe(true);
+    expect(shouldDrawDesktopWindowFrame(false, true, true)).toBe(false);
+    expect(shouldDrawDesktopWindowFrame(true, true, false)).toBe(false);
+    expect(shouldDrawDesktopWindowFrame(false, false, false)).toBe(false);
   });
 
   it("reserves traffic light inset only for non-fullscreen macOS desktop windows", () => {

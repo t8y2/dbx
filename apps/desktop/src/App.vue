@@ -45,7 +45,7 @@ import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlOb
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
-import { isMacOS } from "@/lib/backend/platform";
+import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
@@ -152,7 +152,7 @@ const {
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
-const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop);
+const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop, isWindows());
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 const needsAuth = ref(!isDesktop);

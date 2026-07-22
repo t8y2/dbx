@@ -5793,6 +5793,9 @@ function prepareDataCellMouseDown(item: RowItem, actualColIdx: number) {
     pendingQuickEntryDraftCellFocus.value = { rowId: item.id, col: actualColIdx };
   } else {
     pendingQuickEntryDraftCellFocus.value = null;
+    if (editing && (editing.rowId !== item.id || editing.col !== actualColIdx)) {
+      void commitEditFromCellBlur();
+    }
   }
 }
 

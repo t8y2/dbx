@@ -2,6 +2,7 @@ import { ref, computed, nextTick, watch, getCurrentInstance, onActivated, onBefo
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
@@ -271,9 +272,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function focusEditInput(select = true) {
     const focusInput = () => {
       if (typeof document === "undefined") return;
-      const root = getScrollerElement()?.closest("[data-grid-root]");
+      const scroller = getScrollerElement();
+      const root = scroller?.closest("[data-grid-root]");
       const input = (root ?? document).querySelector(".cell-edit-input") as HTMLInputElement | HTMLTextAreaElement | null;
-      input?.focus();
+      if (input) focusDataGridEditorWithoutScrolling(input, scroller);
       if (select && input) {
         if (input instanceof HTMLTextAreaElement && input.dataset.expandedCellEditor === "true") {
           input.setSelectionRange?.(0, 0);
@@ -399,14 +401,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function preserveScrollPosition() {
-    const el = getScrollerElement();
-    if (!el) return () => {};
-    const top = el.scrollTop;
-    const left = el.scrollLeft;
-    return () => {
-      el.scrollTop = top;
-      el.scrollLeft = left;
-    };
+    return preserveDataGridScrollPosition(getScrollerElement());
   }
 
   function readScrollPosition(): PendingChangesSnapshot["scroll"] | undefined {
@@ -457,6 +452,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     restoreScroll();
     nextTick(() => {
       restoreScroll();
+      if (typeof requestAnimationFrame !== "function") {
+        isCancelling = false;
+        return;
+      }
       let attempts = 0;
       const restoreNextFrame = () => {
         restoreScroll();
@@ -731,7 +730,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       suppressNextBlurCommit = false;
       return;
     }
-    await commitEditAndMaybeAutoSave(options);
+    const restoreScroll = preserveScrollPosition();
+    const pendingCommit = commitEditAndMaybeAutoSave(options);
+    restoreScrollAcrossFrames(restoreScroll);
+    await pendingCommit;
   }
 
   function applyCellValue(rowId: number, col: number, value: string | null, options: ApplyCellValueOptions = {}) {

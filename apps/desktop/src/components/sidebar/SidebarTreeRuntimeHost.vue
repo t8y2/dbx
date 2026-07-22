@@ -557,13 +557,35 @@ async function toggle() {
           ? favoritesNodeParentId(node)
           : `${node.connectionId}:${node.database}`;
         if (parentId && !connectionStore.isTreeNodeChildrenLoaded(parentId)) {
-          await loadFavoritesParentContent(node, connectionStore);
+          // `loadFavoritesParentContent` resolves the same path a normal
+          // database/schema expansion would (loadTables / loadSchemas /
+          // loadSqlServerDatabaseObjects), so it can take several seconds
+          // the first time a connection is opened. Surface a loading
+          // spinner on the row the user actually clicked (the
+          // placeholder or the subnode) so the user knows the click
+          // landed and the group isn't just "broken". The store flips
+          // `isLoading` on the *parent* (database) node internally; we
+          // also flip it on the favorites row itself because the user's
+          // visual anchor is here, not at the parent several rows up.
+          const previousLoading = node.isLoading;
+          node.isLoading = true;
+          try {
+            await loadFavoritesParentContent(node, connectionStore);
+            // Always re-run the refresh pass: the parent-load above
+            // replaces the placeholder's children with an empty array
+            // (see setChildren → ensureFavoritesForParentChildren), so the
+            // inner favorites need a fresh hydration before they can show
+            // real tables.
+            connectionStore.refreshFavoritesNodesInTree();
+          } finally {
+            node.isLoading = previousLoading ?? false;
+          }
+        } else {
+          // Parent already loaded — still run the refresh pass so stub
+          // placeholder rows (synthesized from fav:v1 keys) are replaced
+          // with real source nodes.
+          connectionStore.refreshFavoritesNodesInTree();
         }
-        // Always re-run the refresh pass: the parent-load above replaces
-        // the placeholder's children with an empty array (see setChildren →
-        // ensureFavoritesForParentChildren), so the inner favorites need a
-        // fresh hydration before they can show real tables.
-        connectionStore.refreshFavoritesNodesInTree();
       }
     }
     node.isExpanded = !node.isExpanded;

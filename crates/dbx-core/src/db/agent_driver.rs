@@ -403,6 +403,7 @@ pub enum AgentMethod {
     CompletionAssistantSearchV1,
     GetObjectSource,
     GetColumns,
+    GetTableComment,
     ListIndexes,
     ListForeignKeys,
     ListTriggers,
@@ -422,7 +423,7 @@ pub enum AgentMethod {
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -441,6 +442,7 @@ impl AgentMethod {
         Self::GetObjectSource,
         Self::GetTableDdl,
         Self::GetColumns,
+        Self::GetTableComment,
         Self::ListIndexes,
         Self::ListForeignKeys,
         Self::ListTriggers,
@@ -478,6 +480,7 @@ impl AgentMethod {
             Self::GetObjectSource => "get_object_source",
             Self::GetTableDdl => "get_table_ddl",
             Self::GetColumns => "get_columns",
+            Self::GetTableComment => "get_table_comment",
             Self::ListIndexes => "list_indexes",
             Self::ListForeignKeys => "list_foreign_keys",
             Self::ListTriggers => "list_triggers",
@@ -1124,6 +1127,21 @@ impl AgentDriverClient {
     ) -> Result<T, String> {
         self.call_method_with_timeout(
             AgentMethod::GetColumns,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn get_table_comment<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::GetTableComment,
             agent_schema_table_params(database, schema, table),
             timeout_duration,
         )
@@ -2258,6 +2276,7 @@ for line in sys.stdin:
         assert_eq!(AgentMethod::CompletionAssistantSearchV1.as_str(), "completion_assistant_search_v1");
         assert_eq!(AgentMethod::GetObjectSource.as_str(), "get_object_source");
         assert_eq!(AgentMethod::GetColumns.as_str(), "get_columns");
+        assert_eq!(AgentMethod::GetTableComment.as_str(), "get_table_comment");
         assert_eq!(AgentMethod::ListIndexes.as_str(), "list_indexes");
         assert_eq!(AgentMethod::ListForeignKeys.as_str(), "list_foreign_keys");
         assert_eq!(AgentMethod::ListTriggers.as_str(), "list_triggers");

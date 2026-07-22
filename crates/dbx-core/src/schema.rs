@@ -1303,6 +1303,12 @@ pub async fn get_table_comment_core(
                         .await?;
                     return oracle_table_comment_from_query_result(result);
                 }
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+                    let timeout = agent_metadata_timeout(db_config.as_ref());
+                    drop(connections);
+                    let mut client = client.lock().await;
+                    return client.get_table_comment::<Option<String>>(database, schema, table, timeout).await;
+                }
             }
         }
 

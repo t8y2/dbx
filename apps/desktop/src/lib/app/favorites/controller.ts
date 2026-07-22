@@ -1,7 +1,7 @@
 import { ref, type Ref } from "vue";
 import { uuid } from "@/lib/common/utils";
 import type { FavoriteGroup, FavoriteItem, FavoritesState, TreeNode } from "@/types/database";
-import { collectFavoritedTreeNodes, defaultGroupId, emptyFavoritesState, ensureDefaultGroup, isFavoritableTreeNode, reindexGroupOrder, removeFavoriteItem, reorderFavoriteInGroup, sanitizeFavoritesState, treeNodeFavoriteKey, upsertFavoriteItem } from "@/lib/app/favoritesTree";
+import { collectFavoritedTreeNodes, decodeFavoriteKeyToStub, defaultGroupId, emptyFavoritesState, ensureDefaultGroup, isFavoritableTreeNode, reindexGroupOrder, removeFavoriteItem, reorderFavoriteInGroup, sanitizeFavoritesState, treeNodeFavoriteKey, upsertFavoriteItem } from "@/lib/app/favoritesTree";
 import { buildFavoritesGroupSubnode } from "@/lib/table/tableTree";
 
 /** Local-storage key the controller uses to cache the structured state. The
@@ -380,7 +380,14 @@ export class FavoritesController {
    *  the items are returned flat (matching the pre-Phase-2 layout); when
    *  custom groups exist the items are bucketed under `favorites-group`
    *  subnodes. The result is suitable for direct assignment to a placeholder
-   *  node's `children` field. */
+   *  node's `children` field.
+   *
+   *  When the user has favorited items but the parent (database) children
+   *  have not been loaded yet, the resolved table/view nodes are missing
+   *  from `sourceTree`. We synthesize lightweight placeholder nodes from
+   *  each key so the favorites group is never visually empty — the
+   *  placeholder rows are replaced with real nodes the next time
+   *  `computePlaceholderChildren` runs after the parent loads. */
   computePlaceholderChildren({ connectionId, database, schema, parentId, sourceTree }: { connectionId: string; database: string; schema?: string; parentId: string; sourceTree: readonly TreeNode[] }): { children: TreeNode[]; objectCount: number } {
     const state = this._state.value;
     const scopeGroups = state.groups.filter((group) => group.connectionId === connectionId && group.database === database);
@@ -390,6 +397,22 @@ export class FavoritesController {
     const keySet = new Set(scopeItems.map((item) => item.key));
     const collected = collectFavoritedTreeNodes(sourceTree, keySet, { connectionId, database });
 
+    // Items in scope that did not resolve to a real source tree node. This
+    // happens when the user has favorited tables/views inside a database
+    // they have never expanded — the source tree has no child row to
+    // back the key. Decode the structured key so we can render a stub
+    // placeholder that names the (schema, object) pair.
+    const collectedKeys = new Set(collected.map((node) => treeNodeFavoriteKey(node)));
+    const missing = scopeItems.filter((item) => !collectedKeys.has(item.key));
+    const missingNodes = missing.map((item) => decodeFavoriteKeyToStub(item.key, connectionId, database) ?? {
+      id: `${parentId}::fav_missing::${item.key}`,
+      label: "Unresolved favorite",
+      type: "favorites-missing" as const,
+      connectionId,
+      database,
+      isExpanded: false,
+    });
+
     const groupIdByKey = new Map<string, string>();
     for (const item of scopeItems) groupIdByKey.set(item.key, item.groupId);
     const orderLookup = new Map<string, number>();
@@ -397,7 +420,7 @@ export class FavoritesController {
 
     const childrenByGroup = new Map<string, TreeNode[]>();
     for (const group of orderedGroups) childrenByGroup.set(group.id, []);
-    for (const child of collected) {
+    for (const child of [...collected, ...missingNodes]) {
       const key = treeNodeFavoriteKey(child);
       const groupId = groupIdByKey.get(key);
       if (!groupId) continue;

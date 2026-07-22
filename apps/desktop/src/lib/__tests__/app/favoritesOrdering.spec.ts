@@ -230,8 +230,14 @@ describe("FavoritesController.computePlaceholderChildren ordering", () => {
     const firstDefault = first.children.find((node) => node.label === "Default");
     expect(firstTest).toBeDefined();
     expect(firstDefault).toBeDefined();
-    expect(firstTest?.children).toEqual([]);
-    expect(firstDefault?.children).toEqual([]);
+    // Before the parent (database) children are loaded the source tree has
+    // no rows to back the keys, so the controller synthesises stub
+    // placeholder rows from each key — one per favorited item, names
+    // visible, ready to be replaced by the real nodes once `loadTables`
+    // finishes. Previously these groups rendered as empty, which left
+    // users staring at "收藏" with nothing to click.
+    expect(firstTest?.children?.map((c) => c.label)).toEqual(["table_a"]);
+    expect(firstDefault?.children?.map((c) => c.label)).toEqual(["table_b"]);
 
     // Now the sidebar host has triggered a table load; rebuild the source
     // tree with the real table nodes (mirrors what `loadTables` →
@@ -256,6 +262,15 @@ describe("FavoritesController.computePlaceholderChildren ordering", () => {
     const secondDefault = second.children.find((node) => node.label === "Default");
     expect(secondTest?.children?.map((node) => node.label)).toEqual(["table_a"]);
     expect(secondDefault?.children?.map((node) => node.label)).toEqual(["table_b"]);
+    // Regression for the "收藏夹里看不到表" bug: once the source tree is
+    // loaded, the synthesized stub rows from the first pass must be
+    // replaced by the real cloned source nodes — they share the same
+    // favorite key, so the resolved entry is the real one (not a duplicate
+    // stub). The "isStub" check below asserts the cloned row carries the
+    // same fields as the source, including any `favoritedFromId` we
+    // stamped for the virtual-scroller id-collision workaround.
+    expect(secondTest?.children?.[0]?.favoritedFromId).toBe("c1:a:a");
+    expect(secondDefault?.children?.[0]?.favoritedFromId).toBe("c1:a:b");
   });
 
   it("populates a placeholder that was attached with empty children when the parent was already loaded", () => {

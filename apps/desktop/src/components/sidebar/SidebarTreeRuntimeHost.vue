@@ -543,19 +543,26 @@ async function toggle() {
   // so the user sees their favorited tables without having to toggle a
   // favorite first.
   if (node.type === "favorites" || node.type === "favorites-group") {
-    if (!wasExpanded && node.type === "favorites") {
-      const parentId = favoritesNodeParentId(node);
-      if (parentId && node.connectionId && node.database !== undefined) {
-        if (!connectionStore.isTreeNodeChildrenLoaded(parentId)) {
+    if (!wasExpanded) {
+      // The user has just opened either the placeholder itself or one of
+      // its custom groups. Until the parent (database) children are loaded
+      // the structured favorites state has nowhere to resolve the fav:v1
+      // keys against, so the placeholder renders as a stack of empty
+      // subnodes. Trigger a parent-content load on first expansion in
+      // both cases — for `favorites-group` the subnode may have been
+      // pre-attached before the user had ever opened the database, so we
+      // cannot rely on the placeholder's own expansion to have done it.
+      if (node.connectionId && node.database !== undefined) {
+        const parentId = node.type === "favorites"
+          ? favoritesNodeParentId(node)
+          : `${node.connectionId}:${node.database}`;
+        if (parentId && !connectionStore.isTreeNodeChildrenLoaded(parentId)) {
           await loadFavoritesParentContent(node, connectionStore);
         }
-        // The parent-content load above may have replaced the placeholder's
-        // children (via `setChildren` → `ensureFavoritesForParentChildren`),
-        // but the inner favorites children still need a refresh pass so the
-        // newly-loaded tables surface inside the placeholder. We also run
-        // this when the parent was already loaded — the placeholder is
-        // attached with an empty `children` array, so it has to be hydrated
-        // before the first expand can show the favorites.
+        // Always re-run the refresh pass: the parent-load above replaces
+        // the placeholder's children with an empty array (see setChildren →
+        // ensureFavoritesForParentChildren), so the inner favorites need a
+        // fresh hydration before they can show real tables.
         connectionStore.refreshFavoritesNodesInTree();
       }
     }

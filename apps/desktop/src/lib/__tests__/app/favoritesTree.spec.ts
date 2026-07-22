@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   collectFavoritedTreeNodes,
+  decodeFavoriteKeyToStub,
   defaultGroupId,
   emptyFavoritesState,
   ensureDefaultGroup,
@@ -422,5 +423,40 @@ describe("reorderFavoriteInGroup", () => {
     upsertFavoriteItem(state, "a", group.id);
     expect(reorderFavoriteInGroup(state, "missing", 0)).toBe(false);
     expect(reorderFavoriteInGroup(state, "a", 0)).toBe(false);
+  });
+});
+
+describe("decodeFavoriteKeyToStub", () => {
+  it("round-trips through treeNodeFavoriteKey for a typical table node", () => {
+    const original = {
+      id: "c1:db1:public:users",
+      label: "users",
+      type: "table" as const,
+      connectionId: "c1",
+      database: "db1",
+      schema: "public",
+      objectName: "users",
+    };
+    const key = treeNodeFavoriteKey(original);
+    const stub = decodeFavoriteKeyToStub(key, "c1", "db1");
+    expect(stub).toBeTruthy();
+    expect(stub!.label).toBe("users");
+    expect(stub!.type).toBe("table");
+    expect(stub!.connectionId).toBe("c1");
+    expect(stub!.database).toBe("db1");
+    expect(stub!.schema).toBe("public");
+    // Re-deriving the key from the stub must produce the same key so the
+    // stub collapses into the real node once the source tree loads.
+    expect(treeNodeFavoriteKey(stub!)).toBe(key);
+  });
+
+  it("returns null for an unrelated or malformed key", () => {
+    expect(decodeFavoriteKeyToStub("not-a-fav-key", "c1", "db1")).toBeNull();
+    expect(decodeFavoriteKeyToStub("c1:pin:v1:something", "c1", "db1")).toBeNull();
+  });
+
+  it("returns null when the connectionId in the key does not match the request", () => {
+    const key = treeNodeFavoriteKey({ id: "x", label: "x", type: "table", connectionId: "c1", database: "d" });
+    expect(decodeFavoriteKeyToStub(key, "c2", "d")).toBeNull();
   });
 });

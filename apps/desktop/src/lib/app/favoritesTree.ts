@@ -20,6 +20,45 @@ export function treeNodeFavoriteKey(node: TreeNode): string {
   return `${node.connectionId}:fav:v1:${encodeURIComponent(JSON.stringify(identity))}`;
 }
 
+/** Decode a `fav:v1` key back into a stub tree node. Used when the
+ *  structured state references a favorited item whose source tree row
+ *  has not been loaded yet (the user never expanded the database).
+ *  Returns `null` when the key does not match the fav:v1 shape or any
+ *  field of the underlying identity is missing — in that case the caller
+ *  should fall back to a generic placeholder. */
+export function decodeFavoriteKeyToStub(key: string, connectionId: string, database: string): TreeNode | null {
+  const prefix = `${connectionId}:fav:v1:`;
+  if (!key.startsWith(prefix)) return null;
+  const encoded = key.slice(prefix.length);
+  let identity: (string | undefined)[];
+  try {
+    identity = JSON.parse(decodeURIComponent(encoded));
+  } catch {
+    return null;
+  }
+  const [db, schema, catalog, type, objectName, signature, stableId] = identity;
+  if (!type || !objectName || !stableId) return null;
+  // Only round-trip the well-known favoritable types; anything else (e.g.
+  // a stale or hand-crafted key) becomes null and the caller falls back
+  // to a generic placeholder.
+  if (type !== "table" && type !== "view" && type !== "materialized_view") return null;
+  // Reuse the original stable id so that, when the real source tree node
+  // loads and re-derives the key, both code paths produce the same value
+  // and the placeholder stub collapses into the real node seamlessly.
+  const node: TreeNode = {
+    id: stableId,
+    label: objectName,
+    type,
+    connectionId,
+    database: db || database,
+    schema: schema || undefined,
+    catalog: catalog || undefined,
+    isExpanded: false,
+  };
+  if (signature) node.signature = signature;
+  return node;
+}
+
 /** Empty state used when the user has never saved favorites, or after a
  *  migration that wiped out the old data. */
 export function emptyFavoritesState(): FavoritesState {

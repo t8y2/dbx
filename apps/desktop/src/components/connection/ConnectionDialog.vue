@@ -80,7 +80,7 @@ import {
   Square,
   Trash2,
 } from "@lucide/vue";
-import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
+import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
@@ -3623,11 +3623,11 @@ watch([() => form.value.db_type, () => form.value.username], () => {
 watch(
   () => connectionConfigSnapshotForVisibleDatabases(),
   (current, previous) => {
-    if (!previous || !form.value.visible_databases?.length) return;
-    if (!visibleDatabaseSelectionIsStale(previous, current)) return;
+    if (!previous || !visibleObjectFiltersNeedReset(previous, current)) return;
     form.value.visible_databases = undefined;
-    visibleDatabaseNames.value = [];
-    visibleDatabaseSelection.value = new Set();
+    form.value.visible_schemas = undefined;
+    resetVisibleDatabaseDraftState();
+    resetVisibleSchemasState();
   },
 );
 

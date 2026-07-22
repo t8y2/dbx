@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { appendVisibleDatabaseSelection, buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connection/connectionVisibleDatabases.ts";
+import { appendVisibleDatabaseSelection, buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, visibleObjectFiltersNeedReset, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connection/connectionVisibleDatabases.ts";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForConnection, filterSchemaNamesForVisiblePicker, normalizeVisibleSchemaSelection } from "../../apps/desktop/src/lib/database/visibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
@@ -103,10 +103,11 @@ test("Vastbase schema filters preserve ordinary schemas and explicit empty selec
   assert.deepEqual(normalizeVisibleSchemaSelection(["app", "missing", "app", "public"], schemas), ["app", "public"]);
 });
 
-test("Dameng hides SYSDBA by default for other users but keeps the login schema visible", () => {
-  const schemas = ["APP", "SYS", "SYSDBA", "SYSAUDITOR"];
+test("Dameng hides system schemas by default but keeps the login schema visible", () => {
+  const schemas = ["APP", "SYS", "SYSDBA", "SYSDBO", "SYSAUDITOR"];
   assert.deepEqual(filterSchemaNamesForVisiblePicker(schemas, config({ db_type: "dameng", username: "APP" })), ["APP"]);
   assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "dameng", username: "SYSDBA" }), ""), ["APP", "SYSDBA"]);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "dameng", username: "SYSDBO" }), ""), ["APP", "SYSDBO"]);
 });
 
 test("Dameng explicit schema filters can keep SYSDBA visible", () => {
@@ -124,4 +125,11 @@ test("visible database selection is stale when connection target changes", () =>
   assert.equal(visibleDatabaseSelectionIsStale(previous, config({ host: "db2.internal" })), true);
   assert.equal(visibleDatabaseSelectionIsStale(previous, config({ username: "readonly" })), true);
   assert.equal(visibleDatabaseSelectionIsStale(previous, config({ database: "admin" })), true);
+});
+
+test("visible schema filters reset when the connection target changes", () => {
+  const previous = config({ host: "db.internal", visible_schemas: { "": ["APP"] } });
+  assert.equal(visibleObjectFiltersNeedReset(previous, config({ host: "db.internal", visible_schemas: { "": ["APP"] } })), false);
+  assert.equal(visibleObjectFiltersNeedReset(previous, config({ host: "db2.internal", visible_schemas: { "": ["APP"] } })), true);
+  assert.equal(visibleObjectFiltersNeedReset(previous, config({ host: "db2.internal" })), false);
 });

@@ -51,7 +51,7 @@ const SYSTEM_DATABASE_RULES: Partial<Record<DatabaseType, ReadonlySet<string>>> 
     "xdb",
     "xs$null",
   ]),
-  dameng: new Set(["_sys_statistics", "ctisys", "dba", "sys", "sys_dba", "sys_phm", "sysauditor", "sysdba", "syssso", "system"]),
+  dameng: new Set(["_sys_statistics", "ctisys", "dba", "sys", "sys_dba", "sys_phm", "sysauditor", "sysdba", "sysdbo", "syssso", "system"]),
   saphana: new Set(["_sys_afl", "_sys_bi", "_sys_bic", "_sys_repo", "_sys_statistics", "sys"]),
   cassandra: new Set(["system", "system_auth", "system_distributed", "system_schema", "system_traces", "system_views", "system_virtual_schema"]),
   neo4j: new Set(["system"]),

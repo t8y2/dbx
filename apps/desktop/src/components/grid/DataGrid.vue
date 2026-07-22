@@ -133,6 +133,7 @@ import { canGoNextDataGridPage, hasCompleteLocalDataGridResult } from "@/lib/dat
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, dataGridSearchMatchKey, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
@@ -4328,8 +4329,8 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
           : "rgb(243, 243, 243)"
         : item.displayIndex % 2 === 1
           ? dark
-            ? "rgb(32, 32, 34)"
-            : "rgb(248, 248, 248)"
+            ? DATA_GRID_DARK_STRIPED_ROW_BG
+            : DATA_GRID_LIGHT_STRIPED_ROW_BG
           : dark
             ? "rgb(19, 20, 22)"
             : "rgb(255, 255, 255)";
@@ -9059,7 +9060,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 @reference "../../styles/globals.css";
 
 [data-grid-root] {
-  --data-grid-row-muted-bg: rgb(248, 248, 248);
+  --data-grid-row-muted-bg: rgb(243, 243, 243);
   --data-grid-row-new-bg: rgb(243, 243, 243);
   --data-grid-row-deleted-bg: rgb(255, 244, 244);
   --data-grid-cell-active-bg: rgb(232, 232, 232);
@@ -9085,7 +9086,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 [data-grid-root].data-grid--dark,
 :global(.dark) [data-grid-root] {
-  --data-grid-row-muted-bg: rgb(32, 32, 34);
+  --data-grid-row-muted-bg: rgb(40, 40, 43);
   --data-grid-row-new-bg: rgb(51, 51, 55);
   --data-grid-row-deleted-bg: rgb(55, 31, 32);
   --data-grid-cell-active-bg: rgb(64, 64, 64);
@@ -9111,7 +9112,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 @supports (background: color-mix(in oklab, white 50%, transparent)) {
   [data-grid-root] {
-    --data-grid-row-muted-bg: color-mix(in oklab, var(--muted) 30%, transparent);
+    --data-grid-row-muted-bg: color-mix(in oklab, var(--muted) 99%, var(--foreground));
     --data-grid-row-new-bg: color-mix(in oklab, var(--primary) 5%, transparent);
     --data-grid-row-deleted-bg: color-mix(in oklab, var(--destructive) 5%, transparent);
     --data-grid-cell-active-bg: color-mix(in oklab, var(--primary) 15%, transparent);

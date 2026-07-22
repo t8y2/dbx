@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { fitCanvasText } from "../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts";
+import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, resolveDataGridPaintTheme } from "../../apps/desktop/src/lib/dataGrid/dataGridPaintTheme.ts";
 
 function measureContext(charWidth = 1): CanvasRenderingContext2D {
   return {
@@ -20,4 +21,11 @@ test("fitCanvasText truncates only when text exceeds the available cell width", 
   const ctx = measureContext();
 
   assert.equal(fitCanvasText(ctx, "1234567890", 8), "12345...");
+});
+
+test("data grid paint themes use the increased striped row contrast", () => {
+  const getVar = () => "";
+
+  assert.equal(resolveDataGridPaintTheme({ getVar, isDark: false }).rowMuted, DATA_GRID_LIGHT_STRIPED_ROW_BG);
+  assert.equal(resolveDataGridPaintTheme({ getVar, isDark: true }).rowMuted, DATA_GRID_DARK_STRIPED_ROW_BG);
 });

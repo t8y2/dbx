@@ -1947,6 +1947,7 @@ export default withEnglishFallback({
     selectFiltered: "选中搜索结果",
     clear: "清空",
     showAll: "显示全部",
+    showSystemSchemas: "显示系统 Schema",
     save: "保存",
     emptySelection: "至少选择一个 Schema，或使用「显示全部」清除过滤。",
     loadFailed: "加载 Schema 失败：{message}",

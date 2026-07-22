@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { filterSchemaNamesForVisiblePicker, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import type { DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { addVisibleSchemas, initialVisibleSchemaSelection, resolveVisibleSchemaSaveAction, selectVisibleSchemas } from "./visibleSchemasDialogState";
 
@@ -16,6 +17,8 @@ const props = defineProps<{
   connectionId: string;
   connectionName: string;
   database: string;
+  databaseType?: DatabaseType;
+  username?: string;
   /** Draft mode: parent provides schemas/loading/error externally. Component emits events instead of calling store. */
   draftMode?: boolean;
   draftSchemaNames?: string[];
@@ -39,22 +42,26 @@ const searchText = ref("");
 const isLoading = ref(false);
 const isSaving = ref(false);
 const errorMessage = ref("");
+const showSystemSchemas = ref(false);
 
 const isDraftMode = computed(() => props.draftMode);
 const isLoadingState = computed(() => (isDraftMode.value ? props.draftLoading : isLoading.value));
 const errorMessageState = computed(() => (isDraftMode.value ? props.draftError || "" : errorMessage.value));
+const connection = computed(() => (isDraftMode.value ? { db_type: props.databaseType, username: props.username || "" } : connectionStore.getConfig(props.connectionId)));
+const allSchemaNames = computed(() => (isDraftMode.value ? props.draftSchemaNames || [] : schemaNames.value));
+const listedSchemaNames = computed(() => (showSystemSchemas.value ? allSchemaNames.value : filterSchemaNamesForVisiblePicker(allSchemaNames.value, connection.value)));
+const hasSystemSchemas = computed(() => filterSchemaNamesForVisiblePicker(allSchemaNames.value, connection.value).length < allSchemaNames.value.length);
 
 const filteredSchemaNames = computed(() => {
   const query = searchText.value.trim().toLowerCase();
-  const names = isDraftMode.value ? props.draftSchemaNames || [] : schemaNames.value;
+  const names = listedSchemaNames.value;
   if (!query) return names;
   return names.filter((name) => name.toLowerCase().includes(query));
 });
 const filteredSchemaItems = computed(() => filteredSchemaNames.value.map((name) => ({ name })));
 const selectedCount = computed(() => selectedNames.value.size);
 const totalCount = computed(() => {
-  const names = isDraftMode.value ? props.draftSchemaNames || [] : schemaNames.value;
-  return names.length;
+  return listedSchemaNames.value.length;
 });
 const canSaveSelection = computed(() => selectedNames.value.size > 0);
 
@@ -75,8 +82,7 @@ watch(
 function initDraftMode() {
   searchText.value = "";
   const names = props.draftSchemaNames || [];
-  // Draft callers historically use an empty array for both absent and all-selected state.
-  selectedNames.value = initialVisibleSchemaSelection(names, props.draftInitialSelection, true);
+  initializeSelection(names, props.draftInitialSelection, true);
 }
 
 async function loadSchemas() {
@@ -90,7 +96,7 @@ async function loadSchemas() {
     const names = await api.listSchemas(props.connectionId, database);
     schemaNames.value = names;
     const configured = config?.visible_schemas?.[database || ""];
-    selectedNames.value = initialVisibleSchemaSelection(names, configured);
+    initializeSelection(names, configured);
   } catch (e: any) {
     schemaNames.value = [];
     selectedNames.value = new Set();
@@ -99,6 +105,21 @@ async function loadSchemas() {
     isLoading.value = false;
   }
 }
+
+function initializeSelection(names: string[], configured: string[] | undefined, emptySelectionMeansAll = false) {
+  showSystemSchemas.value = false;
+  const hasExplicitSelection = configured !== undefined && !(emptySelectionMeansAll && configured.length === 0);
+  const initial = hasExplicitSelection ? initialVisibleSchemaSelection(names, configured) : selectVisibleSchemas(filterSchemaNamesForVisiblePicker(names, connection.value));
+  const defaultVisible = new Set(filterSchemaNamesForVisiblePicker(names, connection.value));
+  selectedNames.value = initial;
+  showSystemSchemas.value = hasExplicitSelection && [...initial].some((name) => !defaultVisible.has(name));
+}
+
+watch(showSystemSchemas, (show) => {
+  if (show) return;
+  const visible = new Set(listedSchemaNames.value);
+  selectedNames.value = new Set([...selectedNames.value].filter((name) => visible.has(name)));
+});
 
 function toggleSchema(schema: string) {
   const next = new Set(selectedNames.value);
@@ -110,8 +131,7 @@ function toggleSchema(schema: string) {
 const isSearching = computed(() => searchText.value.trim().length > 0);
 
 function selectAll() {
-  const names = isDraftMode.value ? props.draftSchemaNames || [] : schemaNames.value;
-  selectedNames.value = selectVisibleSchemas(names);
+  selectedNames.value = selectVisibleSchemas(listedSchemaNames.value);
 }
 
 function selectFiltered() {
@@ -148,7 +168,7 @@ async function showAllSchemas() {
 
 async function saveSelection() {
   if (!canSaveSelection.value || isSaving.value) return;
-  const names = isDraftMode.value ? props.draftSchemaNames || [] : schemaNames.value;
+  const names = listedSchemaNames.value;
   const normalized = normalizeVisibleSchemaSelection([...selectedNames.value], names);
   if (isDraftMode.value) {
     emit("draft:save", normalized);
@@ -210,6 +230,11 @@ async function saveSelection() {
       <p v-if="!isLoadingState && !errorMessageState && !canSaveSelection" class="text-xs text-destructive">
         {{ t("visibleSchemas.emptySelection") }}
       </p>
+
+      <label v-if="hasSystemSchemas" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
+        <input v-model="showSystemSchemas" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="isLoadingState || !!errorMessageState" />
+        <span>{{ t("visibleSchemas.showSystemSchemas") }}</span>
+      </label>
 
       <div v-if="isLoadingState || errorMessageState || !filteredSchemaItems.length" class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
         <div v-if="isLoadingState" class="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">

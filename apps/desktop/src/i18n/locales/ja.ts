@@ -1888,6 +1888,7 @@ export default withEnglishFallback({
     selectFiltered: "検索結果を選択",
     clear: "クリア",
     showAll: "すべて表示",
+    showSystemSchemas: "システムスキーマを表示",
     save: "保存",
     emptySelection: "少なくとも1つのスキーマを選択するか、すべて表示でフィルターをクリアしてください。",
     loadFailed: "スキーマの読み込みに失敗しました: {message}",

@@ -81,7 +81,7 @@ import {
   Trash2,
 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connection/connectionVisibleDatabases";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
@@ -1745,6 +1745,7 @@ watch(
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
         visible_databases: config.visible_databases,
+        visible_schemas: config.visible_schemas,
       };
       productionProtectionEnabled.value = !!config.is_production || (config.production_databases?.length ?? 0) > 0;
       connectionUrlInput.value = config.db_type === "h2" && config.connection_string ? config.connection_string : "";
@@ -2240,12 +2241,12 @@ const visibleDatabaseSummary = computed(() => {
   if (!Array.isArray(configured)) return t("visibleDatabases.showAll");
   return t("visibleDatabases.selectedCount", { selected: configured.length, total: visibleDatabaseNames.value.length });
 });
-const listedVisibleDatabaseNames = computed(() => {
-  if (visibleFilterUsesSchemas.value) return visibleDatabaseNames.value;
+const defaultListedVisibleDatabaseNames = computed(() => {
   const connection = connectionConfigSnapshotForVisibleDatabases();
-  if (visibleDatabaseShowSystem.value) return visibleDatabaseNames.value;
+  if (visibleFilterUsesSchemas.value) return filterSchemaNamesForVisiblePicker(visibleDatabaseNames.value, connection);
   return filterDatabaseNamesForVisiblePicker(visibleDatabaseNames.value, connection);
 });
+const listedVisibleDatabaseNames = computed(() => (visibleDatabaseShowSystem.value ? visibleDatabaseNames.value : defaultListedVisibleDatabaseNames.value));
 const filteredVisibleDatabaseNames = computed(() => {
   const query = visibleDatabaseSearchText.value.trim().toLowerCase();
   if (!query) return listedVisibleDatabaseNames.value;
@@ -2254,11 +2255,8 @@ const filteredVisibleDatabaseNames = computed(() => {
 const visibleDatabaseSelectedCount = computed(() => visibleDatabaseSelection.value.size);
 const visibleDatabaseTotalCount = computed(() => listedVisibleDatabaseNames.value.length);
 const visibleDatabaseCanSave = computed(() => canSaveVisibleDatabaseSelection([...visibleDatabaseSelection.value]));
-const visibleDatabaseHasSystemDatabases = computed(() => {
-  if (visibleFilterUsesSchemas.value) return false;
-  const connection = connectionConfigSnapshotForVisibleDatabases();
-  return visibleDatabaseNames.value.some((database) => isSystemDatabaseName(connection.db_type, database));
-});
+const visibleDatabaseHasSystemObjects = computed(() => defaultListedVisibleDatabaseNames.value.length < visibleDatabaseNames.value.length);
+const visibleSystemObjectsLabelKey = computed(() => (visibleFilterUsesSchemas.value ? "visibleSchemas.showSystemSchemas" : "visibleDatabases.showSystemDatabases"));
 const filteredProductionDatabaseNames = computed(() => {
   const query = productionDatabaseSearchText.value.trim().toLowerCase();
   if (!query) return productionDatabaseNames.value;
@@ -3227,10 +3225,12 @@ async function openVisibleDatabasesPicker() {
     await api.connectDb(draftConfig);
     const names = await loadVisibleDatabaseNames(draftId, draftConfig);
     visibleDatabaseNames.value = names;
+    visibleDatabaseShowSystem.value = false;
     const configuredSchemas = visibleSchemaObjectSelection.value;
-    const initialSelection = visibleFilterUsesSchemas.value ? (Array.isArray(configuredSchemas) ? normalizeVisibleSchemaSelection(configuredSchemas, names) : names) : initialVisibleDatabaseSelection(names, form.value.visible_databases, draftConfig);
+    const initialSelection = visibleFilterUsesSchemas.value ? (Array.isArray(configuredSchemas) ? normalizeVisibleSchemaSelection(configuredSchemas, names) : filterSchemaNamesForVisiblePicker(names, draftConfig)) : initialVisibleDatabaseSelection(names, form.value.visible_databases, draftConfig);
     visibleDatabaseSelection.value = new Set(initialSelection);
-    visibleDatabaseShowSystem.value = !visibleFilterUsesSchemas.value && initialSelection.some((database) => isSystemDatabaseName(draftConfig.db_type, database));
+    const defaultVisible = new Set(defaultListedVisibleDatabaseNames.value);
+    visibleDatabaseShowSystem.value = initialSelection.some((name) => !defaultVisible.has(name));
     showVisibleDatabasesDialog.value = true;
   } catch (e: any) {
     visibleDatabaseNames.value = [];
@@ -3634,7 +3634,8 @@ watch(
 watch(visibleDatabaseShowSystem, (show) => {
   if (show) return;
   const connection = connectionConfigSnapshotForVisibleDatabases();
-  visibleDatabaseSelection.value = new Set([...visibleDatabaseSelection.value].filter((database) => !isSystemDatabaseName(connection.db_type, database)));
+  const visible = new Set(visibleFilterUsesSchemas.value ? filterSchemaNamesForVisiblePicker(visibleDatabaseNames.value, connection) : filterDatabaseNamesForVisiblePicker(visibleDatabaseNames.value, connection));
+  visibleDatabaseSelection.value = new Set([...visibleDatabaseSelection.value].filter((name) => visible.has(name)));
 });
 
 watch(canUseTransportLayers, (value) => {
@@ -6250,9 +6251,9 @@ function openExternalUrl(url: string) {
         {{ t(visibleObjectEmptySelectionKey) }}
       </p>
 
-      <label v-if="visibleDatabaseHasSystemDatabases" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
+      <label v-if="visibleDatabaseHasSystemObjects" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
         <input v-model="visibleDatabaseShowSystem" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError" />
-        <span>{{ t("visibleDatabases.showSystemDatabases") }}</span>
+        <span>{{ t(visibleSystemObjectsLabelKey) }}</span>
       </label>
 
       <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
@@ -6364,6 +6365,8 @@ function openExternalUrl(url: string) {
     :connection-id="''"
     :connection-name="form.name || selectedProfile().label"
     :database="visibleSchemasDatabaseKey"
+    :database-type="form.db_type"
+    :username="form.username"
     :draft-schema-names="visibleSchemaNames"
     :draft-initial-selection="visibleSchemaInitialSelection"
     :draft-loading="isLoadingVisibleSchemas"

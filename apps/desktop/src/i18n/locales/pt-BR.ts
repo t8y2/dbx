@@ -1889,6 +1889,7 @@ export default withEnglishFallback({
     selectFiltered: "Selecionar resultados da pesquisa",
     clear: "Limpar",
     showAll: "Mostrar todos",
+    showSystemSchemas: "Mostrar schemas do sistema",
     save: "Salvar",
     emptySelection: "Selecione pelo menos um schema, ou use Mostrar todos para limpar o filtro.",
     loadFailed: "Falha ao carregar schemas: {message}",

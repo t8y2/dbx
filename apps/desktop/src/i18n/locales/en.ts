@@ -1947,6 +1947,7 @@ export default {
     selectFiltered: "Select search results",
     clear: "Clear",
     showAll: "Show all",
+    showSystemSchemas: "Show system schemas",
     save: "Save",
     emptySelection: "Select at least one schema, or use Show all to clear the filter.",
     loadFailed: "Failed to load schemas: {message}",

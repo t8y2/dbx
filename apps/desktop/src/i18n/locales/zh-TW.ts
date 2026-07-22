@@ -1889,6 +1889,7 @@ export default withEnglishFallback({
     selectFiltered: "選取搜尋結果",
     clear: "清空",
     showAll: "顯示全部",
+    showSystemSchemas: "顯示系統 Schema",
     save: "儲存",
     emptySelection: "至少選擇一個 Schema，或使用「顯示全部」清除篩選。",
     loadFailed: "載入 Schema 失敗：{message}",

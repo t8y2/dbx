@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { appendVisibleDatabaseSelection, buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleDatabaseSelectionIsStale, initialVisibleDatabaseSelection } from "../../apps/desktop/src/lib/connection/connectionVisibleDatabases.ts";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForConnection, normalizeVisibleSchemaSelection } from "../../apps/desktop/src/lib/database/visibleDatabases.ts";
+import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForConnection, filterSchemaNamesForVisiblePicker, normalizeVisibleSchemaSelection } from "../../apps/desktop/src/lib/database/visibleDatabases.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -103,8 +103,15 @@ test("Vastbase schema filters preserve ordinary schemas and explicit empty selec
   assert.deepEqual(normalizeVisibleSchemaSelection(["app", "missing", "app", "public"], schemas), ["app", "public"]);
 });
 
-test("Dameng default SYSDBA user remains selectable", () => {
-  assert.deepEqual(filterDatabaseNamesForConnection(["SYS", "SYSDBA", "SYSAUDITOR"], config({ db_type: "dameng" })), ["SYSDBA"]);
+test("Dameng hides SYSDBA by default for other users but keeps the login schema visible", () => {
+  const schemas = ["APP", "SYS", "SYSDBA", "SYSAUDITOR"];
+  assert.deepEqual(filterSchemaNamesForVisiblePicker(schemas, config({ db_type: "dameng", username: "APP" })), ["APP"]);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "dameng", username: "SYSDBA" }), ""), ["APP", "SYSDBA"]);
+});
+
+test("Dameng explicit schema filters can keep SYSDBA visible", () => {
+  const connection = config({ db_type: "dameng", username: "APP", visible_schemas: { "": ["APP", "SYSDBA"] } });
+  assert.deepEqual(filterSchemaNamesForConnection(["APP", "SYS", "SYSDBA"], connection, ""), ["APP", "SYSDBA"]);
 });
 
 test("Oracle keeps an existing DIP user visible", () => {

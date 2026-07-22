@@ -1056,8 +1056,8 @@ mod tests {
         decrypt_sensitive_payload, encrypt_sensitive_payload, forget_webdav_sync_secrets_passphrase,
         gitee_snippet_payload, normalized_remote_path, parent_collection_paths, resolve_webdav_sync_secrets_passphrase,
         save_webdav_sync_secrets_preference, scrub_connection_secrets, snippet_file_content, snippet_response_id,
-        webdav_sync_secrets_status, ApplySnapshotOptions, ConnectionSecretSnapshot, SensitiveSyncPayload,
-};
+        webdav_sync_secrets_status, ApplySnapshotOptions, ConnectionSecretSnapshot, SensitiveSyncPayload, SyncSnapshot,
+    };
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem};
     use crate::connection_secrets::NACOS_AUTH_PASSWORD_KEY;
     use crate::models::connection::{
@@ -1615,5 +1615,67 @@ mod tests {
         assert_eq!(loaded[0].name, "openai");
         assert_eq!(loaded[0].config.model, "snapshot-model");
         assert!(loaded[0].is_default);
+    }
+
+    // ---- favorites sync tests ----
+
+    #[tokio::test]
+    async fn sync_snapshot_round_trips_favorites_state() {
+        let storage = Storage::open(&temp_db_path("fav-src")).await.unwrap();
+        let favorites = serde_json::json!({
+            "groups": [{
+                "id": "conn-1::db::default",
+                "connectionId": "conn-1",
+                "database": "db",
+                "name": "Default",
+                "order": 0,
+                "collapsed": false,
+            }],
+            "items": [{
+                "key": "conn-1:fav:v1:abc",
+                "groupId": "conn-1::db::default",
+                "note": "snapshot round-trip",
+                "order": 0,
+                "createdAt": 1719000000000_i64,
+            }],
+        });
+        storage.save_favorites_state(&favorites).await.unwrap();
+
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, Some("sync-pass")).await.unwrap();
+        assert_eq!(snapshot.favorites_state, Some(favorites.clone()));
+
+        let target = Storage::open(&temp_db_path("fav-dst")).await.unwrap();
+        apply_sync_snapshot(&target, &snapshot, ApplySnapshotOptions { secrets_passphrase: Some("sync-pass") })
+            .await
+            .unwrap();
+        assert_eq!(target.load_favorites_state().await.unwrap(), Some(favorites));
+    }
+
+    #[tokio::test]
+    async fn sync_snapshot_legacy_missing_favorites_does_not_clobber_local() {
+        // A pre-favorites snapshot is deserialized with favorites_state = None.
+        // Applying it on a target that already has favorites must leave them intact.
+        let target = Storage::open(&temp_db_path("fav-legacy-target")).await.unwrap();
+        let local = serde_json::json!({
+            "groups": [],
+            "items": [{"key": "k1", "groupId": "g1", "note": "local", "order": 0, "createdAt": 1_i64}],
+        });
+        target.save_favorites_state(&local).await.unwrap();
+
+        // Build a snapshot from a fully-seeded storage then strip favorites_state to
+        // simulate a pre-feature snapshot. Using build_sync_snapshot keeps the rest
+        // of the payload strictly valid.
+        let source = Storage::open(&temp_db_path("fav-legacy-source")).await.unwrap();
+        let mut legacy_snapshot = build_sync_snapshot(&source, "test-version", None, None).await.unwrap();
+        legacy_snapshot.favorites_state = None;
+        let legacy_json = serde_json::to_value(&legacy_snapshot).unwrap();
+        let legacy_snapshot: SyncSnapshot = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy_snapshot.favorites_state.is_none());
+
+        apply_sync_snapshot(&target, &legacy_snapshot, ApplySnapshotOptions { secrets_passphrase: None })
+            .await
+            .unwrap();
+
+        assert_eq!(target.load_favorites_state().await.unwrap(), Some(local));
     }
 }

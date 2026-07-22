@@ -5125,3 +5125,42 @@ mod tests {
     // --- Favorites ---
 
     #[tokio::test]
+    async fn favorites_state_roundtrip() {
+        let db = temp_db_path("favorites-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        // Nothing persisted yet — load returns None so callers can seed defaults.
+        assert!(storage.load_favorites_state().await.unwrap().is_none());
+
+        // Persist a realistic structured state: groups + items are stored as a
+        // single JSON document, so the controller can update both atomically.
+        let state = serde_json::json!({
+            "groups": [{
+                "id": "conn-1::db::default",
+                "connectionId": "conn-1",
+                "database": "db",
+                "name": "Default",
+                "order": 0,
+                "collapsed": false,
+            }],
+            "items": [{
+                "key": "conn-1:fav:v1:abc",
+                "groupId": "conn-1::db::default",
+                "note": "Daily KPI snapshot",
+                "order": 0,
+                "createdAt": 1719000000000_i64,
+            }],
+        });
+        storage.save_favorites_state(&state).await.unwrap();
+
+        let loaded = storage.load_favorites_state().await.unwrap().expect("state should be present");
+        assert_eq!(loaded, state);
+
+        // A second save overwrites atomically (no leftover keys).
+        let replaced = serde_json::json!({"groups": [], "items": []});
+        storage.save_favorites_state(&replaced).await.unwrap();
+        assert_eq!(storage.load_favorites_state().await.unwrap(), Some(replaced));
+
+        std::fs::remove_file(&db).ok();
+    }
+}

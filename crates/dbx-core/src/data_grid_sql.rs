@@ -1795,13 +1795,17 @@ pub fn format_grid_sql_literal(
     } else {
         text
     };
+    if database_type == Some(DatabaseType::Postgres) && literal_text.contains('\\') {
+        // Escape strings have stable backslash semantics regardless of the
+        // session's standard_conforming_strings setting.
+        let escaped_text = literal_text.replace('\\', "\\\\").replace('\'', "''");
+        return format!("E'{escaped_text}'");
+    }
     let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
         literal_text.replace('\\', "\\\\").replace('\'', "\\'")
-    } else if matches!(database_type, Some(DatabaseType::Postgres) | Some(DatabaseType::Sqlite)) {
-        // Postgres (with the default standard_conforming_strings = on) and SQLite
-        // do not treat backslash as a string-literal escape character, so doubling
-        // it here would corrupt the stored value instead of escaping it. Only the
-        // quote delimiter needs escaping for these dialects.
+    } else if is_sqlite_literal_database(database_type) {
+        // SQLite-family engines do not treat backslash as a string-literal
+        // escape character, so only the quote delimiter needs escaping.
         literal_text.replace('\'', "''")
     } else {
         literal_text.replace('\\', "\\\\").replace('\'', "''")
@@ -1812,6 +1816,13 @@ pub fn format_grid_sql_literal(
     } else {
         escaped
     }
+}
+
+fn is_sqlite_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+    )
 }
 
 fn format_grid_save_sql_literal(
@@ -4761,24 +4772,27 @@ mod tests {
     }
 
     #[test]
-    fn postgres_and_sqlite_literals_do_not_double_escape_backslashes() {
-        // Regression test: Postgres (standard_conforming_strings = on, the default
-        // since 9.1) and SQLite do not treat backslash as a string escape character,
-        // so a single backslash in the cell value must stay a single backslash in
-        // the generated literal.
+    fn postgres_literals_use_escape_strings_for_stable_backslash_semantics() {
         let value = json!(r#"{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}"#);
         assert_eq!(
             format_grid_sql_literal(&value, Some(DatabaseType::Postgres), None),
-            r#"'{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}'"#
+            r#"E'{"json_raw":"{\\"foo\\":1,\\"bar\\":\\"sometext\\"}"}'"#
         );
-        assert_eq!(
-            format_grid_sql_literal(&value, Some(DatabaseType::Sqlite), None),
-            r#"'{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}'"#
-        );
-
-        // Single quotes must still be doubled for both dialects.
         assert_eq!(format_grid_sql_literal(&json!("it's"), Some(DatabaseType::Postgres), None), "'it''s'");
-        assert_eq!(format_grid_sql_literal(&json!("it's"), Some(DatabaseType::Sqlite), None), "'it''s'");
+    }
+
+    #[test]
+    fn sqlite_family_literals_do_not_double_escape_backslashes() {
+        let value = json!(r#"{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}"#);
+        for database_type in
+            [DatabaseType::Sqlite, DatabaseType::Rqlite, DatabaseType::Turso, DatabaseType::CloudflareD1]
+        {
+            assert_eq!(
+                format_grid_sql_literal(&value, Some(database_type), None),
+                r#"'{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}'"#
+            );
+            assert_eq!(format_grid_sql_literal(&json!("it's"), Some(database_type), None), "'it''s'");
+        }
     }
 
     #[test]

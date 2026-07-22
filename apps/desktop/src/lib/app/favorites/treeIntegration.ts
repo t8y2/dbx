@@ -2,13 +2,20 @@ import type { TreeNode } from "@/types/database";
 import { buildFavoritesPlaceholderNode, favoritesNodeParentId, isFavoritesPlaceholderNode } from "@/lib/table/tableTree";
 import type { FavoritesController } from "@/lib/app/favorites/controller";
 
-/** Ensure every database/schema in the tree has a favorites placeholder as
+/** Ensure every database node in the tree has a favorites placeholder as
  *  its first child. Walks the tree in place and then calls the controller to
- *  populate the placeholders' children. */
+ *  populate the placeholders' children.
+ *
+ *  Favorites are scoped to (connection, database), so the placeholder only
+ *  lives on `database` nodes. Sub-views like `schema`, `linked-server-schema`
+ *  and `doris-catalog` do NOT get their own placeholder — that would cause
+ *  the same favorited item to render under both the database node and every
+ *  schema/catalog below it (visible on PostgreSQL where every schema was
+ *  showing its own duplicated "Favorites" group). */
 export function ensureFavoritesPlaceholdersInTree(tree: TreeNode[], controller: FavoritesController): void {
   const visit = (nodes: TreeNode[]) => {
     for (const node of nodes) {
-      if (node.type === "database" || node.type === "schema" || node.type === "linked-server-schema" || node.type === "doris-catalog") {
+      if (node.type === "database") {
         ensurePlaceholderForParent(node);
       }
       if (node.children) visit(node.children);

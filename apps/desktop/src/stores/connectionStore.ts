@@ -1194,8 +1194,11 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function ensureFavoritesForParentChildren(parent: TreeNode, children: TreeNode[]): TreeNode[] {
-    const placeholderOwners: ReadonlySet<TreeNode["type"]> = new Set(["database", "schema", "linked-server-schema", "doris-catalog"]);
-    if (!placeholderOwners.has(parent.type)) return children;
+    // Favorites are scoped to (connection, database) — attach the placeholder
+    // ONLY to database nodes. Per-schema/per-catalog placeholders would
+    // duplicate every favorited item below the database (PG, Doris catalog,
+    // SQL Server linked-server-schema all suffered from this).
+    if (parent.type !== "database") return children;
     if (!parent.connectionId || parent.database === undefined) return children;
     // The placeholder was already attached on an earlier setChildren call —
     // keep the existing reference (along with any loaded favorite children)
@@ -1967,7 +1970,9 @@ export const useConnectionStore = defineStore("connection", () => {
     const pinSet = pinnedTreeNodeIds.value;
     const visit = (nodes: TreeNode[]) => {
       for (const node of nodes) {
-        if (node.type === "database" || node.type === "schema" || node.type === "linked-server-schema" || node.type === "doris-catalog") {
+        // Only database nodes get a favorites placeholder; see
+        // ensureFavoritesForParentChildren for the rationale.
+        if (node.type === "database") {
           ensureFavoritesPlaceholderForParent(node);
         }
         if (node.children) visit(node.children);

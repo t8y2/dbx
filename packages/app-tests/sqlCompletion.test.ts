@@ -158,6 +158,11 @@ test("suggests database-specific data types and functions", () => {
     columnsByTable: new Map(),
     databaseType: "mysql",
   });
+  const mysqlDateSubItems = buildSqlCompletionItems("select date_s", "select date_s".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
   const mysqlSubstringIndexItems = buildSqlCompletionItems("select substring_i", "select substring_i".length, {
     tables: [],
     columnsByTable: new Map(),
@@ -184,7 +189,14 @@ test("suggests database-specific data types and functions", () => {
   assert.ok(mysqlCurrentTimestampItems.some((item) => item.type === "function" && item.label === "CURRENT_TIME"));
   assert.ok(mysqlCurdateItems.some((item) => item.type === "function" && item.label === "CURDATE"));
   assert.ok(mysqlIfnullItems.some((item) => item.type === "function" && item.label === "IFNULL"));
-  assert.ok(mysqlDateAddItems.some((item) => item.type === "function" && item.label === "DATE_ADD"));
+  assert.equal(
+    mysqlDateAddItems.find((item) => item.type === "function" && item.label === "DATE_ADD")?.apply,
+    "DATE_ADD(${date}, INTERVAL ${expr} ${unit})",
+  );
+  assert.equal(
+    mysqlDateSubItems.find((item) => item.type === "function" && item.label === "DATE_SUB")?.apply,
+    "DATE_SUB(${date}, INTERVAL ${expr} ${unit})",
+  );
   assert.ok(mysqlSubstringIndexItems.some((item) => item.type === "function" && item.label === "SUBSTRING_INDEX"));
   assert.ok(mysqlLeftItems.some((item) => item.type === "function" && item.label === "LEFT"));
   assert.ok(mysqlLeftItems.some((item) => item.type === "keyword" && item.label === "LEFT"));
@@ -192,6 +204,28 @@ test("suggests database-specific data types and functions", () => {
     postgresDateItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"),
     false,
   );
+
+  const mysqlDateTypeItems = buildSqlCompletionItems("CREATE TABLE t (d dat", "CREATE TABLE t (d dat".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlTimeTypeItems = buildSqlCompletionItems("CREATE TABLE t (tm tim", "CREATE TABLE t (tm tim".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  assert.equal(mysqlDateTypeItems[0]?.label, "DATE");
+  assert.equal(mysqlDateTypeItems.some((item) => item.type === "function" && item.label === "DATE"), false);
+  assert.equal(mysqlTimeTypeItems[0]?.label, "TIME");
+  assert.equal(mysqlTimeTypeItems.some((item) => item.type === "function" && item.label === "TIME"), false);
+
+  const mysqlCreateViewItems = buildSqlCompletionItems("CREATE VIEW v AS SELECT dat", "CREATE VIEW v AS SELECT dat".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  assert.ok(mysqlCreateViewItems.some((item) => item.type === "function" && item.label === "DATE"));
 });
 
 test("suggests Oracle SQL, PL/SQL, and data type keywords", () => {

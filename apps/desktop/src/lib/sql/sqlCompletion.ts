@@ -928,8 +928,8 @@ const SQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["DATE_FORMAT", ["date", "format"]],
   ["DATEDIFF", ["date1", "date2"]],
   ["TIMESTAMPDIFF", ["unit", "datetime_expr1", "datetime_expr2"]],
-  ["DATE_ADD", ["date", "interval"]],
-  ["DATE_SUB", ["date", "interval"]],
+  ["DATE_ADD", ["date", "INTERVAL expr unit"]],
+  ["DATE_SUB", ["date", "INTERVAL expr unit"]],
   ["EXTRACT", ["unit", "date"]],
   ["YEAR", ["date"]],
   ["MONTH", ["date"]],
@@ -1017,8 +1017,8 @@ const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["UTC_TIMESTAMP", []],
   ["DATE", ["expression"]],
   ["TIME", ["expression"]],
-  ["DATE_ADD", ["date", "interval"]],
-  ["DATE_SUB", ["date", "interval"]],
+  ["DATE_ADD", ["date", "INTERVAL expr unit"]],
+  ["DATE_SUB", ["date", "INTERVAL expr unit"]],
   ["DATEDIFF", ["date1", "date2"]],
   ["TIMESTAMPDIFF", ["unit", "datetime_expr1", "datetime_expr2"]],
   ["YEAR", ["date"]],
@@ -1134,6 +1134,11 @@ const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, str
   sqlserver: SQLSERVER_FUNCTION_SIGNATURES,
   manticoresearch: MANTICORESEARCH_FUNCTION_SIGNATURES,
 };
+
+const MYSQL_FUNCTION_APPLY_TEMPLATES = new Map<string, string>([
+  ["DATE_ADD", "DATE_ADD(${date}, INTERVAL ${expr} ${unit})"],
+  ["DATE_SUB", "DATE_SUB(${date}, INTERVAL ${expr} ${unit})"],
+]);
 
 const COMMON_SQL_FUNCTION_NAMES = new Set([
   "COUNT",
@@ -1348,6 +1353,7 @@ export interface SqlCompletionContext {
   autoAliasTableCompletions: boolean;
   tableAliasAfterCursor?: boolean;
   contextKind: SqlCompletionContextKind;
+  dataTypeContext: boolean;
 }
 
 export interface SqlFunctionSignatureHelp {
@@ -1439,7 +1445,7 @@ class SqlCompletionProvider {
         this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase));
       }
       if (!preferReferencedColumns || context.suggestRoutines) {
-        const functionItems = buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType);
+        const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType);
         this.items.push(...(preferReferencedColumns ? functionItems.filter((item) => item.label.toLowerCase().startsWith(context.prefix.toLowerCase())) : functionItems));
         if (isOracleLikeDatabase(this.databaseType)) {
           this.items.push(...buildOracleSystemValueItems(context.prefix, this.input.keywordCase));
@@ -1928,6 +1934,7 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
   const suggestRoutines = inCallRoutineContext || oracleTableFunctionContext || inPotentialPackageMemberContext || (!exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && !updateInfo?.inSetClause && prefix.length >= 2);
 
   const statementKind = detectStatementKind(beforeCursor || fullStatement);
+  const dataTypeContext = isCreateTableColumnTypeContext(beforeToken);
   const preferredKeywords = qualifier ? [] : preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo);
   const contextKind = detectCompletionContextKind({
     qualifier,
@@ -1975,7 +1982,28 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
     autoAliasTableCompletions,
     tableAliasAfterCursor,
     contextKind,
+    dataTypeContext,
   };
+}
+
+function isCreateTableColumnTypeContext(beforeToken: string): boolean {
+  const cleaned = stripSqlLiterals(beforeToken);
+  if (!/^\s*create\s+table\b/i.test(cleaned)) return false;
+
+  const bodyStart = cleaned.indexOf("(");
+  if (bodyStart < 0) return false;
+
+  let depth = 0;
+  let segmentStart = bodyStart + 1;
+  for (let index = bodyStart + 1; index < cleaned.length; index += 1) {
+    const char = cleaned[index];
+    if (char === "(") depth += 1;
+    else if (char === ")") depth = Math.max(0, depth - 1);
+    else if (char === "," && depth === 0) segmentStart = index + 1;
+  }
+
+  const segment = cleaned.slice(segmentStart).trim();
+  return /^(?:[A-Za-z_][\w$]*|`[^`]+`|"[^"]+"|\[[^\]]+\])$/.test(segment);
 }
 
 function removeActiveTableCompletionReference(referencedTables: SqlCompletionReferencedTable[], prefix: string, qualifier?: string): SqlCompletionReferencedTable[] {
@@ -4100,7 +4128,7 @@ function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<str
       label: name,
       type: "function" as const,
       detail: functionDescriptions.get(name) ?? "function",
-      apply: `${name}(${paramStr})`,
+      apply: (databaseType === "mysql" ? MYSQL_FUNCTION_APPLY_TEMPLATES.get(name) : undefined) ?? `${name}(${paramStr})`,
       boost: computeBoost(name, prefix) + 300,
     });
   }

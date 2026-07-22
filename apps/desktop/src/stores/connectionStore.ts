@@ -1860,108 +1860,27 @@ export const useConnectionStore = defineStore("connection", () => {
    *  tree, reflecting the latest favorites state. Used after favorite toggles
    *  and after tree rebuilds so the favorites group is always in sync. */
   function refreshFavoritesNodesInTree() {
-    const state = favoritesState.value;
     const updatedParents = new Set<string>();
     const visit = (nodes: TreeNode[]) => {
       for (const node of nodes) {
         if (isFavoritesPlaceholderNode(node) && node.connectionId !== undefined && node.database !== undefined) {
-          const connectionId = node.connectionId;
-          const database = node.database;
-          const schema = node.schema;
-          const scopeGroups = state.groups.filter((group) => group.connectionId === connectionId && group.database === database);
-          const scopeItems = state.items.filter((item) => scopeGroups.some((group) => group.id === item.groupId));
-          // Sort scope groups by their persisted `order` so the rendered
-          // subnodes match the user's custom ordering. The default group
-          // seeds at order 0 and is therefore always first unless the user
-          // has manually reordered.
-          const orderedGroups = scopeGroups.slice().sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
-
-          // Collect the favorited nodes from the source tree once and bucket
-          // them by favorite key. The key set is rebuilt from the structured
-          // state to stay consistent with what the user just persisted.
-          const keySet = new Set(scopeItems.map((item) => item.key));
-          const collected = collectFavoritedTreeNodes(treeNodes.value, keySet, { connectionId, database });
-
-          // Group the collected nodes by their favorite's `groupId`. We map
-          // the favorite key → groupId once and reuse it for every match.
-          const groupIdByKey = new Map<string, string>();
-          for (const item of scopeItems) groupIdByKey.set(item.key, item.groupId);
-
-          const orderLookup = new Map<string, number>();
-          for (const item of scopeItems) orderLookup.set(item.key, item.order);
-
-          const childrenByGroup = new Map<string, TreeNode[]>();
-          for (const group of orderedGroups) childrenByGroup.set(group.id, []);
-          for (const child of collected) {
-            const key = treeNodeFavoriteKey(child);
-            const groupId = groupIdByKey.get(key);
-            if (!groupId) continue;
-            const bucket = childrenByGroup.get(groupId);
-            if (!bucket) continue;
-            // Mirror the controller: each cloned favorite gets a unique tree
-            // id so it can sit alongside the source table/view in the flat
-            // tree without colliding in the virtual scroller. Preserve the
-            // real source id (in case `child` is itself a previously-cloned
-            // node carried over from the last render) so the order lookup
-            // below keeps working across re-renders.
-            const stableSourceId = child.favoritedFromId ?? child.id;
-            bucket.push({
-              ...child,
-              id: `${child.id}::fav_clone::${groupId}`,
-              favoritedFromId: stableSourceId,
-              children: undefined,
-              hiddenChildren: undefined,
-            });
-          }
-
-          // Within each group, sort items by their persisted order so the
-          // user's manual reorder (move up/down/top/bottom) sticks.
-          for (const bucket of childrenByGroup.values()) {
-            bucket.sort((left, right) => {
-              const lo = orderLookup.get(treeNodeFavoriteKey(left));
-              const ro = orderLookup.get(treeNodeFavoriteKey(right));
-              if (lo !== undefined && ro !== undefined) return lo - ro;
-              if (lo !== undefined) return -1;
-              if (ro !== undefined) return 1;
-              return left.label.localeCompare(right.label);
-            });
-          }
-
-          // When the user has not created any custom groups, fall back to
-          // the pre-Phase-2 flat layout: items appear directly under the
-          // favorites placeholder so a single default group stays invisible.
-          const hasCustomGroups = orderedGroups.length > 1 || (orderedGroups[0] && orderedGroups[0].id !== defaultGroupId(connectionId, database));
-          if (!hasCustomGroups) {
-            const flat = childrenByGroup.get(orderedGroups[0]?.id ?? defaultGroupId(connectionId, database)) ?? [];
-            node.children = flat;
-            node.objectCount = flat.length;
-          } else {
-            const subnodes: TreeNode[] = [];
-            for (const group of orderedGroups) {
-              const items = childrenByGroup.get(group.id) ?? [];
-              // Mirror the controller: render every group, including an
-              // empty default — the user must always be able to see (and
-              // add to) the default target, otherwise moved-out items
-              // leave the user with no visible way back in.
-              const subnode = buildFavoritesGroupSubnode({
-                parentId: node.id,
-                group: {
-                  id: group.id,
-                  name: group.name,
-                  connectionId: group.connectionId,
-                  database: group.database,
-                  schema: schema,
-                  collapsed: group.collapsed,
-                },
-              });
-              subnode.objectCount = items.length;
-              subnode.children = items;
-              subnodes.push(subnode);
-            }
-            node.children = subnodes;
-            node.objectCount = scopeItems.length;
-          }
-
+          // Delegate to the controller so the sidebar tree, the right-click
+          // menu, and the test suite all observe the same layout. The
+          // controller is the single source of truth for "how do the
+          // favorites render given the current state + source tree"; the
+          // copy that used to live here had drifted out of sync (it
+          // missed the missing-node stub fallback, so first-time
+          // expansion of a connection rendered an empty group subnode
+          // even when the structured state had items for it).
+          const next = favoritesController.computePlaceholderChildren({
+            connectionId: node.connectionId,
+            database: node.database,
+            schema: node.schema,
+            parentId: node.id,
+            sourceTree: treeNodes.value,
+          });
+          node.children = next.children;
+          node.objectCount = next.objectCount;
           const parentId = favoritesNodeParentId(node);
           if (parentId) updatedParents.add(parentId);
         }

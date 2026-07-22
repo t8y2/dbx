@@ -273,6 +273,60 @@ describe("FavoritesController.computePlaceholderChildren ordering", () => {
     expect(secondDefault?.children?.[0]?.favoritedFromId).toBe("c1:a:b");
   });
 
+  it("renders a single default group flat (no group subnodes) when only the default exists", () => {
+    // Regression: the user's screenshot showed an empty favorites
+    // placeholder even when the (connection, database) scope only had
+    // the default group — the controller was mistakenly bucketing items
+    // under a "Default" subnode instead of returning them flat. The
+    // flat layout is the pre-Phase-2 default; the grouped layout should
+    // only kick in when the user has created at least one custom group.
+    const controller = buildController();
+    const tableA = buildTableNode("c1:a:a", "table_a", "c1", "a");
+    const tableB = buildTableNode("c1:a:b", "table_b", "c1", "a");
+    const placeholder = buildPlaceholder("c1", "a");
+    controller.toggleTreeNodeFavorite(tableA);
+    controller.toggleTreeNodeFavorite(tableB);
+
+    const sourceTree: TreeNode[] = [
+      {
+        id: "c1:a",
+        label: "a",
+        type: "database",
+        connectionId: "c1",
+        database: "a",
+        children: [tableA, tableB],
+      },
+    ];
+    const { children } = controller.computePlaceholderChildren({
+      connectionId: "c1",
+      database: "a",
+      parentId: placeholder.id,
+      sourceTree,
+    });
+    // Only the default group exists → no "Default" subnode, items
+    // returned flat. This matches the layout the rest of the app
+    // expects when the user has never opened the "Edit Groups" dialog.
+    expect(children.map((node) => node.label)).toEqual(["table_a", "table_b"]);
+  });
+
+  it("renders stub rows flat (no group subnodes) when only the default exists AND the source tree is empty", () => {
+    // The first-time-open path: only the default group, no source tree
+    // rows yet. The user still must see *something* under the
+    // placeholder — flat stub rows, not a single "Default" subnode.
+    const controller = buildController();
+    const tableA = buildTableNode("c1:a:a", "table_a", "c1", "a");
+    const placeholder = buildPlaceholder("c1", "a");
+    controller.toggleTreeNodeFavorite(tableA);
+
+    const { children } = controller.computePlaceholderChildren({
+      connectionId: "c1",
+      database: "a",
+      parentId: placeholder.id,
+      sourceTree: [],
+    });
+    expect(children.map((node) => node.label)).toEqual(["table_a"]);
+  });
+
   it("populates a placeholder that was attached with empty children when the parent was already loaded", () => {
     // Reproduce the "open a connection, expand the database (which calls
     // `setChildren` and attaches an empty-children placeholder), then

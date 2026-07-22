@@ -28,9 +28,6 @@ import {
   Star,
   StarOff,
   ArrowRightLeft,
-  ChevronUp,
-  ChevronDown,
-  ChevronsUp,
   ChevronsDown,
   NotebookPen,
   Notebook,
@@ -1380,30 +1377,6 @@ function pickGroupToDelete(groupId: string) {
   if (!group) return;
   if (!window.confirm(t("contextMenu.favoritesGroup.deleteGroupConfirm"))) return;
   connectionStore.deleteFavoriteGroup(group.id);
-}
-
-function moveFavoriteUp() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.shiftFavoriteOrder(key, -1);
-}
-
-function moveFavoriteDown() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.shiftFavoriteOrder(key, 1);
-}
-
-function moveFavoriteToTop() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.moveFavoriteToEdge(key, "top");
-}
-
-function moveFavoriteToBottom() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.moveFavoriteToEdge(key, "bottom");
 }
 
 function removeFavorite() {
@@ -4413,18 +4386,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
       const key = favoriteKeyForNode(node);
       if (key) {
         const note = connectionStore.getFavoriteNote(key) ?? "";
-        const siblings = connectionStore.getFavoriteSiblingsForKey(key);
-        const canMoveUp = siblings.index > 0;
-        const canMoveDown = siblings.index >= 0 && siblings.index < siblings.items.length - 1;
         items.push({ label: t("contextMenu.favoritesGroup.editNote"), action: openNoteDialogForActive, icon: NotebookPen });
         if (note) {
           items.push({ label: t("contextMenu.favoritesGroup.clearNote"), action: clearFavoriteNote, icon: Notebook });
         }
-        items.push({ label: "", separator: true });
-        if (canMoveUp) items.push({ label: t("contextMenu.favoritesGroup.moveToTop"), action: moveFavoriteToTop, icon: ChevronsUp });
-        if (canMoveUp) items.push({ label: t("contextMenu.favoritesGroup.moveUp"), action: moveFavoriteUp, icon: ChevronUp });
-        if (canMoveDown) items.push({ label: t("contextMenu.favoritesGroup.moveDown"), action: moveFavoriteDown, icon: ChevronDown });
-        if (canMoveDown) items.push({ label: t("contextMenu.favoritesGroup.moveToBottom"), action: moveFavoriteToBottom, icon: ChevronsDown });
+        // Reordering is handled by drag-and-drop on the favorites row
+        // itself; the right-click menu is intentionally kept narrow so
+        // the user does not have to scan through redundant "move" actions
+        // when the table view already supports direct manipulation.
         items.push({ label: "", separator: true });
         items.push({ label: t("contextMenu.removeFromFavorites"), action: removeFavorite, icon: StarOff });
       }

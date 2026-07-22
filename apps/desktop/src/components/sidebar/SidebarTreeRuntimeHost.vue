@@ -4337,24 +4337,44 @@ function treeItemMenuItems(): ContextMenuItem[] {
       action: togglePin,
       icon: Pin,
     });
-    // "Add to Favorites" is always rendered as a submenu listing every group
-    // in the active (connection, database) scope. Picking a group adds the
-    // node (or moves it when already favorited); picking the current group
-    // removes the item so a single menu covers add / move / remove.
+    // "Add to Favorites" is rendered as a submenu listing every group in the
+    // active (connection, database) scope. Picking a group adds the node (or
+    // moves it when already favorited); picking the current group removes the
+    // item so a single menu covers add / move / remove.
+    //
+    // Note: the entry must show even when the database has NO groups yet —
+    // that is the "first time ever right-clicking a table on this connection"
+    // case. Without this branch the user can never start favoriting because
+    // the placeholder group is lazy-created only after the first item exists.
     if (isFavoritable.value && node.connectionId && node.database !== undefined) {
       const groups = connectionStore.getFavoriteGroupsForDatabase(node.connectionId, node.database);
+      let groupSubmenu: ContextMenuItem[];
       if (groups.length > 0) {
         const currentKey = favoriteKeyForNode(node);
         const currentGroup = currentKey ? connectionStore.getFavoriteGroupForKey(currentKey) : null;
-        const groupSubmenu: ContextMenuItem[] = groups.map((group) => {
+        groupSubmenu = groups.map((group) => {
           const isCurrent = currentGroup?.id === group.id;
           return {
             label: isCurrent ? `✓ ${group.name}` : group.name,
             action: () => addOrMoveFavoriteToGroup(group.id),
           };
         });
-        items.push({ label: t("contextMenu.addToFavorites"), children: groupSubmenu, icon: Star });
+      } else {
+        // Lazily attach the default group on the first pick so the placeholder
+        // shows up immediately and the user can keep favoriting more items.
+        const connectionId = node.connectionId;
+        const database = node.database;
+        groupSubmenu = [
+          {
+            label: t("contextMenu.favoritesGroup.defaultGroupName"),
+            action: () => {
+              const groupId = connectionStore.addFavoriteToDefaultGroup(node);
+              if (groupId) void groupId;
+            },
+          },
+        ];
       }
+      items.push({ label: t("contextMenu.addToFavorites"), children: groupSubmenu, icon: Star });
     }
     // When the item is already favorited, expose note + sort actions. The
     // "Move to Group" submenu is intentionally omitted here because the

@@ -1058,6 +1058,16 @@ export const useConnectionStore = defineStore("connection", () => {
     return favoritesController.addFavoriteToGroup(node, groupId);
   }
 
+  /** Add `node` to the lazily-created default group for its
+   *  (connection, database) scope. Returns the group id on success so the
+   *  caller can chain (e.g. follow-up rename or move). Used as the "first
+   *  pick ever" entry in the favorites submenu, when no groups exist yet. */
+  function addFavoriteToDefaultGroup(node: TreeNode): string | null {
+    if (!node.connectionId || node.database === undefined) return null;
+    const groupId = defaultGroupId(node.connectionId, node.database);
+    return favoritesController.addFavoriteToGroup(node, groupId) ? groupId : null;
+  }
+
   function removeFavorite(node: TreeNode | string): boolean {
     return favoritesController.removeFavorite(node);
   }
@@ -5816,6 +5826,7 @@ export const useConnectionStore = defineStore("connection", () => {
     getFavoriteKeyForNode,
     toggleTreeNodeFavorite,
     addFavoriteToGroup,
+    addFavoriteToDefaultGroup,
     removeFavorite,
     updateFavoriteNote,
     moveFavoriteToGroup,

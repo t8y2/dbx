@@ -203,11 +203,22 @@ export class FavoritesController {
   }
 
   /** Add the node to a specific group. Returns false if the node is already
-   *  favorited (use `moveFavoriteToGroup` to re-target instead). */
+   *  favorited (use `moveFavoriteToGroup` to re-target instead).
+   *
+   *  If `groupId` matches the default group id for the node's scope and
+   *  that group does not exist yet, it is lazily created so the item is
+   *  never orphaned. This makes the "first time ever" code path safe to
+   *  call without first going through `createFavoriteGroup`. */
   addFavoriteToGroup(node: TreeNode, groupId: string): boolean {
     if (!isFavoritableTreeNode(node)) return false;
+    if (!node.connectionId || node.database === undefined) return false;
     const key = treeNodeFavoriteKey(node);
     if (this._state.value.items.some((item) => item.key === key)) return false;
+    const isDefaultId = groupId === defaultGroupId(node.connectionId, node.database);
+    const groupExists = this._state.value.groups.some((group) => group.id === groupId);
+    if (isDefaultId && !groupExists) {
+      ensureDefaultGroup(this._state.value, node.connectionId, node.database);
+    }
     upsertFavoriteItem(this._state.value, key, groupId);
     this.flush();
     return true;

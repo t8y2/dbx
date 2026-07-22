@@ -65,6 +65,43 @@ describe("FavoritesController.getFavoriteGroupsForDatabase", () => {
   });
 });
 
+describe("FavoritesController.addFavoriteToGroup — first-time default group", () => {
+  it("lazily creates the default group when addFavoriteToGroup is called for an empty database", () => {
+    // Regression: the sidebar right-click menu only ever shows "Add to
+    // Favorites" → "Default" when a connection has no favorites yet. The
+    // controller must materialize the default group on demand so the item
+    // is not orphaned (i.e. pointing at a group id that does not exist).
+    const controller = buildController();
+    const table = buildTable("c1:a:t1", "t1", "c1", "a");
+    expect(controller.getFavoriteGroupsForDatabase("c1", "a")).toEqual([]);
+
+    const ok = controller.addFavoriteToGroup(table, "c1::a::default");
+    expect(ok).toBe(true);
+
+    const groups = controller.getFavoriteGroupsForDatabase("c1", "a");
+    expect(groups).toHaveLength(1);
+    expect(groups[0].id).toBe("c1::a::default");
+    expect(groups[0].name).toBe("Default");
+
+    const key = controller.getFavoriteKeyForNode(table);
+    expect(key).not.toBeNull();
+    expect(controller.getFavoriteGroupForKey(key!)?.id).toBe("c1::a::default");
+  });
+
+  it("does not auto-create the default group when groupId is a custom, non-existing id", () => {
+    // Defensive: only the well-known default id should be lazy-created. A
+    // typo or stale id from elsewhere must NOT silently materialize a new
+    // group, otherwise the user's data could be split unexpectedly.
+    const controller = buildController();
+    const table = buildTable("c1:a:t1", "t1", "c1", "a");
+    expect(controller.getFavoriteGroupsForDatabase("c1", "a")).toEqual([]);
+
+    const ok = controller.addFavoriteToGroup(table, "c1::a::made-up-id");
+    expect(ok).toBe(true);
+    expect(controller.getFavoriteGroupsForDatabase("c1", "a")).toEqual([]);
+  });
+});
+
 describe("FavoritesController.addFavoriteToGroup", () => {
   it("adds an unfavorited table to the chosen group", () => {
     const controller = buildController();

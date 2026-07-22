@@ -802,6 +802,7 @@ export default withEnglishFallback({
   grid: {
     rows: "{count}行",
     totalRows: "{count}件表示",
+    loadedRows: "{count}件読み込み済み",
     totalRowCount: "（全{count}件）",
     totalRowCountLoading: "（カウント中...）",
     calculateTotalRows: "総行数をカウント",
@@ -1162,7 +1163,7 @@ export default withEnglishFallback({
       "metadata-unavailable": "DBXがテーブルメタデータを読み込めなかったため、結果の編集は無効です。",
     },
     sortUnsupported: "このSQLは完全な結果の並び替えをサポートしていません。単一のSELECTクエリで再試行してください。",
-    truncatedHint: "結果は{count}行に切り詰められました。フッターのページネーションを使用するか、1ページあたりの行数を調整してください。",
+    truncatedHint: "結果は{count}行を読み込んだ時点で切り詰められました。フッターのページネーションで読み込み済みデータを参照できます。完全な結果のエクスポート時はデータベースへ再問い合わせします。",
     loadingMore: "さらにデータを読み込み中...",
     allLoaded: "すべて読み込み済み",
     previewSqlEmpty: "プレビューする保留中のSQL変更はありません",

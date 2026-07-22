@@ -26,8 +26,10 @@ use crate::xlsx_export::{
     XlsxWorksheetData,
 };
 use serde_json::Value;
-use sqlparser::ast::{GroupByExpr, ObjectNamePart, OrderByKind, SelectItem, SetExpr, Statement, TableFactor};
-use sqlparser::dialect::GenericDialect;
+use sqlparser::ast::{
+    GroupByExpr, ObjectName, ObjectNamePart, ObjectType, OrderByKind, SelectItem, SetExpr, Statement, TableFactor,
+};
+use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use tokio_util::sync::CancellationToken;
 
@@ -61,6 +63,8 @@ pub struct QueryResultExportRequest {
     pub schema: Option<String>,
     pub sql: String,
     pub query_base_sql: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup_sql: Vec<String>,
     pub database_type: DatabaseType,
     #[serde(default)]
     pub use_agent_cursor: bool,
@@ -83,6 +87,33 @@ pub struct QueryResultExportRequest {
     pub execution_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date_time_format: Option<String>,
+}
+
+fn safe_postgres_temp_setup_sql(setup_sql: &[String]) -> Option<Vec<String>> {
+    if setup_sql.is_empty() {
+        return None;
+    }
+
+    let dialect = PostgreSqlDialect {};
+    let mut temporary_tables: Vec<ObjectName> = Vec::new();
+    for sql in setup_sql {
+        let statements = Parser::parse_sql(&dialect, sql).ok()?;
+        let [statement] = statements.as_slice() else {
+            return None;
+        };
+        match statement {
+            Statement::CreateTable(table) if table.temporary => temporary_tables.push(table.name.clone()),
+            Statement::CreateIndex(index) if temporary_tables.iter().any(|name| name == &index.table_name) => {}
+            Statement::Drop { object_type: ObjectType::Table, names, .. }
+                if !names.is_empty() && names.iter().all(|name| temporary_tables.contains(name)) =>
+            {
+                temporary_tables.retain(|table| !names.contains(table));
+            }
+            _ => return None,
+        }
+    }
+
+    Some(setup_sql.to_vec())
 }
 
 fn split_excel_cell_text(value: &str) -> Vec<String> {
@@ -731,9 +762,11 @@ async fn try_export_postgres_query_result_stream(
     let budget = operation_budget_for_pool_key(state, &pool_key, query_export_timeout(request.timeout_secs)).await;
     let cancel_context = state.get_postgres_cancel_context(&pool_key).await;
 
+    let setup_sql = safe_postgres_temp_setup_sql(&request.setup_sql).unwrap_or_default();
     crate::db::postgres::stream_select_query_with_cancel(
         &pool,
         request.schema.as_deref(),
+        &setup_sql,
         &request.sql,
         stream_row_limit,
         cancel_token,
@@ -1428,6 +1461,35 @@ async fn try_export_sqlserver_query_result_stream(
 mod tests {
     use super::*;
 
+    #[test]
+    fn postgres_temp_setup_accepts_only_session_local_table_operations() {
+        let safe = vec![
+            "CREATE TEMPORARY TABLE t1 AS SELECT 1 AS id".to_string(),
+            "CREATE INDEX t1_id ON t1(id)".to_string(),
+            "CREATE TEMP TABLE t2 AS SELECT id FROM t1".to_string(),
+            "DROP TABLE t1".to_string(),
+        ];
+        assert_eq!(safe_postgres_temp_setup_sql(&safe), Some(safe.clone()));
+
+        let parenthesized_ctas = vec![
+            "CREATE TEMPORARY TABLE t1 AS (SELECT CURRENT_DATE AS \u{8d77}\u{4fdd}\u{65e5}\u{671f})".to_string(),
+            "CREATE INDEX t1_1 ON t1(\u{8d77}\u{4fdd}\u{65e5}\u{671f}, \u{7ec8}\u{6b62}\u{65e5}\u{671f})".to_string(),
+        ];
+        assert_eq!(safe_postgres_temp_setup_sql(&parenthesized_ctas), Some(parenthesized_ctas.clone()));
+
+        let persistent_create = vec!["CREATE TABLE users_copy AS SELECT * FROM users".to_string()];
+        assert!(safe_postgres_temp_setup_sql(&persistent_create).is_none());
+
+        let persistent_write = vec![
+            "CREATE TEMP TABLE t1 AS SELECT 1 AS id".to_string(),
+            "INSERT INTO audit_log(message) VALUES ('export')".to_string(),
+        ];
+        assert!(safe_postgres_temp_setup_sql(&persistent_write).is_none());
+
+        let persistent_index = vec!["CREATE INDEX users_name ON users(name)".to_string()];
+        assert!(safe_postgres_temp_setup_sql(&persistent_index).is_none());
+    }
+
     fn request(format: &str, row_limit: Option<usize>, total_rows: Option<u64>) -> QueryResultExportRequest {
         QueryResultExportRequest {
             export_id: "export-1".to_string(),
@@ -1436,6 +1498,7 @@ mod tests {
             schema: None,
             sql: "SELECT * FROM users".to_string(),
             query_base_sql: "SELECT * FROM users".to_string(),
+            setup_sql: Vec::new(),
             database_type: DatabaseType::Postgres,
             use_agent_cursor: false,
             file_path: "out.csv".to_string(),

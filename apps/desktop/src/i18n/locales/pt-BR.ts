@@ -803,6 +803,7 @@ export default withEnglishFallback({
   grid: {
     rows: "{count} linhas",
     totalRows: "Total de {count} linhas",
+    loadedRows: "{count} linhas carregadas",
     totalRowCount: "({count} no total)",
     totalRowCountLoading: "(contando...)",
     loadingMore: "Carregando mais dados...",
@@ -1169,7 +1170,7 @@ export default withEnglishFallback({
       "metadata-unavailable": "O DBX não conseguiu carregar os metadados da tabela, portanto a edição do resultado está desabilitada.",
     },
     sortUnsupported: "Este SQL não suporta a ordenação do resultado completo. Tente novamente com uma única consulta SELECT.",
-    truncatedHint: "Resultados truncados em {count} linhas. Use a paginação no rodapé ou ajuste as linhas por página.",
+    truncatedHint: "Os resultados foram truncados após carregar {count} linhas. Use a paginação no rodapé para navegar pelos dados carregados; exportar o resultado completo executa novamente a consulta no banco de dados.",
     filterBuilderSearchColumns: "Pesquisar campos...",
     filterBuilderNoMatchingColumns: "Nenhum campo correspondente",
   },

@@ -803,6 +803,7 @@ export default withEnglishFallback({
   grid: {
     rows: "{count} filas",
     totalRows: "Total {count} filas",
+    loadedRows: "{count} filas cargadas",
     totalRowCount: "({count} en total)",
     totalRowCountLoading: "(contando...)",
     loadingMore: "Cargando más datos...",
@@ -1169,7 +1170,7 @@ export default withEnglishFallback({
       "metadata-unavailable": "DBX no pudo cargar los metadatos de la tabla, por lo que la edición de resultados está deshabilitada.",
     },
     sortUnsupported: "Este SQL no admite ordenamiento del resultado completo. Intenta con una consulta SELECT simple.",
-    truncatedHint: "Los resultados están limitados a 10.000 filas. Usa LIMIT/OFFSET en tu consulta para paginar.",
+    truncatedHint: "Los resultados se truncaron después de cargar {count} filas. Usa la paginación inferior para explorar los datos cargados; al exportar el resultado completo se vuelve a consultar la base de datos.",
     filterBuilderSearchColumns: "Buscar columnas...",
     filterBuilderNoMatchingColumns: "Sin columnas coincidentes",
   },

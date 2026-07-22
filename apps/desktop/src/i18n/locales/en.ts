@@ -854,6 +854,7 @@ export default {
   grid: {
     rows: "{count} rows",
     totalRows: "Total {count} rows",
+    loadedRows: "Loaded {count} rows",
     totalRowCount: "({count} total)",
     totalRowCountLoading: "(counting...)",
     loadingMore: "Loading more data...",
@@ -1229,7 +1230,7 @@ export default {
       "metadata-unavailable": "DBX could not load table metadata, so result editing is disabled.",
     },
     sortUnsupported: "This SQL does not support full-result sorting. Try again with a single SELECT query.",
-    truncatedHint: "Results truncated to {count} rows. Use the footer pagination or adjust rows per page.",
+    truncatedHint: "Results were truncated after loading {count} rows. Use the footer pagination to browse loaded data; exporting the full result reruns the database query.",
   },
   exportProgress: {
     title: "Exporting Table Data",

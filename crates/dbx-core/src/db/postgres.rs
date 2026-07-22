@@ -2563,6 +2563,7 @@ pub async fn execute_query_with_max_rows_and_cancel(
 pub async fn stream_select_query_with_cancel(
     pool: &Pool,
     schema: Option<&str>,
+    setup_sql: &[String],
     sql: &str,
     max_rows: Option<usize>,
     cancel_token: Option<CancellationToken>,
@@ -2589,28 +2590,72 @@ pub async fn stream_select_query_with_cancel(
         .await?;
     }
 
-    let pg_cancel_token = client.cancel_token();
+    let setup_transaction_started = !setup_sql.is_empty();
+    if setup_transaction_started {
+        execute_postgres_infra_statement(&client, "BEGIN", budget.recycle_timeout, "export_setup.begin").await?;
+    }
+
     let query_timeout = budget.query_timeout;
     let timeout_error =
         format!("Query timed out after {} seconds", query_timeout.map_or(0, |timeout| timeout.as_secs()));
-    let progress_clock = Arc::new(StreamProgressClock::new());
-    let progress_clock_for_stream = progress_clock.clone();
-    let mut on_stream_item = |item| {
-        on_item(item)?;
-        progress_clock_for_stream.mark();
+    let setup_result = async {
+        for setup_statement in setup_sql {
+            wait_postgres_query(
+                client.cancel_token(),
+                cancel_context.clone(),
+                cancel_token.clone(),
+                query_timeout,
+                budget.cancel_timeout,
+                async {
+                    client.batch_execute(setup_statement).await.map_err(pg_error_to_string)?;
+                    Ok(())
+                },
+            )
+            .await?;
+        }
         Ok(())
-    };
-    let result = await_stream_with_progress_timeout(
-        stream_select_query_inner(&client, sql, row_limit, &mut on_stream_item),
-        query_timeout,
-        progress_clock,
-        cancel_token.as_ref(),
-        timeout_error.clone(),
-    )
-    .await;
-    if result.as_ref().is_err_and(|error| error == &timeout_error || error == crate::query::QUERY_CANCELED) {
-        cancel_postgres_query(pg_cancel_token, cancel_context.as_ref(), budget.cancel_timeout).await;
     }
+    .await;
+
+    let result = match setup_result {
+        Ok(()) => {
+            let pg_cancel_token = client.cancel_token();
+            let progress_clock = Arc::new(StreamProgressClock::new());
+            let progress_clock_for_stream = progress_clock.clone();
+            let mut on_stream_item = |item| {
+                on_item(item)?;
+                progress_clock_for_stream.mark();
+                Ok(())
+            };
+            let result = await_stream_with_progress_timeout(
+                stream_select_query_inner(&client, sql, row_limit, &mut on_stream_item),
+                query_timeout,
+                progress_clock,
+                cancel_token.as_ref(),
+                timeout_error.clone(),
+            )
+            .await;
+            if result.as_ref().is_err_and(|error| error == &timeout_error || error == crate::query::QUERY_CANCELED) {
+                cancel_postgres_query(pg_cancel_token, cancel_context.as_ref(), budget.cancel_timeout).await;
+            }
+            result
+        }
+        Err(error) => Err(error),
+    };
+
+    let result = if setup_transaction_started {
+        let rollback_result =
+            execute_postgres_infra_statement(&client, "ROLLBACK", budget.cleanup_timeout, "export_setup.rollback")
+                .await;
+        match (result, rollback_result) {
+            (Ok(rows), Ok(_)) => Ok(rows),
+            (Err(query_err), Ok(_)) => Err(query_err),
+            (Ok(_), Err(rollback_err)) => Err(rollback_err),
+            (Err(query_err), Err(rollback_err)) => Err(format!("{query_err}; {rollback_err}")),
+        }
+    } else {
+        result
+    };
 
     if schema_was_set {
         let reset_result = reset_postgres_search_path(&client, budget.cleanup_timeout, start).await;

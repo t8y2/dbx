@@ -435,6 +435,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         schema: Some("dbo".to_string()),
         sql: sql.clone(),
         query_base_sql: sql,
+        setup_sql: Vec::new(),
         database_type: DatabaseType::SqlServer,
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),

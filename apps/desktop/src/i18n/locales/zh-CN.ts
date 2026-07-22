@@ -856,6 +856,7 @@ export default withEnglishFallback({
   grid: {
     rows: "{count} 行",
     totalRows: "共 {count} 行",
+    loadedRows: "已加载 {count} 行",
     totalRowCount: "（总计 {count} 行）",
     totalRowCountLoading: "（统计中...）",
     loadingMore: "加载更多数据...",
@@ -1229,7 +1230,7 @@ export default withEnglishFallback({
       "metadata-unavailable": "无法读取目标表元数据，暂不能启用结果编辑。",
     },
     sortUnsupported: "当前 SQL 不支持全量排序，请改为单条 SELECT 查询后再尝试。",
-    truncatedHint: "结果已截断，仅显示前 {count} 行。可通过底部分页继续加载，或调整每页行数。",
+    truncatedHint: "结果已截断，已加载前 {count} 行。可通过底部分页浏览已加载数据；导出完整结果时会重新查询数据库。",
   },
   exportProgress: {
     title: "导出表数据",

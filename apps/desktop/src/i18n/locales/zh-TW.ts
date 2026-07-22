@@ -803,6 +803,7 @@ export default withEnglishFallback({
   grid: {
     rows: "{count} 列",
     totalRows: "共 {count} 筆",
+    loadedRows: "已載入 {count} 筆",
     totalRowCount: "（總計 {count} 筆）",
     totalRowCountLoading: "（統計中...）",
     loadingMore: "載入更多資料...",
@@ -1169,7 +1170,7 @@ export default withEnglishFallback({
       "metadata-unavailable": "DBX 無法載入資料表 metadata，因此已停用結果編輯。",
     },
     sortUnsupported: "目前 SQL 不支援完整排序，請改為單條 SELECT 查詢後再嘗試。",
-    truncatedHint: "結果已截斷，僅顯示前 {count} 行。可經由底部分頁繼續載入，或調整每頁行數。",
+    truncatedHint: "結果已截斷，已載入前 {count} 筆。可透過底部分頁瀏覽已載入資料；匯出完整結果時會重新查詢資料庫。",
     filterBuilderSearchColumns: "搜尋欄位...",
     filterBuilderNoMatchingColumns: "沒有匹配的欄位",
   },

@@ -7656,7 +7656,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         </div>
         <!-- Truncation warning banner -->
         <div v-if="showTruncationWarning" class="shrink-0 px-3 py-1 bg-amber-500/10 border-b border-amber-500/20 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
-          <span>{{ t("grid.truncatedHint", { count: pageSize }) }}</span>
+          <span>{{ t("grid.truncatedHint", { count: result.rows.length }) }}</span>
         </div>
         <!-- Content area: table + side/bottom detail panes -->
         <div class="flex-1 grid min-h-0 overflow-hidden" :style="contentGridStyle">
@@ -8912,7 +8912,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     <div v-if="!isErrorResult" class="grid grid-cols-[max-content_minmax(0,1fr)_max-content] items-center gap-2 px-3 py-1 border-t text-xs text-muted-foreground bg-muted/30 shrink-0">
       <div class="flex min-w-0 items-center gap-2 overflow-hidden">
         <span v-if="hasData" class="shrink-0">
-          {{ t("grid.totalRows", { count: result.rows.length }) }}
+          {{ t(showTruncationWarning ? "grid.loadedRows" : "grid.totalRows", { count: result.rows.length }) }}
           <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t("grid.totalRowCount", { count: displayedTotalRowCount }) }}</span>
           <span v-else-if="totalRowCountBusy" class="text-muted-foreground/70">
             {{ t("grid.totalRowCountLoading") }}

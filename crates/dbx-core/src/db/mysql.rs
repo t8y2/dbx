@@ -4867,7 +4867,8 @@ UNIQUE KEY(`tenant_id`, `name``part`)
 
     #[test]
     fn mysql_group_concat_not_supported_error_retries_without_session_variable() {
-        let error = "MySQL connection failed: Server error: `ERROR 1235 (42000): SET of group_concat_max_len is not supported'";
+        let error =
+            "MySQL connection failed: Server error: `ERROR 1235 (42000): SET of group_concat_max_len is not supported'";
 
         assert_eq!(
             mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),

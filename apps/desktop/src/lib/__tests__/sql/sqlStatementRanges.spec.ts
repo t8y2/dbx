@@ -451,6 +451,20 @@ COMMENT = '测试';`;
     expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
   });
 
+  it("keeps MySQL truncate partition clauses when comments separate ALTER TABLE", () => {
+    const sql = "ALTER /* online ddl */ TABLE t\nTRUNCATE PARTITION p0;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "TRUNCATE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL truncate partition clauses when comments precede PARTITION", () => {
+    const sql = "ALTER TABLE t\nTRUNCATE /* keep */ PARTITION p0;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "TRUNCATE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
   it("keeps standalone truncate table statements separate from preceding alter statements", () => {
     const sql = "ALTER TABLE events ADD COLUMN source varchar(100)\nTRUNCATE TABLE events;";
 

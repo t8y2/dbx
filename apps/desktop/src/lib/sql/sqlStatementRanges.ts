@@ -689,6 +689,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (currentBodyKeyword === "ALTER" && isMysqlAlterTableTruncatePartitionContinuation(sql, boundaries[boundaries.length - 1].from, lineStart.from, lineStart.keyword, databaseType)) {
+      continue;
+    }
+
     if (currentBodyKeyword === "ALTER" && ALTER_BODY_KEYWORDS.has(lineStart.keyword)) {
       continue;
     }
@@ -927,6 +931,12 @@ function isMysqlCreateTableOptionContinuation(sql: string, statementFrom: number
 function isClickHouseAlterTableUpdateContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {
   if (databaseType !== "clickhouse" || keyword !== "UPDATE") return false;
   return CLICKHOUSE_ALTER_TABLE_HEADER.test(sql.slice(statementFrom, lineStartFrom));
+}
+
+function isMysqlAlterTableTruncatePartitionContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "mysql" || keyword !== "TRUNCATE") return false;
+  if (!/^ALTER\s+TABLE\b/i.test(sql.slice(statementFrom, lineStartFrom))) return false;
+  return nextSqlWord(sql, lineStartFrom + keyword.length) === "PARTITION";
 }
 
 function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean {

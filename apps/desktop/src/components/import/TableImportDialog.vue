@@ -822,7 +822,7 @@ watch(targetMode, (mode) => {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogScrollContent class="flex max-h-[calc(100dvh-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
+    <DialogScrollContent class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
       <DialogHeader class="shrink-0 pr-8">
         <DialogTitle class="flex items-center gap-2 text-base">
           <FileUp class="h-4 w-4" />

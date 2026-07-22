@@ -133,7 +133,7 @@ defineExpose({ show });
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="h-[min(760px,calc(100dvh-2rem))] flex flex-col overflow-hidden sm:max-w-3xl">
+    <DialogContent class="h-[min(760px,calc(var(--dbx-viewport-height)-2rem))] flex flex-col overflow-hidden sm:max-w-3xl">
       <DialogHeader>
         <DialogTitle>{{ t("extension.manageTitle") }}</DialogTitle>
       </DialogHeader>

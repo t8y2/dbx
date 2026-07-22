@@ -5,7 +5,7 @@ const dialogSource = readFileSync(new URL("../DatabaseSearchDialog.vue", import.
 
 describe("DatabaseSearchDialog layout", () => {
   it("keeps the header and footer visible within the dynamic viewport", () => {
-    expect(dialogSource).toContain('class="flex max-h-[calc(100dvh-6rem)] min-h-0 max-w-4xl flex-col overflow-hidden gap-0 p-0"');
+    expect(dialogSource).toContain('class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 max-w-4xl flex-col overflow-hidden gap-0 p-0"');
     expect(dialogSource).toContain('<DialogHeader class="shrink-0 border-b px-5 py-4">');
     expect(dialogSource).toContain('<DialogFooter class="shrink-0 border-t px-5 py-3">');
   });

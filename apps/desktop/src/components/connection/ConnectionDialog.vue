@@ -6377,7 +6377,7 @@ function openExternalUrl(url: string) {
 .connection-dialog-content {
   display: flex;
   flex-direction: column;
-  max-height: calc(100dvh - 2rem);
+  max-height: calc(var(--dbx-viewport-height) - 2rem);
 }
 
 @media (min-width: 640px) {

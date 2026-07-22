@@ -381,7 +381,7 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
   </div>
 
   <Dialog v-model:open="scheduleDialogOpen">
-    <DialogContent class="max-h-[min(760px,calc(100dvh-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-y-auto">
+    <DialogContent class="max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-y-auto">
       <DialogHeader>
         <DialogTitle>{{ editingScheduleId ? t("databaseBackup.editSchedule") : t("databaseBackup.addSchedule") }}</DialogTitle>
       </DialogHeader>

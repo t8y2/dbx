@@ -53,6 +53,8 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
 mongodb = "3.2.5"
 percent-encoding = "2"
+minisign-verify = "0.2.5"
+semver = "1"
 russh = "0.60"
 csv = "1.4.0"
 calamine = "0.30.1"

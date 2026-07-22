@@ -271,7 +271,15 @@ jobs:
           Set-Content -Path (Join-Path $portableDir "portable.dbx") -Value "" -NoNewline
 
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
-          gh release upload "${env:GITHUB_REF_NAME}" $zipName --repo "${env:GITHUB_REPOSITORY}" --clobber
+          pnpm tauri signer sign $zipName
+
+          $signatureName = "${zipName}.sig"
+          if (!(Test-Path $signatureName)) {
+            Write-Error "Missing portable update signature: $signatureName"
+            exit 1
+          }
+
+          gh release upload "${env:GITHUB_REF_NAME}" $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
       - name: Upload Windows WebView2 offline installer
         if: matrix.arch == 'x64' || matrix.arch == 'arm64'
@@ -317,7 +325,7 @@ jobs:
             gh release view "${GITHUB_REF_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
               --json assets \
-              --jq '.assets[].name | select(endswith(".sig"))'
+              --jq '.assets[].name | select(endswith(".sig") and (endswith("-portable.zip.sig") | not))'
           )
 
           if [ "${#SIG_ASSETS[@]}" -eq 0 ]; then

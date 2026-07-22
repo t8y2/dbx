@@ -13,6 +13,7 @@ const mountedApps: App[] = [];
 
 interface DialogState {
   open: boolean;
+  portableMode: boolean;
   isDownloadingUpdate: boolean;
   downloadProgress: number;
   updateDownloaded: boolean;
@@ -28,6 +29,7 @@ async function flushDialog() {
 async function mountDialog(activeTaskCount: number, initialState: Partial<DialogState> = {}, installDownloaded = vi.fn(async () => {})) {
   const state = reactive<DialogState>({
     open: true,
+    portableMode: false,
     isDownloadingUpdate: false,
     downloadProgress: 0,
     updateDownloaded: false,
@@ -64,7 +66,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
               current_version: "0.5.60",
               latest_version: "0.5.61",
               update_available: true,
-              portable_mode: false,
+              portable_mode: state.portableMode,
               release_name: "DBX v0.5.61",
               release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
               release_notes: "",
@@ -124,6 +126,13 @@ describe("UpdateDialog active task guard", () => {
     await mountDialog(0);
 
     expect(document.body.querySelector('[role="alert"]')).toBeNull();
+    expect(downloadButton()?.disabled).toBe(false);
+  });
+
+  it("offers automatic installation for portable builds", async () => {
+    await mountDialog(0, { portableMode: true });
+
+    expect(document.body.textContent).toContain("portable ZIP");
     expect(downloadButton()?.disabled).toBe(false);
   });
 

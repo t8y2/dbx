@@ -70,7 +70,7 @@ export default {
     openRelease: "Open Release",
     downloadAndInstall: "Download & Install",
     activeTasksBlockUpdate: "{count} task(s) are still running. Wait for them to finish before updating DBX.",
-    portableManualUpdate: "Portable builds cannot use the in-app installer. Download the portable ZIP from the release page, then extract it over the current DBX folder to keep portable.dbx and data.",
+    portableAutomaticUpdate: "DBX will download the signed portable ZIP, replace only DBX.exe after exit, and restart automatically. portable.dbx and data will be kept.",
     downloading: "Downloading {progress}%",
     downloadFailed: "Update download failed: {error}",
     installing: "Installing update...",

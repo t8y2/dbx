@@ -71,7 +71,7 @@ export default withEnglishFallback({
     openRelease: "Apri Release",
     downloadAndInstall: "Scarica e Installa",
     activeTasksBlockUpdate: "Ci sono {count} attività in esecuzione. Attendi che terminino prima di aggiornare DBX.",
-    portableManualUpdate: "Le build portatili non possono utilizzare l'installer in-app. Scarica lo ZIP portatile dalla pagina delle release, quindi estrailo nella cartella DBX corrente per mantenere portable.dbx e i dati.",
+    portableAutomaticUpdate: "DBX scaricherà lo ZIP portatile firmato, sostituirà solo DBX.exe dopo l'uscita e si riavvierà automaticamente. portable.dbx e i dati verranno mantenuti.",
     downloading: "Download in corso {progress}%",
     downloadFailed: "Download dell'aggiornamento non riuscito: {error}",
     installing: "Installazione dell'aggiornamento...",

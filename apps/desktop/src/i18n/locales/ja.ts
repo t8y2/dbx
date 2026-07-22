@@ -72,7 +72,7 @@ export default withEnglishFallback({
     openRelease: "リリースページを開く",
     downloadAndInstall: "ダウンロード & インストール",
     activeTasksBlockUpdate: "{count} 件のタスクが実行中です。完了してから DBX を更新してください。",
-    portableManualUpdate: "ポータブル版はアプリ内インストーラーを使用できません。リリースページからポータブルZIPをダウンロードし、現在のDBXフォルダに上書き展開してください。portable.dbxとデータは保持されます。",
+    portableAutomaticUpdate: "DBX は署名済みのポータブル ZIP をダウンロードし、終了後に DBX.exe のみを置き換えて自動的に再起動します。portable.dbx とデータは保持されます。",
     downloading: "ダウンロード中 {progress}%",
     downloadFailed: "アップデートのダウンロードに失敗しました: {error}",
     installing: "アップデートをインストール中...",

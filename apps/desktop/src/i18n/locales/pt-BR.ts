@@ -72,7 +72,7 @@ export default withEnglishFallback({
     openRelease: "Abrir Lançamento",
     downloadAndInstall: "Baixar e Instalar",
     activeTasksBlockUpdate: "Há {count} tarefa(s) em execução. Aguarde a conclusão antes de atualizar o DBX.",
-    portableManualUpdate: "Versões portáteis não podem usar o instalador interno. Baixe o ZIP portátil da página de lançamento e extraia-o sobre a pasta atual do DBX para manter o portable.dbx e os dados.",
+    portableAutomaticUpdate: "O DBX baixará o ZIP portátil assinado, substituirá apenas o DBX.exe após sair e reiniciará automaticamente. O portable.dbx e os dados serão mantidos.",
     downloading: "Baixando {progress}%",
     downloadFailed: "Falha ao baixar a atualização: {error}",
     installing: "Instalando atualização...",

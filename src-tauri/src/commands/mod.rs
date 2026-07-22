@@ -47,6 +47,7 @@ pub mod text_export;
 pub mod transfer;
 pub mod tunnel_profiles;
 pub mod update;
+mod update_portable;
 pub mod window_controls;
 pub mod xlsx_export;
 pub mod zookeeper_cmd;

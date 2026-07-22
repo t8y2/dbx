@@ -107,7 +107,7 @@ watch(
           {{ t("updates.toUpdate") }}
         </p>
         <p v-if="isDesktop && updateInfo?.update_available && updateInfo.portable_mode" class="text-xs text-muted-foreground">
-          {{ t("updates.portableManualUpdate") }}
+          {{ t("updates.portableAutomaticUpdate") }}
         </p>
         <div v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop) && activeTaskCount > 0" role="alert" class="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
           <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />

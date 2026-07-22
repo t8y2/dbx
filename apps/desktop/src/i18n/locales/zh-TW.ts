@@ -72,7 +72,7 @@ export default withEnglishFallback({
     openRelease: "開啟下載頁",
     downloadAndInstall: "下載並安裝",
     activeTasksBlockUpdate: "有 {count} 個任務正在執行，請等待任務完成後再更新 DBX。",
-    portableManualUpdate: "可攜版無法使用應用程式內建安裝器更新。請從發行頁下載可攜版 ZIP，並解壓縮覆蓋目前的 DBX 目錄，以保留 portable.dbx 和 data。",
+    portableAutomaticUpdate: "DBX 將下載已簽署的可攜版 ZIP，結束後僅替換 DBX.exe 並自動重新啟動。portable.dbx 和 data 會保留。",
     downloading: "下載中 {progress}%",
     downloadFailed: "更新下載失敗：{error}",
     installing: "正在安裝更新...",

@@ -1,0 +1,60 @@
+name: Backfill Similar Issues
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Log suggestions without posting comments
+        required: false
+        default: false
+        type: boolean
+      max_issues_per_chunk:
+        description: Maximum issues per chunk; 0 processes the full backlog
+        required: false
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: similar-issues-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: Backfill chunk ${{ matrix.chunk_index }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        chunk_index: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Create DBX bot token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.DBX_BOT_APP_ID }}
+          private-key: ${{ secrets.DBX_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: dbx
+          permission-issues: write
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+
+      - name: Backfill similar issue suggestions
+        run: node .github/scripts/backfill-similar-issues.mjs
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          BACKFILL_CHUNK_INDEX: ${{ matrix.chunk_index }}
+          BACKFILL_CHUNK_COUNT: "3"
+          BACKFILL_MAX_ISSUES: ${{ inputs.max_issues_per_chunk }}
+          BACKFILL_SEARCH_DELAY_MS: "7000"
+          DRY_RUN: ${{ inputs.dry_run }}

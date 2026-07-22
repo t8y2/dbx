@@ -5,6 +5,44 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DBX</title>
+    <style>
+      html,
+      body,
+      #root {
+        background-color: rgb(255 255 255);
+      }
+
+      html.dark,
+      html.dark body,
+      html.dark #root {
+        background-color: rgb(19 20 22);
+      }
+    </style>
+    <script data-dbx-startup-theme>
+      (() => {
+        const root = document.documentElement;
+        let mode = null;
+
+        // localStorage can throw when WebView storage is unavailable; keep the existing light fallback.
+        try {
+          mode = localStorage.getItem("dbx-theme");
+        } catch {}
+
+        const followsSystem = mode === "system" || mode === "soft-system";
+        let dark = mode === "dark" || mode === "soft-dark";
+
+        if (followsSystem) {
+          try {
+            dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          } catch {
+            dark = false;
+          }
+        }
+
+        root.classList.toggle("dark", dark);
+        root.style.colorScheme = dark ? "dark" : "light";
+      })();
+    </script>
   </head>
   <body>
     <div id="root">

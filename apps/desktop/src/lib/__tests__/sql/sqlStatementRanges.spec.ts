@@ -443,6 +443,44 @@ COMMENT = '测试';`;
     expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
   });
 
+  it("keeps issue #4045 ClickHouse ALTER TABLE UPDATE mutation together", () => {
+    const sql = `ALTER TABLE m2_db.history_data5
+UPDATE value = 14.06
+WHERE uuid IN (
+    SELECT uuid
+    FROM m2_db.pt_uuid_mapping
+    WHERE point_id = 'TEST_Location_1_L2_METER_2_AE_DIFF_H'
+)
+AND ts = toDateTime('2026-07-15 12:00:00');`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER"), "clickhouse")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "UPDATE"), "clickhouse")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "clickhouse"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps a simple ClickHouse ALTER TABLE UPDATE mutation together", () => {
+    const sql = "ALTER TABLE `events` ON CLUSTER 'analytics'\nUPDATE value = 1\nWHERE id = 42;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "UPDATE"), "clickhouse")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "clickhouse"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("separates statements after a ClickHouse ALTER TABLE UPDATE mutation", () => {
+    const mutation = "ALTER TABLE events\nUPDATE value = 1\nWHERE id = 42";
+    const sql = `${mutation};\nSELECT * FROM events;\nUPDATE audit SET processed = 1;`;
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "clickhouse"))).toEqual([mutation, "SELECT * FROM events", "UPDATE audit SET processed = 1"]);
+  });
+
+  it("does not merge independent UPDATE statements into other ALTER statements", () => {
+    const otherDatabaseSql = "ALTER TABLE events\nUPDATE audit SET processed = 1;";
+    const clickHouseSql = "ALTER TABLE events ADD COLUMN source String\nUPDATE audit SET processed = 1;";
+
+    expect(rangeSqlTexts(executableStatementRanges(otherDatabaseSql, "postgres"))).toEqual(["ALTER TABLE events", "UPDATE audit SET processed = 1"]);
+    expect(rangeSqlTexts(executableStatementRanges(otherDatabaseSql, "mysql"))).toEqual(["ALTER TABLE events", "UPDATE audit SET processed = 1"]);
+    expect(rangeSqlTexts(executableStatementRanges(clickHouseSql, "clickhouse"))).toEqual(["ALTER TABLE events ADD COLUMN source String", "UPDATE audit SET processed = 1"]);
+  });
+
   it("keeps insert-select with the INSERT statement", () => {
     const sql = "INSERT INTO archived_users (id, name)\nSELECT id, name FROM users\nUPDATE users SET archived = 1;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "archived_users"));

@@ -82,7 +82,6 @@ describe("MCP policy settings state", () => {
     expect(settingsDialogSource).toContain("if (mcpPolicyControlsDisabled.value) return;");
     expect(settingsDialogSource).toContain(':disabled="mcpPolicyControlsDisabled"');
     expect(settingsDialogSource).toContain('@update:allowed-connection-ids="onMcpAllowedConnectionIdsChange"');
-    expect(settingsDialogSource).toContain('<fieldset :disabled="mcpPolicyControlsDisabled"');
 
     const loadingStart = settingsDialogSource.indexOf("mcpPolicyLoading.value = true;");
     const policyLoad = settingsDialogSource.indexOf("await settingsStore.initMcpGlobalPolicy(true);");
@@ -90,6 +89,25 @@ describe("MCP policy settings state", () => {
     expect(loadingStart).toBeGreaterThan(-1);
     expect(loadingStart).toBeLessThan(policyLoad);
     expect(loadingEnd).toBeGreaterThan(policyLoad);
+  });
+
+  it("keeps translated mode descriptions in one responsive layout track", () => {
+    const descriptionStart = settingsDialogSource.indexOf("data-mcp-execution-mode-description");
+    const descriptionEnd = settingsDialogSource.indexOf("settings.mcpCapabilityTitle", descriptionStart);
+    const descriptionSource = settingsDialogSource.slice(descriptionStart, descriptionEnd);
+
+    expect(descriptionStart).toBeGreaterThan(-1);
+    expect(descriptionEnd).toBeGreaterThan(descriptionStart);
+    expect(descriptionSource).toContain('class="grid text-xs"');
+    expect(descriptionSource.match(/col-start-1 row-start-1/g)).toHaveLength(3);
+    expect(descriptionSource.match(/\? 'visible' : 'invisible'/g)).toHaveLength(3);
+  });
+
+  it("keeps execution mode cards accessible as a keyboard radio group", () => {
+    expect(settingsDialogSource).toContain('role="radiogroup" aria-labelledby="mcp-execution-mode-label"');
+    expect(settingsDialogSource.match(/role="radio"/g)).toHaveLength(3);
+    expect(settingsDialogSource).toContain(":aria-checked=\"mcpExecutionMode === 'safe_write'\"");
+    expect(settingsDialogSource).toContain("onMcpExecutionModeKeydown($event, 'safe_write')");
   });
 });
 

@@ -496,7 +496,7 @@
         "databaseCreate": true,
         "fieldLineage": false,
         "sqlExplain": false,
-        "userAdmin": false,
+        "userAdmin": true,
         "driverManagement": false
       }
     },

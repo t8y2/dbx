@@ -34,6 +34,7 @@ pub mod mongo_ops;
 pub mod mongo_shell;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
+pub(crate) mod mysql_ddl_normalize;
 pub mod nacos;
 pub mod object_source_sql;
 pub mod path_utils;
@@ -130,17 +131,25 @@ pub async fn race_download(
     r2_path: &str,
     user_agent: &str,
 ) -> Result<reqwest::Response, String> {
+    race_download_urls(client, &download_candidate_urls(github_url, r2_path), user_agent).await
+}
+
+pub async fn race_download_urls(
+    client: &reqwest::Client,
+    urls: &[String],
+    user_agent: &str,
+) -> Result<reqwest::Response, String> {
     use futures::future::select_ok;
 
-    let urls = download_candidate_urls(github_url, r2_path);
     let mut futs: Vec<ResponseFuture> = Vec::with_capacity(urls.len());
 
     for url in urls {
         let client = client.clone();
+        let url = url.clone();
         let ua = user_agent.to_string();
         futs.push(Box::pin(async move {
             client
-                .get(&url)
+                .get(url)
                 .header(reqwest::header::USER_AGENT, ua)
                 .header(reqwest::header::ACCEPT_ENCODING, "identity")
                 .send()

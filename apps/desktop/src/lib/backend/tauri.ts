@@ -801,8 +801,8 @@ export async function listSchemaInfos(connectionId: string, database: string): P
   return invoke("list_schema_infos", { connectionId, database });
 }
 
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ColumnInfo[]> {
-  return invoke("get_columns", { connectionId, database, schema, table, catalog });
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
+  return invoke("get_columns", { connectionId, database, schema, table, catalog, clientSessionId });
 }
 
 export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
@@ -1341,12 +1341,14 @@ export async function importAgentsFromZip(path: string | File): Promise<number> 
   return invoke("import_agents_from_zip", { path });
 }
 
-export async function importAgentJar(dbType: string, path: string | File): Promise<void> {
+export async function importAgentDriver(dbType: string, path: string | File): Promise<void> {
   if (typeof path !== "string") {
-    throw new Error("Desktop driver JAR import requires a local file path");
+    throw new Error("Desktop driver import requires a local file path");
   }
-  return invoke("import_agent_jar_cmd", { dbType, path });
+  return invoke("import_agent_driver_cmd", { dbType, path });
 }
+
+export const importAgentJar = importAgentDriver;
 
 export async function reinstallJre(jreKey?: string, source?: UpdateDownloadSource): Promise<void> {
   return invoke("reinstall_jre", { jreKey, source });
@@ -1461,8 +1463,8 @@ export async function installMcpServer(): Promise<string> {
   return invoke("install_mcp_server");
 }
 
-export async function checkForUpdates(locale?: string): Promise<UpdateInfo> {
-  return invoke("check_for_updates", { locale });
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
+  return invoke("check_for_updates", { locale, source });
 }
 
 export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/changelog").ChangelogData> {
@@ -1868,6 +1870,10 @@ export async function mongoDropDatabase(connectionId: string, database: string):
 
 export async function mongoDropCollection(connectionId: string, database: string, collection: string): Promise<void> {
   return invoke("mongo_drop_collection", { connectionId, database, collection });
+}
+
+export async function mongoRenameCollection(connectionId: string, database: string, collection: string, newName: string): Promise<void> {
+  return invoke("mongo_rename_collection", { connectionId, database, collection, newName });
 }
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
@@ -2368,6 +2374,7 @@ export interface DatabaseExportRequest {
   includeData: boolean;
   includeObjects: boolean;
   dropTableIfExists?: boolean;
+  omitAutoIncrement?: boolean;
   failOnError?: boolean;
   snapshotSessionId?: string;
   batchSize: number;

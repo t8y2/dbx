@@ -109,7 +109,8 @@ export const getAgentJavaRuntimeConfig = forward("getAgentJavaRuntimeConfig");
 export const setAgentJavaRuntimeConfig = forward("setAgentJavaRuntimeConfig");
 export const invalidateAgentRegistryCache = forward("invalidateAgentRegistryCache");
 export const importAgentsFromZip = forward("importAgentsFromZip");
-export const importAgentJar = forward("importAgentJar");
+export const importAgentDriver = forward("importAgentDriver");
+export const importAgentJar = importAgentDriver;
 export async function reinstallJre(jreKey?: string) {
   const backend = await getBackend();
   return backend.reinstallJre(jreKey, useSettingsStore().editorSettings.updateDownloadSource);
@@ -457,6 +458,7 @@ export const vectorGetCollectionDetail = forward("vectorGetCollectionDetail");
 export const mongoCreateDatabase = forward("mongoCreateDatabase");
 export const mongoDropDatabase = forward("mongoDropDatabase");
 export const mongoDropCollection = forward("mongoDropCollection");
+export const mongoRenameCollection = forward("mongoRenameCollection");
 export const documentFindDocuments = forward("documentFindDocuments");
 export const mongoFindDocuments = forward("mongoFindDocuments");
 export const mongoParseShellCommand = forward("mongoParseShellCommand");

@@ -1,6 +1,36 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canGoNextDataGridPage } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canGoNextDataGridPage, hasCompleteLocalDataGridResult } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+
+test("first query page is complete when its known total is already loaded", () => {
+  assert.equal(
+    hasCompleteLocalDataGridResult({
+      isResultsContext: true,
+      rowCount: 2,
+      pageLimit: 500,
+      pageOffset: 0,
+      totalRowCount: 2,
+      truncated: false,
+      hasMore: false,
+    }),
+    true,
+  );
+});
+
+test("local query result is incomplete when rows are truncated or start after the first page", () => {
+  const completeFirstPage = {
+    isResultsContext: true,
+    rowCount: 500,
+    pageLimit: 500,
+    pageOffset: 0,
+    totalRowCount: 500,
+    truncated: false,
+    hasMore: false,
+  };
+  assert.equal(hasCompleteLocalDataGridResult({ ...completeFirstPage, truncated: true }), false);
+  assert.equal(hasCompleteLocalDataGridResult({ ...completeFirstPage, pageOffset: 500, totalRowCount: 1000 }), false);
+  assert.equal(hasCompleteLocalDataGridResult({ ...completeFirstPage, totalRowCount: undefined }), false);
+});
 
 test("known total disables next page at the last exact page", () => {
   assert.equal(

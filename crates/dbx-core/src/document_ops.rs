@@ -27,12 +27,14 @@ pub struct MongoGridFsBucketInfo {
     pub total_bytes: i64,
 }
 
+fn cmp_names(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_lower = left.to_lowercase();
+    let right_lower = right.to_lowercase();
+    left_lower.cmp(&right_lower).then_with(|| left.cmp(right))
+}
+
 fn sort_names(mut names: Vec<String>) -> Vec<String> {
-    names.sort_by(|left, right| {
-        let left_lower = left.to_lowercase();
-        let right_lower = right.to_lowercase();
-        left_lower.cmp(&right_lower).then_with(|| left.cmp(right))
-    });
+    names.sort_by(|left, right| cmp_names(left, right));
     names
 }
 
@@ -84,14 +86,21 @@ fn mongo_list_databases_unauthorized(error: &str) -> bool {
     lower.contains("not authorized") && lower.contains("listdatabases")
 }
 
-fn mongo_collection_info(name: String) -> CollectionInfo {
+fn mongo_collection_info(name: String, kind: mongo_driver::MongoCollectionKind) -> CollectionInfo {
     CollectionInfo {
         name: name.clone(),
         id: name,
         dimension: None,
-        kind: Some("collection".to_string()),
+        kind: Some(kind.as_str().to_string()),
         bucket_name: None,
     }
+}
+
+fn sort_mongo_collection_specs(
+    mut specs: Vec<mongo_driver::MongoCollectionSpec>,
+) -> Vec<mongo_driver::MongoCollectionSpec> {
+    specs.sort_by(|left, right| cmp_names(&left.name, &right.name));
+    specs
 }
 
 pub(crate) fn mongo_gridfs_bucket_names(names: &[String]) -> Vec<String> {
@@ -204,9 +213,10 @@ pub async fn list_collections_core(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            let names = sort_names(mongo_driver::list_collections(client, database).await?);
+            let specs = sort_mongo_collection_specs(mongo_driver::list_collection_specs(client, database).await?);
+            let names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
             let mut infos = mongo_bucket_infos(&names);
-            infos.extend(names.into_iter().map(mongo_collection_info));
+            infos.extend(specs.into_iter().map(|spec| mongo_collection_info(spec.name, spec.kind)));
             Ok(infos)
         }
         PoolKind::Elasticsearch(client) => {
@@ -221,7 +231,12 @@ pub async fn list_collections_core(
             let mut client = client.lock().await;
             let names = sort_names(client.mongo_list_collections(database).await?);
             let mut infos = mongo_bucket_infos(&names);
-            infos.extend(names.into_iter().map(mongo_collection_info));
+            // Legacy agent returns names only; treat every entry as a plain collection.
+            infos.extend(
+                names
+                    .into_iter()
+                    .map(|name| mongo_collection_info(name, mongo_driver::MongoCollectionKind::Collection)),
+            );
             Ok(infos)
         }
         _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),

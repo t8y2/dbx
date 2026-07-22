@@ -40,6 +40,7 @@ const { highlight } = useSqlHighlighter();
 const users = ref<DatabaseUserIdentity[]>([]);
 const selectedUserKey = ref("");
 const grants = ref<string[]>([]);
+const grantsLoaded = ref(false);
 const search = ref("");
 const loadingUsers = ref(false);
 const loadingGrants = ref(false);
@@ -113,6 +114,19 @@ const selectedCreateDatabaseSet = computed(() => new Set(createDatabaseAuthoriza
 const createDatabaseAuthorizationsValid = computed(() => createDatabaseAuthorizations.value.every((selection) => selection.preset !== "custom" || (selection.privileges?.length ?? 0) > 0));
 const pendingStatus = computed(() => (pendingResults.value.length > 0 ? authorizationPlanStatus(pendingResults.value) : undefined));
 
+function syncPrivilegeSelectionFromGrants() {
+  const selectionFromGrants = provider.value?.privilegeSelectionFromGrants;
+  if (!grantsLoaded.value || !selectionFromGrants) return;
+  const selection = selectionFromGrants({
+    grants: grants.value,
+    database: privilegeDatabase.value,
+    table: privilegeTable.value,
+    availablePrivileges: availablePrivileges.value,
+  });
+  selectedPrivileges.value = selection.privileges;
+  grantOption.value = selection.grantOption;
+}
+
 function userKey(user: DatabaseUserIdentity): string {
   return `${user.user}\u0000${user.host}`;
 }
@@ -163,18 +177,24 @@ async function loadGrants() {
   const userProvider = provider.value;
   if (!user || !userProvider) {
     grants.value = [];
+    grantsLoaded.value = false;
     return;
   }
   loadingGrants.value = true;
+  grantsLoaded.value = false;
   grantError.value = "";
   try {
     const result = await api.executeQuery(props.connection.id, "", userProvider.showGrantsSql(user), undefined, undefined, {
       maxRows: 1000,
     });
     grants.value = (userProvider.parseGrants ?? grantsFromQueryResult)(result);
+    grantsLoaded.value = true;
+    // Existing-user editing reflects the exact SHOW GRANTS scope; create-user defaults stay independent.
+    syncPrivilegeSelectionFromGrants();
   } catch (error: any) {
     grantError.value = error?.message || String(error);
     grants.value = [];
+    grantsLoaded.value = false;
   } finally {
     loadingGrants.value = false;
   }
@@ -448,7 +468,10 @@ watch(
 
 watch(
   () => selectedUserKey.value,
-  () => void loadGrants(),
+  () => {
+    grantsLoaded.value = false;
+    void loadGrants();
+  },
 );
 
 watch(
@@ -459,6 +482,7 @@ watch(
     createDatabaseAuthorizations.value = [];
     selectedUserKey.value = "";
     grants.value = [];
+    grantsLoaded.value = false;
     privilegeScope.value = provider.value?.defaultScope ?? "mysql";
     resetPrivilegeDefaults(privilegeScope.value);
     void loadUsers();
@@ -476,8 +500,13 @@ watch(
 
 watch(
   () => privilegeScope.value,
-  (scope) => resetPrivilegeDefaults(scope),
+  (scope) => {
+    resetPrivilegeDefaults(scope);
+    syncPrivilegeSelectionFromGrants();
+  },
 );
+
+watch([privilegeDatabase, privilegeTable], syncPrivilegeSelectionFromGrants);
 
 onMounted(loadUsers);
 </script>

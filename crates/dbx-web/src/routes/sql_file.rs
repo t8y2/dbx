@@ -8,6 +8,7 @@ use dbx_core::sql;
 use dbx_core::sql::{SqlFileProgress, SqlFileRequest, SqlFileStatus};
 use dbx_core::sql_file_import::{
     execute_sql_file_content, sql_file_error_progress, sql_file_progress as build_sql_file_progress,
+    SqlFileProgressEmitter,
 };
 use futures::stream::Stream;
 use serde::Deserialize;
@@ -92,21 +93,32 @@ pub async fn execute_sql_file(
 
     tokio::spawn(async move {
         let started_at = std::time::Instant::now();
+        let mut progress_emitter = SqlFileProgressEmitter::new(|progress| {
+            send_sql_file_progress(&tx, progress);
+        });
+        progress_emitter.emit(build_sql_file_progress(
+            &req.execution_id,
+            SqlFileStatus::Started,
+            0,
+            0,
+            0,
+            0,
+            started_at,
+            "",
+            None,
+        ));
         match std::fs::metadata(&file_path) {
             Ok(meta) if meta.len() > 200 * 1024 * 1024 => {
-                send_sql_file_progress(
-                    &tx,
-                    sql_file_error_progress(
-                        &req.execution_id,
-                        started_at,
-                        format!("File too large: {} bytes (max {} bytes)", meta.len(), 200 * 1024 * 1024),
-                    ),
-                );
+                progress_emitter.emit(sql_file_error_progress(
+                    &req.execution_id,
+                    started_at,
+                    format!("File too large: {} bytes (max {} bytes)", meta.len(), 200 * 1024 * 1024),
+                ));
                 cleanup_sql_file_execution(&state_clone, &req.execution_id).await;
                 return;
             }
             Err(e) => {
-                send_sql_file_progress(&tx, sql_file_error_progress(&req.execution_id, started_at, e.to_string()));
+                progress_emitter.emit(sql_file_error_progress(&req.execution_id, started_at, e.to_string()));
                 cleanup_sql_file_execution(&state_clone, &req.execution_id).await;
                 return;
             }
@@ -119,19 +131,14 @@ pub async fn execute_sql_file(
         }) {
             Ok(content) => content,
             Err(e) => {
-                send_sql_file_progress(&tx, sql_file_error_progress(&req.execution_id, started_at, e.to_string()));
+                progress_emitter.emit(sql_file_error_progress(&req.execution_id, started_at, e.to_string()));
                 cleanup_sql_file_execution(&state_clone, &req.execution_id).await;
                 return;
             }
         };
 
-        send_sql_file_progress(
-            &tx,
-            build_sql_file_progress(&req.execution_id, SqlFileStatus::Started, 0, 0, 0, 0, started_at, "", None),
-        );
-
         let _ = execute_sql_file_content(&app, &req, &file_content, token, started_at, |progress| {
-            send_sql_file_progress(&tx, progress);
+            progress_emitter.emit(progress);
         })
         .await;
 
@@ -182,7 +189,7 @@ pub async fn sql_file_progress(
     let tx = channels.get(&execution_id).ok_or_else(|| AppError("Execution not found".to_string()))?;
     let rx = tx.subscribe();
     drop(channels);
-    Ok(crate::sse::sse_from_channel(rx))
+    Ok(crate::sse::sse_from_lossy_channel(rx))
 }
 
 pub async fn cancel_sql_file(

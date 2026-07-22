@@ -89,8 +89,9 @@ import {
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
-import { canRefreshDataTableFromSingleActivationDoubleClick, dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
+import { dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
 import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
+import { appendCreateDatabaseErrorHint } from "@/lib/database/createDatabaseErrorHints";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import {
   buildCreateSchemaSql,
@@ -368,6 +369,14 @@ const {
 const {
   canDropMongoDatabase,
   canDropMongoCollection,
+  canRenameMongoCollection,
+  prepareRenameMongoCollectionDialog,
+  confirmRenameMongoCollection,
+  showRenameMongoCollectionDialog,
+  renameMongoCollectionName,
+  renameMongoCollectionError,
+  renameMongoCollectionPreview,
+  renameMongoCollectionLoading,
   mongoIndexNameForNode,
   canDropMongoIndexNode,
   canDropMongoIndex,
@@ -383,6 +392,7 @@ const {
   dropAllMongoIndexes,
   flushRedisDb,
   confirmFlushRedisDb,
+  confirmDropMongoDatabase,
   confirmDropMongoCollection,
   confirmDropMongoIndex,
   confirmDropAllMongoIndexes,
@@ -661,9 +671,6 @@ function runRowClickAction(clickDetail: number) {
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation);
   if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
   if (action === "open-data") {
-    if (node.type === "table") {
-      singleActivationDoubleClickRefreshAllowed = canRefreshDataTableFromSingleActivationDoubleClick(findExistingSameTableDataTab());
-    }
     scheduleOpenData(node);
   } else if (isDocumentBrowserTreeNode(node.type)) {
     openMongoTreeData(node);
@@ -673,8 +680,6 @@ function runRowClickAction(clickDetail: number) {
     toggle();
   }
 }
-
-let singleActivationDoubleClickRefreshAllowed = false;
 
 function refreshActiveKvBrowserAfterOpen(mode: "etcd" | "zookeeper", connectionId: string) {
   void nextTick(() => {
@@ -839,6 +844,10 @@ function requestRenameSelectedNode(): boolean {
     connectionStore.startEditing(editTarget.connectionId);
     return true;
   }
+  if (canRenameMongoCollection.value) {
+    openRenameMongoCollectionDialog();
+    return true;
+  }
   if (canRenameObject.value) {
     openRenameObjectDialog();
     return true;
@@ -848,6 +857,12 @@ function requestRenameSelectedNode(): boolean {
     return true;
   }
   return false;
+}
+
+function openRenameMongoCollectionDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareRenameMongoCollectionDialog();
 }
 
 function requestEditSelectedConnection(): boolean {
@@ -899,8 +914,8 @@ function onDoubleClick(event: MouseEvent) {
     if (!activeNode.value.isExpanded) void toggle();
   } else if (action === "open-data") {
     openDataImmediately(activeNode.value);
-  } else if (action === "refresh-data") {
-    void refreshData();
+  } else if (action === "activate-data") {
+    activateDataTableFromDoubleClick();
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-saved-sql") {
@@ -912,24 +927,21 @@ function onDoubleClick(event: MouseEvent) {
   }
 }
 
-async function refreshData() {
+function activateDataTableFromDoubleClick() {
   const node = activeNode.value;
   if (node.type !== "table" || !hasNodeDatabaseContext(node)) return;
-  const singleActivationRefreshAllowed = singleActivationDoubleClickRefreshAllowed;
-  singleActivationDoubleClickRefreshAllowed = false;
   const activation = settingsStore.editorSettings.sidebarActivation;
-  if (activation === "single" && !singleActivationRefreshAllowed) return;
   const existingSameTableTab = findExistingSameTableDataTab();
-  const action = dataTableDoubleClickAction(existingSameTableTab, activation, singleActivationRefreshAllowed);
+  const action = dataTableDoubleClickAction(existingSameTableTab, activation);
   if (action === "none") return;
   if (action === "open") {
     openDataImmediately(node);
     return;
   }
   if (!existingSameTableTab) return;
+  // Reopening an available table follows DBeaver's editor reuse model: only
+  // activate the existing tab so filters, result rows, and in-flight work stay intact.
   queryStore.switchTab(existingSameTableTab.id);
-  if (action === "activate") return;
-  await queryStore.refreshDataTab(existingSameTableTab.id);
 }
 
 function findExistingSameTableDataTab() {
@@ -2572,24 +2584,30 @@ async function applyCreateDatabaseAuthorizationPlan() {
   if (!node.connectionId || !plan || createDatabaseAuthorizationApplying.value) return;
   createDatabaseAuthorizationApplying.value = true;
   try {
+    const config = connectionStore.getConfig(node.connectionId);
     const results = await executeWithProductionSqlGuard({
-      connection: connectionStore.getConfig(node.connectionId),
+      connection: config,
       database: "",
       sql: createDatabasePreviewSql.value,
       source: t("production.sourceSidebar"),
       execute: () => executeAuthorizationPlan(plan, (step) => api.executeMulti(node.connectionId!, step.database, step.sql, undefined, undefined, { maxRows: 1000, continueOnError: true })),
     });
     if (!results) return;
-    createDatabaseAuthorizationResults.value = results;
-    const created = results.some((result) => result.step.id === "create-database" && result.status === "success");
-    const status = authorizationPlanStatus(results);
+    const displayResults = results.map((result) => ({
+      ...result,
+      message: result.message && result.step.operation === "createDatabase" ? appendCreateDatabaseErrorHint(config?.db_type, result.message, t) : result.message,
+    }));
+    createDatabaseAuthorizationResults.value = displayResults;
+    const created = displayResults.some((result) => result.step.id === "create-database" && result.status === "success");
+    const status = authorizationPlanStatus(displayResults);
     if (created) {
       await connectionStore.ensureVisibleDatabase(node.connectionId, name);
       await connectionStore.loadDatabases(node.connectionId, { force: true });
     }
     toast(t(status === "success" ? "contextMenu.createDatabaseSuccess" : status === "partial" ? "contextMenu.createDatabasePartial" : "contextMenu.createDatabaseFailed", { name }), status === "success" ? 3000 : 5000);
   } catch (error: any) {
-    toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), 5000);
+    const message = appendCreateDatabaseErrorHint(connectionStore.getConfig(node.connectionId)?.db_type, error?.message || String(error), t);
+    toast(t("contextMenu.tableOperationFailed", { message }), 8000);
   } finally {
     createDatabaseAuthorizationApplying.value = false;
   }
@@ -2631,26 +2649,26 @@ function dropDatabase() {
 
 async function confirmDropDatabase() {
   const node = sidebarDangerTarget.value ?? activeNode.value;
-  if (!node.connectionId || dropDatabaseLoading.value) return;
+  if (node.type === "mongo-db") {
+    await confirmDropMongoDatabase();
+    return;
+  }
+
+  const connectionId = node.connectionId;
+  if (!connectionId || dropDatabaseLoading.value) return;
   dropDatabaseLoading.value = true;
   try {
-    await connectionStore.ensureConnected(node.connectionId);
-    if (node.type === "mongo-db" && node.database) {
-      await api.mongoDropDatabase(node.connectionId, node.database);
-      toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
-      await connectionStore.loadMongoDatabases(node.connectionId);
-      showDropDatabaseConfirm.value = false;
-      return;
-    }
+    await connectionStore.ensureConnected(connectionId);
     const sql =
       dropDatabasePreviewSql.value ||
       (await buildDropDatabaseSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
       }));
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
+    if (!executed) return;
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
-    await connectionStore.loadDatabases(node.connectionId, { force: true });
+    await connectionStore.loadDatabases(connectionId, { force: true });
     showDropDatabaseConfirm.value = false;
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -3309,6 +3327,12 @@ function databaseSpecificDialogCapabilities() {
     editNacosNamespaceDesc,
     editNacosNamespaceLoading,
     confirmEditNacosNamespace,
+    showRenameMongoCollectionDialog,
+    renameMongoCollectionName,
+    renameMongoCollectionError,
+    renameMongoCollectionPreview,
+    renameMongoCollectionLoading,
+    confirmRenameMongoCollection,
     showCreateSchemaDialog,
     createSchemaName,
     confirmCreateSchema,
@@ -3785,6 +3809,14 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    if (canRenameMongoCollection.value) {
+      items.push({
+        label: t("contextMenu.renameObject"),
+        action: openRenameMongoCollectionDialog,
+        icon: Pencil,
+        shortcut: shortcutRename,
+      });
+    }
     if (canDropAllMongoIndexes.value || canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
       if (canDropAllMongoIndexes.value) {

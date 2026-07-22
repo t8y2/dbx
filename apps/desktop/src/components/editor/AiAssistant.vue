@@ -132,6 +132,8 @@ const emit = defineEmits<{
   executeSql: [sql: string];
   tempRunSql: [sql: string];
   requestAutoExecuteSql: [sql: string];
+  insertRedisCommand: [command: string];
+  executeRedisCommand: [command: string];
   openExplainPlan: [sql: string];
   close: [];
 }>();
@@ -390,6 +392,7 @@ const agentActionButtons: AiActionButton[] = [
 ];
 
 const actionButtons = computed<AiActionButton[]>(() => (assistantMode.value === "agent" ? agentActionButtons : askActionButtons));
+const isRedisConnection = computed(() => props.connection?.db_type === "redis");
 
 // Vector DBs hide the action menu and only expose collection tools.
 // Keep their action at `generate` so the task contract doesn't tell the LLM to call execute_query.
@@ -1531,14 +1534,26 @@ async function cancelStream() {
 }
 
 function applySql(code: string) {
+  if (isRedisConnection.value) {
+    emit("insertRedisCommand", code);
+    return;
+  }
   emit("replaceSql", code);
 }
 
 function executeSql(code: string) {
+  if (isRedisConnection.value) {
+    emit("executeRedisCommand", code);
+    return;
+  }
   emit("executeSql", code);
 }
 
 function tempRunSql(code: string) {
+  if (isRedisConnection.value) {
+    emit("executeRedisCommand", code);
+    return;
+  }
   emit("tempRunSql", code);
 }
 
@@ -1918,13 +1933,13 @@ async function openExternalUrl(url: string) {
                       <span>{{ seg.lang }}</span>
                       <span class="flex-1" />
                       <div class="flex items-center gap-1.5">
-                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
+                        <button v-if="seg.isSql && !isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
                           <FlaskConical class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
+                        <button v-if="seg.isSql || isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
                           <Play class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
+                        <button v-if="seg.isSql || isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
                           <Replace class="h-3.5 w-3.5" />
                         </button>
                         <button

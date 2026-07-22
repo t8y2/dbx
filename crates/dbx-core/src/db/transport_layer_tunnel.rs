@@ -276,6 +276,7 @@ mod tests {
             port,
             username: String::new(),
             password: String::new(),
+            test_target: None,
         })
     }
 

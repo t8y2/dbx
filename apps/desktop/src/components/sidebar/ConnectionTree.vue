@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, X, ListFilter, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
+import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -37,6 +37,7 @@ import { createSidebarActionTarget, findSidebarActionTarget, type SidebarActionT
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
+import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -247,6 +248,20 @@ const searchScopeMenuItems = computed(() => [
     : []),
 ]);
 
+const connectionListSortMenuItems = computed(() => [
+  { value: "manual", label: t("sidebar.sortConnectionsManual"), icon: ListOrdered },
+  { value: "asc", label: t("sidebar.sortConnectionsAscending"), icon: ArrowDownAZ },
+  { value: "desc", label: t("sidebar.sortConnectionsDescending"), icon: ArrowUpZA },
+]);
+
+const isConnectionListAlphabeticallySorted = computed(() => settingsStore.editorSettings.sidebarConnectionSortMode !== "manual");
+
+function updateConnectionListSortMode(mode: string) {
+  if (mode === "manual" || mode === "asc" || mode === "desc") {
+    settingsStore.updateEditorSettings({ sidebarConnectionSortMode: mode });
+  }
+}
+
 const hasSearchScopeFilter = computed(() => selectedSearchScopes.value.length > 0);
 const searchableNodeTypes = computed<Set<TreeNodeType> | undefined>(() => {
   if (!hasSearchScopeFilter.value) return undefined;
@@ -321,12 +336,14 @@ function focusTableSearchInput(parentNodeId: string) {
   });
 }
 
+const displayedTreeNodes = computed(() => sortConnectionListForDisplay(store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode));
+
 const filteredNodes = computed(() => {
-  let nodes = store.treeNodes;
+  let nodes = displayedTreeNodes.value;
 
   const q = deferredSearchQuery.value;
+  nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value);
   if (q) {
-    nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value);
     nodes = filterSidebarSearchRootsByConnectionState(nodes, store.connectedIds);
   }
 
@@ -1334,6 +1351,23 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           <Crosshair class="h-3.5 w-3.5" />
         </button>
         <LightDropdown
+          :model-value="settingsStore.editorSettings.sidebarConnectionSortMode"
+          :items="connectionListSortMenuItems"
+          :aria-label="t('sidebar.sortConnections')"
+          :label="t('sidebar.sortConnections')"
+          :trigger-title="t('sidebar.sortConnections')"
+          :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', isConnectionListAlphabeticallySorted ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
+          trigger-icon-class="h-3.5 w-3.5"
+          item-icon-class="h-3.5 w-3.5"
+          content-class="w-max min-w-0"
+          selected-item-class="bg-primary/10 text-primary"
+          selected-check-class="text-primary"
+          :show-trigger-label="false"
+          :show-chevron="false"
+          align="end"
+          @update:model-value="updateConnectionListSortMode"
+        />
+        <LightDropdown
           v-if="searchScopeOptions.length > 0"
           model-value=""
           :items="searchScopeMenuItems"
@@ -1376,7 +1410,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             <TreeItem
               :node="item.node"
               :depth="item.depth"
-              :drag-disabled="isFiltering"
+              :drag-disabled="isFiltering || isConnectionListAlphabeticallySorted"
               :pending-rename="pendingRenameGroupId === item.node.id"
               :highlighted="highlightedNodeId === item.node.id"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
@@ -1399,7 +1433,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             :key="item.id"
             :node="item.node"
             :depth="item.depth"
-            :drag-disabled="isFiltering"
+            :drag-disabled="isFiltering || isConnectionListAlphabeticallySorted"
             :pending-rename="pendingRenameGroupId === item.node.id"
             :highlighted="highlightedNodeId === item.id"
             @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"

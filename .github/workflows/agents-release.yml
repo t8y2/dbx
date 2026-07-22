@@ -298,6 +298,11 @@ jobs:
           find artifacts -name 'dbx-jre-*.tar.gz' -exec cp {} release/ \;
           ls -lh release/
 
+      - name: Add versions to agent artifact filenames
+        env:
+          MODULE_VERSIONS: ${{ needs.bump-versions.outputs.versions }}
+        run: python3 agents/scripts/version_agent_artifacts.py release "$MODULE_VERSIONS"
+
       - name: Generate agent-registry.json
         env:
           MODULE_VERSIONS: ${{ needs.bump-versions.outputs.versions }}
@@ -309,6 +314,10 @@ jobs:
           get_module_version() {
             local name="$1"
             echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name','${RELEASE_VERSION}'))"
+          }
+
+          module_names() {
+            echo "$MODULE_VERSIONS" | python3 -c 'import sys,json; print("\n".join(sorted(json.load(sys.stdin))))'
           }
 
           generate_jar_entry() {
@@ -376,12 +385,13 @@ jobs:
           }
 
           generate_native_platforms() {
-            local name="$1"
+            local name="$1" version="$2"
             local PLATFORMS=""
-            for f in release/dbx-agent-${name}-*; do
+            for p in macos-aarch64 macos-x64 linux-aarch64 linux-x64 windows-aarch64 windows-x64; do
+              extension=""
+              [[ "$p" == windows-* ]] && extension=".exe"
+              f="release/dbx-agent-${name}-${version}-${p}${extension}"
               [ ! -f "$f" ] && continue
-              [[ "$f" != *.jar ]] || continue
-              p=$(basename "$f" | sed "s/dbx-agent-${name}-//; s/\\.exe$//")
               sha256=$(sha256sum "$f" | cut -d' ' -f1)
               size=$(stat -c%s "$f")
               url="https://github.com/${REPO}/releases/download/${TAG}/$(basename $f)"
@@ -401,25 +411,26 @@ jobs:
           JRE21_PLATFORMS=$(generate_jre_platforms "21")
 
           DRIVERS=""
-          for f in release/dbx-agent-*.jar; do
-            name=$(basename "$f" .jar | sed 's/dbx-agent-//')
+          for name in $(module_names); do
+            version=$(get_module_version "$name")
+            f="release/dbx-agent-${name}-${version}.jar"
+            [ -f "$f" ] || continue
             label=$(unzip -p "$f" META-INF/MANIFEST.MF | awk -F': ' 'BEGIN{IGNORECASE=1} /^Agent-Label:/ {sub(/\r$/, "", $2); print $2; exit}' || echo "$name")
             [ -z "$label" ] && label="$name"
             external_driver=$(unzip -p "$f" META-INF/MANIFEST.MF | awk -F': ' 'BEGIN{IGNORECASE=1} /^Agent-External-Driver:/ {sub(/\r$/, "", $2); print tolower($2); exit}' || true)
             [ "$external_driver" = "true" ] || external_driver="false"
             jre_key=$(detect_jre_key "$name")
-            version=$(get_module_version "$name")
-            native_json=$(generate_native_platforms "$name")
+            native_json=$(generate_native_platforms "$name" "$version")
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
           for name in oracle xugu kingbase; do
-            [ -f "release/dbx-agent-${name}.jar" ] && continue
-            native_json=$(generate_native_platforms "$name")
+            version=$(get_module_version "$name")
+            [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
+            native_json=$(generate_native_platforms "$name" "$version")
             [ -z "$native_json" ] && continue
             label=$(native_only_label "$name")
             jre_key=$(detect_jre_key "$name")
-            version=$(get_module_version "$name")
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_native_entry "$name" "$label" "$jre_key" "$version" "$native_json")"
           done
@@ -444,6 +455,9 @@ jobs:
           echo "=== agent-registry.json ==="
           cat release/agent-registry.json
 
+      - name: Build single-driver ZIP bundles
+        run: python3 agents/scripts/build_driver_zips.py release
+
       - name: Build offline ZIP bundles
         run: bash agents/scripts/build_offline_zip.sh release
 
@@ -455,8 +469,12 @@ jobs:
         run: |
           NOTES=""
           DRIVER_NAMES=()
-          for f in release/dbx-agent-*.jar; do
-            DRIVER_NAMES+=("$(basename "$f" .jar | sed 's/dbx-agent-//')")
+          module_names() {
+            echo "$MODULE_VERSIONS" | python3 -c 'import sys,json; print("\n".join(sorted(json.load(sys.stdin))))'
+          }
+          for name in $(module_names); do
+            version=$(echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))")
+            [ -f "release/dbx-agent-${name}-${version}.jar" ] && DRIVER_NAMES+=("$name")
           done
           for name in oracle xugu kingbase; do
             [ -f "release/dbx-agent-${name}.jar" ] && continue
@@ -478,7 +496,7 @@ jobs:
             new_ver=$(echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))")
             [ "$old_ver" = "$new_ver" ] && continue
 
-            jar_file="release/dbx-agent-${name}.jar"
+            jar_file="release/dbx-agent-${name}-${new_ver}.jar"
             if [ -f "$jar_file" ]; then
               label=$(unzip -p "$jar_file" META-INF/MANIFEST.MF | awk -F': ' 'BEGIN{IGNORECASE=1} /^Agent-Label:/ {sub(/\r$/, "", $2); print $2; exit}' || echo "$name")
               [ -z "$label" ] && label="$name"
@@ -531,6 +549,16 @@ jobs:
           git push origin refs/tags/agents-latest --force
 
           if gh release view agents-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Versioned driver assets change names every release, so remove the
+            # previous set before uploading to keep agents-latest unambiguous.
+            gh release view agents-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
+              while IFS= read -r asset; do
+                case "$asset" in
+                  dbx-agent-*.jar|dbx-agent-*.zip|dbx-agent-oracle-*|dbx-agent-xugu-*|dbx-agent-kingbase-*)
+                    gh release delete-asset agents-latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
+                    ;;
+                esac
+              done
             gh release upload agents-latest release/* --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit agents-latest \
               --repo "$GITHUB_REPOSITORY" \
@@ -563,11 +591,14 @@ jobs:
           # Upload only changed driver JARs
           UPLOADED=0
           SKIPPED=0
-          for f in release/dbx-agent-*.jar; do
-            [ ! -f "$f" ] && continue
-            name=$(basename "$f" .jar | sed 's/dbx-agent-//')
+          module_names() {
+            echo "$MODULE_VERSIONS" | python3 -c 'import sys,json; print("\n".join(sorted(json.load(sys.stdin))))'
+          }
+          for name in $(module_names); do
             old_ver=$(echo "$PREV_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))" 2>/dev/null)
             new_ver=$(echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))" 2>/dev/null)
+            f="release/dbx-agent-${name}-${new_ver}.jar"
+            [ ! -f "$f" ] && continue
             if [ "$old_ver" = "$new_ver" ] && [ -n "$old_ver" ]; then
               echo "Skip $(basename $f) (unchanged $old_ver)"
               SKIPPED=$((SKIPPED + 1))
@@ -581,6 +612,7 @@ jobs:
           done
           echo "Drivers: $UPLOADED uploaded, $SKIPPED skipped"
 
+          # Upload versioned native binaries and all single-driver ZIP packages.
           for f in release/dbx-agent-*; do
             [ -f "$f" ] || continue
             [[ "$f" != *.jar ]] || continue

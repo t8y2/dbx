@@ -86,7 +86,7 @@ function invalidateProfileTest() {
 // Profile tests are asynchronous, so any selection or configuration change
 // must invalidate the request before it can publish a stale result.
 watch(
-  [selectedId, selectedSsh],
+  [selectedId, selectedSsh, selectedProxy],
   () => {
     invalidateProfileTest();
   },
@@ -148,7 +148,7 @@ async function save() {
 }
 
 async function testSelected() {
-  const profile = selectedSsh.value;
+  const profile = selectedSsh.value || selectedProxy.value;
   if (!profile || isTesting.value) return;
   const profileSnapshot = cloneProfiles([profile])[0];
   const requestId = testGuard.start(profileSnapshot);
@@ -156,13 +156,13 @@ async function testSelected() {
   testResult.value = null;
   try {
     const message = await store.testProfile(profileSnapshot);
-    if (!testGuard.isCurrent(requestId, selectedSsh.value)) return;
-    testResult.value = { ok: true, message: message || t("settings.tunnelsTestSuccess") };
+    if (!testGuard.isCurrent(requestId, profile)) return;
+    testResult.value = { ok: true, message: message ? t("settings.tunnelsTestSuccess") + ": " + message : t("settings.tunnelsTestSuccess") };
   } catch (error) {
-    if (!testGuard.isCurrent(requestId, selectedSsh.value)) return;
+    if (!testGuard.isCurrent(requestId, profile)) return;
     testResult.value = { ok: false, message: t("settings.tunnelsTestFailed", { message: translateBackendError(t, String(error)) }) };
   } finally {
-    if (testGuard.isCurrent(requestId, selectedSsh.value)) isTesting.value = false;
+    if (testGuard.isCurrent(requestId, selectedSsh.value || selectedProxy.value)) isTesting.value = false;
   }
 }
 </script>
@@ -288,6 +288,10 @@ async function testSelected() {
           <Label class="text-xs">{{ t("connection.proxyPassword") }}</Label>
           <PasswordInput v-model="selectedProxy.password" class="col-span-3" :placeholder="t('connection.proxyPasswordPlaceholder')" />
         </div>
+        <div class="grid grid-cols-4 items-center gap-4">
+          <Label class="text-xs">{{ t("connection.proxyTestTarget") }}</Label>
+          <Input v-model="selectedProxy.test_target" class="col-span-3" :placeholder="t('connection.proxyTestTargetPlaceholder')" />
+        </div>
       </template>
 
       <template v-else-if="selectedHttp">
@@ -314,7 +318,7 @@ async function testSelected() {
       <Button type="button" variant="outline" size="sm" :disabled="!isDirty || isSaving" @click="resetDraft">
         {{ t("settings.tunnelsReset") }}
       </Button>
-      <Button v-if="selectedSsh" type="button" variant="outline" size="sm" :disabled="isTesting || isSaving || !selectedSsh.host.trim()" @click="testSelected">
+      <Button v-if="selectedSsh || selectedProxy" type="button" variant="outline" size="sm" :disabled="isTesting || isSaving || (!selectedSsh?.host?.trim() && !selectedProxy?.host?.trim())" @click="testSelected">
         <Loader2 v-if="isTesting" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
         {{ isTesting ? t("settings.tunnelsTesting") : t("settings.tunnelsTest") }}
       </Button>

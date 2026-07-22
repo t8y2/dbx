@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.62"
+version = "0.5.63"
 dependencies = [
  "anyhow",
  "axum",
@@ -1860,7 +1860,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1923,12 +1923,13 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webpki-roots 0.26.11",
+ "winnow 1.0.3",
  "zip 4.6.1",
 ]
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.39"
+version = "0.4.40"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1945,7 +1946,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.62"
+version = "0.5.63"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

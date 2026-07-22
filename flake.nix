@@ -166,7 +166,7 @@
         # ------------------------------------------------------------------ #
         packages.dbx-desktop = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "dbx-desktop";
-          version = "0.5.62";
+          version = "0.5.63";
 
           src = pkgs.lib.cleanSource ./.;
 
@@ -179,16 +179,16 @@
             fetcherVersion = 4;
             # Replace with the correct hash after the first failed build:
             #   nix build .#dbx-desktop 2>&1 | grep 'got:'
-            hash = "sha256-x6uRTLXUUXh9lHoXJDkJxvb68eEgCOAqOB9P+zp13fw=";
+            hash = "sha256-xRnzwsiLazZVedPCOnRha2f1fos3uEO+UuNRaWJhQ6I=";
           };
 
           # ── Step 2: vendor Cargo dependencies ───────────────────────────── #
           cargoDeps = pkgs.rustPlatform.importCargoLock {
             lockFile = ./Cargo.lock;
             outputHashes = {
-              "tokio-postgres-0.7.17" = "sha256-mGzfqYmo1PPcpKOlyA6ePzZA4lrNspOJ5G52meHiocY=";
-              "mysql_async-0.36.2" = "sha256-qxSo2JX/ldU8Z+PVDrHy8+EB9ZG3Vdo9TbKLCLQt2CU=";
-              "mysql_common-0.35.5" = "sha256-CwXuC6QInSI1GcVSdaD1tcA7J+zTY9ZatOyTYTYPe0Q=";
+                "tokio-postgres-0.7.17" = "sha256-mGzfqYmo1PPcpKOlyA6ePzZA4lrNspOJ5G52meHiocY=";
+                "mysql-common-derive-0.32.2" = "sha256-8lWgsdTuLTgOmzP7tXmA9LnomOE0wjxXsCBw9NEMt2o=";
+                "mysql_async-0.37.0" = "sha256-r4+VFDmflMu7KLButuwE/lcYAlPuacXiDQN6ZdBhuwo=";
             };
           };
 

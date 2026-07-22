@@ -142,12 +142,22 @@ function extractIssueFormSection(body, predicate) {
   return "";
 }
 
+function extractInlineField(body, predicate) {
+  const matches = String(body || "").matchAll(/^\s*\*\*(.+?)\*\*\s*[:：]\s*(.+?)\s*$/gm);
+  for (const match of matches) {
+    if (predicate(match[1].trim())) return match[2].trim();
+  }
+  return "";
+}
+
 function extractDatabaseField(body) {
-  return extractIssueFormSection(body, (heading) => (
+  const matchesDatabaseHeading = (heading) => (
     heading.includes("数据库类型") ||
     heading.toLowerCase().includes("database type") ||
     /^database$/i.test(heading)
-  ));
+  );
+  return extractIssueFormSection(body, matchesDatabaseHeading)
+    || extractInlineField(body, matchesDatabaseHeading);
 }
 
 function extractPriorityField(body) {

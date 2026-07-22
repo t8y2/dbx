@@ -460,22 +460,24 @@ export async function importAgentsFromZip(fileOrPath: string | File): Promise<nu
   return result.count;
 }
 
-export async function importAgentJar(dbType: string, pathOrFile: string | File): Promise<void> {
+export async function importAgentDriver(dbType: string, pathOrFile: string | File): Promise<void> {
   let blob: Blob;
   let fileName: string;
   if (pathOrFile instanceof File) {
     blob = pathOrFile;
     fileName = pathOrFile.name;
   } else {
-    fileName = pathOrFile.split("/").pop() || "driver.jar";
+    fileName = pathOrFile.split("/").pop() || "agent";
     blob = await (await fetch(pathOrFile)).blob();
   }
   const formData = new FormData();
   formData.append("dbType", dbType);
   formData.append("file", blob, fileName);
-  const uploadRes = await fetch(apiUrl("/api/agents/import-jar"), { method: "POST", body: formData });
+  const uploadRes = await fetch(apiUrl("/api/agents/import-driver"), { method: "POST", body: formData });
   if (!uploadRes.ok) throw new Error(await uploadRes.text());
 }
+
+export const importAgentJar = importAgentDriver;
 
 export async function reinstallJre(jreKey?: string, _source?: UpdateDownloadSource): Promise<void> {
   await post("/api/agents/reinstall-jre", { jreKey });
@@ -641,8 +643,8 @@ export async function getObjectSource(connectionId: string, database: string, sc
   return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature })}`);
 }
 
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ColumnInfo[]> {
-  return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
+  return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog, client_session_id: clientSessionId })}`);
 }
 
 export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
@@ -2081,6 +2083,10 @@ export async function mongoDropCollection(connectionId: string, database: string
   await post("/api/mongo/drop-collection", { connectionId, database, collection });
 }
 
+export async function mongoRenameCollection(connectionId: string, database: string, collection: string, newName: string): Promise<void> {
+  await post("/api/mongo/rename-collection", { connectionId, database, collection, newName });
+}
+
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
   const collections = await documentListCollections(connectionId, "default");
   return collections.map((c) => c.name);
@@ -2277,8 +2283,11 @@ export async function deleteHistoryEntry(id: string): Promise<void> {
 // Updates
 // ---------------------------------------------------------------------------
 
-export async function checkForUpdates(locale?: string): Promise<UpdateInfo> {
-  const query = locale ? `?locale=${encodeURIComponent(locale)}` : "";
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
+  const params = new URLSearchParams();
+  if (locale) params.set("locale", locale);
+  if (source) params.set("source", source);
+  const query = params.size > 0 ? `?${params.toString()}` : "";
   return get(`/api/update/check${query}`);
 }
 

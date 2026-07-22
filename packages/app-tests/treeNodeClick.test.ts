@@ -14,9 +14,12 @@ test("double click navigation mode selects rows on single click", () => {
   assert.equal(treeNodeRowAction("saved-sql-file", false, "double"), "none");
 });
 
-test("table rows refresh on double click in both navigation modes", () => {
-  assert.equal(treeNodeRowDoubleClickAction("table", true, "single"), "refresh-data");
-  assert.equal(treeNodeRowDoubleClickAction("table", true, "double"), "refresh-data");
+test("table double click avoids a second action in single activation mode", () => {
+  assert.equal(treeNodeRowDoubleClickAction("table", true, "single"), "none");
+});
+
+test("table double click activates data in double activation mode", () => {
+  assert.equal(treeNodeRowDoubleClickAction("table", true, "double"), "activate-data");
 });
 
 test("double click navigation mode opens other actionable rows on double click", () => {

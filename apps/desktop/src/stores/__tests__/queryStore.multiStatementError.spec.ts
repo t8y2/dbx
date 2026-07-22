@@ -83,6 +83,51 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.result?.columns).toEqual(["Error"]);
   });
 
+  it("invalidates only the executing Oracle tab after successful CURRENT_SCHEMA changes", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "oracle-1",
+      name: "Oracle",
+      db_type: "oracle",
+      database: "ORCL",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti
+      .mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }])
+      .mockResolvedValueOnce([{ columns: ["Error"], rows: [["schema missing"]], affected_rows: 0, execution_time_ms: 1, execution_error: true }])
+      .mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabA = store.createTab("oracle-1", "ORCL", "Tab A");
+    const tabB = store.createTab("oracle-1", "ORCL", "Tab B");
+
+    await store.executeTabSql(tabA, "ALTER SESSION SET CURRENT_SCHEMA = REPORTING");
+    expect(store.tabs.find((tab) => tab.id === tabA)?.completionContextVersion).toBe(1);
+    expect(store.tabs.find((tab) => tab.id === tabB)?.completionContextVersion).toBeUndefined();
+
+    await store.executeTabSql(tabA, "/* retry */ ALTER SESSION SET CURRENT_SCHEMA = MISSING");
+    expect(store.tabs.find((tab) => tab.id === tabA)?.completionContextVersion).toBe(1);
+
+    await store.executeTabSql(tabA, "-- switch back\nALTER SESSION SET CURRENT_SCHEMA = APP");
+    expect(store.tabs.find((tab) => tab.id === tabA)?.completionContextVersion).toBe(2);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.clientSessionId)).toEqual([tabA, tabA, tabA]);
+  });
+
+  it("invalidates Oracle completion metadata when clearing a tab schema resets its session", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "oracle-1",
+      name: "Oracle",
+      db_type: "oracle",
+      database: "ORCL",
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Oracle", "query", "REPORTING");
+
+    store.updateSchema(tabId, undefined);
+
+    expect(store.tabs.find((tab) => tab.id === tabId)?.completionContextVersion).toBe(1);
+  });
+
   it("preserves the selected statement's absolute editor range", async () => {
     mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
     const { useQueryStore } = await import("@/stores/queryStore");

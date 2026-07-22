@@ -60,6 +60,10 @@ const includeStructure = ref(true);
 const includeData = ref(true);
 const includeObjects = ref(true);
 const dropTableIfExists = ref(false);
+const omitAutoIncrement = ref(false);
+// `AUTO_INCREMENT` stripping is a MySQL-only DDL transform (backend gates on
+// db_type == mysql, which also covers MariaDB / TiDB / OceanBase-MySQL-mode).
+const isMysqlFamily = computed(() => store.getConfig(connectionId.value)?.db_type === "mysql");
 
 // Export state
 const isExporting = ref(false);
@@ -273,6 +277,7 @@ async function startExport() {
     includeData: includeData.value,
     includeObjects: includeObjects.value,
     dropTableIfExists: dropTableIfExists.value,
+    omitAutoIncrement: omitAutoIncrement.value,
     batchSize: 1000,
   };
 
@@ -366,6 +371,7 @@ async function startAllDatabasesExport() {
         includeData: includeData.value,
         includeObjects: includeObjects.value,
         dropTableIfExists: dropTableIfExists.value,
+        omitAutoIncrement: omitAutoIncrement.value,
         batchSize: 1000,
       };
 
@@ -454,6 +460,7 @@ function resetState() {
   includeData.value = true;
   includeObjects.value = true;
   dropTableIfExists.value = false;
+  omitAutoIncrement.value = false;
   isExporting.value = false;
   exportProgress.value = null;
   exportDone.value = false;
@@ -676,6 +683,11 @@ watch(
               <CheckSquare v-if="dropTableIfExists && includeStructure" class="w-3.5 h-3.5 text-primary shrink-0" />
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.dropTableIfExists") }}
+            </div>
+            <div v-if="includeStructure && isMysqlFamily" class="flex items-center gap-2 cursor-pointer text-xs" @click="omitAutoIncrement = !omitAutoIncrement">
+              <CheckSquare v-if="omitAutoIncrement" class="w-3.5 h-3.5 text-primary shrink-0" />
+              <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+              {{ t("databaseExport.omitAutoIncrement") }}
             </div>
             <div class="flex items-center gap-2 cursor-pointer text-xs" @click="includeData = !includeData">
               <CheckSquare v-if="includeData" class="w-3.5 h-3.5 text-primary shrink-0" />

@@ -1393,6 +1393,8 @@ class SqlCompletionProvider {
     if (context.suggestKeywords && !context.exclusiveRoutineSuggestions && !pendingJoinKeyword) {
       this.items.push(...buildJoinModifierKeywordItems(context.prefix, this.input.keywordCase));
       this.items.push(...buildKeywordItems(context.prefix, context, this.databaseType, this.input.keywordCase));
+    } else if (shouldOfferKeywordPrefixContinuations(context, pendingJoinKeyword)) {
+      this.items.push(...buildKeywordPrefixContinuationItems(context.prefix, context, this.databaseType, this.input.keywordCase));
     }
 
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
@@ -2775,7 +2777,7 @@ function unquoteIdentifier(value: string): string {
   return value;
 }
 
-function quoteSqlIdentifier(identifier: string, dialect?: "mysql" | "postgres" | "sqlserver"): string {
+export function quoteSqlIdentifier(identifier: string, dialect?: "mysql" | "postgres" | "sqlserver"): string {
   if (dialect !== "postgres" || !requiresPostgresIdentifierQuote(identifier)) return identifier;
   return `"${identifier.replaceAll('"', '""')}"`;
 }
@@ -3403,8 +3405,7 @@ function buildAliasCandidates(tableName: string): string[] {
 
   if (parts.length > 1) {
     const initials = parts.map((part) => part[0]).join("");
-    if (initials.length >= 2) candidates.push(initials.slice(0, 2));
-    if (initials.length >= 3) candidates.push(initials.slice(0, 3));
+    if (initials.length >= 2) candidates.push(initials);
     candidates.push(parts[0].slice(0, 2), parts[0].slice(0, 3));
   } else {
     const name = parts[0] ?? tableName.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -4146,6 +4147,18 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
         boost: base + freqBoost,
       };
     });
+}
+
+function shouldOfferKeywordPrefixContinuations(context: SqlCompletionContext, pendingJoinKeyword: boolean): boolean {
+  return !!context.prefix && !pendingJoinKeyword && !context.qualifier && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions;
+}
+
+function buildKeywordPrefixContinuationItems(prefix: string, context: SqlCompletionContext, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+  const normalizedPrefix = prefix.toLowerCase();
+  return buildKeywordItems(prefix, context, databaseType, keywordCase).filter((item) => {
+    const normalizedLabel = item.label.toLowerCase();
+    return normalizedLabel.length > normalizedPrefix.length && normalizedLabel.startsWith(normalizedPrefix);
+  });
 }
 
 function matchesPrefix(candidate: string, prefix: string): boolean {

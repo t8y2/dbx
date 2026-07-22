@@ -245,7 +245,8 @@ async fn main() {
         .route("/agents/upgrade-all", post(routes::agents::upgrade_all_agents))
         .route("/agents/uninstall", post(routes::agents::uninstall_agent))
         .route("/agents/import-offline", post(routes::agents::import_agents_from_zip))
-        .route("/agents/import-jar", post(routes::agents::import_agent_jar))
+        .route("/agents/import-driver", post(routes::agents::import_agent_driver_file))
+        .route("/agents/import-jar", post(routes::agents::import_agent_driver_file))
         .route(
             "/agents/java-runtime",
             get(routes::agents::get_agent_java_runtime_config).post(routes::agents::set_agent_java_runtime_config),
@@ -449,6 +450,7 @@ async fn main() {
         .route("/mongo/create-database", post(routes::mongo::create_database))
         .route("/mongo/drop-database", post(routes::mongo::drop_database))
         .route("/mongo/drop-collection", post(routes::mongo::drop_collection))
+        .route("/mongo/rename-collection", post(routes::mongo::rename_collection))
         .route("/document-store/list-databases", post(routes::document_store::list_databases))
         .route("/document-store/list-collections", post(routes::document_store::list_collections))
         .route("/document-store/find-documents", post(routes::document_store::find_documents))

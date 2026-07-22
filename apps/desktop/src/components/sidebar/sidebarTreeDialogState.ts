@@ -87,6 +87,11 @@ export const showDropDatabaseConfirm = ref(false);
 export const dropDatabaseLoading = ref(false);
 export const showDropMongoCollectionConfirm = ref(false);
 export const dropMongoCollectionLoading = ref(false);
+export const showRenameMongoCollectionDialog = ref(false);
+export const renameMongoCollectionName = ref("");
+export const renameMongoCollectionError = ref("");
+export const renameMongoCollectionPreview = ref("");
+export const renameMongoCollectionLoading = ref(false);
 export const showDropMongoIndexConfirm = ref(false);
 export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
@@ -130,6 +135,7 @@ const openFlags = [
   showEditNacosNamespaceDialog,
   showDropDatabaseConfirm,
   showDropMongoCollectionConfirm,
+  showRenameMongoCollectionDialog,
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showFlushRedisDbConfirm,

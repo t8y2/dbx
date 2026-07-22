@@ -988,6 +988,34 @@ test("keeps appended empty-table rows when parent refreshes an equivalent rows a
   assert.equal(editor.newRows.value.length, 0);
 });
 
+test("keeps dirty new and deleted state when infinite scrolling appends rows", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const firstRow = [1, "Ada"] as CellValue[];
+  const secondRow = [2, "Grace"] as CellValue[];
+  const result = ref<{ columns: string[]; rows: CellValue[][]; appended_from_row_count?: number }>({ columns: ["id", "name"], rows: [firstRow, secondRow] });
+  const editor = createPeopleGridEditor(computed(() => result.value));
+
+  editor.applyCellValue(0, 1, "Ada Lovelace");
+  editor.deletedRows.value = new Set([1]);
+  editor.addRow();
+  await nextTick();
+
+  result.value = { columns: ["id", "name"], rows: [firstRow, secondRow, [3, "Linus"] as CellValue[]], appended_from_row_count: 2 };
+  await nextTick();
+
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), "Ada Lovelace");
+  assert.deepEqual([...editor.deletedRows.value], [1]);
+  assert.equal(editor.newRows.value.length, 1);
+
+  result.value = { columns: ["id", "name"], rows: [[1, "Ada"] as CellValue[], [2, "Grace"] as CellValue[]] };
+  await nextTick();
+  assert.equal(editor.dirtyRows.value.size, 0, "explicit result replacement still clears stale source indexes");
+  assert.equal(editor.deletedRows.value.size, 0);
+  assert.equal(editor.newRows.value.length, 0);
+});
+
 test("saving manually typed JSON from a MySQL grid normalizes smart quotes", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

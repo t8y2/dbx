@@ -203,6 +203,54 @@ pub async fn list_databases(client: &Client) -> Result<Vec<String>, String> {
     client.list_database_names().await.map_err(|e| e.to_string())
 }
 
+/// MongoDB collection kind from `listCollections` (not GridFS buckets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MongoCollectionKind {
+    Collection,
+    View,
+    Timeseries,
+}
+
+impl MongoCollectionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Collection => "collection",
+            Self::View => "view",
+            Self::Timeseries => "timeseries",
+        }
+    }
+
+    pub fn from_driver_type(collection_type: &mongodb::results::CollectionType) -> Self {
+        match collection_type {
+            mongodb::results::CollectionType::View => Self::View,
+            mongodb::results::CollectionType::Timeseries => Self::Timeseries,
+            // Collection and any future non_exhaustive variants default to a renamable collection.
+            _ => Self::Collection,
+        }
+    }
+}
+
+/// Name + kind for a MongoDB collection/view/timeseries returned by full `listCollections`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MongoCollectionSpec {
+    pub name: String,
+    pub kind: MongoCollectionKind,
+}
+
+/// Full `listCollections` with type metadata (for sidebar rename gating, etc.).
+pub async fn list_collection_specs(client: &Client, database: &str) -> Result<Vec<MongoCollectionSpec>, String> {
+    let mut cursor = client.database(database).list_collections().await.map_err(|e| e.to_string())?;
+    let mut specs = Vec::new();
+    while let Some(spec) = cursor.try_next().await.map_err(|e| e.to_string())? {
+        specs.push(MongoCollectionSpec {
+            name: spec.name,
+            kind: MongoCollectionKind::from_driver_type(&spec.collection_type),
+        });
+    }
+    Ok(specs)
+}
+
+/// Name-only listing (schema, GridFS helpers, and other callers that do not need type).
 pub async fn list_collections(client: &Client, database: &str) -> Result<Vec<String>, String> {
     client.database(database).list_collection_names().await.map_err(|e| e.to_string())
 }
@@ -503,6 +551,39 @@ pub async fn drop_collection(client: &Client, database: &str, collection: &str) 
         return Err("Collection name is required".to_string());
     }
     client.database(database).collection::<Document>(collection).drop().await.map_err(|e| e.to_string())
+}
+
+/// Build the admin `renameCollection` command document for a same-database rename.
+///
+/// Collection (and database) names are identifiers and must be passed exactly as provided —
+/// do not trim or otherwise normalize them before building the namespace.
+pub fn rename_collection_command_document(database: &str, old_name: &str, new_name: &str) -> Result<Document, String> {
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    if old_name.is_empty() {
+        return Err("Collection name is required".to_string());
+    }
+    if new_name.is_empty() {
+        return Err("New collection name is required".to_string());
+    }
+    if old_name == new_name {
+        return Err("New collection name must differ from the current name".to_string());
+    }
+    // MongoDB reserves system.* namespaces; reject them before exposing a rename that the server cannot perform.
+    if old_name.starts_with("system.") || new_name.starts_with("system.") {
+        return Err("System collections cannot be renamed".to_string());
+    }
+    Ok(doc! {
+        "renameCollection": format!("{database}.{old_name}"),
+        "to": format!("{database}.{new_name}"),
+    })
+}
+
+pub async fn rename_collection(client: &Client, database: &str, old_name: &str, new_name: &str) -> Result<(), String> {
+    let command = rename_collection_command_document(database, old_name, new_name)?;
+    client.database("admin").run_command(command).await.map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub async fn list_indexes(client: &Client, database: &str, collection: &str) -> Result<Vec<IndexInfo>, String> {
@@ -1655,44 +1736,13 @@ fn parse_extended_json_value(obj: &serde_json::Map<String, serde_json::Value>) -
 
 fn parse_mongo_shell_date(value: &str) -> Option<DateTime> {
     let trimmed = value.trim();
-    if let Some(inner) = trimmed.strip_prefix("ISODate(").or_else(|| trimmed.strip_prefix("new Date(")) {
-        let inner = inner.strip_suffix(')')?.trim();
-        let quoted = inner
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .or_else(|| inner.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')))?;
-        return DateTime::parse_rfc3339_str(quoted).ok();
-    }
-    parse_legacy_mongo_date_display(trimmed)
-}
-
-fn parse_legacy_mongo_date_display(value: &str) -> Option<DateTime> {
-    let (date, time) = value.split_once(' ').or_else(|| value.split_once('T'))?;
-    if date.len() != 10 || time.len() < 8 || time.len() > 12 {
-        return None;
-    }
-    if !date
-        .chars()
-        .enumerate()
-        .all(|(index, ch)| matches!(index, 4 | 7) && ch == '-' || !matches!(index, 4 | 7) && ch.is_ascii_digit())
-    {
-        return None;
-    }
-    let (seconds, millis) = time.split_once('.').unwrap_or((time, "000"));
-    if seconds.len() != 8 || millis.is_empty() || millis.len() > 3 {
-        return None;
-    }
-    if !seconds
-        .chars()
-        .enumerate()
-        .all(|(index, ch)| matches!(index, 2 | 5) && ch == ':' || !matches!(index, 2 | 5) && ch.is_ascii_digit())
-    {
-        return None;
-    }
-    if !millis.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    DateTime::parse_rfc3339_str(format!("{date}T{seconds}.{millis:0<3}Z")).ok()
+    let inner = trimmed.strip_prefix("ISODate(").or_else(|| trimmed.strip_prefix("new Date("))?;
+    let inner = inner.strip_suffix(')')?.trim();
+    let quoted = inner
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| inner.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')))?;
+    DateTime::parse_rfc3339_str(quoted).ok()
 }
 
 fn parse_extended_json_date(obj: &serde_json::Map<String, serde_json::Value>) -> Option<DateTime> {
@@ -1951,6 +2001,48 @@ mod tests {
 
         assert!(error.starts_with("Invalid update options:"));
         assert!(error.contains("unknown field `upsert`"));
+    }
+
+    #[test]
+    fn rename_collection_command_uses_fully_qualified_names() {
+        let command = rename_collection_command_document("app", "users", "accounts").unwrap();
+        assert_eq!(command.get_str("renameCollection").unwrap(), "app.users");
+        assert_eq!(command.get_str("to").unwrap(), "app.accounts");
+    }
+
+    #[test]
+    fn rename_collection_command_rejects_invalid_names() {
+        assert!(rename_collection_command_document("", "users", "accounts").unwrap_err().contains("Database"));
+        assert!(rename_collection_command_document("app", "", "accounts").unwrap_err().contains("Collection"));
+        assert!(rename_collection_command_document("app", "users", "").unwrap_err().contains("New collection"));
+        assert!(rename_collection_command_document("app", "users", "users").unwrap_err().contains("differ"));
+        assert!(rename_collection_command_document("app", "system.views", "views_backup")
+            .unwrap_err()
+            .contains("System collections"));
+        assert!(rename_collection_command_document("app", "users", "system.users")
+            .unwrap_err()
+            .contains("System collections"));
+    }
+
+    #[test]
+    fn rename_collection_command_preserves_identifier_whitespace() {
+        let command = rename_collection_command_document("app", " users ", " renamed ").unwrap();
+        assert_eq!(command.get_str("renameCollection").unwrap(), "app. users ");
+        assert_eq!(command.get_str("to").unwrap(), "app. renamed ");
+    }
+
+    #[test]
+    fn rename_collection_command_does_not_drop_existing_target() {
+        // Existing target names must fail at the server instead of being overwritten.
+        let command = rename_collection_command_document("app", "users", "accounts").unwrap();
+        assert!(!command.contains_key("dropTarget"));
+    }
+
+    #[test]
+    fn mongo_collection_kind_as_str_is_stable_wire_value() {
+        assert_eq!(MongoCollectionKind::Collection.as_str(), "collection");
+        assert_eq!(MongoCollectionKind::View.as_str(), "view");
+        assert_eq!(MongoCollectionKind::Timeseries.as_str(), "timeseries");
     }
 
     #[test]
@@ -2657,16 +2749,21 @@ mod tests {
     }
 
     #[test]
-    fn json_object_to_document_parses_legacy_date_display_strings() {
+    fn json_object_to_document_preserves_date_shaped_strings() {
         let value = serde_json::json!({
-            "created_at": "2025-08-14 02:25:43.718",
+            "$set": {
+                "create_time": "2025-04-01 19:46:03",
+                "nested": { "updated": "2025-08-14T02:25:43" },
+                "items": ["2025-08-14 02:25:43"],
+            }
         });
         let doc = json_object_to_document(&value).unwrap();
+        let set = doc.get_document("$set").unwrap();
 
-        assert!(matches!(
-            doc.get("created_at"),
-            Some(Bson::DateTime(value)) if value.timestamp_millis() == 1_755_138_343_718
-        ));
+        assert_eq!(set.get_str("create_time").unwrap(), "2025-04-01 19:46:03");
+        assert_eq!(set.get_document("nested").unwrap().get_str("updated").unwrap(), "2025-08-14T02:25:43");
+        assert_eq!(set.get_array("items").unwrap()[0].as_str().unwrap(), "2025-08-14 02:25:43");
+        assert!(is_update_operator_document(&doc));
     }
 
     #[test]

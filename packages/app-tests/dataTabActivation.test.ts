@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canActivateExistingDataTableTab, canRefreshDataTableFromSingleActivationDoubleClick, dataTableDoubleClickAction } from "../../apps/desktop/src/lib/tabs/dataTabActivation.ts";
+import { canActivateExistingDataTableTab, dataTableDoubleClickAction } from "../../apps/desktop/src/lib/tabs/dataTabActivation.ts";
 import type { QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function dataTab(overrides: Partial<QueryTab> = {}): QueryTab {
@@ -62,25 +62,11 @@ test("reloads existing data table tabs showing an error result", () => {
   );
 });
 
-test("single activation snapshots only successful idle tabs as refreshable", () => {
-  assert.equal(canRefreshDataTableFromSingleActivationDoubleClick(undefined), false);
-  assert.equal(canRefreshDataTableFromSingleActivationDoubleClick(dataTab()), false);
-  assert.equal(canRefreshDataTableFromSingleActivationDoubleClick(dataTab({ isExecuting: true })), false);
+test("single activation leaves double click handling to the first click", () => {
+  assert.equal(dataTableDoubleClickAction(undefined, "single"), "none");
+  assert.equal(dataTableDoubleClickAction(dataTab({ isExecuting: true }), "single"), "none");
   assert.equal(
-    canRefreshDataTableFromSingleActivationDoubleClick(
-      dataTab({
-        result: {
-          columns: ["Error"],
-          rows: [["connection failed"]],
-          affected_rows: 0,
-          execution_time_ms: 0,
-        },
-      }),
-    ),
-    false,
-  );
-  assert.equal(
-    canRefreshDataTableFromSingleActivationDoubleClick(
+    dataTableDoubleClickAction(
       dataTab({
         result: {
           columns: ["id"],
@@ -89,41 +75,17 @@ test("single activation snapshots only successful idle tabs as refreshable", () 
           execution_time_ms: 1,
         },
       }),
+      "single",
     ),
-    true,
+    "none",
   );
-});
-
-test("single activation uses missing, restored, error, and busy first-click snapshots even if the tab succeeds before dblclick", () => {
-  const successfulAtDoubleClick = dataTab({
-    result: {
-      columns: ["id"],
-      rows: [[1]],
-      affected_rows: 0,
-      execution_time_ms: 1,
-    },
-  });
-  const errorAtFirstClick = dataTab({
-    result: {
-      columns: ["Error"],
-      rows: [["connection failed"]],
-      affected_rows: 0,
-      execution_time_ms: 0,
-    },
-  });
-  for (const initialTab of [undefined, dataTab(), errorAtFirstClick, dataTab({ isExecuting: true })]) {
-    const refreshAllowed = canRefreshDataTableFromSingleActivationDoubleClick(initialTab);
-    assert.equal(dataTableDoubleClickAction(successfulAtDoubleClick, "single", refreshAllowed), "none");
-  }
-  const refreshAllowed = canRefreshDataTableFromSingleActivationDoubleClick(successfulAtDoubleClick);
-  assert.equal(dataTableDoubleClickAction(successfulAtDoubleClick, "single", refreshAllowed), "refresh");
 });
 
 test("double activation opens a missing table without a first-click snapshot", () => {
   assert.equal(dataTableDoubleClickAction(undefined, "double"), "open");
 });
 
-test("double activation decisions preserve loading, refresh, and recovery behavior", () => {
+test("double activation reuses loading and successful tabs without refreshing", () => {
   assert.equal(dataTableDoubleClickAction(dataTab({ isExecuting: true }), "double"), "activate");
   assert.equal(
     dataTableDoubleClickAction(
@@ -137,8 +99,11 @@ test("double activation decisions preserve loading, refresh, and recovery behavi
       }),
       "double",
     ),
-    "refresh",
+    "activate",
   );
+});
+
+test("double activation preserves restored and error recovery behavior", () => {
   assert.equal(dataTableDoubleClickAction(dataTab(), "double"), "open");
   assert.equal(
     dataTableDoubleClickAction(

@@ -79,6 +79,15 @@ pub struct MongoCollectionNameRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoRenameCollectionRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub new_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoFindRequest {
     pub connection_id: String,
     pub database: String,
@@ -347,6 +356,26 @@ pub async fn drop_collection(
     dbx_core::mongo_ops::mongo_drop_collection_core(&state.app, &req.connection_id, &req.database, &req.collection)
         .await
         .map_err(AppError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn rename_collection(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoRenameCollectionRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Rename collection")
+        .await?;
+    ensure_writable(&state.app, &req.connection_id, "Rename collection").await?;
+    dbx_core::mongo_ops::mongo_rename_collection_core(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.collection,
+        &req.new_name,
+    )
+    .await
+    .map_err(AppError)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

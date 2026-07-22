@@ -10,6 +10,8 @@ import com.dbx.agent.test.JdbcAgentFake;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
 import com.dbx.agent.test.JdbcMetadataSqlFake;
 import com.dbx.agent.test.TestSupport;
+import com.taosdata.jdbc.TSDBDriver;
+import com.taosdata.jdbc.rs.RestfulConnection;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
@@ -21,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -282,6 +285,30 @@ class TDengineAgentMetadataTest {
     }
 
     @Test
+    void restExecutionSwitchesCatalogWithoutGeneratingUseSql() throws Exception {
+        try (RestfulConnection connection = restfulConnection()) {
+            String executionSchema = TDengineAgent.prepareExecutionSchema(connection, " power-data ");
+
+            Assertions.assertNull(executionSchema);
+            Assertions.assertEquals("power-data", connection.getCatalog());
+            Assertions.assertEquals(
+                "power-data",
+                connection.getClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME)
+            );
+        }
+    }
+
+    @Test
+    void websocketExecutionKeepsSchemaForUseSqlSwitching() throws Exception {
+        Connection connection = JdbcAgentFake.connection();
+
+        Assertions.assertEquals(
+            "power",
+            TDengineAgent.prepareExecutionSchema(connection, "power")
+        );
+    }
+
+    @Test
     void decodesTdengineByteArrayTextValues() {
         Assertions.assertEquals(
             "d1001",
@@ -342,6 +369,20 @@ class TDengineAgentMetadataTest {
                 }
                 throw new UnsupportedOperationException(method.getName());
             }
+        );
+    }
+
+    private static RestfulConnection restfulConnection() {
+        return new RestfulConnection(
+            "127.0.0.1",
+            "6041",
+            new Properties(),
+            "",
+            "jdbc:TAOS-RS://127.0.0.1:6041/",
+            null,
+            false,
+            null,
+            null
         );
     }
 }

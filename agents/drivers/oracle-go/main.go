@@ -49,7 +49,7 @@ WHERE username IS NOT NULL
   AND username NOT IN (
     'SYS','SYSTEM','SYSMAN','DBSNMP','SYSBACKUP','SYSDG','SYSKM','SYSRAC','OUTLN',
     'AUDSYS','LBACSYS','DVF','DVSYS','APPQOSSYS','CTXSYS','MDSYS','MDDATA',
-    'ORDSYS','ORDDATA','ORDPLUGINS','XDB','ANONYMOUS','DIP','EXFSYS',
+    'ORDSYS','ORDDATA','ORDPLUGINS','XDB','ANONYMOUS','EXFSYS',
     'GSMADMIN_INTERNAL','GSMCATUSER','GSMROOTUSER','GSMUSER','OJVMSYS','OLAPSYS',
     'ORACLE_OCM','SI_INFORMTN_SCHEMA','WMSYS','XS$NULL','DBSFWUSER',
     'REMOTE_SCHEDULER_AGENT','PDBADMIN','DGPDB_INT','OPS$ORACLE',
@@ -1135,11 +1135,17 @@ func (s *server) currentSchema() (string, error) {
 }
 
 func (s *server) normalizeSchema(schema string) (string, error) {
-	schema = strings.TrimSpace(schema)
-	if schema == "" {
-		return s.currentSchema()
+	return resolveOracleSchema(schema, s.currentSchema, s.sessionUser)
+}
+
+func resolveOracleSchema(schema string, currentSchema, sessionUser func() (string, error)) (string, error) {
+	if schema = strings.TrimSpace(schema); schema != "" {
+		return strings.ToUpper(schema), nil
 	}
-	return strings.ToUpper(schema), nil
+	if current, err := currentSchema(); err == nil && strings.TrimSpace(current) != "" {
+		return strings.ToUpper(strings.TrimSpace(current)), nil
+	}
+	return sessionUser()
 }
 
 func (s *server) sessionUser() (string, error) {

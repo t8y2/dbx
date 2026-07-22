@@ -1111,7 +1111,25 @@ watch(
   },
 );
 
-defineExpose({ focusSearch });
+async function insertCommand(command: string): Promise<boolean> {
+  const normalizedCommand = command.trim();
+  if (!normalizedCommand || commandRunning.value) return false;
+  await openCommandPanel();
+  commandText.value = normalizedCommand;
+  await nextTick();
+  getCommandInput()?.focus();
+  return true;
+}
+
+async function executeAiCommand(command: string): Promise<boolean> {
+  if (!(await insertCommand(command))) return false;
+  // Reuse the interactive console path so blocked commands, confirmations, and
+  // the disabled-safety preference behave exactly like manually entered commands.
+  await executeCommand();
+  return true;
+}
+
+defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 </script>
 
 <template>

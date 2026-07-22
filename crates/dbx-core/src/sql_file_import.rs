@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -34,6 +34,77 @@ struct StatementErrorDecision {
 const SQL_FILE_READ_CHUNK_BYTES: usize = 256 * 1024;
 const SQL_FILE_STATEMENT_BATCH_SIZE: usize = 256;
 const SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES: usize = 1024 * 1024;
+const SQL_FILE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+
+pub struct SqlFileProgressEmitter<F, C = fn() -> Instant> {
+    emit: F,
+    now: C,
+    last_regular_emit_at: Option<Instant>,
+    pending_regular: Option<SqlFileProgress>,
+}
+
+impl<F> SqlFileProgressEmitter<F>
+where
+    F: FnMut(SqlFileProgress),
+{
+    pub fn new(emit: F) -> Self {
+        Self::with_clock(emit, Instant::now)
+    }
+}
+
+impl<F, C> SqlFileProgressEmitter<F, C>
+where
+    F: FnMut(SqlFileProgress),
+    C: FnMut() -> Instant,
+{
+    fn with_clock(emit: F, now: C) -> Self {
+        Self { emit, now, last_regular_emit_at: None, pending_regular: None }
+    }
+
+    pub fn emit(&mut self, progress: SqlFileProgress) {
+        if sql_file_progress_is_immediate(progress.status) {
+            // Preserve ordering and final counters before terminal or failure events.
+            self.flush_pending();
+            (self.emit)(progress);
+            return;
+        }
+
+        self.pending_regular = Some(progress);
+        let now = (self.now)();
+        if self
+            .last_regular_emit_at
+            .is_none_or(|last_emit_at| now.duration_since(last_emit_at) >= SQL_FILE_PROGRESS_EMIT_INTERVAL)
+        {
+            self.flush_pending_at(now);
+        }
+    }
+
+    fn flush_pending(&mut self) {
+        if self.pending_regular.is_none() {
+            return;
+        }
+        let now = (self.now)();
+        self.flush_pending_at(now);
+    }
+
+    fn flush_pending_at(&mut self, now: Instant) {
+        if let Some(progress) = self.pending_regular.take() {
+            self.last_regular_emit_at = Some(now);
+            (self.emit)(progress);
+        }
+    }
+}
+
+fn sql_file_progress_is_immediate(status: SqlFileStatus) -> bool {
+    matches!(
+        status,
+        SqlFileStatus::Started
+            | SqlFileStatus::StatementFailed
+            | SqlFileStatus::Done
+            | SqlFileStatus::Error
+            | SqlFileStatus::Cancelled
+    )
+}
 
 struct SqlFileExecutionProgress {
     statement_index: usize,
@@ -1249,6 +1320,7 @@ fn statement_error_decision(
 mod tests {
     use super::*;
     use crate::models::connection::DatabaseType;
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_SQL_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1261,6 +1333,117 @@ mod tests {
         ));
         tokio::fs::write(&path, bytes).await.unwrap();
         path
+    }
+
+    fn test_progress(status: SqlFileStatus, statement_index: usize) -> SqlFileProgress {
+        SqlFileProgress {
+            execution_id: "test-execution".to_string(),
+            status,
+            statement_index,
+            success_count: statement_index,
+            failure_count: 0,
+            affected_rows: statement_index as u64,
+            elapsed_ms: statement_index as u128,
+            statement_summary: format!("statement {statement_index}"),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn progress_emitter_compresses_high_frequency_regular_events() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut emitted = Vec::new();
+        {
+            let mut emitter =
+                SqlFileProgressEmitter::with_clock(|progress| emitted.push(progress), || base + elapsed.get());
+
+            for statement_index in 1..=1_000 {
+                elapsed.set(Duration::from_millis((statement_index - 1) as u64));
+                emitter.emit(test_progress(SqlFileStatus::Running, statement_index));
+                emitter.emit(test_progress(SqlFileStatus::StatementDone, statement_index));
+            }
+            emitter.emit(test_progress(SqlFileStatus::Done, 1_000));
+        }
+
+        let regular_count = emitted
+            .iter()
+            .filter(|progress| matches!(progress.status, SqlFileStatus::Running | SqlFileStatus::StatementDone))
+            .count();
+        assert_eq!(regular_count, 11);
+        assert_eq!(emitted.last().unwrap().status, SqlFileStatus::Done);
+        assert_eq!(emitted[emitted.len() - 2].statement_index, 1_000);
+    }
+
+    #[test]
+    fn progress_emitter_sends_key_events_immediately() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut emitted = Vec::new();
+        {
+            let mut emitter =
+                SqlFileProgressEmitter::with_clock(|progress| emitted.push(progress), || base + elapsed.get());
+
+            for status in [
+                SqlFileStatus::Started,
+                SqlFileStatus::StatementFailed,
+                SqlFileStatus::Error,
+                SqlFileStatus::Cancelled,
+                SqlFileStatus::Done,
+            ] {
+                emitter.emit(test_progress(status, 1));
+            }
+        }
+
+        assert_eq!(
+            emitted.iter().map(|progress| progress.status).collect::<Vec<_>>(),
+            vec![
+                SqlFileStatus::Started,
+                SqlFileStatus::StatementFailed,
+                SqlFileStatus::Error,
+                SqlFileStatus::Cancelled,
+                SqlFileStatus::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_emitter_flushes_latest_counters_before_terminal_event() {
+        let base = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut emitted = Vec::new();
+        {
+            let mut emitter =
+                SqlFileProgressEmitter::with_clock(|progress| emitted.push(progress), || base + elapsed.get());
+
+            emitter.emit(test_progress(SqlFileStatus::Running, 1));
+            elapsed.set(Duration::from_millis(10));
+            emitter.emit(test_progress(SqlFileStatus::StatementDone, 2));
+            emitter.emit(test_progress(SqlFileStatus::Done, 2));
+        }
+
+        assert_eq!(emitted.len(), 3);
+        assert_eq!(emitted[1].status, SqlFileStatus::StatementDone);
+        assert_eq!(emitted[1].statement_index, 2);
+        assert_eq!(emitted[2].status, SqlFileStatus::Done);
+    }
+
+    #[test]
+    fn progress_emitter_keeps_small_file_progress_timely() {
+        let base = Instant::now();
+        let mut emitted = Vec::new();
+        {
+            let mut emitter = SqlFileProgressEmitter::with_clock(|progress| emitted.push(progress), || base);
+            emitter.emit(test_progress(SqlFileStatus::Started, 0));
+            emitter.emit(test_progress(SqlFileStatus::Running, 1));
+            emitter.emit(test_progress(SqlFileStatus::StatementDone, 1));
+            emitter.emit(test_progress(SqlFileStatus::Done, 1));
+        }
+
+        assert_eq!(
+            emitted.iter().map(|progress| progress.status).collect::<Vec<_>>(),
+            vec![SqlFileStatus::Started, SqlFileStatus::Running, SqlFileStatus::StatementDone, SqlFileStatus::Done,]
+        );
     }
 
     #[test]

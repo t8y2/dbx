@@ -1,0 +1,39 @@
+name: Suggest Similar Issues
+
+on:
+  issues:
+    types: [opened]
+
+concurrency:
+  group: similar-issues-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  suggest:
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.issue.pull_request }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Create DBX bot token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.DBX_BOT_APP_ID }}
+          private-key: ${{ secrets.DBX_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: dbx
+          permission-issues: write
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+
+      - name: Suggest similar issues
+        run: node .github/scripts/suggest-similar-issues.mjs
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

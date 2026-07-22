@@ -1,4 +1,4 @@
-import { ref, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, type ComputedRef, type Ref } from "vue";
+import { ref, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, toRaw, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -139,10 +139,15 @@ const closingPendingSnapshotTabs = new Set<string>();
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
 const MAX_PENDING_CHANGES_HISTORY = 100;
 
-function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][]): boolean {
+function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][], appendedFromRowCount?: number): boolean {
   if (!previousRows) return true;
-  if (previousRows.length !== nextRows.length) return true;
-  return previousRows.some((row, index) => row !== nextRows[index]);
+  if (appendedFromRowCount !== previousRows.length || previousRows.length > nextRows.length) {
+    if (previousRows.length !== nextRows.length) return true;
+    return previousRows.some((row, index) => toRaw(row) !== toRaw(nextRows[index]));
+  }
+  // Infinite scrolling appends rows without changing existing source indexes.
+  // Preserve pending edits only when every previously loaded row is the same object.
+  return previousRows.some((row, index) => toRaw(row) !== toRaw(nextRows[index]));
 }
 
 function cacheKeyBelongsToTab(cacheKey: string, tabId: string) {
@@ -1334,13 +1339,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     exitTransaction();
   }
 
-  // Pending changes reference rows by sourceIndex. When the result set changes
-  // (e.g. different WHERE clause, pagination), stale indices point to wrong rows.
+  // Pending changes reference rows by sourceIndex. Replacements (different WHERE,
+  // sort, normal pagination, refresh) invalidate them; prefix-only appends do not.
   let previousResultRows = result.value.rows;
   watch(
-    () => result.value.rows,
-    (rows) => {
-      if (!dataGridRowsIdentityChanged(previousResultRows, rows)) {
+    () => [result.value.rows, (result.value as { appended_from_row_count?: number }).appended_from_row_count] as const,
+    ([rows, appendedFromRowCount]) => {
+      if (!dataGridRowsIdentityChanged(previousResultRows, rows, appendedFromRowCount)) {
         previousResultRows = rows;
         return;
       }

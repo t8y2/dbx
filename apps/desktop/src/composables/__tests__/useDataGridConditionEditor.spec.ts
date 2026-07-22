@@ -70,6 +70,39 @@ describe("useDataGridConditionEditor", () => {
     expect(editor.suggestions.value).toEqual([{ value: "customer_id = 1", kind: "history" }]);
   });
 
+  it.each(["where", "orderBy"] as const)("displays raw PostgreSQL column names but inserts their quoted %s text", async (kind) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind,
+      value,
+      columns: [{ name: "OrderId", insertText: '"OrderId"', comment: "Mixed-case identifier" }],
+      historyScope: {},
+    });
+
+    value.value = kind === "where" ? "status = Order" : "created_at DESC, Order";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "OrderId", insertText: '"OrderId"', kind: "column", comment: "Mixed-case identifier" }]));
+
+    expect(editor.accept()).toBe(true);
+    expect(value.value).toBe(kind === "where" ? 'status = "OrderId"' : 'created_at DESC, "OrderId"');
+  });
+
+  it("restores quoted history verbatim instead of quoting it again", () => {
+    const scope = { connectionId: "connection", database: "db", tableName: "orders" };
+    rememberDataGridConditionHistory("orderBy", scope, '"OrderId" DESC');
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "orderBy",
+      value,
+      columns: [{ name: "OrderId", insertText: '"OrderId"' }],
+      historyScope: scope,
+    });
+
+    editor.openHistory();
+    expect(editor.accept(0)).toBe(true);
+    expect(value.value).toBe('"OrderId" DESC');
+  });
+
   it.each(["where", "orderBy"] as const)("normalizes %s comments from different metadata providers", async (kind) => {
     const value = ref("");
     const editor = useDataGridConditionEditor({

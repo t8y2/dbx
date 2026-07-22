@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
@@ -193,6 +194,85 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         .collect::<BTreeSet<_>>();
     let expected_ids = (1..=250).collect::<BTreeSet<_>>();
     assert_eq!(exported_ids, expected_ids);
+}
+
+#[tokio::test]
+#[ignore = "requires a writable MySQL endpoint for a 650,000-row XLSX export"]
+async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arriving() {
+    let host = std::env::var("DBX_LIVE_MYSQL_EXPORT_HOST").expect("DBX_LIVE_MYSQL_EXPORT_HOST");
+    let port = std::env::var("DBX_LIVE_MYSQL_EXPORT_PORT").expect("DBX_LIVE_MYSQL_EXPORT_PORT").parse::<u16>().unwrap();
+    let user = std::env::var("DBX_LIVE_MYSQL_EXPORT_USER").expect("DBX_LIVE_MYSQL_EXPORT_USER");
+    let password = std::env::var("DBX_LIVE_MYSQL_EXPORT_PASSWORD").expect("DBX_LIVE_MYSQL_EXPORT_PASSWORD");
+    let database = std::env::var("DBX_LIVE_MYSQL_EXPORT_DATABASE").expect("DBX_LIVE_MYSQL_EXPORT_DATABASE");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let table = format!("dbx_query_export_timeout_{}", &suffix[..8]);
+    let connection_id = format!("live-mysql-query-export-timeout-{suffix}");
+    let config = live_mysql_query_export_config(&connection_id, &host, port, &user, &password, &database);
+    let dir = std::env::temp_dir().join(format!("dbx-live-mysql-query-export-timeout-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let values = (1..=807).map(|id| format!("({id}, 'row-{id}')")).collect::<Vec<_>>().join(", ");
+    let cleanup_sql = format!("DROP TABLE IF EXISTS `{table}`");
+    let create_sql = format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, label VARCHAR(32) NOT NULL)");
+    let insert_sql = format!("INSERT INTO `{table}` (id, label) VALUES {values}");
+    let _ = execute_sql_statement(&state, &connection_id, &database, &cleanup_sql, None, None).await;
+    execute_sql_statement(&state, &connection_id, &database, &create_sql, None, None)
+        .await
+        .expect("create live export timeout table");
+    execute_sql_statement(&state, &connection_id, &database, &insert_sql, None, None)
+        .await
+        .expect("insert live export timeout rows");
+
+    let file_path = dir.join("result.xlsx");
+    let sql = format!(
+        "SELECT a.id * 100000 + b.id AS id, CONCAT(a.label, '-', b.label) AS label \
+         FROM `{table}` AS a CROSS JOIN `{table}` AS b LIMIT 650000"
+    );
+    let request = QueryResultExportRequest {
+        export_id: format!("live-mysql-query-export-timeout-{suffix}"),
+        connection_id: connection_id.clone(),
+        database: database.clone(),
+        schema: None,
+        sql: sql.clone(),
+        query_base_sql: sql,
+        database_type: DatabaseType::Mysql,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "xlsx".to_string(),
+        include_sql_sheet: false,
+        page_size: 10_000,
+        row_limit: None,
+        total_rows: Some(650_000),
+        timeout_secs: Some(1),
+        keyset_optimization_enabled: false,
+        client_session_id: None,
+        execution_id: Some(format!("live-mysql-query-export-timeout-{suffix}")),
+        date_time_format: None,
+    };
+    let rows_exported = AtomicU64::new(0);
+    let done_seen = AtomicBool::new(false);
+    let started_at = Instant::now();
+    let result = export_query_result_core(&state, &request, None, |progress| {
+        rows_exported.store(progress.rows_exported, Ordering::Relaxed);
+        if matches!(progress.status, ExportStatus::Done) {
+            done_seen.store(true, Ordering::Relaxed);
+        }
+    })
+    .await;
+    let elapsed = started_at.elapsed();
+
+    let cleanup_result = execute_sql_statement(&state, &connection_id, &database, &cleanup_sql, None, None).await;
+    result.expect("stream 650,000 MySQL rows to XLSX");
+    cleanup_result.expect("cleanup live export timeout table");
+    assert!(elapsed > Duration::from_secs(1), "export should outlive configured timeout: {elapsed:?}");
+    assert_eq!(rows_exported.load(Ordering::Relaxed), 650_000);
+    assert!(done_seen.load(Ordering::Relaxed));
+    assert!(std::fs::metadata(&file_path).unwrap().len() > 1_000_000);
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]

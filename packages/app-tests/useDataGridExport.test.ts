@@ -48,6 +48,29 @@ function installMemoryStorage() {
   };
 }
 
+function installTextDownloadCapture() {
+  let downloadedBlob: Blob | undefined;
+  const createObjectUrl = vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+    downloadedBlob = blob;
+    return "blob:test-export";
+  });
+  const revokeObjectUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: { createElement: () => ({ click: vi.fn(), href: "", download: "" }) },
+  });
+  return {
+    content: async () => downloadedBlob?.text(),
+    restore: () => {
+      createObjectUrl.mockRestore();
+      revokeObjectUrl.mockRestore();
+      if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+      else Reflect.deleteProperty(globalThis, "document");
+    },
+  };
+}
+
 function buildExportHarness(
   options: {
     currentResultLabel?: string;
@@ -56,6 +79,7 @@ function buildExportHarness(
     columnTypes?: Array<string | undefined>;
     rows?: QueryResult["rows"];
     allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
+    completeLocalResult?: QueryResult;
   } = {},
 ) {
   const exportColumns = options.columns ?? ["id", "name"];
@@ -124,6 +148,8 @@ function buildExportHarness(
     hasRowSelection: computed(() => false),
     fullExportResult,
     queryResultExportRequest,
+    hasCompleteLocalResult: computed(() => !!options.completeLocalResult),
+    completeLocalResult: computed(() => options.completeLocalResult),
     allExportResults: computed(() => options.allExportResults),
     currentResultLabel: computed(() => options.currentResultLabel),
     exportFileBaseName: computed(() => options.exportFileBaseName),
@@ -666,6 +692,88 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
   assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
+});
+
+test("complete local query result XLSX export does not re-execute the query", async () => {
+  const completeLocalResult: QueryResult = {
+    columns: ["id", "name"],
+    column_types: ["int4", "text"],
+    rows: [
+      [1, "Ada"],
+      [2, "Lin"],
+    ],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    truncated: false,
+    has_more: false,
+  };
+  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ completeLocalResult });
+
+  await composable.exportXlsx();
+
+  assert.equal(fullExportResult.mock.calls.length, 0);
+  assert.equal(queryResultExportRequest.mock.calls.length, 0);
+  assert.equal(apiMock.startQueryResultExport.mock.calls.length, 0);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1), ["Export", ["id", "name"], ["int4", "text"], completeLocalResult.rows]);
+});
+
+test("complete local query result export removes only internal hidden columns", async () => {
+  const completeLocalResult: QueryResult = {
+    columns: ["id", "name", "__DBX_PK_id"],
+    column_types: ["int4", "text", "int4"],
+    rows: [
+      [1, "Ada", 1],
+      [2, "Lin", 2],
+    ],
+    hidden_column_indexes: [2],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    truncated: false,
+    has_more: false,
+  };
+  const { composable } = buildExportHarness({ columns: ["id"], completeLocalResult });
+
+  await composable.exportXlsx();
+
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1), [
+    "Export",
+    ["id", "name"],
+    ["int4", "text"],
+    [
+      [1, "Ada"],
+      [2, "Lin"],
+    ],
+  ]);
+});
+
+test("complete local CSV, XLSX, and TXT exports honor the enabled row limit", async () => {
+  useSettingsStore().updateEditorSettings({ exportRowLimitEnabled: true, exportRowLimit: 100 });
+  const completeLocalResult: QueryResult = {
+    columns: ["id"],
+    column_types: ["int4"],
+    rows: Array.from({ length: 101 }, (_, index) => [index + 1]),
+    affected_rows: 0,
+    execution_time_ms: 1,
+    truncated: false,
+    has_more: false,
+  };
+  const { composable } = buildExportHarness({ completeLocalResult });
+
+  await composable.exportCsv();
+  assert.equal(apiMock.exportQueryResultCsv.mock.calls[0]?.[2].length, 100);
+
+  await composable.exportXlsx();
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0]?.[4].length, 100);
+
+  const download = installTextDownloadCapture();
+  try {
+    await composable.exportTxt();
+    const lines = (await download.content())?.split("\n");
+    assert.equal(lines?.length, 101);
+    assert.equal(lines?.at(-1), "100");
+  } finally {
+    download.restore();
+  }
 });
 
 test("full query result CSV export defaults to the saved SQL title", async () => {

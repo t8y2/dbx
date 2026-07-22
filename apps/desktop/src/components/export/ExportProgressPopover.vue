@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft } from "@lucide/vue";
-import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
+import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 
 const { t } = useI18n();
 const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask } = useExportTracker();
@@ -84,7 +84,9 @@ const rowsText = (task: ExportTask) => {
         })
       : task.currentTable || "";
     const rowText = task.totalRows ? `${task.rowsExported.toLocaleString()} / ${task.totalRows.toLocaleString()} ${t("exportProgress.rowsShort")}` : `${task.rowsExported.toLocaleString()} ${t("exportProgress.rowsShort")}`;
-    return task.currentTable ? `${tableText} · ${task.currentTable} · ${rowText}` : tableText;
+    const finishedAt = task.finishedAt ?? Date.now();
+    const durationText = t("exportProgress.elapsed", { duration: formatDataTransferDuration(finishedAt - (task.startedAt ?? finishedAt)) });
+    return task.currentTable ? `${tableText} · ${task.currentTable} · ${rowText} · ${durationText}` : `${tableText} · ${durationText}`;
   }
   if (task.totalRows) return `${task.rowsExported.toLocaleString()} / ${task.totalRows.toLocaleString()}`;
   return `${task.rowsExported.toLocaleString()} ${t("exportProgress.rowsShort")}`;

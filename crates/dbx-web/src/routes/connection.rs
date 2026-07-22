@@ -556,6 +556,7 @@ mod tests {
             port: 1080,
             username: String::new(),
             password: String::new(),
+            test_target: None,
             profile_id: String::new(),
         }));
         let proxy_error = connection_final_proxy_port(

@@ -11,11 +11,13 @@ pub async fn get_version() -> Json<serde_json::Value> {
 pub struct UpdateCheckParams {
     #[serde(default)]
     pub locale: Option<String>,
+    #[serde(default)]
+    pub source: Option<dbx_core::DownloadSource>,
 }
 
 pub async fn check_for_updates(Query(params): Query<UpdateCheckParams>) -> Result<Json<serde_json::Value>, AppError> {
     let locale = params.locale.unwrap_or_else(|| "zh-CN".to_string());
-    let release = update::fetch_latest_release(&locale).await.map_err(AppError)?;
+    let release = update::fetch_latest_release(&locale, params.source.unwrap_or_default()).await.map_err(AppError)?;
     let info = update::build_update_info(release, env!("CARGO_PKG_VERSION"));
     Ok(Json(serde_json::to_value(info).map_err(|e| AppError(e.to_string()))?))
 }

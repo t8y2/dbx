@@ -7,6 +7,7 @@ import { useToast } from "@/composables/useToast";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { clearDataGridClipboardCopy, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert, formatTsv } from "@/lib/export/exportFormats";
 import { uuid } from "@/lib/common/utils";
@@ -210,9 +211,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   } = options;
   const selectedCellMatrix = selectedCellMatrixOption ?? computed<CellSelectionMatrix | null>(() => null);
 
-  async function copyText(text: string) {
+  async function copyText(text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; includeHeader?: boolean }) {
+    const copiedRows = gridCopy?.rows.map((row) => [...row]);
+    clearDataGridClipboardCopy();
     try {
       await copyToClipboard(text);
+      if (copiedRows) rememberDataGridClipboardCopy(text, copiedRows, gridCopy?.includeHeader);
       toast(t("grid.copied"));
     } catch (e: any) {
       toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
@@ -230,6 +234,22 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return pattern ? { ...result, rows: formatTemporalRowsForExport(result.rows, result.columnTypes, pattern) } : result;
   }
 
+  function normalizeCompleteLocalResult(result: QueryResult): { columns: string[]; columnTypes: string[]; rows: CellValue[][] } {
+    const hiddenColumnIndexes = new Set(result.hidden_column_indexes ?? []);
+    const exportedColumnIndexes = result.columns.map((_, index) => index).filter((index) => !hiddenColumnIndexes.has(index));
+    const hasHiddenColumns = exportedColumnIndexes.length !== result.columns.length;
+    const editorSettings = useSettingsStore().editorSettings;
+    const rows = editorSettings.exportRowLimitEnabled ? result.rows.slice(0, editorSettings.exportRowLimit) : result.rows;
+
+    // Internal key columns are query-only metadata. Keep every user column,
+    // including columns hidden manually in the grid, while preserving alignment.
+    return {
+      columns: hasHiddenColumns ? exportedColumnIndexes.map((index) => result.columns[index]!) : result.columns,
+      columnTypes: hasHiddenColumns ? exportedColumnIndexes.map((index) => result.column_types?.[index] ?? "") : (result.column_types ?? []),
+      rows: hasHiddenColumns ? rows.map((row) => exportedColumnIndexes.map((index) => row[index])) : rows,
+    };
+  }
+
   async function resultToExport(rowIds?: number[], onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, useFullExport = true, formatDateTime = true): Promise<{ columns: string[]; columnTypes: string[]; rows: CellValue[][] }> {
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
@@ -241,7 +261,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // and reflects client-side filters/search and unsaved edits, which would
     // silently change what the export contains.
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
-      return applyGlobalDateTimeExportFormat({ columns: completeLocalResult.value.columns, columnTypes: completeLocalResult.value.column_types ?? [], rows: completeLocalResult.value.rows }, formatDateTime);
+      return applyGlobalDateTimeExportFormat(normalizeCompleteLocalResult(completeLocalResult.value), formatDateTime);
     }
     return applyGlobalDateTimeExportFormat(
       {
@@ -449,17 +469,23 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       });
       return;
     }
-    const key = insertCopyKey(excludePrimaryKeys, insertMode);
-    const current = insertCopyCache(excludePrimaryKeys, insertMode);
-    if (current.ready && current.key === key) return current.text;
-    if (current.loading && current.key === key && current.promise) return current.promise;
-
     const data: CopyInsertData = {
       columns: columns.value,
       sourceColumns: sourceColumns.value,
       columnTypes: columnTypes.value?.map((type) => type ?? undefined),
       rows,
     };
+    if (databaseType.value === "mongodb") {
+      // Mongo documents can approach the 16 MiB BSON limit. Yield before the
+      // synchronous shell serialization so menu close/rendering is never held up.
+      await yieldToMainThread();
+      return buildCopyInsertStatement(data, excludePrimaryKeys, insertMode);
+    }
+
+    const key = insertCopyKey(excludePrimaryKeys, insertMode);
+    const current = insertCopyCache(excludePrimaryKeys, insertMode);
+    if (current.ready && current.key === key) return current.text;
+    if (current.loading && current.key === key && current.promise) return current.promise;
     const promise = Promise.resolve().then(async () => {
       const statement = await buildCopyInsertStatement(data, excludePrimaryKeys, insertMode);
       const latest = insertCopyCache(excludePrimaryKeys, insertMode);
@@ -533,6 +559,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       });
       return;
     }
+    if (databaseType.value === "mongodb") {
+      // Keep context-menu work bounded; serialize the selected Mongo fields only
+      // after the user explicitly invokes the copy command.
+      await yieldToMainThread();
+      return buildCopyInsertStatement(data, false, insertMode);
+    }
     const key = selectionInsertCopyKey(insertMode);
     const current = selectionInsertCopyCache(insertMode);
     if (current.ready && current.key === key) return current.text;
@@ -580,10 +612,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return cache.ready && cache.key === selectionInsertCopyKey(insertMode);
   }
 
-  function copySelectionAsInsert(insertMode: DataGridCopyInsertMode = "merged"): boolean {
-    if (!canCopyPreparedSelectionInsert(insertMode)) return false;
-    void copyText(selectionInsertCopyCache(insertMode).text);
-    return true;
+  async function copySelectionAsInsert(insertMode: DataGridCopyInsertMode = "merged"): Promise<boolean> {
+    try {
+      const statement = await prepareSelectionAsInsertStatement(insertMode);
+      if (!statement) return false;
+      await copyText(statement);
+      return true;
+    } catch (error: any) {
+      toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
+      return false;
+    }
   }
 
   async function prefetchRowAsUpdateStatement() {
@@ -684,12 +722,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   // --- Selection copy functions ---
   async function copySelectionTsv() {
     if (!hasCellSelection.value) return;
-    await copyText(formatSelectionAsTsv(selectedCells.value));
+    const selection = selectedCells.value;
+    await copyText(formatSelectionAsTsv(selection), { rows: selection.rows });
   }
 
   async function copySelectionTsvWithHeaders() {
     if (!hasCellSelection.value) return;
-    await copyText(formatSelectionAsTsv(selectedCells.value, true));
+    const selection = selectedCells.value;
+    await copyText(formatSelectionAsTsv(selection, true), { rows: selection.rows, includeHeader: true });
   }
 
   async function copySelectionCsv() {
@@ -711,14 +751,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (!hasRowSelection.value || selectedRowIds.value.size === 0) return;
     const rows = displayItems.value.filter((item) => selectedRowIds.value.has(item.id) && !item.isDraft).map((item) => item.data);
     if (rows.length === 0) return;
-    await copyText(formatSelectionAsTsv({ columns: columns.value, rows }));
+    await copyText(formatSelectionAsTsv({ columns: columns.value, rows }), { rows });
   }
 
   async function copySelectedRowsTsvWithHeaders() {
     if (!hasRowSelection.value || selectedRowIds.value.size === 0) return;
     const rows = displayItems.value.filter((item) => selectedRowIds.value.has(item.id) && !item.isDraft).map((item) => item.data);
     if (rows.length === 0) return;
-    await copyText(formatSelectionAsTsv({ columns: columns.value, rows }, true));
+    await copyText(formatSelectionAsTsv({ columns: columns.value, rows }, true), { rows, includeHeader: true });
   }
 
   async function copyColumnNames() {
@@ -753,7 +793,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const item = getRowItem(contextCell.value.rowId);
     if (!item || item.isDraft) return;
     const val = item?.data[contextCell.value.col] ?? null;
-    await copyText(displayCellValue(val));
+    await copyText(displayCellValue(val), { rows: [[val]] });
   }
 
   async function copyRow() {
@@ -823,11 +863,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function copyAll() {
     const header = columns.value.join("\t");
-    const body = displayItems.value
-      .filter((item) => !item.isDraft)
-      .map((item) => item.data.map((c) => displayCellValue(c)).join("\t"))
-      .join("\n");
-    await copyText(`${header}\n${body}`);
+    const rows = displayItems.value.filter((item) => !item.isDraft).map((item) => item.data);
+    const body = rows.map((row) => row.map((cell) => displayCellValue(cell)).join("\t")).join("\n");
+    await copyText(`${header}\n${body}`, { rows, includeHeader: true });
   }
 
   // --- Export functions ---
@@ -1558,6 +1596,10 @@ function formatMongoCopyInsertStatement(statement: string | undefined): string |
   } catch {
     return statement;
   }
+}
+
+function yieldToMainThread(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function compactLocalTimestamp(date = new Date()): string {

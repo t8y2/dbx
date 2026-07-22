@@ -22,6 +22,8 @@ export interface ExportTask {
   failureCount?: number;
   affectedRows?: number;
   elapsedMs?: number;
+  startedAt?: number;
+  finishedAt?: number;
   statementSummary?: string;
   tableIndex?: number;
   totalTables?: number;
@@ -53,6 +55,26 @@ function normalizeTransferStatus(status: api.TransferProgress["status"], termina
   if (status === "error") return terminal ? "Error" : "Running";
   if (status === "cancelled") return "Cancelled";
   return "Running";
+}
+
+function finishDataTransferTask(task: ExportTask) {
+  // Preserve the first terminal timestamp so later completion events cannot change the displayed duration.
+  task.finishedAt ??= Date.now();
+}
+
+export function formatDataTransferDuration(elapsedMs: number): string {
+  const safeElapsedMs = Math.max(0, Number.isFinite(elapsedMs) ? Math.round(elapsedMs) : 0);
+  if (safeElapsedMs < 1000) return `${safeElapsedMs} ms`;
+
+  if (safeElapsedMs < 60_000) return `${(Math.floor(safeElapsedMs / 100) / 10).toFixed(1)} s`;
+
+  const totalSeconds = Math.floor(safeElapsedMs / 1000);
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ${seconds}s`;
+
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}h ${totalMinutes % 60}m ${seconds}s`;
 }
 
 function targetTableName(table: string, nameCase: api.TransferTableNameCase): string {
@@ -167,6 +189,7 @@ export function useExportTracker() {
       tableIndex: 0,
       totalTables,
       currentTable: "",
+      startedAt: Date.now(),
     });
     taskMap.set(transferId, task);
     return task;
@@ -182,6 +205,7 @@ export function useExportTracker() {
   ): ExportTask {
     const existingTask = taskMap.get(request.transferId);
     const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
+    task.startedAt ??= Date.now();
     task.targetConnectionId = request.targetConnectionId;
     task.targetDatabase = request.targetDatabase;
     task.targetSchema = request.targetSchema;
@@ -193,6 +217,7 @@ export function useExportTracker() {
       task.status = "Error";
       const visibleTables = overlappingTables.slice(0, 5);
       task.errorMessage = options.formatOverlapError?.(visibleTables) ?? `Another data transfer is already running for target table(s): ${visibleTables.join(", ")}`;
+      finishDataTransferTask(task);
       return task;
     }
 
@@ -272,6 +297,7 @@ export function useExportTracker() {
     const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
     const hadError = task.status === "Error";
     task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
+    if (isTerminalTransferProgress(progress)) finishDataTransferTask(task);
     task.errorMessage = progress.error || task.errorMessage || null;
     task.tableIndex = progress.tableIndex;
     task.totalTables = progress.totalTables;

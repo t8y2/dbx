@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { dataGridScrollPosition, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll } from "../../apps/desktop/src/lib/dataGrid/dataGridInfiniteScroll.ts";
 
@@ -22,4 +23,12 @@ test("first scroll position only establishes the infinite scroll baseline", () =
 test("near-bottom check matches the grid threshold", () => {
   assert.equal(isDataGridNearScrollBottom({ scrollTop: 801, scrollHeight: 1000, clientHeight: 100 }), true);
   assert.equal(isDataGridNearScrollBottom({ scrollTop: 800, scrollHeight: 1000, clientHeight: 100 }), false);
+});
+
+test("infinite scroll requests only the next bounded segment", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  assert.match(source, /const nextOffset = props\.result\.rows\.length/);
+  assert.match(source, /Math\.min\(pageSize\.value, remainingRows\)/);
+  assert.doesNotMatch(source, /emit\("paginate", 0, cumulativeLimit/);
+  assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset/);
 });

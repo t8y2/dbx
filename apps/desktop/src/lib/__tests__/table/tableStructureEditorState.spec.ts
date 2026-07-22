@@ -355,6 +355,115 @@ describe("tableStructureEditorState", () => {
     expect(drafts.map((draft) => draft.original?.column_default)).toEqual(["''", "1", "sysdatetime()", "'prefix (internal)'"]);
   });
 
+  it("distinguishes MySQL empty string defaults from no default", () => {
+    const drafts = createColumnDrafts(
+      [
+        {
+          name: "empty_label",
+          data_type: "varchar(100)",
+          is_nullable: false,
+          column_default: "",
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "optional_label",
+          data_type: "varchar(100)",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "mysql",
+    );
+
+    expect(drafts.map((draft) => draft.defaultValue)).toEqual(["''", ""]);
+    expect(drafts.map((draft) => draft.original?.column_default)).toEqual(["''", null]);
+  });
+
+  it("preserves MySQL ordinary string and expression defaults", () => {
+    const drafts = createColumnDrafts(
+      [
+        {
+          name: "status",
+          data_type: "varchar(20)",
+          is_nullable: false,
+          column_default: "active",
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "created_at",
+          data_type: "timestamp",
+          is_nullable: false,
+          column_default: "CURRENT_TIMESTAMP",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "mysql",
+    );
+
+    expect(drafts.map((draft) => draft.defaultValue)).toEqual(["active", "CURRENT_TIMESTAMP"]);
+    expect(drafts.map((draft) => draft.original?.column_default)).toEqual(["active", "CURRENT_TIMESTAMP"]);
+  });
+
+  it("keeps a MySQL empty string default when renaming a column", () => {
+    const [column] = createColumnDrafts(
+      [
+        {
+          name: "old_name",
+          data_type: "varchar(100)",
+          is_nullable: false,
+          column_default: "",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "mysql",
+    );
+
+    column!.name = "new_name";
+
+    expect(column!.defaultValue).toBe("''");
+    expect(column!.original?.column_default).toBe("''");
+  });
+
+  it("retains Postgres and SQL Server default normalization", () => {
+    const [postgres] = createColumnDrafts(
+      [
+        {
+          name: "label",
+          data_type: "character varying(100)",
+          is_nullable: false,
+          column_default: "''::character varying",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "postgres",
+    );
+    const [sqlserver] = createColumnDrafts(
+      [
+        {
+          name: "label",
+          data_type: "nvarchar(100)",
+          is_nullable: false,
+          column_default: "('')",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "sqlserver",
+    );
+
+    expect(postgres!.defaultValue).toBe("''");
+    expect(postgres!.original?.column_default).toBe("''");
+    expect(sqlserver!.defaultValue).toBe("''");
+    expect(sqlserver!.original?.column_default).toBe("''");
+  });
+
   it("limits SQL Server identity columns to supported data types", () => {
     expect(isSqlServerIdentityCompatibleDataType("int")).toBe(true);
     expect(isSqlServerIdentityCompatibleDataType("bigint")).toBe(true);

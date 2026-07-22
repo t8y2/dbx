@@ -87,6 +87,18 @@ pub async fn mongo_drop_collection(
 }
 
 #[tauri::command]
+pub async fn mongo_rename_collection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    new_name: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Rename collection").await?;
+    dbx_core::mongo_ops::mongo_rename_collection_core(&state, &connection_id, &database, &collection, &new_name).await
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn mongo_find_documents(
     state: State<'_, Arc<AppState>>,

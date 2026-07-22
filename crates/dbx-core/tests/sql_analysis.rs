@@ -101,6 +101,222 @@ fn extracts_unqualified_order_by_columns_for_sqlserver_queries() {
 }
 
 #[test]
+fn sqlserver_date_functions_do_not_treat_legal_dateparts_as_columns() {
+    let dateadd_and_datediff = [
+        "year",
+        "yy",
+        "yyyy",
+        "quarter",
+        "qq",
+        "q",
+        "month",
+        "mm",
+        "m",
+        "dayofyear",
+        "dy",
+        "y",
+        "day",
+        "dd",
+        "d",
+        "week",
+        "wk",
+        "ww",
+        "weekday",
+        "dw",
+        "w",
+        "hour",
+        "hh",
+        "minute",
+        "mi",
+        "n",
+        "second",
+        "ss",
+        "s",
+        "millisecond",
+        "ms",
+        "microsecond",
+        "mcs",
+        "nanosecond",
+        "ns",
+    ];
+    let datediff_big = [
+        "year",
+        "yy",
+        "yyyy",
+        "quarter",
+        "qq",
+        "q",
+        "month",
+        "mm",
+        "m",
+        "dayofyear",
+        "dy",
+        "y",
+        "day",
+        "dd",
+        "d",
+        "week",
+        "wk",
+        "ww",
+        "weekday",
+        "dw",
+        "w",
+        "hour",
+        "hh",
+        "minute",
+        "mi",
+        "n",
+        "second",
+        "ss",
+        "s",
+        "millisecond",
+        "ms",
+        "microsecond",
+        "mcs",
+        "nanosecond",
+        "ns",
+    ];
+    let datepart = [
+        "year",
+        "yy",
+        "yyyy",
+        "quarter",
+        "qq",
+        "q",
+        "month",
+        "mm",
+        "m",
+        "dayofyear",
+        "dy",
+        "y",
+        "day",
+        "dd",
+        "d",
+        "week",
+        "wk",
+        "ww",
+        "weekday",
+        "dw",
+        "w",
+        "hour",
+        "hh",
+        "minute",
+        "mi",
+        "n",
+        "second",
+        "ss",
+        "s",
+        "millisecond",
+        "ms",
+        "microsecond",
+        "mcs",
+        "nanosecond",
+        "ns",
+        "tzoffset",
+        "tz",
+        "iso_week",
+        "isowk",
+        "isoww",
+    ];
+    let datename = [
+        "year",
+        "yy",
+        "yyyy",
+        "quarter",
+        "qq",
+        "q",
+        "month",
+        "mm",
+        "m",
+        "dayofyear",
+        "dy",
+        "y",
+        "day",
+        "dd",
+        "d",
+        "week",
+        "wk",
+        "ww",
+        "weekday",
+        "dw",
+        "w",
+        "hour",
+        "hh",
+        "minute",
+        "mi",
+        "n",
+        "second",
+        "ss",
+        "s",
+        "millisecond",
+        "ms",
+        "microsecond",
+        "mcs",
+        "nanosecond",
+        "ns",
+        "tzoffset",
+        "tz",
+        "iso_week",
+        "isowk",
+        "isoww",
+    ];
+
+    for (function, dateparts) in [
+        ("DATEADD", dateadd_and_datediff.as_slice()),
+        ("DATEDIFF", dateadd_and_datediff.as_slice()),
+        ("DATEDIFF_BIG", datediff_big.as_slice()),
+        ("DATEPART", datepart.as_slice()),
+        ("DATENAME", datename.as_slice()),
+    ] {
+        for (index, datepart) in dateparts.iter().enumerate() {
+            let datepart = if index % 2 == 0 { datepart.to_ascii_uppercase() } else { datepart.to_string() };
+            let sql = match function {
+                "DATEADD" => format!("SELECT DATEADD({datepart}, amount, occurred_at) FROM events"),
+                "DATEDIFF" | "DATEDIFF_BIG" => {
+                    format!("SELECT {function}({datepart}, started_at, ended_at) FROM events")
+                }
+                "DATEPART" | "DATENAME" => format!("SELECT {function}({datepart}, occurred_at) FROM events"),
+                _ => unreachable!(),
+            };
+            let analysis = analyze_sql_references(&sql, Some("sqlserver"))
+                .unwrap_or_else(|error| panic!("{function}({datepart}, ...) should analyze: {error}"));
+            let columns: Vec<_> = analysis.columns.iter().map(|column| column.name.as_str()).collect();
+            let expected = match function {
+                "DATEADD" => vec!["amount", "occurred_at"],
+                "DATEDIFF" | "DATEDIFF_BIG" => vec!["started_at", "ended_at"],
+                "DATEPART" | "DATENAME" => vec!["occurred_at"],
+                _ => unreachable!(),
+            };
+            assert_eq!(columns, expected, "{function} must ignore the legal {datepart} datepart only");
+        }
+    }
+}
+
+#[test]
+fn sqlserver_datepart_suppression_is_limited_to_unqualified_builtins() {
+    let sql = "SELECT dAtEaDd(SeCoNd, amount, occurred_at), dbo.DATEADD(SECOND, amount, occurred_at), custom_fn(MONTH, occurred_at), DATEADD(datepart_column, amount, occurred_at), SECOND FROM events";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    let columns: Vec<_> = analysis.columns.iter().map(|column| column.name.as_str()).collect();
+    assert_eq!(
+        columns,
+        vec![
+            "amount",
+            "occurred_at",
+            "SECOND",
+            "amount",
+            "occurred_at",
+            "MONTH",
+            "occurred_at",
+            "datepart_column",
+            "amount",
+            "occurred_at",
+            "SECOND",
+        ]
+    );
+}
+
+#[test]
 fn sqlserver_create_proc_and_procedure_are_equivalent() {
     for sql in ["CREATE PROC test\nAS\n", "CREATE PROCEDURE test\nAS\n", "CREATE PROC test AS SELECT 1;"] {
         let analysis = analyze_sql_references(sql, Some("sqlserver"))

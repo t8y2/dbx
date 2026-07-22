@@ -1031,7 +1031,7 @@ async function openSource(row: ObjectBrowserRow) {
   const database = props.database;
   const schema = row.schema || selectedSchema.value || database;
   try {
-    const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind);
+    const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
     if (sidePanelGuard.isStale(epoch)) return;
     sourceCanEdit.value = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type);
     const editable = sourceCanEdit.value
@@ -1154,7 +1154,7 @@ async function confirmRename() {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
     if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
-      const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind);
+      const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
       const statements = await buildRoutineRenameObjectSourceStatements({
         databaseType: effectiveDatabaseType.value,
         objectType: row.type as ObjectSourceKind,
@@ -2591,9 +2591,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
                   :class="{
                     'bg-accent/40': sourceRow?.id === item.id,
+                    'bg-primary/10': sidePanelRow?.id === item.id && !selectedTableIds.has(item.id),
                     'bg-primary/5': selectedTableIds.has(item.id),
                   }"
-                  :style="{ gridTemplateColumns }"
+                  :style="{ gridTemplateColumns, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 hsl(var(--primary))' : undefined }"
                   @click="onRowClick(item, $event)"
                   @contextmenu="onContextMenu"
                 >
@@ -2650,6 +2651,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     :class="{
                       'border-primary bg-primary/5': selectedTableIds.has(item.id),
                       'border-primary/60': sourceRow?.id === item.id && !selectedTableIds.has(item.id),
+                      'border-primary bg-primary/8 shadow-sm': sidePanelRow?.id === item.id && !selectedTableIds.has(item.id),
                     }"
                     :title="item.displayName"
                     @click="onRowClick(item, $event)"

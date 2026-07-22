@@ -652,6 +652,9 @@ func TestListDatabasesSQLUsesUserDictionaryInsteadOfObjectDictionary(t *testing.
 	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_VIEWS") {
 		t.Fatalf("schema listing should not scan object dictionaries, got: %s", oracleListDatabasesSQL)
 	}
+	if strings.Contains(sqlText, "'DIP'") {
+		t.Fatalf("schema listing should not hide an existing user named DIP, got: %s", oracleListDatabasesSQL)
+	}
 }
 
 func TestListDatabasesSQLCanApplyVisibleSchemaFilter(t *testing.T) {
@@ -669,6 +672,41 @@ func TestListDatabasesSQLCanApplyVisibleSchemaFilter(t *testing.T) {
 	}
 	if strings.Contains(upperSQL, "ALL_TABLES") || strings.Contains(upperSQL, "ALL_VIEWS") {
 		t.Fatalf("schema listing should not scan object dictionaries, got: %s", sqlText)
+	}
+}
+
+func TestResolveOracleSchemaPrefersCurrentSchemaOverSessionUser(t *testing.T) {
+	currentCalls := 0
+	sessionUserCalls := 0
+	schema, err := resolveOracleSchema(
+		"",
+		func() (string, error) {
+			currentCalls++
+			return "REPORTING", nil
+		},
+		func() (string, error) {
+			sessionUserCalls++
+			return "APP", nil
+		},
+	)
+
+	if err != nil || schema != "REPORTING" {
+		t.Fatalf("resolved schema = %q, err = %v; want REPORTING", schema, err)
+	}
+	if currentCalls != 1 || sessionUserCalls != 0 {
+		t.Fatalf("unexpected resolver calls: current=%d session_user=%d", currentCalls, sessionUserCalls)
+	}
+}
+
+func TestResolveOracleSchemaFallsBackToSessionUser(t *testing.T) {
+	schema, err := resolveOracleSchema(
+		"",
+		func() (string, error) { return "", errors.New("CURRENT_SCHEMA unavailable") },
+		func() (string, error) { return "APP", nil },
+	)
+
+	if err != nil || schema != "APP" {
+		t.Fatalf("resolved schema = %q, err = %v; want APP", schema, err)
 	}
 }
 

@@ -632,7 +632,12 @@ function stripSqlServerDefaultOuterParens(defaultValue: string): string {
 }
 
 function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
-  const defaultValue = column.column_default ?? "";
+  if (column.column_default === null) return "";
+  const defaultValue = column.column_default;
+  if (databaseType === "mysql" && defaultValue === "" && isMysqlCharacterDataType(column.data_type)) {
+    // MySQL metadata uses an empty string for DEFAULT '', so keep it distinct from no default.
+    return "''";
+  }
   if (databaseType === "postgres") return stripPostgresStringDefaultCast(defaultValue, column.data_type);
   if (databaseType === "sqlserver") return stripSqlServerDefaultOuterParens(defaultValue);
   return defaultValue;

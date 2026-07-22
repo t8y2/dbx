@@ -3060,6 +3060,18 @@ mod tests {
         assert_eq!(xlsx_sheet_names(&path.to_string_lossy()).unwrap(), vec!["First", "Second"]);
         assert_eq!(parsed.columns, vec!["name"]);
         assert_eq!(parsed.rows, vec![vec![serde_json::json!("Ada")]]);
+        assert_eq!(
+            mapping_indexes(
+                &parsed,
+                &[TableImportColumnMapping {
+                    source_column: "name".to_string(),
+                    target_column: "display_name".to_string(),
+                    target_data_type: None,
+                }],
+            )
+            .unwrap(),
+            vec![(0, "display_name".to_string())]
+        );
         let _ = std::fs::remove_file(path);
     }
 

@@ -62,6 +62,22 @@ pub async fn mongo_drop_collection_core(
     }
 }
 
+pub async fn mongo_rename_collection_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::rename_collection(client, database, collection, new_name).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support rename collection".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
 pub async fn mongo_server_version_core(
     state: &AppState,
     connection_id: &str,

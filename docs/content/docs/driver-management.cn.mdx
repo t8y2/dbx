@@ -55,11 +55,21 @@ DBX 会定期检查驱动更新：
 
 对于无法访问互联网的环境，DBX 支持离线驱动安装：
 
-1. 从另一台机器下载 JDBC 驱动 ZIP 包
+1. 从另一台机器下载与目标操作系统和 CPU 架构匹配的 DBX 离线驱动 ZIP 包
 2. 将其传输到离线机器
 3. 在驱动商店中使用**从 ZIP 导入**安装驱动包
 
 这适用于气隙网络、严格防火墙环境或企业中预先批准的驱动版本。
+
+所有 Agent 都提供单驱动 ZIP，可直接使用**导入离线包**安装。Java Agent 的单驱动包跨平台，但不重复携带 JRE；Kingbase、Oracle、Xugu 等原生 Agent 的单驱动包按操作系统和 CPU 架构区分。
+
+如果目标机器尚未安装 Java Agent 所需的托管 JRE，请另外导入一次对应平台的 JRE，或者直接使用包含全部驱动和 JRE 的完整离线包。
+
+### Windows 导入 Kingbase
+
+Windows x64 下载 `dbx-agent-kingbase-<version>-windows-x64.zip`，Windows ARM64 下载 `dbx-agent-kingbase-<version>-windows-aarch64.zip`，然后在驱动管理中选择**导入离线包**。请勿导入 Linux 或 macOS 包。
+
+ZIP 内包含版本信息和对应平台的原生 Agent。DBX 会将其安装为 `%USERPROFILE%\.dbx\agents\drivers\kingbase\agent.exe`，不需要手动解除浏览器下载文件的阻止状态或复制文件。
 
 ## 插件更新
 

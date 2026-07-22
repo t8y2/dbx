@@ -266,14 +266,12 @@ describe("useDataGridExport prepared row statements", () => {
     vi.mocked(buildDataGridCopyInsertStatement).mockReturnValueOnce(pending.promise);
     const state = useDataGridExport(options);
 
-    const prefetch = state.prefetchSelectionAsInsertStatement("merged");
+    const copy = state.copySelectionAsInsert("merged");
     await vi.waitFor(() => expect(buildDataGridCopyInsertStatement).toHaveBeenCalledTimes(1));
-    expect(state.copySelectionAsInsert("merged")).toBe(false);
     expect(copyToClipboard).not.toHaveBeenCalled();
     pending.resolve("INSERT INTO users (name, note) VALUES ('Ada', 'math'), ('Grace', 'compiler');");
-    await prefetch;
+    await copy;
     expect(state.canCopyPreparedSelectionInsert("merged")).toBe(true);
-    expect(state.copySelectionAsInsert("merged")).toBe(true);
 
     expect(buildDataGridCopyInsertStatement).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -353,11 +351,47 @@ describe("useDataGridExport prepared row statements", () => {
       },
     });
 
-    await state.prefetchSelectionAsInsertStatement();
-    state.copySelectionAsInsert();
+    await state.copySelectionAsInsert();
 
     expect(copyToClipboard).toHaveBeenCalledWith(`db.getCollection("documents").insert({
   "booleanText": "true"
 });`);
+  });
+
+  it("does not traverse Mongo documents while checking copy availability", async () => {
+    let documentReads = 0;
+    const originalDocument = Object.defineProperty({}, "payload", {
+      enumerable: true,
+      get() {
+        documentReads++;
+        return "large-value";
+      },
+    });
+    const item = { ...row(["large-value"]), sourceIndex: 0 };
+    const state = createMongoExportState({ columns: ["payload"], item, mongoDocuments: [originalDocument] });
+
+    expect(state.canCopyRowAsInsert.value).toBe(true);
+    expect(documentReads).toBe(0);
+
+    const copy = state.copyRowAsInsert();
+    expect(documentReads).toBe(0);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+
+    await copy;
+    expect(documentReads).toBeGreaterThan(0);
+    expect(copyToClipboard).toHaveBeenCalledWith(expect.stringContaining('"payload": "large-value"'));
+  });
+
+  it("preserves oversized Mongo documents without running the formatter", async () => {
+    const payload = "x".repeat(1_100_000);
+    const item = { ...row([payload]), sourceIndex: 0 };
+    const state = createMongoExportState({ columns: ["payload"], item, mongoDocuments: [{ payload }] });
+
+    await state.copyRowAsInsert();
+
+    const copied = vi.mocked(copyToClipboard).mock.calls[0]?.[0] ?? "";
+    expect(copied).toHaveLength(payload.length + 'db.getCollection("documents").insert({"payload":""});'.length);
+    expect(copied.startsWith('db.getCollection("documents").insert({"payload":"')).toBe(true);
+    expect(copied.endsWith('"});')).toBe(true);
   });
 });

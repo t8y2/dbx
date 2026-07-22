@@ -2,7 +2,7 @@ import type { ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database"
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
 export type TreeNodeRowAction = "open-data" | "toggle" | "none";
-export type TreeNodeRowDoubleClickAction = "open-data" | "refresh-data" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-saved-sql" | "toggle" | "none";
+export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
@@ -48,7 +48,9 @@ export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetai
 }
 
 export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false): TreeNodeRowDoubleClickAction {
-  if (type === "table") return "refresh-data";
+  // Single-click activation already handles the first click in a dblclick
+  // sequence. Only double-click activation needs a second-stage table action.
+  if (type === "table") return activation === "double" ? "activate-data" : "none";
   if (activation === "double") {
     if (dataNodeTypes.has(type)) return "open-data";
     if (sourceNodeTypes.has(type)) return "open-source";

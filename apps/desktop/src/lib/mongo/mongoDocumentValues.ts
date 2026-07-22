@@ -2,7 +2,6 @@ export type MongoInputValue = string | number | boolean | null;
 
 const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
 const MONGO_SHELL_NUMBER_LONG_PATTERN = /^NumberLong\(\s*(["'])(-?\d+)\1\s*\)$/;
-const LEGACY_MONGO_DATE_DISPLAY_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?$/;
 const MONGO_OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
 const MONGO_INTEGER_PATTERN = /^-?\d+$/;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
@@ -27,9 +26,6 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   if (shellDate !== trimmed) return shellDate;
   const shellNumberLong = mongoShellNumberLongToExtendedJson(trimmed);
   if (shellNumberLong !== trimmed) return shellNumberLong;
-
-  const legacyDate = legacyMongoDateDisplayToExtendedJson(trimmed);
-  if (legacyDate) return legacyDate;
 
   if (MONGO_INTEGER_PATTERN.test(trimmed)) {
     const integer = BigInt(trimmed);
@@ -65,13 +61,6 @@ function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, 
 function mongoDocumentFieldValue(document: unknown, field: string): unknown {
   if (!document || typeof document !== "object" || Array.isArray(document)) return undefined;
   return (document as Record<string, unknown>)[field];
-}
-
-function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } | null {
-  const match = value.match(LEGACY_MONGO_DATE_DISPLAY_PATTERN);
-  if (!match) return null;
-  const [, date, time, millis = "000"] = match;
-  return { $date: `${date}T${time}.${millis.padEnd(3, "0")}Z` };
 }
 
 function mongoShellNumberLongToExtendedJson(value: string): unknown {

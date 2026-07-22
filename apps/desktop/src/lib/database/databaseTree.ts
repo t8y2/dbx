@@ -7,8 +7,12 @@ export function shouldIncludeDefaultDatabaseNode(connection: Pick<ConnectionConf
   return connection?.db_type === "mysql" && databases.some((database) => !database.name.trim());
 }
 
+export function compareSidebarNames(left: string, right: string): number {
+  return sidebarNameCollator.compare(left, right);
+}
+
 export function sortSidebarNames(names: readonly string[]): string[] {
-  return [...names].sort((left, right) => sidebarNameCollator.compare(left, right));
+  return [...names].sort(compareSidebarNames);
 }
 
 export function sortSidebarDatabases(databases: readonly DatabaseInfo[]): DatabaseInfo[] {

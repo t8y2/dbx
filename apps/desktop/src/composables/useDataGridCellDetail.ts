@@ -33,8 +33,10 @@ export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>
 
   watch(detailsEditorContainer, async (element) => {
     if (element && !detailsEditor) {
-      detailsEditor = useCellDetailEditor({ onChange: (value) => (options.editValue.value = value), onEscape: options.onCancel, ...editorOptions() });
-      await detailsEditor.create(element, options.editValue.value, options.detail.value.type);
+      const editor = useCellDetailEditor({ onChange: (value) => (options.editValue.value = value), onEscape: options.onCancel, ...editorOptions() });
+      detailsEditor = editor;
+      await editor.create(element, options.editValue.value, options.detail.value.type);
+      if (detailsEditor === editor) editor.view.value?.focus();
     } else if (!element && detailsEditor) {
       detailsEditor.destroy();
       detailsEditor = null;
@@ -55,7 +57,10 @@ export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>
     () => options.detail.value.formattedJson ?? "",
     (value) => sideJsonEditor?.setValue(value, "json"),
   );
-  watch(options.editValue, (value) => detailsEditor?.setValue(value, options.detail.value.type));
+  watch(options.editValue, (value) => {
+    if (!detailsEditor || detailsEditor.getValue() === value) return;
+    detailsEditor.setValue(value, options.detail.value.type);
+  });
 
   return {
     geometryPreviewOpen,

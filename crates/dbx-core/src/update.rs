@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-const LATEST_JSON_PATH: &str = "https://github.com/t8y2/dbx/releases/latest/download/latest.json";
+const LATEST_JSON_GITHUB_PATH: &str = "https://github.com/t8y2/dbx/releases/latest/download/latest.json";
 const LATEST_JSON_R2_PATH: &str = "releases/latest/latest.json";
+const LATEST_JSON_CNB_PATH: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/latest/download/latest.json";
 const LATEST_EN_NOTES_R2_PATH: &str = "changelog/latest-en.json";
 const GITHUB_RELEASE_API_PREFIX: &str = "https://api.github.com/repos/t8y2/dbx/releases/tags/v";
 const RELEASE_URL_PREFIX: &str = "https://github.com/t8y2/dbx/releases/tag/v";
@@ -46,12 +47,11 @@ pub struct UpdateInfo {
     pub release_notes: String,
 }
 
-pub async fn fetch_latest_release(locale: &str) -> Result<TauriRelease, String> {
+pub async fn fetch_latest_release(locale: &str, source: crate::DownloadSource) -> Result<TauriRelease, String> {
     let client = build_update_http_client()?;
 
-    let resp = crate::race_download(&client, LATEST_JSON_PATH, LATEST_JSON_R2_PATH, "dbx-update-checker")
-        .await
-        .map_err(|e| format!("Failed to check updates: {e}"))?;
+    let candidates = update_check_candidates(source);
+    let resp = fetch_first_available(&client, &candidates).await?;
 
     let mut release = resp.json::<TauriRelease>().await.map_err(|e| format!("Failed to parse update response: {e}"))?;
     if let Ok(github) = fetch_github_release_metadata(&client, &release.version).await {
@@ -64,6 +64,38 @@ pub async fn fetch_latest_release(locale: &str) -> Result<TauriRelease, String> 
         }
     }
     Ok(release)
+}
+
+async fn fetch_first_available(client: &reqwest::Client, candidates: &[String]) -> Result<reqwest::Response, String> {
+    let mut errors = Vec::with_capacity(candidates.len());
+    for url in candidates {
+        match client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, "dbx-update-checker")
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+            .and_then(|response| response.error_for_status())
+        {
+            Ok(response) => return Ok(response),
+            Err(error) => errors.push(format!("{url}: {error}")),
+        }
+    }
+    Err(format!("Failed to check updates: {}", errors.join("; ")))
+}
+
+fn update_check_candidates(source: crate::DownloadSource) -> Vec<String> {
+    match source {
+        crate::DownloadSource::Official => {
+            vec![format!("{}{LATEST_JSON_R2_PATH}", crate::R2_CDN_BASE), LATEST_JSON_GITHUB_PATH.to_string()]
+        }
+        // CNB exposes a moving latest release, so checking CNB does not need an official-source version first.
+        crate::DownloadSource::Cnb => vec![
+            LATEST_JSON_CNB_PATH.to_string(),
+            format!("{}{LATEST_JSON_R2_PATH}", crate::R2_CDN_BASE),
+            LATEST_JSON_GITHUB_PATH.to_string(),
+        ],
+    }
 }
 
 // 拉取 R2 上的英文 release notes（仅最新版本）。version 必须与 latest.json 的 version 一致才采用，
@@ -245,8 +277,8 @@ pub fn build_update_info(release: TauriRelease, current_version: &str) -> Update
     let github = release.github.as_ref();
     let release_notes = non_empty(release.notes_en.as_deref())
         .map(ToOwned::to_owned)
+        .or_else(|| canonical_release_notes(release.notes.as_deref()))
         .or_else(|| github.and_then(|metadata| non_empty(metadata.body.as_deref())).map(ToOwned::to_owned))
-        .or(release.notes)
         .unwrap_or_default();
     let release_name = github
         .and_then(|metadata| non_empty(metadata.name.as_deref()))
@@ -266,6 +298,15 @@ pub fn build_update_info(release: TauriRelease, current_version: &str) -> Update
         release_notes,
         latest_version,
     }
+}
+
+fn canonical_release_notes(notes: Option<&str>) -> Option<String> {
+    let notes = non_empty(notes)?;
+    // Tauri's generated updater notes are a transport fallback, not the curated release notes.
+    if notes.starts_with("## What's Changed") || notes == "See the assets below to download and install." {
+        return None;
+    }
+    Some(notes.to_owned())
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -446,5 +487,39 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
         let info = build_update_info(release, "0.5.2");
 
         assert_eq!(info.release_notes, "### New Features\n\nReal release notes");
+    }
+
+    #[test]
+    fn update_info_ignores_generated_notes_when_curated_notes_are_unavailable() {
+        let release = TauriRelease {
+            version: "0.5.3".to_string(),
+            notes: Some("## What's Changed\n* generated item".to_string()),
+            jdbc_plugin: None,
+            github: None,
+            notes_en: None,
+        };
+
+        let info = build_update_info(release, "0.5.2");
+
+        assert_eq!(info.release_notes, "");
+    }
+
+    #[test]
+    fn update_check_candidates_follow_selected_source() {
+        assert_eq!(
+            super::update_check_candidates(crate::DownloadSource::Official),
+            vec![
+                "https://dl.dbxio.com/releases/latest/latest.json",
+                "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+            ]
+        );
+        assert_eq!(
+            super::update_check_candidates(crate::DownloadSource::Cnb),
+            vec![
+                "https://cnb.cool/dbxio.com/dbx/-/releases/latest/download/latest.json",
+                "https://dl.dbxio.com/releases/latest/latest.json",
+                "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+            ]
+        );
     }
 }

@@ -2070,6 +2070,66 @@ pub async fn list_tables_show(pool: &MySqlPool, database: &str) -> Result<Vec<Ta
     list_tables_show_with_status(pool, database).await.map(|(tables, _)| tables)
 }
 
+fn starrocks_materialized_views_sql(database: &str) -> String {
+    format!(
+        "SELECT TABLE_NAME FROM information_schema.materialized_views WHERE TABLE_SCHEMA = {}",
+        quote_value(database)
+    )
+}
+
+async fn list_starrocks_materialized_view_names(pool: &MySqlPool, database: &str) -> Result<HashSet<String>, String> {
+    let sql = starrocks_materialized_views_sql(database);
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect())
+}
+
+fn classify_starrocks_materialized_views(
+    tables: &mut [TableInfo],
+    materialized_view_names: Result<HashSet<String>, String>,
+    database: &str,
+) {
+    let materialized_view_names = match materialized_view_names {
+        Ok(names) => names,
+        Err(err) => {
+            // Older StarRocks versions and restricted accounts may not expose this
+            // information_schema view; keep the base SHOW TABLES result usable.
+            log::warn!("Skipping materialized view classification for StarRocks database `{database}`: {err}");
+            return;
+        }
+    };
+
+    for table in tables {
+        if table.table_type.eq_ignore_ascii_case("VIEW") && materialized_view_names.contains(&table.name) {
+            table.table_type = "MATERIALIZED_VIEW".to_string();
+        }
+    }
+}
+
+async fn list_starrocks_tables_with_status(
+    pool: &MySqlPool,
+    database: &str,
+) -> Result<(Vec<TableInfo>, HashMap<String, TableStatusMeta>), String> {
+    let (tables, materialized_view_names) = tokio::join!(
+        list_tables_show_with_status(pool, database),
+        list_starrocks_materialized_view_names(pool, database)
+    );
+    let (mut tables, status) = tables?;
+    classify_starrocks_materialized_views(&mut tables, materialized_view_names, database);
+    Ok((tables, status))
+}
+
+pub async fn list_starrocks_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
+    list_starrocks_tables_with_status(pool, database).await.map(|(tables, _)| tables)
+}
+
 fn requested_object_type(object_types: Option<&[String]>, object_type: &str) -> bool {
     object_types.is_none_or(|types| {
         types.is_empty() || types.iter().any(|candidate| candidate.eq_ignore_ascii_case(object_type))
@@ -2282,13 +2342,49 @@ pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result
     let (tables, routines) =
         tokio::join!(list_tables_show_with_status(pool, database), list_routine_objects(pool, database));
     let (tables, status) = tables?;
-    let mut objects: Vec<ObjectInfo> = tables
+    let mut objects = table_infos_to_objects(tables, &status, database);
+
+    match routines {
+        Ok(routines) => objects.extend(routines),
+        Err(err) => log::warn!("Skipping routines for database `{}` in object browser: {}", database, err),
+    }
+
+    Ok(objects)
+}
+
+pub async fn list_starrocks_table_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
+    let (tables, routines) =
+        tokio::join!(list_starrocks_tables_with_status(pool, database), list_routine_objects(pool, database));
+    let (tables, status) = tables?;
+    let mut objects = table_infos_to_objects(tables, &status, database);
+
+    match routines {
+        Ok(routines) => objects.extend(routines),
+        Err(err) => log::warn!("Skipping routines for database `{}` in object browser: {}", database, err),
+    }
+
+    Ok(objects)
+}
+
+fn table_infos_to_objects(
+    tables: Vec<TableInfo>,
+    status: &HashMap<String, TableStatusMeta>,
+    database: &str,
+) -> Vec<ObjectInfo> {
+    tables
         .into_iter()
         .map(|table| {
             let meta = status.get(&table.name);
             ObjectInfo {
                 name: table.name,
-                object_type: if table.table_type.eq_ignore_ascii_case("VIEW") { "VIEW" } else { "TABLE" }.to_string(),
+                object_type: if table.table_type.eq_ignore_ascii_case("MATERIALIZED_VIEW") {
+                    "MATERIALIZED_VIEW"
+                } else if table.table_type.eq_ignore_ascii_case("VIEW") {
+                    "VIEW"
+                } else {
+                    "TABLE"
+                }
+                .to_string(),
                 schema: Some(database.to_string()),
                 valid: None,
                 signature: None,
@@ -2299,14 +2395,7 @@ pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result
                 parent_name: table.parent_name,
             }
         })
-        .collect();
-
-    match routines {
-        Ok(routines) => objects.extend(routines),
-        Err(err) => log::warn!("Skipping routines for database `{}` in object browser: {}", database, err),
-    }
-
-    Ok(objects)
+        .collect()
 }
 
 async fn list_routine_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
@@ -4188,6 +4277,101 @@ mod tests {
         let filtered = filter_list_tables_fallback(rows, Some("ood"), None, None, Some(&["TABLE".to_string()]));
 
         assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["t_0001"]);
+    }
+
+    #[test]
+    fn starrocks_materialized_views_are_classified_without_duplicating_tables() {
+        let mut tables = vec![
+            TableInfo {
+                name: "orders".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_view".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_mv".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let materialized_views = HashSet::from(["orders_mv".to_string(), "orders_mv".to_string()]);
+
+        classify_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+
+        assert_eq!(tables.len(), 3);
+        assert_eq!(
+            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
+            vec![("orders", "BASE TABLE"), ("orders_view", "VIEW"), ("orders_mv", "MATERIALIZED_VIEW")]
+        );
+    }
+
+    #[test]
+    fn starrocks_materialized_view_lookup_failure_keeps_base_types() {
+        let mut tables = vec![TableInfo {
+            name: "orders_mv".to_string(),
+            table_type: "VIEW".to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }];
+
+        classify_starrocks_materialized_views(&mut tables, Err("permission denied".to_string()), "analytics");
+
+        assert_eq!(tables[0].table_type, "VIEW");
+    }
+
+    #[test]
+    fn starrocks_materialized_view_query_is_scoped_to_database() {
+        let sql = starrocks_materialized_views_sql("tenant's analytics");
+
+        assert_eq!(
+            sql,
+            "SELECT TABLE_NAME FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics'"
+        );
+    }
+
+    #[test]
+    fn starrocks_object_conversion_preserves_table_view_and_materialized_view_types() {
+        let tables = vec![
+            TableInfo {
+                name: "orders".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_view".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_mv".to_string(),
+                table_type: "MATERIALIZED_VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+
+        let objects = table_infos_to_objects(tables, &HashMap::new(), "analytics");
+
+        assert_eq!(
+            objects.iter().map(|object| (object.name.as_str(), object.object_type.as_str())).collect::<Vec<_>>(),
+            vec![("orders", "TABLE"), ("orders_view", "VIEW"), ("orders_mv", "MATERIALIZED_VIEW")]
+        );
     }
 
     #[test]

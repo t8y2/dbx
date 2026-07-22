@@ -23,23 +23,32 @@ function normalizedLabel(node: TreeNode): string {
 }
 
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
-  return filterSidebarTreeWithMatcher(nodes, createSidebarLabelMatcher(query), collapsedIds, searchableNodeTypes);
+  const matchLabel = query ? createSidebarLabelMatcher(query) : undefined;
+  if (!matchLabel && searchableNodeTypes === undefined) return nodes;
+  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes);
 }
 
-function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
+function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
     if (node.type === "object-browser" && node.hiddenChildren) {
-      const matches = node.hiddenChildren.map((child) => ({ node: child, score: matchLabel(normalizedLabel(child))?.score ?? 0 })).filter((match) => match.score > 0);
+      const matches = node.hiddenChildren.flatMap((child) => {
+        if (searchableNodeTypes && !searchableNodeTypes.has(child.type)) return [];
+        const match = matchLabel?.(normalizedLabel(child));
+        if (matchLabel && !match) return [];
+        return [{ node: child, score: match?.score ?? 0 }];
+      });
       filteredNodes.push(...matches);
       continue;
     }
 
     const label = normalizedLabel(node);
     const canSelfMatch = !searchableNodeTypes || searchableNodeTypes.has(node.type);
-    const selfMatch = canSelfMatch ? bestMatch(matchLabel, label, node.comment) : null;
-    const preservesSubtree = !!selfMatch && preserveMatchedSubtreeTypes.has(node.type);
+    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment) : { score: 0 }) : null;
+    // Type-only filtering keeps matching rows and their ancestor path, but not
+    // unrelated descendants that would make the selected type appear ignored.
+    const preservesSubtree = !!matchLabel && !!selfMatch && preserveMatchedSubtreeTypes.has(node.type);
     const filteredChildren = preservesSubtree ? node.children : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes) : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0)) {

@@ -123,6 +123,95 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("loads metadata from the connection default database when the query tab database is empty", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    expect(getColumns).toHaveBeenCalledWith("mysql-1", "app", "app", "users", undefined);
+    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "", "SELECT name, `id` AS `__DBX_PK_0` FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.tableMeta?.database).toBe("app");
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("uses the connection default database for SQL library tabs without a saved database", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.openSavedSql({
+      id: "saved-1",
+      connectionId: "mysql-1",
+      name: "users.sql",
+      database: "",
+      sql: "SELECT name FROM users",
+      createdAt: "2026-07-21T00:00:00.000Z",
+      updatedAt: "2026-07-21T00:00:00.000Z",
+    });
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    expect(getColumns).toHaveBeenCalledWith("mysql-1", "app", "app", "users", undefined);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("preserves JDBC catalog metadata lookup when the tab uses the connection default database", async () => {
+    getConnectionConfig.mockReturnValue({ id: "jdbc-1", name: "JDBC MySQL", db_type: "jdbc", connection_string: "jdbc:mysql://localhost:3306/app", database: "app", query_timeout_secs: 30 });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("jdbc-1", "", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    expect(getColumns).toHaveBeenCalledWith("jdbc-1", "app", "", "users", undefined);
+    expect(executeMulti).toHaveBeenCalledWith("jdbc-1", "", "SELECT name, `id` AS `__DBX_PK_0` FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps an explicitly selected database instead of falling back to the connection default", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "analytics", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    expect(getColumns).toHaveBeenCalledWith("mysql-1", "analytics", "analytics", "users", undefined);
+    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "analytics", "SELECT name, `id` AS `__DBX_PK_0` FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+  });
+
+  it("loads metadata from a MySQL cross-database qualified source", async () => {
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => {
+      const hidden = sql.includes("__DBX_PK_0");
+      return {
+        editable: true,
+        analysis: {
+          schema: "reporting",
+          tableName: "users",
+          selectStar: false,
+          columns: [{ sourceName: "name", resultName: "name", expression: "name" }, ...(hidden ? [{ sourceName: "id", resultName: "__DBX_PK_0", expression: "`id`" }] : [])],
+        },
+      };
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM reporting.users");
+
+    expect(getColumns).toHaveBeenCalledWith("mysql-1", "app", "reporting", "users", undefined);
+    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT name, `id` AS `__DBX_PK_0` FROM reporting.users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.tableMeta?.database).toBe("app");
+    expect(tab.tableMeta?.schema).toBe("reporting");
+  });
+
   it("uses a hidden Oracle ROWID to keep keyless base-table query results editable", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([
@@ -330,6 +419,27 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.resultSortedSql).toBe("SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC");
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
     expect(tab.queryAnalysis).toBeDefined();
+  });
+
+  it("clears result sorting when the editor SQL is executed again", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.resultSortColumn = "name";
+    tab.resultSortColumnIndex = 0;
+    tab.resultSortDirection = "desc";
+    tab.resultSortMode = "database";
+    tab.resultSortedSql = "SELECT name FROM users ORDER BY name DESC";
+
+    await store.executeCurrentSql("SELECT name FROM users");
+
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortColumnIndex).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.resultSortMode).toBeUndefined();
+    expect(tab.resultSortedSql).toBeUndefined();
+    expect(executeMulti).toHaveBeenLastCalledWith("mysql-1", "app", "SELECT name, `id` AS `__DBX_PK_0` FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
   });
 
   it("preserves the original query behavior when the primary key is already returned", async () => {

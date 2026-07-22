@@ -1,6 +1,7 @@
-import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 import { JDBCX_JDBC_DRIVER_CLASS } from "@/lib/database/jdbcxBuiltinDriver";
+import { buildSidebarLayoutFromFolderPaths } from "@/lib/sidebar/sidebarLayout";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
@@ -13,10 +14,16 @@ type DbeaverImportPayload = {
 type DbeaverConnectionEntry = {
   id: string;
   name?: string;
+  folder?: string;
   provider?: string;
   driver?: string;
   configuration?: Record<string, any>;
   [key: string]: any;
+};
+
+export type DbeaverImportResult = {
+  connections: ConnectionConfig[];
+  layout?: SidebarLayout;
 };
 
 type ConnectionProfile = {
@@ -195,6 +202,19 @@ function extractConnections(parsed: any): DbeaverConnectionEntry[] {
     .map(([id, entry]) => ({ ...(entry as Record<string, any>), id: getString((entry as any).id || id) }));
 }
 
+function extractFolderPaths(parsed: any): string[] {
+  const folders = parsed?.folders;
+  if (!folders || typeof folders !== "object") return [];
+
+  const entries = Array.isArray(folders) ? folders.map((folder) => [getString(folder?.name), folder] as const) : Object.entries(folders);
+
+  return entries.flatMap(([name, folder]) => {
+    if (!name || !folder || typeof folder !== "object") return [];
+    const parent = getString((folder as Record<string, any>).parent);
+    return [parent ? `${parent}/${name}` : name];
+  });
+}
+
 function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<typeof readCredentials>): ConnectionConfig | null {
   const profile = inferProfile(entry);
   const config = entry.configuration || {};
@@ -239,7 +259,7 @@ export function isDbeaverImportPayload(content: string) {
   }
 }
 
-export async function parseDbeaverConnections(content: string): Promise<ConnectionConfig[]> {
+export async function parseDbeaverImport(content: string): Promise<DbeaverImportResult> {
   const payload = JSON.parse(content) as DbeaverImportPayload;
   if (payload.format !== "dbeaver-import" || !payload.dataSources) {
     throw new Error("Invalid DBeaver import payload");
@@ -248,6 +268,7 @@ export async function parseDbeaverConnections(content: string): Promise<Connecti
   const dataSources = JSON.parse(payload.dataSources);
   const encryptedCredentials = await decryptCredentialsFile(payload.credentialsBase64);
   const configs: ConnectionConfig[] = [];
+  const connectionFolderPaths = new Map<string, string>();
   const seen = new Set<string>();
 
   for (const entry of extractConnections(dataSources)) {
@@ -257,7 +278,21 @@ export async function parseDbeaverConnections(content: string): Promise<Connecti
     if (seen.has(key)) continue;
     seen.add(key);
     configs.push(config);
+    const folderPath = getString(entry.folder);
+    if (folderPath) connectionFolderPaths.set(config.id, folderPath);
   }
 
-  return configs;
+  // DBeaver stores declared folders separately and connections reference full
+  // slash-delimited paths. Missing ancestors are created during DBeaver load,
+  // so mirror that behavior when producing DBX's nested sidebar layout.
+  const layout = buildSidebarLayoutFromFolderPaths(
+    configs.map((config) => config.id),
+    extractFolderPaths(dataSources),
+    connectionFolderPaths,
+  );
+  return { connections: configs, layout };
+}
+
+export async function parseDbeaverConnections(content: string): Promise<ConnectionConfig[]> {
+  return (await parseDbeaverImport(content)).connections;
 }

@@ -1,7 +1,6 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
-    self, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisScanResult,
-    RedisValue,
+    self, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisScanResult, RedisValue,
 };
 
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -65,40 +64,8 @@ pub async fn redis_scan_keys_batch_core(
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_db(db)?;
-                // Cluster scan already iterates across nodes; for batch mode we
-                // loop the cluster-level scan to accumulate keys server-side.
-                if max_iterations <= 1 {
-                    return redis_driver::scan_cluster_keys_page_with_options(
-                        cluster,
-                        cursor,
-                        pattern,
-                        count,
-                        include_types,
-                    )
-                    .await;
-                }
-                let mut all_keys: Vec<RedisKeyInfo> = Vec::new();
-                let mut current_cursor = cursor;
-                let mut total_keys: u64 = 0;
-                for i in 0..max_iterations {
-                    let page = redis_driver::scan_cluster_keys_page_with_options(
-                        cluster,
-                        current_cursor,
-                        pattern,
-                        count,
-                        include_types,
-                    )
-                    .await?;
-                    if i == 0 {
-                        total_keys = page.total_keys;
-                    }
-                    all_keys.extend(page.keys);
-                    if page.cursor == 0 {
-                        return Ok(RedisScanResult { cursor: 0, keys: all_keys, total_keys });
-                    }
-                    current_cursor = page.cursor;
-                }
-                Ok(RedisScanResult { cursor: current_cursor, keys: all_keys, total_keys })
+                redis_driver::scan_cluster_keys_batch(cluster, cursor, pattern, count, max_iterations, include_types)
+                    .await
             }
         },
         _ => Err("Not a Redis connection".to_string()),

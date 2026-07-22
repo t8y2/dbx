@@ -915,15 +915,16 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       }
     "
   >
-    <DialogContent class="sm:max-w-md">
+    <DialogContent class="min-w-0 sm:max-w-md">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <AlertTriangle class="h-5 w-5 text-amber-500" />
           {{ t("editor.unsavedChangesTitle") }}
         </DialogTitle>
       </DialogHeader>
-      <div class="space-y-2">
-        <p class="text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
+      <!-- Grid items use min-content sizing by default; shrink and wrap long file paths before they can displace the footer actions. -->
+      <div class="min-w-0 space-y-2">
+        <p class="wrap-anywhere text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
         <Popover v-if="showCloseConfirmBulkActions" :open="closeConfirmListOpen" @update:open="closeConfirmListOpen = $event">
           <PopoverTrigger as-child>
             <button
@@ -948,7 +949,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
           </PopoverContent>
         </Popover>
       </div>
-      <DialogFooter>
+      <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" variant="secondary" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>

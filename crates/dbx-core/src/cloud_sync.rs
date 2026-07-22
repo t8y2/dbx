@@ -794,7 +794,9 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
         // New format: save directly (empty = all configs were deleted)
         storage.save_ai_configs(configs).await?;
     } else if let Some(old_config) = &payload.ai_config {
-        // Legacy format: migrate then save
+        // A legacy snapshot still represents the complete AI configuration state.
+        // Replace local configs just like the new list format so a generated ID
+        // cannot conflict with an existing config that has the same name.
         let provider_name = old_config.provider.as_str().to_string();
         let item = AiConfigItem {
             id: AiConfigItem::new_id(),
@@ -802,7 +804,7 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
             is_default: true,
             config: old_config.clone(),
         };
-        storage.save_ai_config_item(&item).await?;
+        storage.save_ai_configs(&[item]).await?;
     }
     if let Some(profiles) = &payload.tunnel_profiles {
         storage.save_tunnel_profiles(profiles).await?;
@@ -1578,5 +1580,31 @@ mod tests {
         let loaded = storage.load_ai_configs().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "synced");
+    }
+
+    #[tokio::test]
+    async fn sensitive_payload_legacy_ai_config_replaces_local_configs_with_same_name() {
+        let storage = Storage::open(&temp_db_path("ai-cfg-legacy-replace")).await.unwrap();
+        storage.save_ai_config_item(&make_test_config("openai", true)).await.unwrap();
+        storage.save_ai_config_item(&make_test_config("local-only", false)).await.unwrap();
+
+        let mut legacy_config = make_test_config("unused", true).config;
+        legacy_config.model = "snapshot-model".to_string();
+        let payload = SensitiveSyncPayload {
+            connection_secrets: vec![],
+            ai_configs: None,
+            ai_config: Some(legacy_config),
+            tunnel_profiles: None,
+        };
+
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        // Reapplying the same old snapshot must not collide with the generated ID.
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "openai");
+        assert_eq!(loaded[0].config.model, "snapshot-model");
+        assert!(loaded[0].is_default);
     }
 }

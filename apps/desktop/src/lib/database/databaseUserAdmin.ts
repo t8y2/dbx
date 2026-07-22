@@ -26,6 +26,18 @@ export interface PrivilegeChangeInput {
   role?: string;
 }
 
+export interface PrivilegeSelectionInput {
+  grants: readonly string[];
+  database: string;
+  table?: string;
+  availablePrivileges: readonly string[];
+}
+
+export interface PrivilegeSelection {
+  privileges: string[];
+  grantOption: boolean;
+}
+
 export interface DatabaseUserAdminProvider {
   dialect: UserAdminDialect;
   defaultScope: PrivilegeScope;
@@ -45,6 +57,7 @@ export interface DatabaseUserAdminProvider {
   detail(user: DatabaseUserIdentity): string | undefined;
   privilegesForScope?(scope: PrivilegeScope): readonly string[];
   defaultPrivilegesForScope?(scope: PrivilegeScope): string[];
+  privilegeSelectionFromGrants?(input: PrivilegeSelectionInput): PrivilegeSelection;
 }
 
 export const MYSQL_USER_ADMIN_TYPES = new Set<DatabaseType>(["mysql", "goldendb"]);
@@ -52,6 +65,7 @@ export const KINGBASE_USER_ADMIN_TYPES = new Set<DatabaseType>(["kingbase"]);
 export const POSTGRES_USER_ADMIN_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "highgo", "kwdb", "opengauss", "questdb", "vastbase"]);
 
 export const MYSQL_COMMON_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "EXECUTE", "SHOW VIEW", "CREATE VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "TRIGGER", "EVENT", "CREATE TEMPORARY TABLES", "LOCK TABLES"] as const;
+export const DORIS_TABLE_PRIVILEGES = ["SELECT_PRIV", "LOAD_PRIV", "ALTER_PRIV", "CREATE_PRIV", "DROP_PRIV", "SHOW_VIEW_PRIV"] as const;
 export const STARROCKS_TABLE_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "EXPORT", "ALL"] as const;
 
 export const POSTGRES_DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"] as const;
@@ -98,6 +112,30 @@ export function starrocksListUsersSql(): string {
   return "SHOW USERS;";
 }
 
+export function dorisListUsersSql(): string {
+  return "SHOW ALL GRANTS;";
+}
+
+export function dorisUsersResult(result: QueryResult): DatabaseUserIdentity[] {
+  const userIndex = columnIndex(result, "UserIdentity");
+  if (userIndex < 0) return [];
+  return result.rows.flatMap((row) => {
+    const parsed = parseMySqlGrantee(String(row[userIndex] ?? ""));
+    return parsed ? [parsed] : [];
+  });
+}
+
+export function dorisGrantsResult(result: QueryResult): string[] {
+  const ignoredColumns = new Set(["useridentity", "comment", "password"]);
+  return result.rows.flatMap((row) =>
+    result.columns.flatMap((column, index) => {
+      if (ignoredColumns.has(column.toLowerCase())) return [];
+      const value = String(row[index] ?? "").trim();
+      return value && value.toUpperCase() !== "NULL" ? [`${column}: ${value}`] : [];
+    }),
+  );
+}
+
 export function starrocksUsersResult(result: QueryResult): DatabaseUserIdentity[] {
   const userIndex = columnIndex(result, "user", "User");
   if (userIndex < 0) return [];
@@ -123,6 +161,10 @@ export function mysqlCreateUserSql(input: CreatePrincipalInput): string {
 
 export function mysqlAlterUserPasswordSql(user: DatabaseUserIdentity, password: string): string {
   return `ALTER USER ${mysqlUserAccount(user)} IDENTIFIED BY ${quoteMySqlString(password)};`;
+}
+
+export function dorisAlterUserPasswordSql(user: DatabaseUserIdentity, password: string): string {
+  return `SET PASSWORD FOR ${mysqlUserAccount(user)} = PASSWORD(${quoteMySqlString(password)});`;
 }
 
 export function mysqlAlterUserAccountLockSql(user: DatabaseUserIdentity, locked: boolean): string {
@@ -173,12 +215,60 @@ export function starrocksRevokePrivilegesSql(input: PrivilegeChangeInput): strin
   return `REVOKE ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table)} FROM USER ${mysqlUserAccount(input.user)};`;
 }
 
+export function dorisPrivilegeTargetSql(database: string, table = "*"): string {
+  const db = database.trim() || "*";
+  const tbl = table.trim() || "*";
+  if (db === "*") return "*.*.*";
+  const tableSql = tbl === "*" ? "*" : quoteMySqlIdentifier(tbl);
+  return `${quoteMySqlIdentifier("internal")}.${quoteMySqlIdentifier(db)}.${tableSql}`;
+}
+
+export function dorisGrantPrivilegesSql(input: PrivilegeChangeInput): string {
+  const privileges = normalizePrivileges(input.privileges, "SELECT_PRIV").join(", ");
+  // Doris 2.x GRANT has no WITH GRANT OPTION clause; GRANT_PRIV is managed as an explicit privilege instead.
+  return `GRANT ${privileges} ON ${dorisPrivilegeTargetSql(input.database, input.table)} TO ${mysqlUserAccount(input.user)};`;
+}
+
+export function dorisRevokePrivilegesSql(input: PrivilegeChangeInput): string {
+  const privileges = normalizePrivileges(input.privileges, "SELECT_PRIV").join(", ");
+  return `REVOKE ${privileges} ON ${dorisPrivilegeTargetSql(input.database, input.table)} FROM ${mysqlUserAccount(input.user)};`;
+}
+
 export function normalizePrivileges(privileges: string[], fallback = "SELECT"): string[] {
   const normalized = privileges.map((privilege) => privilege.trim().toUpperCase()).filter(Boolean);
   return Array.from(new Set(normalized.length > 0 ? normalized : [fallback]));
 }
 
 export const normalizeMySqlPrivileges = normalizePrivileges;
+
+export function mysqlPrivilegeSelectionFromGrants(input: PrivilegeSelectionInput): PrivilegeSelection {
+  const database = normalizeMySqlScopeIdentifier(input.database || "*");
+  const table = normalizeMySqlScopeIdentifier(input.table || "*");
+  const availableByName = new Map(input.availablePrivileges.map((privilege) => [normalizePrivilegeName(privilege), privilege]));
+  const selected = new Set<string>();
+  let grantOption = false;
+
+  for (const grantSql of input.grants) {
+    const grant = parseMySqlGrant(grantSql);
+    if (!grant || grant.objectType === "FUNCTION" || grant.objectType === "PROCEDURE") continue;
+    if (normalizeMySqlScopeIdentifier(grant.database) !== database || normalizeMySqlScopeIdentifier(grant.table) !== table) continue;
+
+    grantOption ||= grant.grantOption;
+    if (grant.allPrivileges) {
+      input.availablePrivileges.forEach((privilege) => selected.add(privilege));
+      continue;
+    }
+    grant.privileges.forEach((privilege) => {
+      const available = availableByName.get(normalizePrivilegeName(privilege));
+      if (available) selected.add(available);
+    });
+  }
+
+  return {
+    privileges: input.availablePrivileges.filter((privilege) => selected.has(privilege)),
+    grantOption,
+  };
+}
 
 export function usersFromMySqlUserResult(result: QueryResult): DatabaseUserIdentity[] {
   const userIndex = columnIndex(result, "user", "User");
@@ -437,6 +527,47 @@ function parseMySqlGrantee(value: string): DatabaseUserIdentity | null {
   };
 }
 
+interface ParsedMySqlGrant {
+  privileges: string[];
+  database: string;
+  table: string;
+  objectType?: "TABLE" | "FUNCTION" | "PROCEDURE";
+  allPrivileges: boolean;
+  grantOption: boolean;
+}
+
+function parseMySqlGrant(sql: string): ParsedMySqlGrant | null {
+  const identifier = String.raw`(?:\x60(?:\x60\x60|[^\x60])*\x60|\*|[^\s.]+)`;
+  const match = new RegExp(String.raw`^\s*GRANT\s+(.+?)\s+ON\s+(?:(TABLE|FUNCTION|PROCEDURE)\s+)?(${identifier})\s*\.\s*(${identifier})\s+TO\s+`, "i").exec(sql);
+  if (!match) return null;
+
+  const privileges = match[1].split(",").map(normalizePrivilegeName).filter(Boolean);
+  return {
+    privileges,
+    database: unquoteMySqlIdentifier(match[3]),
+    table: unquoteMySqlIdentifier(match[4]),
+    objectType: match[2]?.toUpperCase() as ParsedMySqlGrant["objectType"],
+    allPrivileges: privileges.some((privilege) => privilege === "ALL" || privilege === "ALL PRIVILEGES"),
+    grantOption: /\s+WITH\s+GRANT\s+OPTION\s*;?\s*$/i.test(sql),
+  };
+}
+
+function normalizePrivilegeName(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+function normalizeMySqlScopeIdentifier(value: string): string {
+  return unquoteMySqlIdentifier(value.trim()).toLocaleLowerCase("en-US");
+}
+
+function unquoteMySqlIdentifier(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith("`") && trimmed.endsWith("`")) {
+    return trimmed.slice(1, -1).replace(/``/g, "`");
+  }
+  return trimmed;
+}
+
 function postgresDefaultPrivilege(scope: PrivilegeScope | undefined): string {
   if (scope === "schema") return "USAGE";
   if (scope === "database") return "CONNECT";
@@ -472,6 +603,7 @@ export const mysqlUserAdminProvider: DatabaseUserAdminProvider = {
   detail: (user) => user.plugin,
   privilegesForScope: () => MYSQL_COMMON_PRIVILEGES,
   defaultPrivilegesForScope: () => ["SELECT"],
+  privilegeSelectionFromGrants: mysqlPrivilegeSelectionFromGrants,
 };
 
 export const postgresUserAdminProvider: DatabaseUserAdminProvider = {
@@ -498,6 +630,24 @@ export const kingbaseUserAdminProvider: DatabaseUserAdminProvider = {
   showGrantsSql: kingbaseShowGrantsSql,
 };
 
+export const dorisUserAdminProvider: DatabaseUserAdminProvider = {
+  dialect: "mysql",
+  defaultScope: "table",
+  listUsersSql: dorisListUsersSql,
+  parseUsers: dorisUsersResult,
+  showGrantsSql: mysqlShowGrantsSql,
+  parseGrants: dorisGrantsResult,
+  createUserSql: mysqlCreateUserSql,
+  alterPasswordSql: dorisAlterUserPasswordSql,
+  dropUserSql: mysqlDropUserSql,
+  grantPrivilegesSql: dorisGrantPrivilegesSql,
+  revokePrivilegesSql: dorisRevokePrivilegesSql,
+  label: mysqlUserLabel,
+  detail: (user) => user.plugin,
+  privilegesForScope: () => DORIS_TABLE_PRIVILEGES,
+  defaultPrivilegesForScope: () => ["SELECT_PRIV"],
+};
+
 export const starrocksUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "mysql",
   defaultScope: "table",
@@ -519,6 +669,7 @@ export const starrocksUserAdminProvider: DatabaseUserAdminProvider = {
 const DATABASE_USER_ADMIN_PROVIDER_BY_TYPE = new Map<DatabaseType, DatabaseUserAdminProvider>([
   ["mysql", mysqlUserAdminProvider],
   ["goldendb", mysqlUserAdminProvider],
+  ["doris", dorisUserAdminProvider],
   ["kingbase", kingbaseUserAdminProvider],
   ["postgres", postgresUserAdminProvider],
   ["gaussdb", postgresUserAdminProvider],

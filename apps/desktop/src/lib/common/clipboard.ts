@@ -58,6 +58,15 @@ interface NativeClipboardSelectionEnvironment {
 
 const EDITABLE_CLIPBOARD_TARGET_SELECTOR = "input, textarea, [contenteditable='true'], [role='textbox']";
 const NATIVE_CLIPBOARD_REGION_SELECTOR = "[data-native-clipboard]";
+let clipboardWriteRevision = 0;
+
+export function getClipboardWriteRevision(): number {
+  return clipboardWriteRevision;
+}
+
+function recordClipboardWrite(): void {
+  clipboardWriteRevision += 1;
+}
 
 function closestElement(target: unknown, selector: string): unknown {
   return (target as { closest?: (selector: string) => unknown } | null)?.closest?.(selector) ?? null;
@@ -117,6 +126,7 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
     try {
       const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
       await writeText(text);
+      recordClipboardWrite();
       return;
     } catch {
       // Preserve Web Clipboard and legacy copy compatibility when native writes fail.
@@ -126,6 +136,7 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
   try {
     if (env.navigator?.clipboard?.writeText) {
       await env.navigator.clipboard.writeText(text);
+      recordClipboardWrite();
       return;
     }
   } catch {
@@ -153,6 +164,7 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
     if (!document.execCommand("copy")) {
       throw new Error("Clipboard copy failed");
     }
+    recordClipboardWrite();
   } finally {
     document.body.removeChild(textarea);
   }

@@ -105,3 +105,31 @@ test("object browser batch empty reviews the frozen SQL plan before executing", 
   assert.match(body, /runBatchTableEmpty/, "batch empty should still use the batch executor after confirmation");
   assert.ok(body.indexOf("executeObjectBrowserSqlWithProductionGuard") < body.indexOf("runBatchTableEmpty"), "production guard must be entered before the batch executor");
 });
+
+test("mongo sidebar mutations share the production-gated runMongoSidebarMutation shell", () => {
+  const shellSource = readSource("apps/desktop/src/lib/sidebar/runMongoSidebarMutation.ts");
+  assert.match(shellSource, /executeWithProductionContextGuard/, "shared mongo mutation shell must request production confirmation");
+  assert.match(shellSource, /return \{\s*result\s*\}/, "void execute success must be boxed so it is not treated as cancel");
+  assert.match(shellSource, /if \(executed === undefined\) return/, "only unboxed undefined from the guard means cancel");
+  assert.match(shellSource, /onSuccess\(executed\.result\)/, "onSuccess must receive the unboxed execute result");
+
+  const source = readSource("apps/desktop/src/composables/useSidebarDatabaseSpecificMutationRuntime.ts");
+  for (const name of [
+    "confirmRenameMongoCollection",
+    "confirmDropMongoCollection",
+    "confirmDropMongoIndex",
+    "confirmDropAllMongoIndexes",
+    "confirmDropMongoDatabase",
+  ] as const) {
+    const body = functionBody(source, name);
+    assert.match(body, /runMongoSidebarMutation/, `${name} must use the shared mongo mutation shell`);
+    assert.ok(body.includes("production.sourceSidebar"), `${name} should label the confirmation source`);
+  }
+
+  assert.ok(source.includes("api.mongoRenameCollection"), "mongo rename should still call the rename API");
+  assert.ok(source.includes("api.mongoDropDatabase"), "mongo drop database should still call the drop API");
+
+  const dropDatabaseBody = functionBody(readSource("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue"), "confirmDropDatabase");
+  assert.match(dropDatabaseBody, /confirmDropMongoDatabase/, "host drop-database confirm should delegate mongo to the mutation runtime");
+  assert.ok(!dropDatabaseBody.includes("api.mongoDropDatabase"), "host drop-database confirm should not call mongo APIs directly");
+});

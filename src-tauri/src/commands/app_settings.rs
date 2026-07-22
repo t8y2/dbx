@@ -60,6 +60,14 @@ pub async fn complete_app_close(app: AppHandle, window: Window, action: String) 
 }
 
 #[tauri::command]
+pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
+    let state =
+        app.try_state::<CloseBehaviorState>().ok_or_else(|| "close behavior state is unavailable".to_string())?;
+    state.set_frontend_ready(true);
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn request_app_close_from_window_controls(app: AppHandle) -> Result<(), String> {
     request_app_close(&app, "settings");
     Ok(())

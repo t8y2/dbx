@@ -424,7 +424,7 @@ fn build_data_compare_sync_plan_from_refs(tables: &[DataCompareSyncPlanTableRef<
 
     for table in tables {
         insert_count += table.diff.added.len();
-        update_count += table.diff.modified.len();
+        update_count += table.diff.modified.iter().filter(|row| has_writable_changes(row, table.column_info)).count();
         delete_count += table.diff.removed.len();
         sync_statements.extend(table.pre_sync_statements.iter().cloned());
         sync_statements.extend(generate_data_sync_statements(&GenerateDataSyncSqlOptions {
@@ -644,14 +644,8 @@ fn json_stringify(value: &Value) -> String {
 
 fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions<'_>) -> Vec<String> {
     let table = qualified_table_name(options.database_type, options.schema, options.table_name);
-    let columns = options
-        .columns
-        .iter()
-        .map(|column| quote_table_identifier(options.database_type, column))
-        .collect::<Vec<_>>()
-        .join(", ");
     let column_info = options.column_info;
-    let added = generate_insert_sync_statements(options, &table, &columns, column_info);
+    let added = generate_insert_sync_statements(options, &table, column_info);
     let modified = generate_update_sync_statements(options, &table, column_info);
     let removed = generate_delete_sync_statements(options, &table, column_info);
 
@@ -665,9 +659,21 @@ fn generate_data_sync_statements(options: &GenerateDataSyncSqlOptions<'_>) -> Ve
 fn generate_insert_sync_statements(
     options: &GenerateDataSyncSqlOptions<'_>,
     table: &str,
-    columns: &str,
     column_info: &[DataGridColumnInfo],
 ) -> Vec<String> {
+    let writable_columns = options
+        .columns
+        .iter()
+        .filter(|column| !is_non_identity_generated_column(column_info_for(column_info, column)))
+        .collect::<Vec<_>>();
+    let columns = writable_columns
+        .iter()
+        .map(|column| quote_table_identifier(options.database_type, column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if writable_columns.is_empty() {
+        return options.diff.added.par_iter().map(|_| format!("INSERT INTO {table} DEFAULT VALUES;")).collect();
+    }
     options
         .diff
         .added
@@ -676,12 +682,11 @@ fn generate_insert_sync_statements(
             let values = chunk
                 .iter()
                 .map(|row| {
-                    let row_values = options
-                        .columns
+                    let row_values = writable_columns
                         .iter()
                         .map(|column| {
                             format_grid_sql_literal(
-                                row.values.get(column).unwrap_or(&Value::Null),
+                                row.values.get(*column).unwrap_or(&Value::Null),
                                 options.database_type,
                                 column_info_for(column_info, column),
                             )
@@ -702,17 +707,18 @@ fn generate_update_sync_statements(
     table: &str,
     column_info: &[DataGridColumnInfo],
 ) -> Vec<String> {
-    options
-        .diff
-        .modified
+    let writable_rows =
+        options.diff.modified.iter().filter(|row| has_writable_changes(row, column_info)).collect::<Vec<_>>();
+    writable_rows
         .par_chunks(DATA_SYNC_CONDITION_BATCH_SIZE)
         .flat_map_iter(|chunk| {
             if chunk.len() == 1 {
-                return vec![generate_single_update_statement(options, table, column_info, &chunk[0])];
+                return vec![generate_single_update_statement(options, table, column_info, chunk[0])];
             }
             let changed_columns = options
                 .columns
                 .iter()
+                .filter(|column| !is_non_identity_generated_column(column_info_for(column_info, column)))
                 .filter(|column| chunk.iter().any(|row| row.changes.iter().any(|change| change.column == **column)))
                 .collect::<Vec<_>>();
             if changed_columns.is_empty() {
@@ -766,6 +772,7 @@ fn generate_single_update_statement(
     let assignments = row
         .changes
         .iter()
+        .filter(|change| !is_non_identity_generated_column(column_info_for(column_info, &change.column)))
         .map(|change| {
             format!(
                 "{} = {}",
@@ -1038,6 +1045,16 @@ fn column_info_for<'a>(columns: &'a [DataGridColumnInfo], name: &str) -> Option<
     columns.iter().find(|column| column.name.to_ascii_lowercase() == normalized)
 }
 
+fn is_non_identity_generated_column(column_info: Option<&DataGridColumnInfo>) -> bool {
+    let extra = column_info.and_then(|column| column.extra.as_deref()).unwrap_or("").to_ascii_lowercase();
+    // Keep this aligned with data_grid_sql: identity also says "generated always" but remains explicitly writable.
+    extra.contains("generated always as") && !extra.contains("identity")
+}
+
+fn has_writable_changes(row: &DataCompareModifiedRow, column_info: &[DataGridColumnInfo]) -> bool {
+    row.changes.iter().any(|change| !is_non_identity_generated_column(column_info_for(column_info, &change.column)))
+}
+
 fn data_grid_column_info(column: crate::types::ColumnInfo) -> DataGridColumnInfo {
     DataGridColumnInfo {
         name: column.name,
@@ -1064,6 +1081,10 @@ mod tests {
             column_default: None,
             extra: None,
         }
+    }
+
+    fn data_compare_column_with_extra(name: &str, data_type: &str, extra: &str) -> DataGridColumnInfo {
+        DataGridColumnInfo { extra: Some(extra.to_string()), ..data_compare_column(name, data_type) }
     }
 
     #[test]
@@ -1124,6 +1145,195 @@ mod tests {
             .join("\n")
         );
         assert_eq!(preparation.sync_statements.len(), 3);
+    }
+
+    #[test]
+    fn postgres_sync_omits_generated_columns_but_keeps_identity_columns() {
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "generated_column_sync_test".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "quantity".to_string(), "total_price".to_string()],
+            key_columns: vec!["id".to_string()],
+            column_info: vec![
+                data_compare_column_with_extra("id", "bigint", "generated always as identity"),
+                data_compare_column("quantity", "integer"),
+                data_compare_column_with_extra(
+                    "total_price",
+                    "numeric(12,2)",
+                    "generated always as (quantity * 3.50) stored",
+                ),
+            ],
+            source_rows: vec![vec![json!(1), json!(2), json!(7.0)], vec![json!(2), json!(3), json!(10.5)]],
+            target_rows: vec![vec![json!(2), json!(1), json!(3.5)]],
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        assert_eq!(
+            preparation.sync_sql,
+            [
+                "INSERT INTO \"public\".\"generated_column_sync_test\" (\"id\", \"quantity\") VALUES (1, 2);",
+                "UPDATE \"public\".\"generated_column_sync_test\" SET \"quantity\" = 3 WHERE \"id\" = 2;",
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn inserts_default_values_when_all_compared_columns_are_generated() {
+        let plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+            tables: vec![DataCompareSyncPlanTableOptions {
+                table_name: "generated_only_projection".to_string(),
+                schema: Some("public".to_string()),
+                columns: vec!["computed_value".to_string()],
+                key_columns: Vec::new(),
+                column_info: vec![data_compare_column_with_extra(
+                    "computed_value",
+                    "integer",
+                    "generated always as (base_value + 1) stored",
+                )],
+                diff: DataCompareResult {
+                    added: vec![
+                        DataCompareRow {
+                            key: "0".to_string(),
+                            key_values: HashMap::new(),
+                            values: HashMap::from([(String::from("computed_value"), json!(2))]),
+                        },
+                        DataCompareRow {
+                            key: "1".to_string(),
+                            key_values: HashMap::new(),
+                            values: HashMap::from([(String::from("computed_value"), json!(3))]),
+                        },
+                    ],
+                    removed: Vec::new(),
+                    modified: Vec::new(),
+                },
+                database_type: Some(DatabaseType::Postgres),
+                pre_sync_statements: Vec::new(),
+            }],
+        });
+
+        assert_eq!(plan.insert_count, 2);
+        assert_eq!(plan.statement_count, 2);
+        assert_eq!(
+            plan.sync_statements,
+            vec![
+                "INSERT INTO \"public\".\"generated_only_projection\" DEFAULT VALUES;",
+                "INSERT INTO \"public\".\"generated_only_projection\" DEFAULT VALUES;",
+            ]
+        );
+    }
+
+    #[test]
+    fn generated_only_changes_do_not_create_updates_or_increment_counts() {
+        let plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+            tables: vec![DataCompareSyncPlanTableOptions {
+                table_name: "generated_column_sync_test".to_string(),
+                schema: Some("public".to_string()),
+                columns: vec!["id".to_string(), "total_price".to_string()],
+                key_columns: vec!["id".to_string()],
+                column_info: vec![
+                    data_compare_column("id", "bigint"),
+                    data_compare_column_with_extra(
+                        "total_price",
+                        "numeric(12,2)",
+                        "generated always as (quantity * unit_price) stored",
+                    ),
+                ],
+                diff: DataCompareResult {
+                    added: Vec::new(),
+                    removed: Vec::new(),
+                    modified: vec![DataCompareModifiedRow {
+                        key: "1".to_string(),
+                        key_values: HashMap::from([(String::from("id"), json!(1))]),
+                        source_values: HashMap::new(),
+                        target_values: HashMap::new(),
+                        changes: vec![DataCompareChangedCell {
+                            column: "total_price".to_string(),
+                            source: json!(7.0),
+                            target: json!(8.0),
+                        }],
+                    }],
+                },
+                database_type: Some(DatabaseType::Postgres),
+                pre_sync_statements: Vec::new(),
+            }],
+        });
+
+        assert_eq!(plan.update_count, 0);
+        assert_eq!(plan.statement_count, 0);
+        assert!(plan.sync_sql.is_empty());
+    }
+
+    #[test]
+    fn generated_only_changes_do_not_enter_batch_update_where_clauses() {
+        let mut modified = (1..=200)
+            .map(|id| DataCompareModifiedRow {
+                key: id.to_string(),
+                key_values: HashMap::from([(String::from("id"), json!(id))]),
+                source_values: HashMap::new(),
+                target_values: HashMap::new(),
+                changes: vec![DataCompareChangedCell {
+                    column: "quantity".to_string(),
+                    source: json!(id + 1),
+                    target: json!(id),
+                }],
+            })
+            .collect::<Vec<_>>();
+        modified.push(DataCompareModifiedRow {
+            key: "999".to_string(),
+            key_values: HashMap::from([(String::from("id"), json!(999))]),
+            source_values: HashMap::new(),
+            target_values: HashMap::new(),
+            changes: vec![DataCompareChangedCell {
+                column: "total_price".to_string(),
+                source: json!(7.0),
+                target: json!(8.0),
+            }],
+        });
+        let plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+            tables: vec![DataCompareSyncPlanTableOptions {
+                table_name: "generated_column_sync_test".to_string(),
+                schema: Some("public".to_string()),
+                columns: vec!["id".to_string(), "quantity".to_string(), "total_price".to_string()],
+                key_columns: vec!["id".to_string()],
+                column_info: vec![
+                    data_compare_column("id", "bigint"),
+                    data_compare_column("quantity", "integer"),
+                    data_compare_column_with_extra(
+                        "total_price",
+                        "numeric(12,2)",
+                        "generated always as (quantity * unit_price) stored",
+                    ),
+                ],
+                diff: DataCompareResult { added: Vec::new(), removed: Vec::new(), modified },
+                database_type: Some(DatabaseType::Postgres),
+                pre_sync_statements: Vec::new(),
+            }],
+        });
+
+        assert_eq!(plan.update_count, 200);
+        assert_eq!(plan.statement_count, 1);
+        assert!(!plan.sync_sql.contains("\"id\" = 999"));
+        assert!(!plan.sync_sql.contains("\"total_price\""));
+    }
+
+    #[test]
+    fn sync_keeps_legacy_writes_when_column_metadata_is_missing() {
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "generated_column_sync_test".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "total_price".to_string()],
+            key_columns: vec!["id".to_string()],
+            column_info: Vec::new(),
+            source_rows: vec![vec![json!(1), json!(7.0)], vec![json!(2), json!(10.5)]],
+            target_rows: vec![vec![json!(2), json!(9.0)]],
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        assert!(preparation.sync_sql.contains("(\"id\", \"total_price\") VALUES (1, 7.0)"));
+        assert!(preparation.sync_sql.contains("SET \"total_price\" = 10.5 WHERE \"id\" = 2"));
     }
 
     #[test]
@@ -1413,6 +1623,50 @@ mod tests {
         assert_eq!(plan.statement_count, 2);
         assert!(plan.sync_sql.starts_with("CREATE TABLE"));
         assert!(plan.sync_sql.contains("INSERT INTO \"public\".\"users\""));
+    }
+
+    #[test]
+    fn missing_target_plan_omits_generated_columns_from_followup_insert() {
+        let plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
+            tables: vec![DataCompareSyncPlanTableOptions {
+                table_name: "generated_column_sync_test".to_string(),
+                schema: Some("public".to_string()),
+                columns: vec!["id".to_string(), "quantity".to_string(), "total_price".to_string()],
+                key_columns: Vec::new(),
+                column_info: vec![
+                    data_compare_column("id", "bigint"),
+                    data_compare_column("quantity", "integer"),
+                    data_compare_column_with_extra(
+                        "total_price",
+                        "numeric(12,2)",
+                        "generated always as (quantity * unit_price) stored",
+                    ),
+                ],
+                diff: DataCompareResult {
+                    added: vec![DataCompareRow {
+                        key: "0".to_string(),
+                        key_values: HashMap::new(),
+                        values: HashMap::from([
+                            (String::from("id"), json!(1)),
+                            (String::from("quantity"), json!(2)),
+                            (String::from("total_price"), json!(7.0)),
+                        ]),
+                    }],
+                    removed: Vec::new(),
+                    modified: Vec::new(),
+                },
+                database_type: Some(DatabaseType::Postgres),
+                pre_sync_statements: vec![
+                    "CREATE TABLE \"public\".\"generated_column_sync_test\" (\"id\" bigint);".to_string()
+                ],
+            }],
+        });
+
+        assert_eq!(plan.insert_count, 1);
+        assert_eq!(plan.statement_count, 2);
+        assert!(plan.sync_sql.starts_with("CREATE TABLE"));
+        assert!(plan.sync_sql.contains("(\"id\", \"quantity\") VALUES (1, 2)"));
+        assert!(!plan.sync_sql.contains("\"total_price\") VALUES"));
     }
 
     #[test]

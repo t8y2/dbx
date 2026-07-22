@@ -22,11 +22,25 @@ test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   });
 });
 
-test("parses legacy Mongo date display values as UTC dates", () => {
-  assert.deepEqual(parseMongoDocumentInputValue("2025-08-14 02:25:43.718"), {
-    $date: "2025-08-14T02:25:43.718Z",
-  });
+test("preserves date-shaped Mongo strings instead of guessing Date", () => {
+  assert.equal(parseMongoDocumentInputValue("2025-08-14 02:25:43.718"), "2025-08-14 02:25:43.718");
+  assert.equal(parseMongoDocumentInputValue("2025-04-01 19:46:03"), "2025-04-01 19:46:03");
   assert.equal(parseMongoDocumentInputValue('"2025-08-14 02:25:43.718"'), "2025-08-14 02:25:43.718");
+});
+
+test("preserves existing date-shaped Mongo string fields on grid update", () => {
+  const original = {
+    _id: "1",
+    create_time: "2025-04-01 19:46:03",
+    last_updated_time: "2025-04-01 19:54:12",
+  };
+  const changes = new Map<number, string | number | boolean | null>([[1, "2025-04-01 19:41:03"]]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "create_time", "last_updated_time"], original), {
+    $set: {
+      create_time: "2025-04-01 19:41:03",
+    },
+  });
 });
 
 test("preserves unsafe Mongo int64 input values without JavaScript rounding", () => {

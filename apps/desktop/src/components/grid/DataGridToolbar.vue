@@ -185,7 +185,7 @@ function actionLabelClass() {
   </div>
 </template>
 
-<style scoped>
+<style>
 .data-grid-topbar-action-button {
   align-items: center;
   justify-content: center;

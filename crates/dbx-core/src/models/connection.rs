@@ -338,6 +338,11 @@ pub struct ProxyTunnelConfig {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    /// Optional target for tunnel profile testing. When set, the test connects
+    /// to this `host:port`; when empty, the test performs an endpoint-only
+    /// liveness probe that requires no external destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_target: Option<String>,
     /// See [`SshTunnelConfig::profile_id`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile_id: String,
@@ -2348,6 +2353,7 @@ mod tests {
             port: 1080,
             username: String::new(),
             password: String::new(),
+            test_target: None,
         })];
 
         let saved = serde_json::to_value(config).unwrap();

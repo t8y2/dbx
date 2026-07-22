@@ -2,6 +2,13 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import {
   connectionSupportsDatabaseUserAdmin,
+  dorisAlterUserPasswordSql,
+  dorisGrantPrivilegesSql,
+  dorisGrantsResult,
+  dorisListUsersSql,
+  dorisPrivilegeTargetSql,
+  dorisRevokePrivilegesSql,
+  dorisUsersResult,
   grantsFromQueryResult,
   getDatabaseUserAdminProvider,
   mysqlAlterUserAccountLockSql,
@@ -253,6 +260,47 @@ test("routes StarRocks to the StarRocks user admin provider", () => {
   assert.deepEqual(provider?.privilegesForScope?.("table"), ["SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "EXPORT", "ALL"]);
 });
 
+test("routes Doris to a Doris 2.x user admin provider", () => {
+  const provider = getDatabaseUserAdminProvider("doris");
+  assert.ok(provider, "expected a provider for doris");
+  assert.equal(provider?.dialect, "mysql");
+  assert.equal(provider?.listUsersSql(), "SHOW ALL GRANTS;");
+  assert.equal(provider?.showGrantsSql({ user: "root", host: "%" }), "SHOW GRANTS FOR 'root'@'%';");
+  assert.equal(provider?.createUserSql?.({ user: "app", host: "%", password: "secret" }), "CREATE USER 'app'@'%' IDENTIFIED BY 'secret';");
+  assert.equal(dorisAlterUserPasswordSql({ user: "app", host: "%" }, "new'secret"), "SET PASSWORD FOR 'app'@'%' = PASSWORD('new''secret');");
+  assert.equal(provider?.dropUserSql?.({ user: "app", host: "%" }), "DROP USER 'app'@'%';");
+  assert.equal(dorisPrivilegeTargetSql("*"), "*.*.*");
+  assert.equal(dorisPrivilegeTargetSql("analytics"), "`internal`.`analytics`.*");
+  assert.equal(dorisPrivilegeTargetSql("analytics", "daily`rollup"), "`internal`.`analytics`.`daily``rollup`");
+  const privilegeInput = {
+    user: { user: "reporter", host: "%" },
+    privileges: ["select_priv", "LOAD_PRIV"],
+    database: "analytics",
+    grantOption: true,
+  };
+  assert.equal(dorisGrantPrivilegesSql(privilegeInput), "GRANT SELECT_PRIV, LOAD_PRIV ON `internal`.`analytics`.* TO 'reporter'@'%';");
+  assert.equal(dorisRevokePrivilegesSql(privilegeInput), "REVOKE SELECT_PRIV, LOAD_PRIV ON `internal`.`analytics`.* FROM 'reporter'@'%';");
+  assert.equal(provider?.alterLoginSql, undefined);
+  assert.deepEqual(provider?.privilegesForScope?.("table"), ["SELECT_PRIV", "LOAD_PRIV", "ALTER_PRIV", "CREATE_PRIV", "DROP_PRIV", "SHOW_VIEW_PRIV"]);
+});
+
+test("parses Doris SHOW ALL GRANTS results", () => {
+  const grants = result(
+    ["UserIdentity", "Comment", "Password", "Roles", "GlobalPrivs", "CatalogPrivs", "DatabasePrivs", "TablePrivs"],
+    [
+      ["'root'@'%'", "ROOT", "No", "operator", "Admin_priv", null, "internal.mysql: Select_priv", null],
+      ["'o''brien'@'localhost'", "", "Yes", "", null, "internal: Select_priv", null, "internal.analytics.orders: Select_priv"],
+    ],
+  );
+
+  assert.equal(dorisListUsersSql(), "SHOW ALL GRANTS;");
+  assert.deepEqual(dorisUsersResult(grants), [
+    { user: "root", host: "%" },
+    { user: "o'brien", host: "localhost" },
+  ]);
+  assert.deepEqual(dorisGrantsResult(grants), ["Roles: operator", "GlobalPrivs: Admin_priv", "DatabasePrivs: internal.mysql: Select_priv", "CatalogPrivs: internal: Select_priv", "TablePrivs: internal.analytics.orders: Select_priv"]);
+});
+
 test("resolves user admin support from the effective connection type", () => {
   const mysqlProtocolStarRocks = {
     id: "starrocks-1",
@@ -265,9 +313,27 @@ test("resolves user admin support from the effective connection type", () => {
     connection_string: "jdbc:mysql://localhost:9030/analytics",
     driver_profile: "starrocks",
   } as ConnectionConfig;
+  const mysqlProtocolDoris = {
+    id: "doris-1",
+    db_type: "mysql",
+    driver_profile: "doris",
+  } as ConnectionConfig;
+  const jdbcDoris = {
+    id: "doris-jdbc-1",
+    db_type: "jdbc",
+    connection_string: "jdbc:mysql://localhost:9030/analytics",
+    driver_profile: "doris",
+  } as ConnectionConfig;
+  const mysql = { id: "mysql-1", db_type: "mysql" } as ConnectionConfig;
+  const goldenDb = { id: "goldendb-1", db_type: "goldendb" } as ConnectionConfig;
 
   assert.equal(resolveDatabaseUserAdminProviderForConnection(mysqlProtocolStarRocks), getDatabaseUserAdminProvider("starrocks"));
   assert.equal(resolveDatabaseUserAdminProviderForConnection(jdbcStarRocks), getDatabaseUserAdminProvider("starrocks"));
+  assert.equal(resolveDatabaseUserAdminProviderForConnection(mysqlProtocolDoris), getDatabaseUserAdminProvider("doris"));
+  assert.equal(resolveDatabaseUserAdminProviderForConnection(jdbcDoris), getDatabaseUserAdminProvider("doris"));
+  assert.equal(resolveDatabaseUserAdminProviderForConnection(mysql), getDatabaseUserAdminProvider("mysql"));
+  assert.equal(resolveDatabaseUserAdminProviderForConnection(goldenDb), getDatabaseUserAdminProvider("goldendb"));
   assert.equal(connectionSupportsDatabaseUserAdmin(mysqlProtocolStarRocks), true);
+  assert.equal(connectionSupportsDatabaseUserAdmin(mysqlProtocolDoris), true);
   assert.equal(connectionSupportsDatabaseUserAdmin({ id: "sqlite-1", db_type: "sqlite" } as ConnectionConfig), false);
 });

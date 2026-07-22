@@ -34,13 +34,20 @@ test("mutation families retain accepted targets, failures, and refresh work", ()
     assert.match(body, /tableOperationFailed/);
   }
 
-  for (const name of ["confirmCreateNacosNamespace", "confirmEditNacosNamespace", "confirmDropDatabase", "confirmDropMongoCollection"]) {
+  for (const name of ["confirmCreateNacosNamespace", "confirmEditNacosNamespace", "confirmDropDatabase"]) {
     const body = functionBody(name);
     assert.match(body, /try \{/);
     assert.match(body, /catch \([A-Za-z]+: any\)/);
     assert.match(body, /finally \{/);
     assert.match(body, /Loading\.value = false/);
   }
+
+  // Mongo collection mutations share a production-gated shell for failures / loading.
+  const dropMongoCollection = functionBody("confirmDropMongoCollection");
+  assert.match(dropMongoCollection, /runMongoSidebarMutation/);
+  assert.match(dropMongoCollection, /onError:\s*toastMutationError/);
+  assert.match(dropMongoCollection, /api\.mongoDropCollection/);
+
 
   const redis = functionBody("confirmFlushRedisDb");
   assert.match(redis, /updateRedisDbKeyStats/);

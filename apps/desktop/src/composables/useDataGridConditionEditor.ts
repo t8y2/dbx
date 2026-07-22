@@ -5,6 +5,7 @@ export type DataGridConditionSuggestionKind = "column" | "history";
 
 export interface DataGridConditionColumnSuggestion {
   name: string;
+  insertText?: string;
   comment?: string | null;
 }
 
@@ -12,6 +13,7 @@ export type DataGridConditionColumnOption = string | DataGridConditionColumnSugg
 
 export interface DataGridConditionSuggestion {
   value: string;
+  insertText?: string;
   kind: DataGridConditionSuggestionKind;
   comment?: string;
 }
@@ -97,7 +99,8 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
       if (!normalizedValue.startsWith(normalizedToken) || normalizedValue === normalizedToken || seen.has(value)) continue;
       seen.add(value);
       const comment = normalizedColumnComment(column);
-      suggestions.push({ value, kind: "column", ...(comment ? { comment } : {}) });
+      const insertText = typeof column === "string" ? value : column.insertText;
+      suggestions.push({ value, kind: "column", ...(insertText !== undefined && insertText !== value ? { insertText } : {}), ...(comment ? { comment } : {}) });
     }
     return suggestions;
   }
@@ -177,7 +180,8 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     const suggestion = suggestions.value[index];
     if (!suggestion) return false;
     suppressNextValueSuggestion = true;
-    options.value.value = suggestion.kind === "history" ? suggestion.value : replaceActiveToken(options.kind, options.value.value, suggestion.value);
+    // History is already executable SQL; only fresh column suggestions apply dialect quoting.
+    options.value.value = suggestion.kind === "history" ? suggestion.value : replaceActiveToken(options.kind, options.value.value, suggestion.insertText ?? suggestion.value);
     dismiss();
     return true;
   }

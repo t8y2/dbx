@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::sql_file_import::{
     execute_sql_file_path, mysql_like_sql_file_can_execute_without_selected_database, read_sql_file_preview,
-    sql_file_progress,
+    sql_file_progress, SqlFileProgressEmitter,
 };
 
 pub use dbx_core::sql::{SqlFilePreview, SqlFileRequest, SqlFileStatus};
@@ -62,8 +62,6 @@ pub async fn execute_sql_file(
     }
 
     let started_at = Instant::now();
-    emit_progress(&app, &request.execution_id, SqlFileStatus::Started, 0, 0, 0, 0, started_at, "", None);
-
     let result = execute_sql_file_inner(&app, &state, &request, token, started_at).await;
     {
         let mut executions = sql_file_executions().write().await;
@@ -90,6 +88,20 @@ async fn execute_sql_file_inner(
     token: CancellationToken,
     started_at: Instant,
 ) -> Result<(), String> {
+    let mut progress_emitter = SqlFileProgressEmitter::new(|progress| {
+        let _ = app.emit("sql-file-progress", progress);
+    });
+    progress_emitter.emit(sql_file_progress(
+        &request.execution_id,
+        SqlFileStatus::Started,
+        0,
+        0,
+        0,
+        0,
+        started_at,
+        "",
+        None,
+    ));
     execute_sql_file_path(
         state.inner().as_ref(),
         request,
@@ -97,7 +109,7 @@ async fn execute_sql_file_inner(
         token,
         started_at,
         |progress| {
-            let _ = app.emit("sql-file-progress", progress);
+            progress_emitter.emit(progress);
         },
     )
     .await
@@ -118,35 +130,6 @@ fn register_sql_file_execution(
 
 fn remove_sql_file_execution(executions: &mut HashMap<String, CancellationToken>, execution_id: &str) {
     executions.remove(execution_id);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_progress(
-    app: &AppHandle,
-    execution_id: &str,
-    status: SqlFileStatus,
-    statement_index: usize,
-    success_count: usize,
-    failure_count: usize,
-    affected_rows: u64,
-    started_at: Instant,
-    statement_summary: &str,
-    error: Option<String>,
-) {
-    let _ = app.emit(
-        "sql-file-progress",
-        sql_file_progress(
-            execution_id,
-            status,
-            statement_index,
-            success_count,
-            failure_count,
-            affected_rows,
-            started_at,
-            statement_summary,
-            error,
-        ),
-    );
 }
 
 #[cfg(test)]

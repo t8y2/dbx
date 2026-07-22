@@ -45,7 +45,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
+import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
@@ -81,6 +81,7 @@ import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilit
 import { useSettingsStore } from "@/stores/settingsStore";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
+import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/metadata/completionTreeIndex";
 import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
@@ -2280,7 +2281,7 @@ export const useConnectionStore = defineStore("connection", () => {
           } else if (config && connectionUsesVisibleSchemaFilter(config)) {
             const schemaFilterConfig = config;
             const effectiveDb = schemaFilterConfig.database || "";
-            const cacheKey = schemaCacheKey(connectionId, effectiveDb, "schemas");
+            const cacheKey = schemaCacheKey(connectionId, effectiveDb, config.db_type === "oracle" ? "schemas-v2" : "schemas");
             if (!options?.force) {
               const cached = await loadPersistedTreeChildren(node, cacheKey);
               if (cached.hit) {
@@ -2788,18 +2789,18 @@ export const useConnectionStore = defineStore("connection", () => {
       const collections = await api.mongoListCollections(connectionId, database);
       const bucketNames = new Set(collections.filter((c) => c.kind === "bucket" && c.bucketName).map((c) => c.bucketName as string));
       const hiddenCollectionNames = new Set([...bucketNames].flatMap((bucketName) => [`${bucketName}.files`, `${bucketName}.chunks`]));
-      const collectionNames = collections
-        .filter((c) => c.kind !== "bucket")
-        .map((c) => c.name)
-        .filter((name) => !hiddenCollectionNames.has(name));
-      const collectionChildren = sortSidebarNames(collectionNames).map((col) => ({
-        id: `${nodeId}:${col}`,
-        label: col,
-        type: "mongo-collection" as const,
-        connectionId,
-        database,
-        isExpanded: false,
-      }));
+      const collectionEntries = collections.filter((c) => c.kind !== "bucket").filter((c) => !hiddenCollectionNames.has(c.name));
+      const collectionChildren = [...collectionEntries]
+        .sort((left, right) => compareSidebarNames(left.name, right.name))
+        .map((col) => ({
+          id: `${nodeId}:${col.name}`,
+          label: col.name,
+          type: "mongo-collection" as const,
+          connectionId,
+          database,
+          meta: { collectionKind: toMongoCollectionKind(col.kind) },
+          isExpanded: false,
+        }));
       const children = [
         {
           id: `${nodeId}:__gridfs`,
@@ -4780,39 +4781,45 @@ export const useConnectionStore = defineStore("connection", () => {
     return deduped;
   }
 
-  async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string): Promise<SqlCompletionColumn[]> {
-    if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(getConfig(connectionId)) && !schema) {
+  async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number }): Promise<SqlCompletionColumn[]> {
+    const config = getConfig(connectionId);
+    const completionSchema = schema?.trim() || undefined;
+    const usesOracleCurrentSchema = config?.db_type === "oracle" && !completionSchema;
+    if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !completionSchema && !usesOracleCurrentSchema) {
       return [];
     }
-    const cacheKey = `${connectionId}:${database}:${schema || ""}:${table}`;
+    const sessionCacheScope = usesOracleCurrentSchema && context?.clientSessionId ? `:${context.clientSessionId}:${context.version ?? 0}` : "";
+    const cacheKey = `${connectionId}:${database}:${schema || ""}:${table}${sessionCacheScope}`;
     if (!completionColumnsCache.value[cacheKey]) {
       await withCompletionInFlight(
         `${cacheKey}:columns`,
         async () => {
           await ensureConnected(connectionId);
-          try {
-            const assistantColumns = await listCompletionAssistantColumns(connectionId, database, table, schema);
-            if (assistantColumns.length > 0) {
-              completionColumnsCache.value[cacheKey] = assistantColumns.map((column) => ({
-                name: column.name,
-                data_type: column.dataType ?? "",
-                is_nullable: column.isNullable ?? true,
-                column_default: null,
-                is_primary_key: false,
-                extra: null,
-                comment: column.comment ?? null,
-                numeric_precision: null,
-                numeric_scale: null,
-                character_maximum_length: null,
-              }));
-              evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
-              return;
+          if (!usesOracleCurrentSchema) {
+            try {
+              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, table, completionSchema);
+              if (assistantColumns.length > 0) {
+                completionColumnsCache.value[cacheKey] = assistantColumns.map((column) => ({
+                  name: column.name,
+                  data_type: column.dataType ?? "",
+                  is_nullable: column.isNullable ?? true,
+                  column_default: null,
+                  is_primary_key: false,
+                  extra: null,
+                  comment: column.comment ?? null,
+                  numeric_precision: null,
+                  numeric_scale: null,
+                  character_maximum_length: null,
+                }));
+                evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
+                return;
+              }
+            } catch {
+              // Fall back to the existing metadata path below.
             }
-          } catch {
-            // Fall back to the existing metadata path below.
           }
-          const querySchema = metadataQuerySchema(connectionId, database, schema);
-          completionColumnsCache.value[cacheKey] = await api.getColumns(connectionId, database, querySchema, table);
+          const querySchema = usesOracleCurrentSchema ? "" : metadataQuerySchema(connectionId, database, completionSchema);
+          completionColumnsCache.value[cacheKey] = await api.getColumns(connectionId, database, querySchema, table, undefined, usesOracleCurrentSchema ? context?.clientSessionId : undefined);
           evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
         },
         { scope: completionLimiterScope(connectionId, database), kind: "columns" },
@@ -4822,12 +4829,12 @@ export const useConnectionStore = defineStore("connection", () => {
     const columns = completionColumnsCache.value[cacheKey].map((column) => ({
       name: column.name,
       table,
-      schema,
+      schema: completionSchema,
       dataType: column.data_type,
       isNullable: column.is_nullable,
       comment: column.comment,
     }));
-    indexCompletionColumns(connectionId, database, table, schema, columns);
+    if (!usesOracleCurrentSchema) indexCompletionColumns(connectionId, database, table, schema, columns);
     return columns;
   }
 
@@ -4873,8 +4880,8 @@ export const useConnectionStore = defineStore("connection", () => {
     return listCompletionDatabases(connectionId);
   }
 
-  function refreshCompletionColumns(connectionId: string, database: string, table: string, schema?: string): Promise<SqlCompletionColumn[]> {
-    return listCompletionColumns(connectionId, database, table, schema);
+  function refreshCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number }): Promise<SqlCompletionColumn[]> {
+    return listCompletionColumns(connectionId, database, table, schema, context);
   }
 
   function refreshCompletionForeignKeys(connectionId: string, database: string, table: string, schema?: string): Promise<SqlCompletionForeignKey[]> {
@@ -5229,7 +5236,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const { parseNavicatConnections } = await import("@/lib/imports/navicatImport");
       imported = await parseNavicatConnections(content);
     } else if (!passphrase) {
-      const { isDbeaverImportPayload, parseDbeaverConnections } = await import("@/lib/imports/dbeaverImport");
+      const { isDbeaverImportPayload, parseDbeaverImport } = await import("@/lib/imports/dbeaverImport");
       const { isDataGripImportPayload, parseDataGripConnections } = await import("@/lib/imports/datagripImport");
       if (isDataGripImportPayload(content)) {
         const payload = JSON.parse(content) as {
@@ -5240,7 +5247,9 @@ export const useConnectionStore = defineStore("connection", () => {
         pendingDataGripPayload = payload;
         imported = parseDataGripConnections(payload);
       } else if (isDbeaverImportPayload(content)) {
-        imported = await parseDbeaverConnections(content);
+        const result = await parseDbeaverImport(content);
+        imported = result.connections;
+        importedLayout = result.layout;
       } else {
         const parsed = JSON.parse(content);
 

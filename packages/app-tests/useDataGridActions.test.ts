@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { computed } from "vue";
+import { computed, toRaw } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { test, vi } from "vitest";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
+import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 import type { ColumnInfo, ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 vi.mock("vue-i18n", async () => {
@@ -165,6 +166,58 @@ test("data reload preserves current page offset instead of resetting to page 1",
     assert.equal(buildSqlOptions?.offset, 400, "build-table-select-sql must receive offset=400 to stay on page 5");
     assert.equal(buildSqlOptions?.limit, 100, "limit must be 100");
     assert.equal(tab.resultPageOffset, 400, "resultPageOffset must be 400 after reload to keep DataGrid on page 5");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("infinite pagination fetches and appends only the next table segment", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  const { useDataGridActions } = await import("../../apps/desktop/src/composables/useDataGridActions.ts");
+  let buildSqlOptions: any;
+  let executeBody: any;
+
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/connection/check-health") return Response.json(null);
+    if (url.pathname === "/api/query/build-table-select-sql") {
+      buildSqlOptions = JSON.parse(String(init?.body ?? "{}"))?.options;
+      return Response.json("SELECT * FROM `orders` LIMIT 100 OFFSET 100");
+    }
+    if (url.pathname === "/api/query/execute-multi") {
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      return Response.json([{ columns: ["id"], rows: [[101], [102]], affected_rows: 0, execution_time_ms: 2 }]);
+    }
+    return new Response(`unexpected ${url.pathname}`, { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({ infiniteScroll: true, infiniteScrollMaxRows: 5000 });
+    connectionStore.addEphemeralConnection(conn("mysql-1"));
+    const tabId = queryStore.createTab("mysql-1", "app", "orders", "data");
+    queryStore.setTableMeta(tabId, { tableName: "orders", tableType: "TABLE", columns: [], primaryKeys: [] });
+    const tab = queryStore.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+    const firstRow = [1] as (string | number | boolean | null)[];
+    tab.result = { columns: ["id"], rows: [firstRow], affected_rows: 0, execution_time_ms: 1 };
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 0;
+
+    const actions = useDataGridActions(computed(() => tab));
+    await actions.onPaginate(1, 100);
+
+    assert.equal(buildSqlOptions?.offset, 1);
+    assert.equal(buildSqlOptions?.limit, 100);
+    assert.equal(executeBody.maxRows, 100, "the backend receives one segment, not a cumulative limit");
+    assert.equal(tab.result?.rows.length, 3);
+    assert.equal(toRaw(tab.result?.rows[0]), firstRow, "existing row identity must survive append");
+    assert.deepEqual(tab.result?.rows.slice(1), [[101], [102]]);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

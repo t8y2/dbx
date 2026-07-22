@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tauri::menu::Menu;
 #[cfg(target_os = "macos")]
 use tauri::menu::{AboutMetadata, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::webview::PageLoadEvent;
 use tauri::RunEvent;
 use tauri::{
     menu::MenuBuilder,
@@ -35,11 +36,12 @@ const APP_MENU_COPY_SUPPORT_INFO_ID: &str = "app-menu-copy-support-info";
 
 pub struct CloseBehaviorState {
     confirmed_exit: AtomicBool,
+    frontend_ready: AtomicBool,
 }
 
 impl CloseBehaviorState {
     fn new() -> Self {
-        Self { confirmed_exit: AtomicBool::new(false) }
+        Self { confirmed_exit: AtomicBool::new(false), frontend_ready: AtomicBool::new(false) }
     }
 
     pub(crate) fn allow_next_exit(&self) {
@@ -48,6 +50,14 @@ impl CloseBehaviorState {
 
     fn take_confirmed_exit(&self) -> bool {
         self.confirmed_exit.swap(false, Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_frontend_ready(&self, ready: bool) {
+        self.frontend_ready.store(ready, Ordering::Release);
+    }
+
+    fn is_frontend_ready(&self) -> bool {
+        self.frontend_ready.load(Ordering::Acquire)
     }
 }
 #[cfg(target_os = "macos")]
@@ -101,6 +111,10 @@ fn should_show_main_window_after_setup() -> bool {
 
 fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
     should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
+}
+
+fn should_fallback_to_native_quit(target: &str, frontend_ready: bool) -> bool {
+    target == "quit" && !frontend_ready
 }
 
 fn native_window_decorations_override(target_os: &str) -> Option<bool> {
@@ -436,6 +450,16 @@ pub(crate) fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHand
 }
 
 pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, target: &str) {
+    let frontend_ready = app.try_state::<CloseBehaviorState>().is_some_and(|state| state.is_frontend_ready());
+    if should_fallback_to_native_quit(target, frontend_ready) {
+        // A missing WebView2 runtime can prevent the frontend listener from ever
+        // loading. Only the explicit tray Quit fallback bypasses the prompt.
+        if let Some(state) = app.try_state::<CloseBehaviorState>() {
+            state.allow_next_exit();
+        }
+        app.exit(0);
+        return;
+    }
     show_main_window(app);
     let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
@@ -589,9 +613,9 @@ mod tests {
     use super::{
         linux_appimage_system_gtk_immodules_cache, linux_appimage_wayland_backend_override,
         linux_nvidia_driver_from_state, linux_selected_drm_render_device, linux_webkit_rendering_workarounds,
-        native_window_decorations_override, should_confirm_app_exit_request, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, uses_application_level_icon,
-        LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        native_window_decorations_override, should_confirm_app_exit_request, should_fallback_to_native_quit,
+        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
@@ -663,6 +687,13 @@ mod tests {
         assert!(!should_confirm_app_exit_request("windows", Some(0), true));
         assert!(!should_confirm_app_exit_request("windows", Some(tauri::RESTART_EXIT_CODE), false));
         assert!(!should_confirm_app_exit_request("linux", Some(0), false));
+    }
+
+    #[test]
+    fn only_quit_uses_native_fallback_before_frontend_ready() {
+        assert!(should_fallback_to_native_quit("quit", false));
+        assert!(!should_fallback_to_native_quit("quit", true));
+        assert!(!should_fallback_to_native_quit("settings", false));
     }
 
     #[test]
@@ -898,6 +929,14 @@ pub fn run() {
     });
 
     builder
+        .manage(CloseBehaviorState::new())
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started {
+                if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
+                    state.set_frontend_ready(false);
+                }
+            }
+        })
         .setup(move |app| {
             let setup_start = Instant::now();
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
@@ -968,7 +1007,6 @@ pub fn run() {
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
             app.manage(commands::deep_link::DeepLinkOpenState::default());
-            app.manage(CloseBehaviorState::new());
             app.manage(commands::update::PendingUpdateState::default());
             #[cfg(target_os = "macos")]
             macos_app_delegate::install_dock_quit_handler(app.handle());
@@ -1038,6 +1076,7 @@ pub fn run() {
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
             commands::app_settings::complete_app_close,
+            commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
             commands::window_controls::set_macos_traffic_light_position,
             commands::app_settings::set_driver_store_dir,
@@ -1291,6 +1330,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_create_database,
             commands::mongo_cmd::mongo_drop_database,
             commands::mongo_cmd::mongo_drop_collection,
+            commands::mongo_cmd::mongo_rename_collection,
             commands::document_cmd::document_list_databases,
             commands::document_cmd::document_list_collections,
             commands::document_cmd::document_find_documents,
@@ -1473,6 +1513,7 @@ pub fn run() {
             commands::agents::reinstall_jre,
             commands::agents::invalidate_agent_registry_cache,
             commands::agents::import_agents_from_zip,
+            commands::agents::import_agent_driver_cmd,
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
             commands::ssh_config::list_ssh_config_hosts,

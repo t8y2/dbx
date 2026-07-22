@@ -942,8 +942,8 @@ func TestXuguWatchdogFiresKillAndCancel(t *testing.T) {
 
 	select {
 	case <-killCh:
-	default:
-		t.Fatal("killSession was not called when watchdog fired")
+	case <-time.After(time.Second):
+		t.Fatal("killSession was not called after watchdog cancellation")
 	}
 }
 

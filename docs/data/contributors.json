@@ -1,16 +1,13 @@
 {
   "repository": "t8y2/dbx",
-  "generatedAt": "2026-07-20T06:29:19.005Z",
+  "generatedAt": "2026-07-20T06:29:43.431Z",
   "stars": 10381,
-  "generatedAt": "2026-07-20T04:34:57.141Z",
-  "stars": 10360,
   "contributors": [
     {
       "login": "t8y2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/77960507?v=4",
       "profileUrl": "https://github.com/t8y2",
       "commits": 2451,
-      "commits": 2450,
       "mergedPullRequests": 13,
       "firstContributionAt": "2026-04-30T08:14:51Z",
       "latestContributionAt": "2026-05-30T11:15:38Z"
@@ -23,10 +20,6 @@
       "mergedPullRequests": 299,
       "firstContributionAt": "2026-06-22T06:10:59Z",
       "latestContributionAt": "2026-07-20T05:52:06Z"
-      "commits": 295,
-      "mergedPullRequests": 297,
-      "firstContributionAt": "2026-06-22T06:10:59Z",
-      "latestContributionAt": "2026-07-20T04:29:16Z"
     },
     {
       "login": "eryajf",
@@ -36,10 +29,6 @@
       "mergedPullRequests": 85,
       "firstContributionAt": "2026-06-08T11:45:45Z",
       "latestContributionAt": "2026-07-20T06:05:40Z"
-      "commits": 84,
-      "mergedPullRequests": 83,
-      "firstContributionAt": "2026-06-08T11:45:45Z",
-      "latestContributionAt": "2026-07-20T02:51:17Z"
     },
     {
       "login": "Abeautifulsnow",

@@ -88,6 +88,12 @@ const {
   editNacosNamespaceDesc,
   editNacosNamespaceLoading,
   confirmEditNacosNamespace,
+  showRenameMongoCollectionDialog,
+  renameMongoCollectionName,
+  renameMongoCollectionError,
+  renameMongoCollectionPreview,
+  renameMongoCollectionLoading,
+  confirmRenameMongoCollection,
   showCreateSchemaDialog,
   createSchemaName,
   confirmCreateSchema,
@@ -143,6 +149,7 @@ watch(
     showEditDatabasePropertiesDialog,
     showCreateNacosNamespaceDialog,
     showEditNacosNamespaceDialog,
+    showRenameMongoCollectionDialog,
     showCreateSchemaDialog,
     showEditSchemaCommentDialog,
   ],
@@ -216,6 +223,26 @@ watch(
       <DialogFooter>
         <Button variant="outline" @click="showRenameObjectDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button :disabled="!renameObjectName.trim() || renameObjectName.trim() === node.label" @click="confirmRenameObject">
+          {{ t("contextMenu.renameObject") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showRenameMongoCollectionDialog">
+    <DialogContent class="sm:max-w-[420px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("contextMenu.renameObjectTitle") }}</DialogTitle>
+      </DialogHeader>
+      <div class="grid gap-3">
+        <Input v-model="renameMongoCollectionName" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" :disabled="renameMongoCollectionLoading" @keydown.enter.prevent="confirmRenameMongoCollection" />
+        <pre v-if="renameMongoCollectionPreview" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap">{{ renameMongoCollectionPreview }}</pre>
+        <p v-if="renameMongoCollectionError" class="text-sm text-destructive">{{ renameMongoCollectionError }}</p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" :disabled="renameMongoCollectionLoading" @click="showRenameMongoCollectionDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="renameMongoCollectionLoading || !renameMongoCollectionName || renameMongoCollectionName === node.label" @click="confirmRenameMongoCollection">
+          <Loader2 v-if="renameMongoCollectionLoading" class="mr-2 h-4 w-4 animate-spin" />
           {{ t("contextMenu.renameObject") }}
         </Button>
       </DialogFooter>

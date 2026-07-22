@@ -66,13 +66,33 @@ describe("McpConnectionScopePicker", () => {
       allowedConnectionIds: null,
       "onUpdate:allowedConnectionIds": update,
     });
-    const modeInputs = findAll(mounted.root, (node) => node.type === "input" && node.props.name === "mcp-scope-mode");
+    const modeButtons = findAll(mounted.root, (node) => {
+      return node.type === "button" && node.props["class"]?.includes("settings-choice-card");
+    });
 
-    expect(modeInputs.find((input) => input.props.value === "all")?.props.checked).toBe(true);
+    expect(modeButtons.find((node) => node.props["data-scope-mode"] === "all")?.props["class"]?.includes("settings-choice-card--selected")).toBe(true);
+    expect(modeButtons.find((node) => node.props["data-scope-mode"] === "all")?.props.role).toBe("radio");
+    expect(modeButtons.find((node) => node.props["data-scope-mode"] === "all")?.props["aria-checked"]).toBe(true);
+    expect(modeButtons.find((node) => node.props["data-scope-mode"] === "selected")?.props.tabindex).toBe(-1);
     dispatch(
-      findOne(mounted.root, (node) => node.type === "input" && node.props.value === "selected"),
-      "change",
+      findOne(mounted.root, (node) => node.type === "button" && node.props["data-scope-mode"] === "selected"),
+      "click",
     );
+    expect(update).toHaveBeenCalledWith(["one", "two"]);
+  });
+
+  it("supports radio-group arrow-key selection", () => {
+    const update = vi.fn();
+    const mounted = mountComponent(McpConnectionScopePicker, {
+      connections: [connection("one"), connection("two")],
+      allowedConnectionIds: null,
+      "onUpdate:allowedConnectionIds": update,
+    });
+    const allMode = findOne(mounted.root, (node) => node.type === "button" && node.props["data-scope-mode"] === "all");
+
+    const event = dispatch(allMode, "keydown", { key: "ArrowRight" });
+
+    expect(event.defaultPrevented).toBe(true);
     expect(update).toHaveBeenCalledWith(["one", "two"]);
   });
 

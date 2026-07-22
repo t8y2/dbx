@@ -142,12 +142,19 @@ defineExpose({ show });
         <Loader2 class="h-6 w-6 animate-spin text-muted-foreground" />
       </div>
 
-      <div v-else class="grid flex-1 min-h-0 grid-cols-1 gap-4 sm:grid-cols-2">
-        <div class="flex min-h-0 flex-col">
-          <div class="mb-3 flex items-center gap-2">
-            <div class="w-16 text-xs font-medium text-muted-foreground">Schema</div>
+      <div v-else class="flex min-h-0 flex-1 flex-col gap-3">
+        <div class="flex flex-col gap-2 rounded-lg border bg-muted/30 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+            <span class="font-medium text-foreground">{{ t("extension.available") }}</span>
+            <span>{{ available.length }}</span>
+            <span class="text-border">/</span>
+            <span class="font-medium text-foreground">{{ t("extension.installed") }}</span>
+            <span>{{ installed.length }}</span>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <div class="text-xs font-medium text-muted-foreground">Schema</div>
             <Select v-model="selectedSchema">
-              <SelectTrigger class="h-8">
+              <SelectTrigger class="h-8 w-32 justify-between">
                 <SelectValue :placeholder="'Schema'" />
               </SelectTrigger>
               <SelectContent>
@@ -156,55 +163,60 @@ defineExpose({ show });
               </SelectContent>
             </Select>
           </div>
-          <div class="mb-2 flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
-            <Package class="h-4 w-4" />
-            {{ t("extension.available") }}
-            <span class="ml-auto text-xs">({{ available.length }})</span>
-          </div>
-          <ScrollArea class="min-h-0 flex-1 rounded-md border">
-            <div v-if="available.length === 0" class="flex items-center justify-center py-12 text-sm text-muted-foreground">
-              {{ t("extension.noAvailable") }}
-            </div>
-            <div v-else class="divide-y">
-              <div v-for="ext in available" :key="ext.name" class="flex items-center justify-between gap-2 px-3 py-2">
-                <div class="min-w-0 flex-1">
-                  <div class="truncate text-sm font-medium">{{ ext.name }}</div>
-                  <div class="text-xs text-muted-foreground">{{ ext.comment || ext.version }}</div>
-                </div>
-                <Button size="sm" variant="outline" :disabled="installing === ext.name" @click="installExtension(ext.name)">
-                  <Loader2 v-if="installing === ext.name" class="mr-1 h-3 w-3 animate-spin" />
-                  <Plus v-else class="mr-1 h-3 w-3" />
-                  {{ t("extension.install") }}
-                </Button>
-              </div>
-            </div>
-          </ScrollArea>
         </div>
 
-        <div class="flex min-h-0 flex-col">
-          <div class="mb-2 flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
-            <Package class="h-4 w-4" />
-            {{ t("extension.installed") }}
-            <span class="ml-auto text-xs">({{ installed.length }})</span>
-          </div>
-          <ScrollArea class="min-h-0 flex-1 rounded-md border">
-            <div v-if="installed.length === 0" class="flex items-center justify-center py-12 text-sm text-muted-foreground">
-              {{ t("extension.noInstalled") }}
+        <div class="grid min-h-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
+          <section class="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card">
+            <div class="flex h-11 shrink-0 items-center gap-2 border-b bg-muted/30 px-3">
+              <Package class="h-4 w-4 text-muted-foreground" />
+              <div class="text-sm font-semibold text-foreground">{{ t("extension.available") }}</div>
+              <span class="ml-auto rounded-full bg-background px-2 py-0.5 text-xs font-medium text-muted-foreground ring-1 ring-border">{{ available.length }}</span>
             </div>
-            <div v-else class="divide-y">
-              <div v-for="ext in installed" :key="ext.name" class="flex items-center justify-between gap-2 px-3 py-2">
-                <div class="min-w-0 flex-1">
-                  <div class="truncate text-sm font-medium">{{ ext.name }}</div>
-                  <div class="text-xs text-muted-foreground">{{ installedExtensionSummary(ext) }}</div>
-                </div>
-                <Button size="sm" variant="outline" :disabled="dropping === ext.name" @click="dropExtension(ext.name)">
-                  <Loader2 v-if="dropping === ext.name" class="mr-1 h-3 w-3 animate-spin" />
-                  <Trash2 v-else class="mr-1 h-3 w-3" />
-                  {{ t("extension.drop") }}
-                </Button>
+            <ScrollArea class="min-h-0 flex-1">
+              <div v-if="available.length === 0" class="flex items-center justify-center px-6 py-12 text-center text-sm text-muted-foreground">
+                {{ t("extension.noAvailable") }}
               </div>
+              <div v-else class="divide-y">
+                <div v-for="ext in available" :key="ext.name" class="flex items-center justify-between gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
+                  <div class="min-w-0 flex-1">
+                    <div class="truncate text-sm font-medium text-foreground">{{ ext.name }}</div>
+                    <div class="line-clamp-2 text-xs leading-4 text-muted-foreground">{{ ext.comment || ext.version }}</div>
+                  </div>
+                  <Button class="shrink-0" size="sm" variant="outline" :disabled="installing === ext.name" @click="installExtension(ext.name)">
+                    <Loader2 v-if="installing === ext.name" class="mr-1 h-3 w-3 animate-spin" />
+                    <Plus v-else class="mr-1 h-3 w-3" />
+                    {{ t("extension.install") }}
+                  </Button>
+                </div>
+              </div>
+            </ScrollArea>
+          </section>
+
+          <section class="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card">
+            <div class="flex h-11 shrink-0 items-center gap-2 border-b bg-muted/30 px-3">
+              <Package class="h-4 w-4 text-muted-foreground" />
+              <div class="text-sm font-semibold text-foreground">{{ t("extension.installed") }}</div>
+              <span class="ml-auto rounded-full bg-background px-2 py-0.5 text-xs font-medium text-muted-foreground ring-1 ring-border">{{ installed.length }}</span>
             </div>
-          </ScrollArea>
+            <ScrollArea class="min-h-0 flex-1">
+              <div v-if="installed.length === 0" class="flex items-center justify-center px-6 py-12 text-center text-sm text-muted-foreground">
+                {{ t("extension.noInstalled") }}
+              </div>
+              <div v-else class="divide-y">
+                <div v-for="ext in installed" :key="ext.name" class="flex items-center justify-between gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
+                  <div class="min-w-0 flex-1">
+                    <div class="truncate text-sm font-medium text-foreground">{{ ext.name }}</div>
+                    <div class="line-clamp-2 text-xs leading-4 text-muted-foreground">{{ installedExtensionSummary(ext) }}</div>
+                  </div>
+                  <Button class="shrink-0" size="sm" variant="outline" :disabled="dropping === ext.name" @click="dropExtension(ext.name)">
+                    <Loader2 v-if="dropping === ext.name" class="mr-1 h-3 w-3 animate-spin" />
+                    <Trash2 v-else class="mr-1 h-3 w-3" />
+                    {{ t("extension.drop") }}
+                  </Button>
+                </div>
+              </div>
+            </ScrollArea>
+          </section>
         </div>
       </div>
 

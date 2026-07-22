@@ -509,7 +509,8 @@ async function toggle() {
   }
 
   if (node.type === "group-extensions" && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
-    node.isExpanded = true;
+    node.isExpanded = !node.isExpanded;
+    if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }

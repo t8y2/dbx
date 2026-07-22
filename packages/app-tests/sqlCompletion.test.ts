@@ -133,6 +133,41 @@ test("suggests database-specific data types and functions", () => {
     columnsByTable: new Map(),
     databaseType: "mysql",
   });
+  const mysqlCurrentDateItems = buildSqlCompletionItems("select current_d", "select current_d".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlCurrentTimestampItems = buildSqlCompletionItems("select current_t", "select current_t".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlCurdateItems = buildSqlCompletionItems("select curd", "select curd".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlIfnullItems = buildSqlCompletionItems("select ifn", "select ifn".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlDateAddItems = buildSqlCompletionItems("select date_a", "select date_a".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlSubstringIndexItems = buildSqlCompletionItems("select substring_i", "select substring_i".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlLeftItems = buildSqlCompletionItems("select lef", "select lef".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
   const postgresDateItems = buildSqlCompletionItems("select date_f", "select date_f".length, {
     tables: [],
     columnsByTable: new Map(),
@@ -144,6 +179,15 @@ test("suggests database-specific data types and functions", () => {
   assert.ok(functionItems.some((item) => item.type === "function" && item.label === "JSONB_BUILD_OBJECT"));
   assert.ok(mysqlFunctionItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"));
   assert.ok(mysqlSysdateItems.some((item) => item.type === "function" && item.label === "SYSDATE"));
+  assert.ok(mysqlCurrentDateItems.some((item) => item.type === "function" && item.label === "CURRENT_DATE"));
+  assert.ok(mysqlCurrentTimestampItems.some((item) => item.type === "function" && item.label === "CURRENT_TIMESTAMP"));
+  assert.ok(mysqlCurrentTimestampItems.some((item) => item.type === "function" && item.label === "CURRENT_TIME"));
+  assert.ok(mysqlCurdateItems.some((item) => item.type === "function" && item.label === "CURDATE"));
+  assert.ok(mysqlIfnullItems.some((item) => item.type === "function" && item.label === "IFNULL"));
+  assert.ok(mysqlDateAddItems.some((item) => item.type === "function" && item.label === "DATE_ADD"));
+  assert.ok(mysqlSubstringIndexItems.some((item) => item.type === "function" && item.label === "SUBSTRING_INDEX"));
+  assert.ok(mysqlLeftItems.some((item) => item.type === "function" && item.label === "LEFT"));
+  assert.ok(mysqlLeftItems.some((item) => item.type === "keyword" && item.label === "LEFT"));
   assert.equal(
     postgresDateItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"),
     false,
@@ -770,6 +814,25 @@ test("suggests compound JOIN keywords while typing a join modifier", () => {
   assert.ok(leftIndex >= 0);
   assert.ok(leftJoinIndex < leftIndex, "LEFT JOIN should rank ahead of the single LEFT token");
   assert.equal(items[leftJoinIndex]?.apply, "LEFT JOIN ");
+});
+
+test("keeps MySQL LEFT JOIN ranking when LEFT() is also a function", () => {
+  const sql = "select * from users le";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  const leftJoinIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT JOIN");
+  const leftKeywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT");
+  const leftFunctionIndex = items.findIndex((item) => item.type === "function" && item.label === "LEFT");
+
+  assert.ok(leftJoinIndex >= 0);
+  assert.ok(leftKeywordIndex >= 0);
+  assert.ok(leftFunctionIndex >= 0);
+  assert.ok(leftJoinIndex < leftKeywordIndex, "LEFT JOIN should rank ahead of LEFT keyword");
+  assert.ok(leftJoinIndex < leftFunctionIndex, "LEFT JOIN should rank ahead of LEFT()");
 });
 
 test("suggests JOIN after a join modifier", () => {

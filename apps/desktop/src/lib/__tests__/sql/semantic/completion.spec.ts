@@ -35,6 +35,24 @@ function semanticCompletion(markedSql: string, input: Partial<SqlCompletionProvi
 }
 
 describe("semantic SQL completion candidates", () => {
+  it("isolates SQL Server columns for database-qualified tables with the same schema and name", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["DatabaseA.OUT.orders", [{ name: "source_marker", table: "orders", schema: "OUT" }]],
+      ["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]],
+    ]);
+    const { context, items } = semanticCompletion("SELECT * FROM [DatabaseA].[OUT].[orders] a LEFT JOIN [DatabaseB].[OUT].[orders] b ON b.|", { columnsByTable }, { databaseType: "sqlserver", dialect: "sqlserver" });
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "orders", database: "DatabaseB", schema: "OUT", alias: "b" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["target_marker"]);
+  });
+
+  it("resolves columns after a full SQL Server database.schema.table qualifier", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]]]);
+    const { context, items } = semanticCompletion("SELECT * FROM [DatabaseB].[OUT].[orders] WHERE [DatabaseB].[OUT].[orders].|", { columnsByTable }, { databaseType: "sqlserver", dialect: "sqlserver" });
+
+    expect(context.qualifierParts).toEqual(["DatabaseB", "OUT", "orders"]);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["target_marker"]);
+  });
   it.each([
     ["MySQL ORDER BY", "SELECT * FROM t LIMIT 100 or|", "mysql", "mysql", "ORDER BY"],
     ["PostgreSQL ON CONFLICT", "INSERT INTO t VALUES (1) on|", "postgres", "postgres", "ON CONFLICT"],

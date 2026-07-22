@@ -255,6 +255,7 @@ function tableLookupFor(tables: SqlTableReference[]): Map<string, SqlTableRefere
     lookup.set(normalizeName(table.name), table);
     if (table.alias) lookup.set(normalizeName(table.alias), table);
     if (table.schema) lookup.set(normalizeName(`${table.schema}.${table.name}`), table);
+    if (table.database && table.schema) lookup.set(normalizeName(`${table.database}.${table.schema}.${table.name}`), table);
   }
   return lookup;
 }
@@ -301,7 +302,7 @@ function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, S
       schema: table.schema ?? undefined,
     }));
   }
-  const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name, ...keysWithTableName(columnsByTable, table.name)];
+  const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name, ...keysWithTableName(columnsByTable, table.name)];
   for (const key of keys) {
     const normalizedKey = normalizeName(key);
     const columns = columnsByTable.get(key) ?? columnsByTable.get(normalizedKey);
@@ -321,12 +322,12 @@ function rangesIntersect(left: SqlSemanticDiagnosticVisibleRange, right: SqlSema
   return left.from < right.to && right.from < left.to;
 }
 
-export function tableReferenceKey(table: Pick<SqlTableReference, "name" | "schema">): string {
-  return normalizeName(table.schema ? `${table.schema}.${table.name}` : table.name);
+export function tableReferenceKey(table: Pick<SqlTableReference, "name" | "database" | "schema">): string {
+  return normalizeName(table.schema ? `${table.database ? `${table.database}.` : ""}${table.schema}.${table.name}` : table.name);
 }
 
 function displayTableName(table: SqlTableReference): string {
-  return table.schema ? `${table.schema}.${table.name}` : table.name;
+  return table.schema ? `${table.database ? `${table.database}.` : ""}${table.schema}.${table.name}` : table.name;
 }
 
 function isCursorAfterTableTrigger(sql: string, cursor: number): boolean {

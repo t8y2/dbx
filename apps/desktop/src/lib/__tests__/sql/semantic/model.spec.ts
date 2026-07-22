@@ -226,7 +226,7 @@ describe("sqlSemanticModel baseline fixtures", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT * FROM [ServerOne].[AppDb].[dbo].[Users] U WHERE u.na|");
     const model = buildSqlSemanticModel(sql, cursor, { databaseType: "sqlserver" });
 
-    expect(model.rowSources[0]).toEqual(expect.objectContaining({ name: "Users", qualifierParts: ["ServerOne", "AppDb", "dbo"], alias: "U" }));
+    expect(model.rowSources[0]).toEqual(expect.objectContaining({ name: "Users", qualifierParts: ["ServerOne", "AppDb", "dbo"], alias: "U", metadataTarget: { database: "AppDb", schema: "dbo", table: "Users" } }));
     expect(model.cursorIntent.kind).toBe("alias_column");
     expect(model.cursorIntent.qualifierParts).toEqual(["u"]);
   });

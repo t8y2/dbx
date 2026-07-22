@@ -94,6 +94,16 @@ pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: Mcp
 }
 
 #[tauri::command]
+pub async fn load_favorites_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_favorites_state().await
+}
+
+#[tauri::command]
+pub async fn save_favorites_state(state: State<'_, Arc<AppState>>, favorites: serde_json::Value) -> Result<(), String> {
+    state.storage.save_favorites_state(&favorites).await
+}
+
+#[tauri::command]
 pub async fn load_editor_settings(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
     state.storage.load_editor_settings().await
 }

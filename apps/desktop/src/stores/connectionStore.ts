@@ -10,6 +10,8 @@ import type {
   DatabaseType,
   DatabaseConnectionInfo,
   CatalogInfo,
+  FavoriteGroup,
+  FavoriteItem,
   ForeignKeyInfo,
   ObjectInfo,
   SchemaInfo,
@@ -20,6 +22,8 @@ import type {
   VectorCollectionMeta,
 } from "@/types/database";
 import { inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey } from "@/lib/app/pinnedItems";
+import { FavoritesController, refreshFavoritesPlaceholdersInTree, runLegacyFavoritesMigrationIfNeeded } from "@/lib/app/favorites";
+import { collectFavoritedTreeNodes, defaultGroupId, treeNodeFavoriteKey } from "@/lib/app/favoritesTree";
 import {
   reconcileLayout,
   buildTreeNodesFromLayout,
@@ -55,10 +59,14 @@ import { requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATI
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 import {
+  buildFavoritesGroupSubnode,
+  buildFavoritesPlaceholderNode,
   buildObjectGroupPlaceholderNodes,
   buildGroupedObjectTreeNodes,
   buildSimpleObjectTreeNodes,
   buildTableTreeNodes,
+  favoritesNodeParentId,
+  isFavoritesPlaceholderNode,
   appendTableTreeLoadMoreNode,
   expandCachedObjectBrowserNodes,
   filterSimpleSidebarSupplementalObjects,
@@ -256,6 +264,29 @@ export const useConnectionStore = defineStore("connection", () => {
   });
   const treeNodes = ref<TreeNode[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
+  // Structured favorites: groups + items, persisted as one JSON document.
+  // Independent from pinnedTreeNodeIds so "Pin" and "Add to Favorites" are
+  // orthogonal: pinning a table keeps it expanded, favoriting puts it in
+  // the database's Favorites group. The controller owns the structured state
+  // and exposes a reactive ref so existing consumers can keep reading
+  // `favoritesState.value` without a migration.
+  const favoritesController = new FavoritesController(
+    {
+      isDesktop: isTauriRuntime(),
+      loadRemote: () => api.loadFavoritesState().catch(() => null),
+    },
+    {
+      persist: (snapshot) => {
+        if (isTauriRuntime()) {
+          void api.saveFavoritesState(snapshot).catch(() => undefined);
+        }
+      },
+      refreshTree: () => {
+        refreshFavoritesPlaceholdersInTree(treeNodes.value, favoritesController);
+      },
+    },
+  );
+  const favoritesState = favoritesController.ref;
   const connectedIds = ref<Set<string>>(new Set());
   const identifierQuotes = ref<Record<string, string>>({});
   const lastConnectionHealthCheckAt = ref<Record<string, number>>({});
@@ -961,6 +992,121 @@ export const useConnectionStore = defineStore("connection", () => {
     localStorage.setItem(PINNED_TREE_NODES_STORAGE_KEY, JSON.stringify([...pinnedTreeNodeIds.value]));
   }
 
+  function isTreeNodeFavorited(node: TreeNode | string): boolean {
+    return favoritesController.isTreeNodeFavorited(node);
+  }
+
+  /** Returns the persisted favorite key for a node, or `null` if it isn't
+   *  currently favorited. Used by the menu actions so we don't have to
+   *  re-derive the v2 key format in every call site. */
+  function getFavoriteKeyForNode(node: TreeNode): string | null {
+    return favoritesController.getFavoriteKeyForNode(node);
+  }
+
+  /** Returns the stored note for a favorited key, or `null` if the key isn't
+   *  favorited. Used by tooltip rendering and the note editor. */
+  function getFavoriteNote(key: string): string | null {
+    return favoritesController.getFavoriteNote(key);
+  }
+
+  /** Returns the group a favorited key belongs to, or `null` if ungrouped. */
+  function getFavoriteGroupForKey(key: string): FavoriteGroup | null {
+    return favoritesController.getFavoriteGroupForKey(key);
+  }
+
+  /** Returns a favorites group by id, or `null` if not found. */
+  function getFavoriteGroupById(groupId: string): FavoriteGroup | null {
+    return favoritesController.getFavoriteGroupById(groupId);
+  }
+
+  /** All groups for one (connection, database) scope, sorted by their
+   *  `order` field. Used by the "Move to Group" submenu. */
+  function getFavoriteGroupsForDatabase(connectionId: string, database: string): FavoriteGroup[] {
+    return favoritesController.getFavoriteGroupsForDatabase(connectionId, database);
+  }
+
+  /** Siblings of `key` within its group, sorted by `order`. Used to decide
+   *  whether "Move Up" / "Move Down" should be enabled in the context menu. */
+  function getFavoriteSiblingsForKey(key: string): { items: { key: string; order: number }[]; index: number } {
+    return favoritesController.getFavoriteSiblingsForKey(key);
+  }
+
+  /** Returns the raw stored item for a favorite key, or `null` if missing.
+   *  Used by drag-and-drop reordering to validate the source and target
+   *  belong to the same group before mutating the list. */
+  function getFavoriteItemForKey(key: string): FavoriteItem | null {
+    return favoritesController.getFavoriteItemForKey(key);
+  }
+
+  /** Compute the favorite key for a tree node. Returns `null` for nodes that
+   *  cannot be favorited (no connectionId or wrong node type) so callers can
+   *  short-circuit. */
+  function favoriteKeyForNode(node: TreeNode): string | null {
+    return favoritesController.favoriteKeyForNode(node);
+  }
+
+  /** True if a favorite key is present in the structured state. */
+  function isFavoritedKey(key: string): boolean {
+    return favoritesController.isFavoritedKey(key);
+  }
+
+  function toggleTreeNodeFavorite(node: TreeNode): boolean {
+    return favoritesController.toggleTreeNodeFavorite(node);
+  }
+
+  function addFavoriteToGroup(node: TreeNode, groupId: string): boolean {
+    return favoritesController.addFavoriteToGroup(node, groupId);
+  }
+
+  function removeFavorite(node: TreeNode | string): boolean {
+    return favoritesController.removeFavorite(node);
+  }
+
+  function updateFavoriteNote(key: string, note: string): boolean {
+    return favoritesController.updateFavoriteNote(key, note);
+  }
+
+  function moveFavoriteToGroup(key: string, groupId: string): boolean {
+    return favoritesController.moveFavoriteToGroup(key, groupId);
+  }
+
+  /** Move an item within its group by one slot. `direction = -1` moves up. */
+  function shiftFavoriteOrder(key: string, direction: -1 | 1): boolean {
+    return favoritesController.shiftFavoriteOrder(key, direction);
+  }
+
+  /** Move an item to the top or bottom of its group. */
+  function moveFavoriteToEdge(key: string, edge: "top" | "bottom"): boolean {
+    return favoritesController.moveFavoriteToEdge(key, edge);
+  }
+
+  /** Drag-and-drop reorder: place `key` at the explicit index within its
+   *  current group. Used by the sidebar's drag handler — the index is
+   *  computed from the drop target's position. */
+  function reorderFavorite(key: string, targetIndex: number): boolean {
+    return favoritesController.reorderFavorite(key, targetIndex);
+  }
+
+  function createFavoriteGroup(connectionId: string, database: string, name: string): FavoriteGroup {
+    return favoritesController.createFavoriteGroup(connectionId, database, name);
+  }
+
+  function renameFavoriteGroup(groupId: string, name: string): boolean {
+    return favoritesController.renameFavoriteGroup(groupId, name);
+  }
+
+  function setFavoriteGroupCollapsed(groupId: string, collapsed: boolean): boolean {
+    return favoritesController.setFavoriteGroupCollapsed(groupId, collapsed);
+  }
+
+  function deleteFavoriteGroup(groupId: string): boolean {
+    return favoritesController.deleteFavoriteGroup(groupId);
+  }
+
+  function clearFavoritesForDatabaseNew(connectionId: string, database: string): number {
+    return favoritesController.clearFavoritesForDatabase(connectionId, database);
+  }
+
   function isTreeNodePinned(node: TreeNode | string): boolean {
     if (typeof node === "string") return pinnedTreeNodeIds.value.has(node);
     return pinnedTreeNodeIds.value.has(treeNodePinKey(node)) || pinnedTreeNodeIds.value.has(node.id);
@@ -1038,8 +1184,30 @@ export const useConnectionStore = defineStore("connection", () => {
       persistPinnedTreeNodeIds();
     }
     syncPinnedTreeNodeStateInPlace(children, migratedPins.ids);
-    parent.children = markRawLeafTreeNodes(children);
+    // Database / schema / doris-catalog nodes get a virtual "Favorites"
+    // container as their first child. We pre-/re-attach it on every setChildren
+    // call so expanding or refreshing a database always shows the favorites
+    // group at the top, even after a metadata reload.
+    const scopedChildren = ensureFavoritesForParentChildren(parent, children);
+    parent.children = markRawLeafTreeNodes(scopedChildren);
     loadedTreeNodeChildrenIds.value.add(parent.id);
+  }
+
+  function ensureFavoritesForParentChildren(parent: TreeNode, children: TreeNode[]): TreeNode[] {
+    const placeholderOwners: ReadonlySet<TreeNode["type"]> = new Set(["database", "schema", "linked-server-schema", "doris-catalog"]);
+    if (!placeholderOwners.has(parent.type)) return children;
+    if (!parent.connectionId || parent.database === undefined) return children;
+    // The placeholder was already attached on an earlier setChildren call —
+    // keep the existing reference (along with any loaded favorite children)
+    // so we don't tear down user state on every metadata refresh.
+    if (children.some(isFavoritesPlaceholderNode)) return children;
+    const placeholder = buildFavoritesPlaceholderNode({
+      nodeId: parent.id,
+      connectionId: parent.connectionId,
+      database: parent.database,
+      schema: parent.schema,
+    });
+    return [placeholder, ...children];
   }
 
   function removeTreeNode(nodeId: string) {
@@ -1660,6 +1828,175 @@ export const useConnectionStore = defineStore("connection", () => {
     // Pinning is infrequent; synchronizing the loaded tree here also clears any
     // stale flags created by legacy unscoped ids without rebuilding metadata.
     syncPinnedTreeNodeStateInPlace(treeNodes.value, next);
+    refreshFavoritesNodesInTree();
+  }
+
+  /** Rebuild the children of every favorites placeholder under the current
+   *  tree, reflecting the latest favorites state. Used after favorite toggles
+   *  and after tree rebuilds so the favorites group is always in sync. */
+  function refreshFavoritesNodesInTree() {
+    const state = favoritesState.value;
+    const updatedParents = new Set<string>();
+    const visit = (nodes: TreeNode[]) => {
+      for (const node of nodes) {
+        if (isFavoritesPlaceholderNode(node) && node.connectionId !== undefined && node.database !== undefined) {
+          const connectionId = node.connectionId;
+          const database = node.database;
+          const schema = node.schema;
+          const scopeGroups = state.groups.filter((group) => group.connectionId === connectionId && group.database === database);
+          const scopeItems = state.items.filter((item) => scopeGroups.some((group) => group.id === item.groupId));
+          // Sort scope groups by their persisted `order` so the rendered
+          // subnodes match the user's custom ordering. The default group
+          // seeds at order 0 and is therefore always first unless the user
+          // has manually reordered.
+          const orderedGroups = scopeGroups.slice().sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
+
+          // Collect the favorited nodes from the source tree once and bucket
+          // them by favorite key. The key set is rebuilt from the structured
+          // state to stay consistent with what the user just persisted.
+          const keySet = new Set(scopeItems.map((item) => item.key));
+          const collected = collectFavoritedTreeNodes(treeNodes.value, keySet, { connectionId, database });
+
+          // Group the collected nodes by their favorite's `groupId`. We map
+          // the favorite key → groupId once and reuse it for every match.
+          const groupIdByKey = new Map<string, string>();
+          for (const item of scopeItems) groupIdByKey.set(item.key, item.groupId);
+
+          const orderLookup = new Map<string, number>();
+          for (const item of scopeItems) orderLookup.set(item.key, item.order);
+
+          const childrenByGroup = new Map<string, TreeNode[]>();
+          for (const group of orderedGroups) childrenByGroup.set(group.id, []);
+          for (const child of collected) {
+            const key = treeNodeFavoriteKey(child);
+            const groupId = groupIdByKey.get(key);
+            if (!groupId) continue;
+            const bucket = childrenByGroup.get(groupId);
+            if (!bucket) continue;
+            // Mirror the controller: each cloned favorite gets a unique tree
+            // id so it can sit alongside the source table/view in the flat
+            // tree without colliding in the virtual scroller. Preserve the
+            // real source id (in case `child` is itself a previously-cloned
+            // node carried over from the last render) so the order lookup
+            // below keeps working across re-renders.
+            const stableSourceId = child.favoritedFromId ?? child.id;
+            bucket.push({
+              ...child,
+              id: `${child.id}::fav_clone::${groupId}`,
+              favoritedFromId: stableSourceId,
+              children: undefined,
+              hiddenChildren: undefined,
+            });
+          }
+
+          // Within each group, sort items by their persisted order so the
+          // user's manual reorder (move up/down/top/bottom) sticks.
+          for (const bucket of childrenByGroup.values()) {
+            bucket.sort((left, right) => {
+              const lo = orderLookup.get(treeNodeFavoriteKey(left));
+              const ro = orderLookup.get(treeNodeFavoriteKey(right));
+              if (lo !== undefined && ro !== undefined) return lo - ro;
+              if (lo !== undefined) return -1;
+              if (ro !== undefined) return 1;
+              return left.label.localeCompare(right.label);
+            });
+          }
+
+          // When the user has not created any custom groups, fall back to
+          // the pre-Phase-2 flat layout: items appear directly under the
+          // favorites placeholder so a single default group stays invisible.
+          const hasCustomGroups = orderedGroups.length > 1 || (orderedGroups[0] && orderedGroups[0].id !== defaultGroupId(connectionId, database));
+          if (!hasCustomGroups) {
+            const flat = childrenByGroup.get(orderedGroups[0]?.id ?? defaultGroupId(connectionId, database)) ?? [];
+            node.children = flat;
+            node.objectCount = flat.length;
+          } else {
+            const subnodes: TreeNode[] = [];
+            for (const group of orderedGroups) {
+              const items = childrenByGroup.get(group.id) ?? [];
+              // Mirror the controller: render every group, including an
+              // empty default — the user must always be able to see (and
+              // add to) the default target, otherwise moved-out items
+              // leave the user with no visible way back in.
+              const subnode = buildFavoritesGroupSubnode({
+                parentId: node.id,
+                group: {
+                  id: group.id,
+                  name: group.name,
+                  connectionId: group.connectionId,
+                  database: group.database,
+                  schema: schema,
+                  collapsed: group.collapsed,
+                },
+              });
+              subnode.objectCount = items.length;
+              subnode.children = items;
+              subnodes.push(subnode);
+            }
+            node.children = subnodes;
+            node.objectCount = scopeItems.length;
+          }
+
+          const parentId = favoritesNodeParentId(node);
+          if (parentId) updatedParents.add(parentId);
+        }
+        if (node.children) visit(node.children);
+        if (node.hiddenChildren) visit(node.hiddenChildren);
+      }
+    };
+    visit(treeNodes.value);
+
+    // Reposition the favorites node to stay at the top of its parent's children
+    // (it is the first child created when the database is loaded). Without
+    // this, expanding/loading siblings could bury it below the regular groups.
+    for (const parentId of updatedParents) {
+      const parent = findNode(treeNodes.value, parentId);
+      if (!parent?.children) continue;
+      const favoritesIdx = parent.children.findIndex(isFavoritesPlaceholderNode);
+      if (favoritesIdx > 0) {
+        const [favoritesNode] = parent.children.splice(favoritesIdx, 1);
+        if (favoritesNode) parent.children.unshift(favoritesNode);
+      }
+    }
+  }
+
+  /** Ensure every loaded database/schema node in the current tree has a
+   *  favorites placeholder as its first child. Safe to call after metadata
+   *  loads — the placeholder is only added if missing. */
+  function ensureFavoritesNodesInTree() {
+    const pinSet = pinnedTreeNodeIds.value;
+    const visit = (nodes: TreeNode[]) => {
+      for (const node of nodes) {
+        if (node.type === "database" || node.type === "schema" || node.type === "linked-server-schema" || node.type === "doris-catalog") {
+          ensureFavoritesPlaceholderForParent(node);
+        }
+        if (node.children) visit(node.children);
+        if (node.hiddenChildren) visit(node.hiddenChildren);
+      }
+    };
+    visit(treeNodes.value);
+    refreshFavoritesNodesInTree();
+    // populate favorites children with current pin state when newly created
+    void pinSet;
+  }
+
+  function ensureFavoritesPlaceholderForParent(parent: TreeNode) {
+    if (!parent.connectionId || parent.database === undefined) return;
+    if (!parent.children) parent.children = [];
+    if (parent.children.some(isFavoritesPlaceholderNode)) return;
+    const placeholder = buildFavoritesPlaceholderNode({
+      nodeId: parent.id,
+      connectionId: parent.connectionId,
+      database: parent.database,
+      schema: parent.schema,
+    });
+    parent.children = [placeholder, ...parent.children];
+  }
+
+  /** Remove every favorite belonging to the supplied database (used by the
+   *  "Clear All Favorites" action on the favorites group context menu). */
+  function clearFavoritesForDatabase(connectionId: string, database: string) {
+    return clearFavoritesForDatabaseNew(connectionId, database);
   }
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
@@ -4960,6 +5297,9 @@ export const useConnectionStore = defineStore("connection", () => {
         return node;
       });
     treeNodes.value = mergeState(freshNodes);
+    // Rebuilding drops any previously injected favorites placeholders, so
+    // re-attach them for every loaded database/schema in the fresh tree.
+    ensureFavoritesNodesInTree();
   }
 
   function updateLayoutAndRebuild(nextLayout: SidebarLayout) {
@@ -5396,6 +5736,16 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!initFromDiskPromise) {
       initFromDiskPromise = (async () => {
         pinnedTreeNodeIds.value = await loadPinnedTreeNodeIds();
+        // Run the legacy favorites migration before the structured load so
+        // the first paint already reflects migrated entries. The helper is
+        // idempotent — a re-run is a no-op once the marker is set.
+        const migration = runLegacyFavoritesMigrationIfNeeded(loadPinnedTreeNodeIdsFromLocalStorage, favoritesState.value);
+        if (migration.migrated) {
+          favoritesController.setState(migration.state);
+          pinnedTreeNodeIds.value = migration.remainingPinned;
+          persistPinnedTreeNodeIds();
+        }
+        await favoritesController.load();
         const saved = await api.loadConnections();
         connections.value = saved.map(normalizeConnection);
         const savedLayout = await api.loadSidebarLayout();
@@ -5453,6 +5803,32 @@ export const useConnectionStore = defineStore("connection", () => {
     connectionIdentifierQuote,
     isTreeNodePinned,
     toggleTreeNodePin,
+    ensureFavoritesNodesInTree,
+    refreshFavoritesNodesInTree,
+    clearFavoritesForDatabase,
+    favoritesState,
+    isTreeNodeFavorited,
+    getFavoriteKeyForNode,
+    toggleTreeNodeFavorite,
+    addFavoriteToGroup,
+    removeFavorite,
+    updateFavoriteNote,
+    moveFavoriteToGroup,
+    shiftFavoriteOrder,
+    moveFavoriteToEdge,
+    reorderFavorite,
+    createFavoriteGroup,
+    renameFavoriteGroup,
+    setFavoriteGroupCollapsed,
+    deleteFavoriteGroup,
+    getFavoriteNote,
+    getFavoriteItemForKey,
+    favoriteKeyForNode,
+    isFavoritedKey,
+    getFavoriteGroupForKey,
+    getFavoriteGroupById,
+    getFavoriteGroupsForDatabase,
+    getFavoriteSiblingsForKey,
     addConnection,
     copyConnectionsToTreeClipboard,
     pasteConnectionClipboard,

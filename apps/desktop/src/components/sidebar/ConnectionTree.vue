@@ -24,6 +24,8 @@ import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHan
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
 import TreeItem from "./TreeItem.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
+import { useFavoriteEditDialog } from "@/composables/useFavoriteEditDialog";
+import FavoriteEditDialog from "./FavoriteEditDialog.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -592,6 +594,29 @@ function bindSidebarTreeRuntimeHost(host: Element | ComponentPublicInstance | nu
 const pendingRenameGroupId = ref<string | null>(null);
 const highlightedNodeId = ref<string | null>(null);
 let highlightTimer: number | undefined;
+
+const favoriteEditDialog = useFavoriteEditDialog();
+const favoriteEditDialogState = favoriteEditDialog.state;
+
+function onFavoriteEditSubmit(value: string) {
+  const dialogState = favoriteEditDialogState.value;
+  if (!dialogState) return;
+  if (dialogState.mode === "note" && dialogState.favoriteKey) {
+    store.updateFavoriteNote(dialogState.favoriteKey, value);
+  } else if (dialogState.mode === "group" && dialogState.connectionId && dialogState.database !== undefined) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      favoriteEditDialog.close();
+      return;
+    }
+    if (dialogState.groupId) {
+      store.renameFavoriteGroup(dialogState.groupId, trimmed);
+    } else {
+      store.createFavoriteGroup(dialogState.connectionId, dialogState.database, trimmed);
+    }
+  }
+  favoriteEditDialog.close();
+}
 
 // 等待虚拟列表渲染后再高亮。
 function waitForSidebarRenderFrame(): Promise<void> {
@@ -1521,6 +1546,17 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       </template>
     </SidebarDangerConfirmDialog>
     <SidebarTreeItemDialogs v-if="sidebarTreeItemDialogController" :key="sidebarTreeItemDialogController.node?.id" :controller="sidebarTreeItemDialogController" @closed="sidebarTreeItemDialogController = null" />
+    <FavoriteEditDialog
+      v-if="favoriteEditDialogState"
+      :open="favoriteEditDialogState.open"
+      :mode="favoriteEditDialogState.mode"
+      :initial-value="favoriteEditDialogState.initialValue"
+      :title="favoriteEditDialogState.title"
+      :placeholder="favoriteEditDialogState.meta?.placeholder as string | undefined"
+      :label="favoriteEditDialogState.meta?.label as string | undefined"
+      @update:open="(next) => !next && favoriteEditDialog.close()"
+      @submit="onFavoriteEditSubmit"
+    />
     <InstallExtensionDialog v-if="sidebarInstallExtensionTarget" ref="sidebarInstallExtensionDialogRef" :node="sidebarInstallExtensionTarget" @close="refreshSidebarActionTarget" />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}

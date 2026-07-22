@@ -333,15 +333,21 @@ pub fn sqlserver_legacy_agent_config(config: &ConnectionConfig) -> ConnectionCon
     legacy_config
 }
 
-pub fn sqlserver_legacy_agent_error(native_error: &str, agent_error: &str) -> String {
-    let install_hint = if agent_error.contains("driver is not installed") {
-        format!("\n\n{SQLSERVER_LEGACY_DRIVER_INSTALL_HINT}")
+pub fn sqlserver_uses_legacy_driver(config: &ConnectionConfig) -> bool {
+    config
+        .driver_profile
+        .as_deref()
+        .is_some_and(|profile| profile.eq_ignore_ascii_case(db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE))
+}
+
+pub fn sqlserver_legacy_driver_error(agent_error: &str) -> String {
+    // AgentManager currently returns launch failures as strings. This exact marker is generated
+    // internally and only adds guidance for an explicitly selected compatibility driver.
+    if agent_error.contains("driver is not installed") {
+        format!("{agent_error}\n\n{SQLSERVER_LEGACY_DRIVER_INSTALL_HINT}")
     } else {
-        String::new()
-    };
-    format!(
-        "{native_error}\n\nFallback with SQL Server legacy compatibility component failed: {agent_error}{install_hint}"
-    )
+        agent_error.to_string()
+    }
 }
 
 pub async fn connect_mysql_metadata_pool(
@@ -748,26 +754,48 @@ impl AppState {
         Ok(PoolKind::ExternalDriver { driver_id: driver_id.to_string(), config: Arc::new(config.clone()), session })
     }
 
-    pub async fn test_sqlserver_connection_with_legacy_fallback(
+    pub async fn test_sqlserver_connection(
         &self,
         config: &ConnectionConfig,
         host: &str,
         port: u16,
         connect_timeout: Duration,
     ) -> Result<String, String> {
-        self.test_sqlserver_connection_with_legacy_fallback_with_info(config, host, port, connect_timeout)
-            .await
-            .map(|result| result.message)
+        self.test_sqlserver_connection_with_info(config, host, port, connect_timeout).await.map(|result| result.message)
     }
 
-    pub async fn test_sqlserver_connection_with_legacy_fallback_with_info(
+    pub async fn test_sqlserver_connection_with_info(
         &self,
         config: &ConnectionConfig,
         host: &str,
         port: u16,
         connect_timeout: Duration,
     ) -> Result<ConnectionTestResult, String> {
-        match db::sqlserver::connect_with_port_explicit(
+        if sqlserver_uses_legacy_driver(config) {
+            let legacy_config = sqlserver_legacy_agent_config(config);
+            let connect_params =
+                agent_connect_params(&legacy_config, host, port, legacy_config.effective_database().unwrap_or(""));
+            let mut client = self
+                .agent_manager
+                .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
+                .await
+                .map_err(|err| sqlserver_legacy_driver_error(&err))?;
+            let response = client
+                .call_method_with_timeout::<serde_json::Value>(
+                    AgentMethod::TestConnection,
+                    connect_params,
+                    Some(agent_connect_timeout(&legacy_config)),
+                )
+                .await
+                .map_err(|err| sqlserver_legacy_driver_error(&err))?;
+            client.disconnect().await.ok();
+            return Ok(ConnectionTestResult::success(
+                "Connection successful (via SQL Server legacy compatibility driver)",
+            )
+            .with_database_info(database_info_from_protocol_value(&response)));
+        }
+
+        db::sqlserver::connect_with_port_explicit(
             host,
             port,
             config.sqlserver_port_explicit(),
@@ -776,44 +804,38 @@ impl AppState {
             config.database.as_deref(),
             connect_timeout,
         )
-        .await
-        {
-            Ok(_) => Ok(ConnectionTestResult::success("Connection successful")),
-            Err(native_error)
-                if db::sqlserver::sqlserver_legacy_compatibility_enabled(config.url_params.as_deref()) =>
-            {
-                let legacy_config = sqlserver_legacy_agent_config(config);
-                let connect_params =
-                    agent_connect_params(&legacy_config, host, port, legacy_config.effective_database().unwrap_or(""));
-                let mut client = self
-                    .agent_manager
-                    .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
-                    .await
-                    .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                let response = client
-                    .call_method_with_timeout::<serde_json::Value>(
-                        AgentMethod::TestConnection,
-                        connect_params,
-                        Some(agent_connect_timeout(&legacy_config)),
-                    )
-                    .await
-                    .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                client.disconnect().await.ok();
-                Ok(ConnectionTestResult::success("Connection successful (via SQL Server legacy compatibility driver)")
-                    .with_database_info(database_info_from_protocol_value(&response)))
-            }
-            Err(err) => Err(err),
-        }
+        .await?;
+        Ok(ConnectionTestResult::success("Connection successful"))
     }
 
-    pub async fn connect_sqlserver_pool_with_legacy_fallback(
+    pub async fn connect_sqlserver_pool(
         &self,
         config: &ConnectionConfig,
         host: &str,
         port: u16,
         connect_timeout: Duration,
     ) -> Result<PoolKind, String> {
-        match db::sqlserver::connect_with_port_explicit(
+        if sqlserver_uses_legacy_driver(config) {
+            let legacy_config = sqlserver_legacy_agent_config(config);
+            let connect_params =
+                agent_connect_params(&legacy_config, host, port, legacy_config.effective_database().unwrap_or(""));
+            let mut client = self
+                .agent_manager
+                .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
+                .await
+                .map_err(|err| sqlserver_legacy_driver_error(&err))?;
+            client
+                .call_method_with_timeout::<serde_json::Value>(
+                    AgentMethod::Connect,
+                    connect_params,
+                    Some(agent_connect_timeout(&legacy_config)),
+                )
+                .await
+                .map_err(|err| sqlserver_legacy_driver_error(&err))?;
+            return Ok(PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client))));
+        }
+
+        let client = db::sqlserver::connect_with_port_explicit(
             host,
             port,
             config.sqlserver_port_explicit(),
@@ -822,32 +844,8 @@ impl AppState {
             config.database.as_deref(),
             connect_timeout,
         )
-        .await
-        {
-            Ok(client) => Ok(PoolKind::SqlServer(Arc::new(tokio::sync::Mutex::new(client)))),
-            Err(native_error)
-                if db::sqlserver::sqlserver_legacy_compatibility_enabled(config.url_params.as_deref()) =>
-            {
-                let legacy_config = sqlserver_legacy_agent_config(config);
-                let connect_params =
-                    agent_connect_params(&legacy_config, host, port, legacy_config.effective_database().unwrap_or(""));
-                let mut client = self
-                    .agent_manager
-                    .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
-                    .await
-                    .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                client
-                    .call_method_with_timeout::<serde_json::Value>(
-                        AgentMethod::Connect,
-                        connect_params,
-                        Some(agent_connect_timeout(&legacy_config)),
-                    )
-                    .await
-                    .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                Ok(PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client))))
-            }
-            Err(err) => Err(err),
-        }
+        .await?;
+        Ok(PoolKind::SqlServer(Arc::new(tokio::sync::Mutex::new(client))))
     }
 
     pub fn external_driver_runtime_env(&self, driver_id: &str) -> Result<PluginRuntimeEnv, String> {
@@ -1381,9 +1379,7 @@ impl AppState {
                 db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::ClickHouse(client)
             }
-            DatabaseType::SqlServer => {
-                self.connect_sqlserver_pool_with_legacy_fallback(&db_config, &host, port, connect_timeout).await?
-            }
+            DatabaseType::SqlServer => self.connect_sqlserver_pool(&db_config, &host, port, connect_timeout).await?,
             DatabaseType::Elasticsearch => {
                 let mut client = db::elasticsearch_driver::EsClient::from_config(
                     &url,
@@ -3753,8 +3749,8 @@ mod tests {
         metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_query_timeout_sql,
         oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
         redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
-        sqlserver_legacy_agent_error, task_client_session_id, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3891,17 +3887,24 @@ mod tests {
         assert_eq!(legacy.db_type, DatabaseType::SqlServer);
         assert_eq!(legacy.driver_profile.as_deref(), Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE));
         assert_eq!(legacy.driver_label.as_deref(), Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_LABEL));
+        assert!(sqlserver_uses_legacy_driver(&legacy));
     }
 
     #[test]
-    fn sqlserver_legacy_agent_error_mentions_driver_manager_when_missing() {
-        let message = sqlserver_legacy_agent_error(
-            "native failed",
+    fn sqlserver_legacy_url_param_does_not_force_agent_driver() {
+        let mut config = mysql_config(Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.url_params = Some("applicationName=dbx;encrypt=false".to_string());
+
+        assert!(!sqlserver_uses_legacy_driver(&config));
+    }
+
+    #[test]
+    fn sqlserver_legacy_driver_error_mentions_driver_manager_when_missing() {
+        let message = sqlserver_legacy_driver_error(
             "sqlserver-legacy driver is not installed. Please install it from the Driver Manager.",
         );
 
-        assert!(message.contains("native failed"));
-        assert!(message.contains("Fallback with SQL Server legacy compatibility component failed"));
         assert!(message.contains("Driver Manager"));
         assert!(message.contains("enable SQL Server legacy compatibility mode again"));
     }

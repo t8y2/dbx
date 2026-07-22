@@ -2046,7 +2046,9 @@ export const useConnectionStore = defineStore("connection", () => {
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
       await beforeConnectHandler?.(config);
-      await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
+      if (config.db_type === "sqlserver") {
+        await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
+      }
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
       const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
@@ -2213,6 +2215,9 @@ export const useConnectionStore = defineStore("connection", () => {
     const localAttempt = beginLocalConnectionAttempt(connectionId);
     const connectPromise = (async () => {
       await beforeConnectHandler?.(config);
+      if (config.db_type === "sqlserver") {
+        await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
+      }
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
       const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);

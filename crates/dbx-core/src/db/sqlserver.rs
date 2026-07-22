@@ -177,7 +177,7 @@ async fn try_connect_legacy_sqlserver_encryption(
     Err(errors.join("\n"))
 }
 
-pub fn sqlserver_legacy_compatibility_enabled(url_params: Option<&str>) -> bool {
+pub fn sqlserver_native_encryption_disabled(url_params: Option<&str>) -> bool {
     let Some(params) = url_params.map(str::trim).filter(|params| !params.is_empty()) else {
         return false;
     };
@@ -2355,14 +2355,14 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_legacy_compatibility_flag_accepts_dbx_and_jdbc_params() {
-        assert!(!super::sqlserver_legacy_compatibility_enabled(None));
-        assert!(!super::sqlserver_legacy_compatibility_enabled(Some("encrypt=true")));
-        assert!(super::sqlserver_legacy_compatibility_enabled(Some("sqlserverEncryption=disabled")));
-        assert!(super::sqlserver_legacy_compatibility_enabled(Some("applicationName=dbx;sqlserverEncryption=off")));
-        assert!(super::sqlserver_legacy_compatibility_enabled(Some("?sqlserverEncryption=false&applicationName=dbx")));
-        assert!(super::sqlserver_legacy_compatibility_enabled(Some("applicationName=dbx;encrypt=false")));
-        assert!(super::sqlserver_legacy_compatibility_enabled(Some("?Encrypt=0&applicationName=dbx")));
+    fn sqlserver_native_encryption_flag_accepts_dbx_and_jdbc_params() {
+        assert!(!super::sqlserver_native_encryption_disabled(None));
+        assert!(!super::sqlserver_native_encryption_disabled(Some("encrypt=true")));
+        assert!(super::sqlserver_native_encryption_disabled(Some("sqlserverEncryption=disabled")));
+        assert!(super::sqlserver_native_encryption_disabled(Some("applicationName=dbx;sqlserverEncryption=off")));
+        assert!(super::sqlserver_native_encryption_disabled(Some("?sqlserverEncryption=false&applicationName=dbx")));
+        assert!(super::sqlserver_native_encryption_disabled(Some("applicationName=dbx;encrypt=false")));
+        assert!(super::sqlserver_native_encryption_disabled(Some("?Encrypt=0&applicationName=dbx")));
     }
 
     #[test]

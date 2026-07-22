@@ -11,7 +11,7 @@ function installLocalStorage() {
   });
 }
 
-function sqlServerLegacyConnection(): ConnectionConfig {
+function sqlServerNativeConnectionWithDisabledEncryption(): ConnectionConfig {
   return {
     id: "sqlserver-1",
     name: "SQL Server",
@@ -41,7 +41,7 @@ describe("connectionStore SQL Server legacy compatibility", () => {
     setActivePinia(createPinia());
   });
 
-  it("installs the legacy compatibility component before connecting saved legacy configs", async () => {
+  it("does not preinstall the legacy component for historical disabled-encryption configs", async () => {
     const connectDb = vi.fn().mockResolvedValue("sqlserver-1");
     const installAgent = vi.fn().mockResolvedValue(undefined);
 
@@ -54,10 +54,53 @@ describe("connectionStore SQL Server legacy compatibility", () => {
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
-    await store.connect(sqlServerLegacyConnection());
+    await store.connect(sqlServerNativeConnectionWithDisabledEncryption());
 
-    expect(installAgent).toHaveBeenCalledWith("sqlserver-legacy");
+    expect(installAgent).not.toHaveBeenCalled();
     expect(connectDb).toHaveBeenCalledTimes(1);
-    expect(installAgent.mock.invocationCallOrder[0]).toBeLessThan(connectDb.mock.invocationCallOrder[0]);
+  });
+
+  it("reconnects persisted legacy profiles without reinstalling an installed component", async () => {
+    const connectDb = vi.fn().mockResolvedValue("sqlserver-1");
+    const installAgent = vi.fn().mockResolvedValue(undefined);
+    const config = sqlServerNativeConnectionWithDisabledEncryption();
+    config.driver_profile = "sqlserver-legacy";
+    config.driver_label = "SQL Server legacy compatibility component";
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      installAgent,
+      isAgentInstalled: vi.fn().mockResolvedValue(true),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await store.connect(config);
+
+    expect(installAgent).not.toHaveBeenCalled();
+    expect(connectDb).toHaveBeenCalledOnce();
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ driver_profile: "sqlserver-legacy" }), expect.any(Number));
+  });
+
+  it("does not install or retry legacy after a TLS error followed by SQL Server 18456", async () => {
+    const connectDb = vi.fn().mockRejectedValue(new Error("TLS negotiation failed\nSQL Server error 18456: Login failed"));
+    const installAgent = vi.fn().mockResolvedValue(undefined);
+    const config = sqlServerNativeConnectionWithDisabledEncryption();
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      installAgent,
+      isAgentInstalled: vi.fn().mockResolvedValue(false),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await expect(store.connect(config)).rejects.toThrow("18456");
+
+    expect(connectDb).toHaveBeenCalledOnce();
+    expect(installAgent).not.toHaveBeenCalled();
   });
 });

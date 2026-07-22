@@ -897,10 +897,7 @@ async fn test_connection_with_info_inner(
                     .map(|_| "Connection successful".to_string())
             }
             DatabaseType::SqlServer => {
-                match state
-                    .test_sqlserver_connection_with_legacy_fallback_with_info(&config, &host, port, connect_timeout)
-                    .await
-                {
+                match state.test_sqlserver_connection_with_info(&config, &host, port, connect_timeout).await {
                     Ok(details) => {
                         database_info = details.database_info;
                         Ok(details.message)
@@ -1229,9 +1226,7 @@ pub async fn connect_db(
             db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::ClickHouse(client)
         }
-        DatabaseType::SqlServer => {
-            state.connect_sqlserver_pool_with_legacy_fallback(&db_config, &host, port, connect_timeout).await?
-        }
+        DatabaseType::SqlServer => state.connect_sqlserver_pool(&db_config, &host, port, connect_timeout).await?,
         DatabaseType::Elasticsearch => {
             let mut client = db::elasticsearch_driver::EsClient::from_config(
                 &url,

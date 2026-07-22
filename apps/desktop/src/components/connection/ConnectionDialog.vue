@@ -50,7 +50,7 @@ import { normalizeKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapS
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
-import { isSqlServerLegacyCompatibilityMode, requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityMode, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
+import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import {
   ArrowLeft,
   ArrowDown,
@@ -1330,31 +1330,22 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
   return true;
 }
 
-async function onSqlServerLegacyCompatibilityModeChange(event: Event) {
+async function setSqlServerDriverMode(mode: "auto" | "legacy") {
   if (form.value.db_type !== "sqlserver") return;
-  const input = event.target instanceof HTMLInputElement ? event.target : null;
-  const enabled = input?.checked === true;
   // The connection test may still be using the previous compatibility mode.
   resetTestState();
-  if (!enabled) {
-    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
+  if (mode === "auto") {
+    setSqlServerLegacyCompatibilityConfig(form.value, false);
     return;
   }
 
-  if (input) input.checked = false;
   try {
     await installSqlServerLegacyCompatibilityComponentIfNeeded();
-    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, true);
+    setSqlServerLegacyCompatibilityConfig(form.value, true);
     testResult.value = null;
   } catch {
-    form.value.url_params = setSqlServerLegacyCompatibilityMode(form.value.url_params, false);
-    if (input) input.checked = false;
+    setSqlServerLegacyCompatibilityConfig(form.value, false);
   }
-}
-
-function isSqlServerTlsHandshakeFailure(message: string): boolean {
-  const text = message.toLowerCase();
-  return text.includes("sql server") && text.includes("tls") && (text.includes("handshake") || text.includes("eof") || text.includes("performing i/o"));
 }
 
 function clearTestedConnectionInfo() {
@@ -2401,7 +2392,7 @@ const agentInstallProgressLabel = computed(() => {
   return `${label} ${formatInstallSize(progress.downloaded ?? 0)} / ${formatInstallSize(progress.total)} (${agentInstallPercent.value ?? 0}%)`;
 });
 const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || !!agentInstallError.value);
-const sqlServerLegacyCompatibilityModeEnabled = computed(() => form.value.db_type === "sqlserver" && isSqlServerLegacyCompatibilityMode(form.value.url_params));
+const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLegacyCompatibility(form.value) ? "legacy" : "auto"));
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "sm:max-w-[760px]";
@@ -2505,10 +2496,6 @@ async function testConnection() {
     const message = config ? connectionErrorWithDriverUpdateHint(config, rawMessage) : rawMessage;
     const fallback = config ? await tryNacosDockerConsoleFallback(config, message, runId) : null;
     if (runId !== testRunId) return;
-    const shouldShowSqlServerLegacyMode = !fallback && config?.db_type === "sqlserver" && !isSqlServerLegacyCompatibilityMode(config.url_params) && isSqlServerTlsHandshakeFailure(message);
-    if (shouldShowSqlServerLegacyMode) {
-      configTab.value = "advanced";
-    }
     if (fallback) {
       applySuccessfulConnectionTest(fallback.result, fallback.config, submittedSourceName);
       void persistSuccessfulConnectionTest(fallback.result, fallback.config, submittedSourceName, runId);
@@ -5236,6 +5223,22 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
+                  <div v-if="form.db_type === 'sqlserver'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.driverMode") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Button size="sm" :variant="sqlServerDriverMode === 'legacy' ? 'outline' : 'default'" :disabled="agentInstallRunning" @click="setSqlServerDriverMode('auto')">{{ t("connection.mongoDriverAuto") }}</Button>
+                      <Button size="sm" :variant="sqlServerDriverMode === 'legacy' ? 'default' : 'outline'" :disabled="agentInstallRunning" @click="setSqlServerDriverMode('legacy')">{{ t("connection.mongoDriverLegacy") }}</Button>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top" align="center" class="max-w-[320px] whitespace-pre-line text-xs leading-relaxed">
+                          {{ t("connection.sqlServerLegacyCompatibilityModeHint") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ form.db_type === "elasticsearch" && elasticsearchConnectionMode === "kibana" ? t("connection.elasticsearchKibanaHost") : t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
@@ -5836,18 +5839,6 @@ function openExternalUrl(url: string) {
                         </Button>
                       </div>
                     </template>
-                  </div>
-                </div>
-                <div v-show="form.db_type === 'sqlserver'" class="grid grid-cols-4 items-start gap-4">
-                  <Label :class="connectionLabelSmallClass">{{ t("connection.sqlServerLegacyCompatibilityMode") }}</Label>
-                  <div class="col-span-3 flex flex-col gap-1">
-                    <label class="flex h-5 cursor-pointer items-center gap-2">
-                      <input type="checkbox" :checked="sqlServerLegacyCompatibilityModeEnabled" :disabled="agentInstallRunning" class="mr-0" @change="onSqlServerLegacyCompatibilityModeChange" />
-                      <span class="text-xs text-foreground">{{ t("connection.sqlServerLegacyCompatibilityModeEnable") }}</span>
-                    </label>
-                    <p class="m-0 whitespace-pre-line text-xs leading-5 text-muted-foreground">
-                      {{ t("connection.sqlServerLegacyCompatibilityModeHint") }}
-                    </p>
                   </div>
                 </div>
                 <div v-show="form.db_type === 'redis'" class="grid grid-cols-4 items-center gap-4">

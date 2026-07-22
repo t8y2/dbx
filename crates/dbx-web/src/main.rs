@@ -278,6 +278,7 @@ async fn main() {
         .route("/agents/progress/{operationId}", get(routes::agents::agent_progress))
         // Schema
         .route("/schema/databases", get(routes::schema::list_databases))
+        .route("/schema/database-storage", post(routes::schema::list_database_storage))
         .route("/schema/doris/catalogs", get(routes::schema::list_doris_catalogs))
         .route("/schema/doris/catalog-databases", get(routes::schema::list_doris_catalog_databases))
         .route("/schema/sqlserver/linked-servers", get(routes::schema::list_sqlserver_linked_servers))

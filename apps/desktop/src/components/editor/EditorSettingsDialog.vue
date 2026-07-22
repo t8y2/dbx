@@ -39,6 +39,7 @@ import {
   type InterfaceLayout,
   type DisconnectTabHandlingMode,
   type OpenTabsRestoreMode,
+  type SidebarObjectInfoMode,
   type SqlSemanticDiagnosticsMode,
   type UpdateDownloadSource,
   type CustomThemeColors,
@@ -356,7 +357,7 @@ const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
 const editPrefillNewQueryWithSelect = ref(settingsStore.editorSettings.prefillNewQueryWithSelect);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
 const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
-const editSidebarHideTableComments = ref(settingsStore.editorSettings.sidebarHideTableComments);
+const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
@@ -456,7 +457,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     reuseDataTab: editReuseDataTab.value,
     prefillNewQueryWithSelect: editPrefillNewQueryWithSelect.value,
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
-    sidebarHideTableComments: editSidebarHideTableComments.value,
+    sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
     exportBatchSize: editExportBatchSize.value,
@@ -709,7 +710,7 @@ function syncEditorSettingsDraftFromStore() {
   editPrefillNewQueryWithSelect.value = settingsStore.editorSettings.prefillNewQueryWithSelect;
   editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
   editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
-  editSidebarHideTableComments.value = settingsStore.editorSettings.sidebarHideTableComments;
+  editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
   editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
@@ -817,6 +818,7 @@ async function persistSettings() {
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
   if (Object.keys(editorSettingsPatch).length > 0) {
     settingsStore.updateEditorSettings(editorSettingsPatch);
+    await settingsStore.persistEditorSettings();
     editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
   }
   await settingsStore.updateDesktopSettings({
@@ -907,7 +909,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
     editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
-    editSidebarHideTableComments.value = DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments;
+    editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
     editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
     editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
@@ -992,7 +994,7 @@ function resetAllDefaults() {
   editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
   editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
-  editSidebarHideTableComments.value = DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments;
+  editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
   editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
   editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
@@ -4002,14 +4004,24 @@ onUnmounted(cleanupPreviewEditor);
                   {{ t(`settings.${disconnectTabHandlingModeDescriptionKey}`) }}
                 </p>
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
-                  <Label for="sidebar-hide-table-comments">{{ t("settings.sidebarHideTableComments") }}</Label>
-                  <HelpTooltip :label="t('settings.sidebarHideTableComments')">
-                    {{ t("settings.sidebarHideTableCommentsDescription") }}
+                  <Label for="sidebar-object-info-mode">{{ t("settings.sidebarObjectInfoMode") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarObjectInfoMode')">
+                    {{ t("settings.sidebarObjectInfoModeDescription") }}
                   </HelpTooltip>
                 </div>
-                <Switch id="sidebar-hide-table-comments" v-model="editSidebarHideTableComments" />
+                <Select :model-value="editSidebarObjectInfoMode" @update:model-value="(value) => (editSidebarObjectInfoMode = value as SidebarObjectInfoMode)">
+                  <SelectTrigger id="sidebar-object-info-mode" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="comment-aligned">{{ t("settings.sidebarObjectInfoModeCommentAligned") }}</SelectItem>
+                    <SelectItem value="comment-inline">{{ t("settings.sidebarObjectInfoModeCommentInline") }}</SelectItem>
+                    <SelectItem value="size">{{ t("settings.sidebarObjectInfoModeSize") }}</SelectItem>
+                    <SelectItem value="hidden">{{ t("settings.sidebarObjectInfoModeHidden") }}</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">

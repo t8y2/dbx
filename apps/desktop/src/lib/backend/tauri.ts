@@ -6,6 +6,7 @@ import type {
   ConnectionTestResult,
   DatabaseConnectionInfo,
   DatabaseInfo,
+  DatabaseStorageInfo,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -757,6 +758,10 @@ export async function closeDatabaseConnection(connectionId: string, database: st
 
 export async function listDatabases(connectionId: string): Promise<DatabaseInfo[]> {
   return invoke("list_databases", { connectionId });
+}
+
+export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
+  return invoke("list_database_storage", { connectionId, databases });
 }
 
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {

@@ -3,6 +3,7 @@ import type {
   ConnectionTestResult,
   DatabaseConnectionInfo,
   DatabaseInfo,
+  DatabaseStorageInfo,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -568,6 +569,10 @@ export async function syncSavedSqlDirectory(_request: SavedSqlSyncRequest): Prom
 
 export async function listDatabases(connectionId: string): Promise<DatabaseInfo[]> {
   return get(`/api/schema/databases?${qs({ connection_id: connectionId })}`);
+}
+
+export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
+  return post("/api/schema/database-storage", { connection_id: connectionId, databases });
 }
 
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {

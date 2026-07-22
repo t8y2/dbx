@@ -653,6 +653,56 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
 
+pub async fn list_database_storage_core(
+    state: &AppState,
+    connection_id: &str,
+    database_names: &[String],
+) -> Result<Vec<db::DatabaseStorageInfo>, String> {
+    const DATABASE_STORAGE_TIMEOUT: Duration = Duration::from_secs(5);
+    const MAX_DATABASE_STORAGE_NAMES: usize = 2048;
+
+    if database_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let config = connection_config(state, connection_id).await;
+    if !config.as_ref().is_some_and(|config| {
+        config.db_type == DatabaseType::Postgres && config.driver_profile.as_deref() != Some("cockroachdb")
+    }) {
+        return Ok(Vec::new());
+    }
+
+    let pool = {
+        let connections = state.connections.read().await;
+        match connections.get(connection_id) {
+            Some(PoolKind::Postgres(pool)) => pool.clone(),
+            _ => return Ok(Vec::new()),
+        }
+    };
+    let mut seen = std::collections::HashSet::new();
+    let requested = database_names
+        .iter()
+        .filter(|name| !name.is_empty() && seen.insert((*name).clone()))
+        .take(MAX_DATABASE_STORAGE_NAMES)
+        .cloned()
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    match tokio::time::timeout(DATABASE_STORAGE_TIMEOUT, db::postgres::list_database_storage(&pool, &requested)).await {
+        Ok(result) => result,
+        Err(_) => {
+            log::warn!(
+                "[list_database_storage:timeout] connection_id={} database_count={} timeout_ms={}",
+                connection_id,
+                requested.len(),
+                DATABASE_STORAGE_TIMEOUT.as_millis()
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
 pub async fn list_sqlserver_linked_servers_core(
     state: &AppState,
     connection_id: &str,
@@ -1573,6 +1623,91 @@ fn oracle_object_statistics_rows_only_sql(schema: &str) -> String {
     )
 }
 
+fn dameng_object_statistics_dba_segments_sql(schema: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         LEFT JOIN ( \
+           SELECT owner, table_name, SUM(bytes) AS BYTES \
+           FROM ( \
+             SELECT s.OWNER, s.SEGMENT_NAME AS TABLE_NAME, s.BYTES \
+             FROM DBA_SEGMENTS s \
+             WHERE s.OWNER = {} AND s.SEGMENT_TYPE IN ('TABLE','TABLE PARTITION','TABLE SUBPARTITION') \
+             UNION ALL \
+             SELECT i.TABLE_OWNER AS OWNER, i.TABLE_NAME, s.BYTES \
+             FROM ALL_INDEXES i \
+             JOIN DBA_SEGMENTS s ON s.OWNER = i.OWNER AND s.SEGMENT_NAME = i.INDEX_NAME \
+             WHERE i.TABLE_OWNER = {} AND s.SEGMENT_TYPE IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION') \
+           ) \
+           GROUP BY owner, table_name \
+         ) s ON s.OWNER = t.OWNER AND s.TABLE_NAME = t.TABLE_NAME \
+         WHERE t.OWNER = {} AND (t.NESTED IS NULL OR t.NESTED = 'NO') \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+    )
+}
+
+fn dameng_object_statistics_user_segments_sql(schema: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         LEFT JOIN ( \
+           SELECT table_name, SUM(bytes) AS BYTES \
+           FROM ( \
+             SELECT s.SEGMENT_NAME AS TABLE_NAME, s.BYTES \
+             FROM USER_SEGMENTS s \
+             WHERE s.SEGMENT_TYPE IN ('TABLE','TABLE PARTITION','TABLE SUBPARTITION') \
+             UNION ALL \
+             SELECT i.TABLE_NAME, s.BYTES \
+             FROM ALL_INDEXES i \
+             JOIN USER_SEGMENTS s ON s.SEGMENT_NAME = i.INDEX_NAME \
+             WHERE i.TABLE_OWNER = {} AND s.SEGMENT_TYPE IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION') \
+           ) \
+           GROUP BY table_name \
+         ) s ON s.TABLE_NAME = t.TABLE_NAME \
+         WHERE t.OWNER = {} AND t.OWNER = USER AND (t.NESTED IS NULL OR t.NESTED = 'NO') \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+    )
+}
+
+fn dameng_object_statistics_rows_only_sql(schema: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, CAST(NULL AS NUMBER) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         WHERE t.OWNER = {} AND (t.NESTED IS NULL OR t.NESTED = 'NO') \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+    )
+}
+
+fn kingbase_object_statistics_sql(schema: &str) -> String {
+    format!(
+        "SELECT c.relname, n.nspname, \
+                CAST(CASE WHEN c.reltuples < 0 THEN 0 ELSE c.reltuples END AS BIGINT) AS estimated_rows, \
+                CAST(sys_total_relation_size(c.oid) AS BIGINT) AS total_bytes \
+         FROM sys_catalog.sys_class c \
+         JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {} AND c.relkind IN ('r','m','f','p') \
+         ORDER BY c.relname",
+        sql_string(schema),
+    )
+}
+
+fn gbase8a_object_statistics_sql(database: &str) -> String {
+    format!(
+        "SELECT TABLE_NAME, TABLE_SCHEMA, TABLE_ROWS, \
+                COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES \
+         FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {} AND TABLE_TYPE <> 'VIEW' \
+         ORDER BY TABLE_NAME",
+        sql_string(database),
+    )
+}
+
 fn query_result_cell_i64(row: &[serde_json::Value], index: usize) -> Option<i64> {
     let value = row.get(index)?;
     if value.is_null() {
@@ -1755,7 +1890,7 @@ async fn oracle_agent_list_object_statistics(
     ];
     let mut last_error = None;
     for (source, sql, accept_empty) in queries {
-        match oracle_agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await {
+        match agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await {
             Ok(result) if accept_empty || !result.rows.is_empty() => {
                 return Ok(oracle_object_statistics_from_query_result(result));
             }
@@ -1780,7 +1915,58 @@ async fn oracle_agent_list_object_statistics(
     Err(last_error.unwrap_or_else(|| "Oracle object statistics are unavailable".to_string()))
 }
 
-async fn oracle_agent_object_statistics_query(
+async fn dameng_agent_list_object_statistics(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    schema: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ObjectStatistics>, String> {
+    let mut client = client.lock().await;
+    let queries = [
+        ("dba-segments", dameng_object_statistics_dba_segments_sql(schema), true),
+        ("user-segments", dameng_object_statistics_user_segments_sql(schema), false),
+        ("rows-only", dameng_object_statistics_rows_only_sql(schema), true),
+    ];
+    let mut last_error = None;
+    for (source, sql, accept_empty) in queries {
+        match agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await {
+            Ok(result) if accept_empty || !result.rows.is_empty() => {
+                return Ok(oracle_object_statistics_from_query_result(result));
+            }
+            Ok(_) => {
+                log::debug!(
+                    "[schema][dameng:list_object_statistics:empty-fallback] schema={} source={}",
+                    schema,
+                    source
+                );
+            }
+            Err(error) => {
+                log::debug!(
+                    "[schema][dameng:list_object_statistics:fallback-failed] schema={} source={} error={}",
+                    schema,
+                    source,
+                    error
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Dameng object statistics are unavailable".to_string()))
+}
+
+async fn agent_list_object_statistics(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    schema: &str,
+    sql: String,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ObjectStatistics>, String> {
+    let mut client = client.lock().await;
+    let result = agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await?;
+    Ok(oracle_object_statistics_from_query_result(result))
+}
+
+async fn agent_object_statistics_query(
     client: &mut db::agent_driver::AgentDriverClient,
     database: &str,
     schema: &str,
@@ -2453,11 +2639,13 @@ fn escape_presto_like_pattern(value: &str) -> String {
 mod tests {
     use super::db;
     use super::{
-        clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
-        filter_object_infos, filter_table_infos, filter_visible_schema_names,
-        is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error, mysql_object_source_sql,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
+        dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
+        filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
+        gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error,
+        kingbase_object_statistics_sql, mysql_object_source_sql, mysql_table_metadata_catalog,
+        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
@@ -3466,6 +3654,40 @@ mod tests {
     }
 
     #[test]
+    fn dameng_object_statistics_sql_uses_available_segment_views() {
+        let dba_sql = dameng_object_statistics_dba_segments_sql("app's");
+        assert!(dba_sql.contains("DBA_SEGMENTS"));
+        assert!(dba_sql.contains("ALL_INDEXES"));
+        assert!(!dba_sql.contains("ALL_SEGMENTS"));
+        assert!(!dba_sql.contains("ALL_LOBS"));
+        assert!(dba_sql.contains("OWNER = 'APP''S'"));
+        assert!(dba_sql.contains("t.NESTED IS NULL OR t.NESTED = 'NO'"));
+
+        let user_sql = dameng_object_statistics_user_segments_sql("app's");
+        assert!(user_sql.contains("USER_SEGMENTS"));
+        assert!(user_sql.contains("t.OWNER = USER"));
+
+        let rows_only_sql = dameng_object_statistics_rows_only_sql("app's");
+        assert!(rows_only_sql.contains("CAST(NULL AS NUMBER) AS TOTAL_BYTES"));
+        assert!(!rows_only_sql.contains("SEGMENTS"));
+    }
+
+    #[test]
+    fn agent_database_object_statistics_sql_uses_native_catalogs() {
+        let kingbase_sql = kingbase_object_statistics_sql("core's");
+        assert!(kingbase_sql.contains("sys_catalog.sys_class"));
+        assert!(kingbase_sql.contains("sys_catalog.sys_namespace"));
+        assert!(kingbase_sql.contains("sys_total_relation_size"));
+        assert!(kingbase_sql.contains("n.nspname = 'core''s'"));
+
+        let gbase_sql = gbase8a_object_statistics_sql("shop's");
+        assert!(gbase_sql.contains("information_schema.TABLES"));
+        assert!(gbase_sql.contains("DATA_LENGTH"));
+        assert!(gbase_sql.contains("INDEX_LENGTH"));
+        assert!(gbase_sql.contains("TABLE_SCHEMA = 'shop''s'"));
+    }
+
+    #[test]
     fn oracle_object_statistics_from_query_result_maps_numbers() {
         let result = db::QueryResult {
             columns: vec![
@@ -3931,6 +4153,42 @@ async fn list_object_statistics_once(
                 client,
                 database,
                 schema,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
+        }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Dameng) {
+            drop(connections);
+            return dameng_agent_list_object_statistics(
+                client,
+                database,
+                schema,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
+        }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            let sql = kingbase_object_statistics_sql(schema);
+            drop(connections);
+            return agent_list_object_statistics(
+                client,
+                database,
+                schema,
+                sql,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
+        }
+        if db_config.as_ref().is_some_and(|config| {
+            config.db_type == DatabaseType::Gbase && config.driver_profile.as_deref() != Some("gbase8s")
+        }) {
+            let sql = gbase8a_object_statistics_sql(database);
+            drop(connections);
+            return agent_list_object_statistics(
+                client,
+                database,
+                schema,
+                sql,
                 agent_metadata_timeout(db_config.as_ref()),
             )
             .await;

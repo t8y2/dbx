@@ -5,6 +5,12 @@ pub struct DatabaseInfo {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseStorageInfo {
+    pub name: String,
+    pub size_bytes: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaInfo {
     pub name: String,

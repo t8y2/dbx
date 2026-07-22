@@ -26,8 +26,8 @@ use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, QueryResult,
-    RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
+    DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics,
+    OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
@@ -1542,19 +1542,51 @@ fn validate_postgres_ssl_paths(url: &str) -> Result<(), String> {
     postgres_connection_url(url).map(|_| ())
 }
 
+fn list_databases_sql() -> &'static str {
+    "SELECT datname FROM pg_database \
+     WHERE datallowconn = true \
+     ORDER BY datname"
+}
+
+fn database_storage_sql() -> &'static str {
+    "SELECT d.datname, \
+            CASE \
+              WHEN has_database_privilege(d.datname, 'CONNECT') \
+                OR COALESCE(( \
+                  SELECT pg_has_role(current_user, r.oid, 'MEMBER') \
+                  FROM pg_roles r \
+                  WHERE r.rolname = 'pg_read_all_stats' \
+                ), false) \
+              THEN pg_database_size(d.oid) \
+              ELSE NULL \
+            END AS size_bytes \
+     FROM pg_database d \
+     WHERE d.datallowconn = true \
+       AND d.datname = ANY($1::text[]) \
+     ORDER BY d.datname"
+}
+
 pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT datname FROM pg_database \
-         WHERE datallowconn = true \
-         ORDER BY datname",
-        &[],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, list_databases_sql(), &[]).await.map_err(|e| e.to_string())?;
 
     Ok(rows.iter().map(|row| DatabaseInfo { name: pg_row_try_string(row, 0) }).collect())
+}
+
+pub async fn list_database_storage(pool: &Pool, database_names: &[String]) -> Result<Vec<DatabaseStorageInfo>, String> {
+    if database_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows =
+        postgres_query_cached(&client, database_storage_sql(), &[&database_names]).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseStorageInfo {
+            name: pg_row_try_string(row, 0),
+            size_bytes: row.try_get::<_, Option<i64>>(1).ok().flatten(),
+        })
+        .collect())
 }
 
 pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, String> {
@@ -3578,6 +3610,22 @@ mod tests {
     use std::process::Command;
     use std::time::Instant;
     use tokio_postgres::types::FromSql;
+
+    #[test]
+    fn database_list_does_not_collect_storage_usage() {
+        assert!(list_databases_sql().contains("pg_database"));
+        assert!(!list_databases_sql().contains("pg_database_size"));
+    }
+
+    #[test]
+    fn database_storage_is_scoped_and_permission_guarded() {
+        let sql = database_storage_sql();
+        assert!(sql.contains("d.datname = ANY($1::text[])"));
+        assert!(sql.contains("has_database_privilege"));
+        assert!(sql.contains("pg_read_all_stats"));
+        assert!(sql.contains("pg_database_size"));
+        assert!(sql.contains("ELSE NULL"));
+    }
 
     #[test]
     fn classify_pg_type_covers_all_dispatch_branches() {

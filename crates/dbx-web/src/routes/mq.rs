@@ -1541,6 +1541,7 @@ mod tests {
             sessions: RwLock::new(HashSet::new()),
             sse_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
+            table_import_channels: RwLock::new(HashMap::new()),
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
             export_files: RwLock::new(HashMap::new()),
         });

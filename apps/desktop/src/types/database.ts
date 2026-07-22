@@ -351,6 +351,11 @@ export interface DatabaseInfo {
   name: string;
 }
 
+export interface DatabaseStorageInfo {
+  name: string;
+  size_bytes: number | null;
+}
+
 export interface SchemaInfo {
   name: string;
   comment?: string | null;
@@ -714,6 +719,7 @@ export interface TreeNode {
   tableType?: string;
   comment?: string | null;
   valid?: boolean | null;
+  sizeBytes?: number | null;
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;

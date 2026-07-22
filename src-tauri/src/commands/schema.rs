@@ -20,6 +20,15 @@ pub async fn list_databases(
 }
 
 #[tauri::command]
+pub async fn list_database_storage(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    databases: Vec<String>,
+) -> Result<Vec<db::DatabaseStorageInfo>, String> {
+    dbx_core::schema::list_database_storage_core(&state, &connection_id, &databases).await
+}
+
+#[tauri::command]
 pub async fn list_doris_catalogs(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

@@ -44,7 +44,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "reuseDataTab",
   "prefillNewQueryWithSelect",
   "updateNotificationsEnabled",
-  "sidebarHideTableComments",
+  "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
   "sidebarHiddenTablePrefixes",
   "exportBatchSize",

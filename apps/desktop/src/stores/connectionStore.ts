@@ -9,9 +9,11 @@ import type {
   ConnectionConfig,
   DatabaseType,
   DatabaseConnectionInfo,
+  DatabaseStorageInfo,
   CatalogInfo,
   ForeignKeyInfo,
   ObjectInfo,
+  ObjectStatistics,
   SchemaInfo,
   SidebarLayout,
   TableInfo,
@@ -97,6 +99,7 @@ import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import i18n from "@/i18n";
 import type { MqAdminConfig } from "@/types/mq";
 import { RABBITMQ_MQ_TENANT, resolveMqSystemKindFromConnection } from "@/lib/mq/mqConsoleDefaults";
+import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseNames, supportsSidebarDatabaseStorage, supportsSidebarTableStorage, type SidebarTableStorageScope } from "@/lib/sidebar/sidebarDatabaseStorage";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -108,6 +111,7 @@ const DISCONNECT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_KEEPALIVE_INTERVAL_SECS = 30;
 const METADATA_LIST_PAGE_CACHE_TTL_MS = 30_000;
 const METADATA_LIST_PAGE_CACHE_MAX_ENTRIES = 160;
+const SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS = 30_000;
 export const COMPLETION_METADATA_CONCURRENCY = 2;
 const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
@@ -257,6 +261,10 @@ export const useConnectionStore = defineStore("connection", () => {
     else localStorage.removeItem(ACTIVE_CONNECTION_STORAGE_KEY);
   });
   const treeNodes = ref<TreeNode[]>([]);
+  const sidebarDatabaseStorageCache = new Map<string, { expiresAt: number; value: DatabaseStorageInfo[] }>();
+  const sidebarDatabaseStorageInFlight = new Map<string, Promise<DatabaseStorageInfo[]>>();
+  const sidebarTableStorageCache = new Map<string, { expiresAt: number; value: ObjectStatistics[] }>();
+  const sidebarTableStorageInFlight = new Map<string, Promise<ObjectStatistics[]>>();
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
   const connectedIds = ref<Set<string>>(new Set());
   const identifierQuotes = ref<Record<string, string>>({});
@@ -2263,6 +2271,104 @@ export const useConnectionStore = defineStore("connection", () => {
     beforeConnectHandler = handler;
   }
 
+  function sidebarDatabaseStorageRequestKey(connectionId: string, databases: readonly string[]): string {
+    return `${connectionId}\0${[...databases].sort().join("\0")}`;
+  }
+
+  async function loadSidebarDatabaseStorage(connectionId: string, options?: { force?: boolean }): Promise<void> {
+    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(connectionId)) return;
+    if (!supportsSidebarDatabaseStorage(getConfig(connectionId))) return;
+    const connectionNode = findConnectionNode(connectionId);
+    const databases = sidebarDatabaseNames(connectionNode?.children);
+    if (!databases.length) return;
+
+    const requestKey = sidebarDatabaseStorageRequestKey(connectionId, databases);
+    const cached = sidebarDatabaseStorageCache.get(requestKey);
+    if (!options?.force && cached && cached.expiresAt > Date.now()) {
+      applySidebarDatabaseStorage(connectionNode?.children, cached.value);
+      return;
+    }
+
+    let request = sidebarDatabaseStorageInFlight.get(requestKey);
+    if (!request) {
+      request = api.listDatabaseStorage(connectionId, databases);
+      sidebarDatabaseStorageInFlight.set(requestKey, request);
+    }
+    try {
+      const storage = await request;
+      sidebarDatabaseStorageCache.set(requestKey, {
+        expiresAt: Date.now() + SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
+        value: storage,
+      });
+      const currentNode = findConnectionNode(connectionId);
+      const currentNames = sidebarDatabaseNames(currentNode?.children);
+      if (sidebarDatabaseStorageRequestKey(connectionId, currentNames) === requestKey) {
+        applySidebarDatabaseStorage(currentNode?.children, storage);
+      }
+    } catch (error) {
+      console.debug("[DBX][sidebar-database-storage:unavailable]", { connectionId, error });
+    } finally {
+      if (sidebarDatabaseStorageInFlight.get(requestKey) === request) {
+        sidebarDatabaseStorageInFlight.delete(requestKey);
+      }
+    }
+  }
+
+  function sidebarTableStorageRequestKey(scope: SidebarTableStorageScope): string {
+    return `${scope.connectionId}\0${scope.database}\0${scope.schema}`;
+  }
+
+  async function loadSidebarTableStorage(scope: SidebarTableStorageScope, options?: { force?: boolean }): Promise<void> {
+    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(scope.connectionId)) return;
+    if (!supportsSidebarTableStorage(getConfig(scope.connectionId))) return;
+    const requestKey = sidebarTableStorageRequestKey(scope);
+    const cached = sidebarTableStorageCache.get(requestKey);
+    if (!options?.force && cached && cached.expiresAt > Date.now()) {
+      applySidebarTableStorage(treeNodes.value, scope, cached.value);
+      return;
+    }
+
+    let request = sidebarTableStorageInFlight.get(requestKey);
+    if (!request) {
+      request = api.listObjectStatistics(scope.connectionId, scope.database, scope.schema);
+      sidebarTableStorageInFlight.set(requestKey, request);
+    }
+    try {
+      const statistics = await request;
+      sidebarTableStorageCache.set(requestKey, {
+        expiresAt: Date.now() + SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
+        value: statistics,
+      });
+      applySidebarTableStorage(treeNodes.value, scope, statistics);
+    } catch (error) {
+      console.debug("[DBX][sidebar-table-storage:unavailable]", { ...scope, error });
+    } finally {
+      if (sidebarTableStorageInFlight.get(requestKey) === request) {
+        sidebarTableStorageInFlight.delete(requestKey);
+      }
+    }
+  }
+
+  const sidebarDatabaseStorageScope = computed(() => {
+    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return "";
+    return [...connectedIds.value]
+      .filter((connectionId) => supportsSidebarDatabaseStorage(getConfig(connectionId)))
+      .map((connectionId) => sidebarDatabaseStorageRequestKey(connectionId, sidebarDatabaseNames(findConnectionNode(connectionId)?.children)))
+      .sort()
+      .join("\n");
+  });
+
+  watch(
+    sidebarDatabaseStorageScope,
+    () => {
+      if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return;
+      for (const connectionId of connectedIds.value) {
+        void loadSidebarDatabaseStorage(connectionId);
+      }
+    },
+    { flush: "post" },
+  );
+
   async function loadDatabases(connectionId: string, options?: LoadTreeOptions) {
     const configForScope = getConfig(connectionId);
     return runTreeMetadataLoad(
@@ -2410,6 +2516,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
           node.isExpanded = true;
+          if (options?.force) void loadSidebarDatabaseStorage(connectionId, { force: true });
         } catch (e) {
           recordMetadataLoadError(connectionId, e);
           throw e;
@@ -5504,6 +5611,8 @@ export const useConnectionStore = defineStore("connection", () => {
     setBeforeConnectHandler,
     initFromDisk,
     loadDatabases,
+    loadSidebarDatabaseStorage,
+    loadSidebarTableStorage,
     loadRedisDatabases,
     refreshRedisDbKeyCounts,
     loadEtcdRoot,

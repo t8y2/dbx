@@ -1797,6 +1797,12 @@ pub fn format_grid_sql_literal(
     };
     let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
         literal_text.replace('\\', "\\\\").replace('\'', "\\'")
+    } else if matches!(database_type, Some(DatabaseType::Postgres) | Some(DatabaseType::Sqlite)) {
+        // Postgres (with the default standard_conforming_strings = on) and SQLite
+        // do not treat backslash as a string-literal escape character, so doubling
+        // it here would corrupt the stored value instead of escaping it. Only the
+        // quote delimiter needs escaping for these dialects.
+        literal_text.replace('\'', "''")
     } else {
         literal_text.replace('\\', "\\\\").replace('\'', "''")
     };
@@ -4752,6 +4758,35 @@ mod tests {
             "b'10101010'"
         );
         assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Postgres), Some(&bit)), "'0'");
+    }
+
+    #[test]
+    fn postgres_and_sqlite_literals_do_not_double_escape_backslashes() {
+        // Regression test: Postgres (standard_conforming_strings = on, the default
+        // since 9.1) and SQLite do not treat backslash as a string escape character,
+        // so a single backslash in the cell value must stay a single backslash in
+        // the generated literal.
+        let value = json!(r#"{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}"#);
+        assert_eq!(
+            format_grid_sql_literal(&value, Some(DatabaseType::Postgres), None),
+            r#"'{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}'"#
+        );
+        assert_eq!(
+            format_grid_sql_literal(&value, Some(DatabaseType::Sqlite), None),
+            r#"'{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}'"#
+        );
+
+        // Single quotes must still be doubled for both dialects.
+        assert_eq!(format_grid_sql_literal(&json!("it's"), Some(DatabaseType::Postgres), None), "'it''s'");
+        assert_eq!(format_grid_sql_literal(&json!("it's"), Some(DatabaseType::Sqlite), None), "'it''s'");
+    }
+
+    #[test]
+    fn mysql_and_neo4j_literals_keep_doubling_backslashes() {
+        // MySQL (default sql_mode, without NO_BACKSLASH_ESCAPES) and Neo4j do treat
+        // backslash as an escape character, so this behavior must be preserved.
+        assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::Mysql), None), r"'a\\b'");
+        assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::Neo4j), None), r"'a\\b'");
     }
 
     #[test]

@@ -1111,7 +1111,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function objectGroupCacheKey(node: TreeNode): string {
-    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v5");
+    const config = node.connectionId ? getConfig(node.connectionId) : undefined;
+    const cacheVersion = config?.db_type === "oracle" ? "objects-v6" : "objects-v5";
+    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
 
   function metadataListDriverProfile(connectionId?: string): string | undefined {

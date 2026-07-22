@@ -24,8 +24,8 @@ test("allows in-app update installation for installed desktop builds", () => {
   assert.equal(canDownloadAndInstallUpdate(updateInfo(), true), true);
 });
 
-test("blocks in-app update installation for portable builds", () => {
-  assert.equal(canDownloadAndInstallUpdate(updateInfo({ portable_mode: true }), true), false);
+test("allows portable builds to use the portable update installer", () => {
+  assert.equal(canDownloadAndInstallUpdate(updateInfo({ portable_mode: true }), true), true);
 });
 
 test("blocks in-app update installation outside desktop runtime or without an update", () => {

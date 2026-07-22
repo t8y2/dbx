@@ -34,6 +34,11 @@ function entry(overrides: Partial<HistoryEntry> = {}): HistoryEntry {
   };
 }
 
+function addInput(stored = entry()): Omit<HistoryEntry, "id" | "executed_at"> {
+  const { id: _id, executed_at: _executedAt, ...input } = stored;
+  return input;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((complete) => {
@@ -87,6 +92,85 @@ describe("historyStore", () => {
     expect(store.nextCursor).toBeNull();
   });
 
+  it("ignores a search started while deletion is pending", async () => {
+    const stored = entry();
+    vi.mocked(api.searchHistory).mockResolvedValueOnce({ entries: [stored], total: 1, next_cursor: null });
+    const store = useHistoryStore();
+    await store.search(request);
+
+    const deletion = deferred<void>();
+    const delayedSearch = deferred<HistorySearchResult>();
+    vi.mocked(api.deleteHistoryEntry).mockReturnValueOnce(deletion.promise);
+    vi.mocked(api.searchHistory).mockReturnValueOnce(delayedSearch.promise);
+    const removePromise = store.remove(stored.id);
+    const searchPromise = store.search(request);
+    deletion.resolve(undefined);
+    await removePromise;
+    delayedSearch.resolve({ entries: [stored], total: 1, next_cursor: { executed_at: stored.executed_at, id: stored.id } });
+    await searchPromise;
+
+    expect(store.entries).toEqual([]);
+    expect(store.total).toBe(0);
+    expect(store.nextCursor).toBeNull();
+    expect(store.loading).toBe(false);
+  });
+
+  it("does not restore connection options returned after clear", async () => {
+    const delayedOptions = deferred<Awaited<ReturnType<typeof api.loadHistoryConnectionOptions>>>();
+    vi.mocked(api.loadHistoryConnectionOptions).mockReturnValueOnce(delayedOptions.promise);
+    vi.mocked(api.clearHistory).mockResolvedValue(undefined);
+    const store = useHistoryStore();
+    const optionsPromise = store.loadConnectionOptions();
+    await store.clear();
+    delayedOptions.resolve([{ connection_id: "conn-a", connection_name: "Primary", databases: ["sales"] }]);
+    await optionsPromise;
+
+    expect(store.connectionOptions).toEqual([]);
+  });
+
+  it("does not let delayed connection options overwrite a newly added option", async () => {
+    const delayedOptions = deferred<Awaited<ReturnType<typeof api.loadHistoryConnectionOptions>>>();
+    vi.mocked(api.loadHistoryConnectionOptions).mockReturnValueOnce(delayedOptions.promise);
+    vi.mocked(api.saveHistory).mockResolvedValue(undefined);
+    const store = useHistoryStore();
+    const optionsPromise = store.loadConnectionOptions();
+    await store.add(addInput());
+    delayedOptions.resolve([]);
+    await optionsPromise;
+
+    expect(store.connectionOptions).toEqual([{ connection_id: "conn-a", connection_name: "Primary", databases: ["sales"] }]);
+  });
+
+  it("refreshes an active panel even when its initial search is still pending", async () => {
+    const initialSearch = deferred<HistorySearchResult>();
+    const persisted = entry({ id: "persisted-new" });
+    vi.mocked(api.searchHistory)
+      .mockReturnValueOnce(initialSearch.promise)
+      .mockResolvedValueOnce({ entries: [persisted], total: 1, next_cursor: null });
+    vi.mocked(api.saveHistory).mockResolvedValue(undefined);
+    const store = useHistoryStore();
+    store.setHistoryPanelActive(true);
+    const initialPromise = store.search(request);
+
+    await store.add(addInput());
+    initialSearch.resolve({ entries: [], total: 0, next_cursor: null });
+    await initialPromise;
+
+    expect(store.entries).toEqual([persisted]);
+    expect(store.total).toBe(1);
+  });
+
+  it("does not refresh after the history panel closes", async () => {
+    vi.mocked(api.saveHistory).mockResolvedValue(undefined);
+    const store = useHistoryStore();
+    store.setHistoryPanelActive(true);
+    store.setHistoryPanelActive(false);
+
+    await store.add(addInput());
+
+    expect(api.searchHistory).not.toHaveBeenCalled();
+  });
+
   it("refreshes from storage after insertion instead of exceeding the persisted limit", async () => {
     const stored = entry();
     vi.mocked(api.searchHistory)
@@ -94,9 +178,10 @@ describe("historyStore", () => {
       .mockResolvedValueOnce({ entries: [entry({ id: "persisted-new" })], total: 1000, next_cursor: null });
     vi.mocked(api.saveHistory).mockResolvedValue(undefined);
     const store = useHistoryStore();
+    store.setHistoryPanelActive(true);
     await store.search(request);
 
-    await store.add({ ...stored, id: undefined, executed_at: undefined } as Omit<HistoryEntry, "id" | "executed_at">);
+    await store.add(addInput(stored));
 
     expect(store.total).toBe(1000);
     expect(store.entries[0]?.id).toBe("persisted-new");
@@ -107,10 +192,11 @@ describe("historyStore", () => {
     vi.mocked(api.searchHistory).mockResolvedValue({ entries: [], total: 0, next_cursor: null });
     vi.mocked(api.saveHistory).mockResolvedValue(undefined);
     const store = useHistoryStore();
+    store.setHistoryPanelActive(true);
     await store.search(filteredRequest);
 
     const stored = entry({ sql: "select 'ä'" });
-    await store.add({ ...stored, id: undefined, executed_at: undefined } as Omit<HistoryEntry, "id" | "executed_at">);
+    await store.add(addInput(stored));
 
     expect(store.entries).toEqual([]);
     expect(store.total).toBe(0);

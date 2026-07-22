@@ -33,13 +33,28 @@ export const useHistoryStore = defineStore("history", () => {
   let requestSerial = 0;
   let mutationGeneration = 0;
   let destructiveMutations = 0;
-  let hasLoaded = false;
+  let historyPanelActive = false;
+  let optionsRequestSerial = 0;
   let latestRequestedSearch = copyRequest(DEFAULT_HISTORY_SEARCH);
+
+  function invalidateConnectionOptionRequests() {
+    optionsRequestSerial += 1;
+  }
+
+  function setHistoryPanelActive(active: boolean) {
+    historyPanelActive = active;
+    if (active) return;
+    requestSerial += 1;
+    invalidateConnectionOptionRequests();
+    loading.value = false;
+    loadingMore.value = false;
+  }
 
   function beginDestructiveMutation() {
     requestSerial += 1;
     mutationGeneration += 1;
     destructiveMutations += 1;
+    invalidateConnectionOptionRequests();
     loading.value = false;
     loadingMore.value = false;
   }
@@ -78,7 +93,6 @@ export const useHistoryStore = defineStore("history", () => {
       }
       total.value = result.total;
       nextCursor.value = result.next_cursor ?? null;
-      hasLoaded = true;
     } catch (searchError) {
       if (serial !== requestSerial || generation !== mutationGeneration || destructiveMutations > 0) return;
       error.value = searchError instanceof Error ? searchError.message : String(searchError);
@@ -105,7 +119,15 @@ export const useHistoryStore = defineStore("history", () => {
   }
 
   async function loadConnectionOptions() {
-    connectionOptions.value = await api.loadHistoryConnectionOptions();
+    const serial = ++optionsRequestSerial;
+    try {
+      const options = await api.loadHistoryConnectionOptions();
+      if (serial !== optionsRequestSerial) return;
+      connectionOptions.value = options;
+    } catch (loadError) {
+      if (serial !== optionsRequestSerial) return;
+      throw loadError;
+    }
   }
 
   function addConnectionOption(entry: HistoryEntry) {
@@ -128,8 +150,9 @@ export const useHistoryStore = defineStore("history", () => {
       executed_at: new Date().toISOString(),
     };
     await api.saveHistory(full);
+    invalidateConnectionOptionRequests();
     addConnectionOption(full);
-    if (hasLoaded) {
+    if (historyPanelActive) {
       try {
         // Re-query SQLite so eviction, totals, cursors, and text matching stay authoritative.
         await search(latestRequestedSearch);
@@ -178,6 +201,7 @@ export const useHistoryStore = defineStore("history", () => {
     load,
     loadMore,
     loadConnectionOptions,
+    setHistoryPanelActive,
     add,
     remove,
     clear,

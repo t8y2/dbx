@@ -421,6 +421,7 @@ watch(
 watch([searchText, activeFilter, () => dateRange.value.startDate, () => dateRange.value.endDate, () => selectedConnections.value.map(connectionKey).join("\0"), () => selectedDatabases.value.map(databaseKey).join("\0")], scheduleHistorySearch);
 
 onMounted(() => {
+  store.setHistoryPanelActive(true);
   void store.loadConnectionOptions().catch(() => {});
   void runHistorySearch();
   void nextTick(updateFilterScrollability);
@@ -432,6 +433,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  store.setHistoryPanelActive(false);
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
   searchDebounceTimer = null;
   filterScrollResizeObserver?.disconnect();

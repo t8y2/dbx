@@ -262,7 +262,7 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app", { force: true });
 
     expect(store.connectionErrors[connection.id]).toBeUndefined();
-    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public"]);
+    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions"]);
   });
 
   it("clears a failed metadata warning when the driver hint finishes during retry", async () => {

@@ -2867,7 +2867,7 @@ export const useConnectionStore = defineStore("connection", () => {
               database,
             ),
           );
-          const children = schemas
+          const children: TreeNode[] = schemas
             .filter((schema) => visibleSchemaNames.has(schema.name))
             .map((schema) => {
               const s = schema.name;

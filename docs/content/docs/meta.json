@@ -15,6 +15,7 @@
     "redis",
     "mongodb",
     "object-browser",
+    "favorites",
     "---Advanced Features---",
     "schema-diff",
     "data-transfer",

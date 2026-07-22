@@ -1,0 +1,78 @@
+---
+title: Favorites
+description: Pin frequently used tables and views into a per-database favorites group with notes, custom sub-groups, and cloud sync.
+---
+
+Favorites let you bookmark the tables, views, and materialized views you reach for most often, grouped per database. Once added, a favorite shows up under a dedicated **Favorites** section in the sidebar so you can jump to it in one click.
+
+## What You Can Favorite
+
+Favorites are scoped to a single database, so the right-hand sidebar shows a separate **Favorites** group for each `(connection, database)` pair you've used. Inside that group you can organize items into:
+
+- A built-in **Default** group that is created automatically the first time you favorite something in that database.
+- Any number of custom sub-groups (e.g. *Daily Reports*, *Staging Tables*).
+
+You can favorite any:
+
+- Table
+- View
+- Materialized view
+
+## Add a Favorite
+
+<Steps>
+  <Step>
+    ### Open the context menu Right-click a table or view in the sidebar.
+  </Step>
+  <Step>
+    ### Choose "Add to Favorites" The item is added to the **Default** group of its database. If the group is collapsed, the favorite is still persisted; expand the group to see it.
+  </Step>
+</Steps>
+
+## Manage Items
+
+Click the **Favorites** section header to expand it. From there you can:
+
+- **Rename a group** to something meaningful
+- **Delete a group** (items move into the Default group)
+- **Move an item** into a different group, or reorder it within the current group
+- **Edit a note** for a favorite to record why it's useful or how it's queried
+- **Remove a favorite** when it's no longer needed
+- **Clear all favorites** for the current database from the section header menu
+
+## Notes
+
+Every favorite accepts a free-form note. Notes are useful when the table name is opaque (think `t_evt_2024_q3`) or when the favorite should be opened with a specific filter. The note is stored alongside the favorite and shows up in the item's tooltip.
+
+## Ordering and Drag-Sort
+
+Groups and items are ordered. Drag an item in the sidebar to move it within its group, or use the **Move to Top / Bottom** actions in the context menu. The order is persisted and syncs with cloud sync (see below).
+
+## Cloud Sync
+
+The favorites state is part of the snapshot that DBX syncs via WebDAV / GitHub / Gitee (see [Cloud Sync](/docs/cloud-sync)). Favorites round-trip cleanly between machines running the same DBX account.
+
+- Snapshots created on a build that predates the favorites feature don't include favorites, so applying them on a newer build leaves your local favorites untouched.
+- Snapshots from a newer build always include the field, so older builds ignore it gracefully.
+
+## Migration From the Old Pin Set
+
+Earlier DBX builds stored favorites as a side-channel of the **pinned sidebar items** feature. On first launch with this build, DBX inspects the existing pinned set and silently moves every favoritable v2 pin into the new favorites store. Non-favoritable pins (connections, schemas, etc.) remain pinned as before.
+
+You can also run the migration manually with `pnpm dbx dev -- --migrate-favorites` (advanced; usually not needed).
+
+## Storage Location
+
+Favorites live in the same `app_settings.json` file as the rest of DBX's local settings, under the `favorites_state` key. The state is a single JSON document so groups and items always update atomically — partial writes cannot leave a half-saved favorites list.
+
+To back up favorites independently, copy the `favorites_state` value out of:
+
+- **macOS**: `~/Library/Application Support/com.dbx.app/app_settings.json`
+- **Linux**: `~/.config/com.dbx.app/app_settings.json`
+- **Windows**: `%APPDATA%\com.dbx.app\app_settings.json`
+
+## Tips
+
+- Group by intent, not by schema — *Daily Reports* and *Reference Data* are easier to scan than per-schema groups.
+- Use notes to capture filters: `WHERE created_at > now() - interval '7 days'` reads faster than a generic comment.
+- Pair favorites with [SQL Snippets](/docs/sql-snippets) so your most-used queries are one click away too.

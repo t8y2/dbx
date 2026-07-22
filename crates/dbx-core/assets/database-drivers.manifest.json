@@ -1721,6 +1721,11 @@
           "profile": "rocketmq",
           "label": "Apache RocketMQ",
           "agentKey": "rocketmq"
+        },
+        {
+          "profile": "rabbitmq",
+          "label": "RabbitMQ",
+          "agentKey": "rabbitmq"
         }
       ],
       "supportLevel": "connect",

@@ -17,4 +17,21 @@ describe("mqAuth", () => {
       }),
     ).toBe("basic");
   });
+
+  it("allows basic auth for RabbitMQ", () => {
+    expect(isMqAuthKindAllowedForSystem("rabbitmq", "basic")).toBe(true);
+    expect(isMqAuthKindAllowedForSystem("rabbitmq", "kerberos")).toBe(false);
+    expect(isMqAuthKindAllowedForSystem("rabbitmq", "token")).toBe(false);
+  });
+
+  it("detects RabbitMQ basic auth from config", () => {
+    expect(
+      detectMqUiAuthKind({
+        systemKind: "rabbitmq",
+        authKind: "basic",
+        saslMechanism: "",
+        jaasConfig: "",
+      }),
+    ).toBe("basic");
+  });
 });

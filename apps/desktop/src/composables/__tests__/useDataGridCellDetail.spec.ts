@@ -12,11 +12,13 @@ const mocks = vi.hoisted(() => ({
   openSearch: vi.fn(),
   focus: vi.fn(),
   onChange: undefined as undefined | ((value: string) => void),
+  fontFamily: undefined as undefined | (() => string),
 }));
 
 vi.mock("@/composables/useCellDetailEditor", () => ({
-  useCellDetailEditor: (options: { onChange?: (value: string) => void }) => {
+  useCellDetailEditor: (options: { onChange?: (value: string) => void; fontFamily: () => string }) => {
     mocks.onChange = options.onChange;
+    mocks.fontFamily = options.fontFamily;
     return {
       create: mocks.create,
       destroy: mocks.destroy,
@@ -29,7 +31,7 @@ vi.mock("@/composables/useCellDetailEditor", () => ({
 }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themePalette: ref({}) }) }));
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { theme: "default", fontSize: 13, fontFamily: "monospace" } }),
+  useSettingsStore: () => ({ editorSettings: { theme: "default", fontSize: 13, fontFamily: "monospace", tableFontFamily: "'Grid Font', sans-serif" } }),
 }));
 vi.mock("@/lib/dataGrid/geometryPreview", () => ({ renderWktOnCanvas: vi.fn() }));
 
@@ -59,11 +61,12 @@ function detail(): DataGridCellDetail {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.onChange = undefined;
+  mocks.fontFamily = undefined;
   mocks.getValue.mockReturnValue("");
 });
 
 describe("useDataGridCellDetail", () => {
-  it("focuses CodeMirror after entering cell detail edit mode", async () => {
+  it("focuses CodeMirror and applies the data grid font in cell detail edit mode", async () => {
     const scope = effectScope();
     const composable = scope.run(() => useDataGridCellDetail({ detail: ref(detail()), editValue: ref(""), onCancel: vi.fn() }))!;
 
@@ -72,6 +75,7 @@ describe("useDataGridCellDetail", () => {
     await Promise.resolve();
 
     expect(mocks.focus).toHaveBeenCalledOnce();
+    expect(mocks.fontFamily?.()).toBe("'Grid Font', sans-serif");
 
     composable.detailsEditorContainer.value = undefined;
     await nextTick();

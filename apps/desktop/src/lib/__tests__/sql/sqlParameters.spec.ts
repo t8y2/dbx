@@ -285,6 +285,97 @@ describe("extractSqlParameters", () => {
   });
 });
 
+describe("Oracle and Dameng trigger pseudo-records", () => {
+  it("ignores Oracle default pseudo-record fields while keeping ordinary parameters", () => {
+    const sql = `
+      CREATE OR REPLACE TRIGGER audit_orders
+      BEFORE UPDATE ON orders
+      FOR EACH ROW
+      BEGIN
+        :NEW.updated_at := current_timestamp;
+        audit_change(:old.id, :PaReNt.order_id, :tenant_id);
+      END;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["tenant_id"]);
+  });
+
+  it("ignores Dameng default pseudo-record fields case-insensitively", () => {
+    const sql = `
+      create trigger audit_orders after update on orders
+      for each row
+      begin
+        insert into order_audit values (:new.id, :OLD.status, :EventInfo.event_type, :actor_id);
+      end;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["actor_id"]);
+  });
+
+  it("parses REFERENCING aliases without disabling default pseudo-records", () => {
+    const sql = `
+      create or replace trigger audit_orders
+      before update on orders
+      referencing old row as previous new as current
+      for each row
+      begin
+        audit_change(:previous.id, :CURRENT.status, :old.id, :new.status, :reason);
+      end;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["reason"]);
+  });
+
+  it("replaces ordinary trigger parameters but preserves pseudo-record fields", () => {
+    const sql = `create trigger audit_orders before update on orders
+      referencing new as inserted old as deleted
+      for each row begin
+        :inserted.updated_by := :user_id;
+        audit_change(:deleted.id, :NEW.id, :note);
+      end;`;
+
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          user_id: { kind: "number", value: "42" },
+          note: { kind: "string", value: "manual" },
+        },
+        { databaseType: "dameng" },
+      ),
+    ).toBe(`create trigger audit_orders before update on orders
+      referencing new as inserted old as deleted
+      for each row begin
+        :inserted.updated_by := 42;
+        audit_change(:deleted.id, :NEW.id, 'manual');
+      end;`);
+  });
+
+  it("does not apply trigger rules to other databases or statements outside triggers", () => {
+    const oracleScript = `create trigger audit_orders before update on orders
+      for each row begin :new.id := :value; end;
+      /
+      select :new, :outside_value from dual;`;
+
+    expect(extractSqlParameters(oracleScript, { databaseType: "oracle" })).toEqual(["value", "new", "outside_value"]);
+    expect(extractSqlParameters("create trigger t before update on x begin :NEW.id := :value; end;", { databaseType: "postgres" })).toEqual(["NEW", "value"]);
+    expect(extractSqlParameters("create trigger t before update on x begin NEW.id := :value; end;", { databaseType: "postgres" })).toEqual(["value"]);
+  });
+
+  it("keeps assignment, casts, comments, strings, and non-field pseudo-record tokens unchanged", () => {
+    const sql = `create trigger audit_orders before update on orders
+      for each row begin
+        :new := :actual_value;
+        value := :NEW.id;
+        select value::int into :target_value from dual;
+        -- :OLD.comment_field
+        note := ':EVENTINFO.string_field';
+      end;`;
+
+    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["new", "actual_value", "target_value"]);
+  });
+});
+
 describe("substituteSqlParameters", () => {
   it("replaces placeholders with SQL literals", () => {
     const sql = "select * from t where dt >= ${start_date} and amount > ${amount} and enabled = ${enabled}";

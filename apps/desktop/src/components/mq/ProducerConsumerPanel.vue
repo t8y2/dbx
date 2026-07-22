@@ -112,7 +112,7 @@ const topicRef = computed<TopicRef | null>(() => {
   if (!topic) return null;
   return {
     tenant: props.tenant,
-    namespace: props.namespace,
+    namespace: topic.namespace || props.namespace,
     topic: topic.shortName,
     persistent: topic.persistent,
     partitioned: topic.partitioned,

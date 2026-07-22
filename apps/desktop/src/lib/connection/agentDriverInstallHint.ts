@@ -15,6 +15,7 @@ export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverPr
   if (dbType === "mq") {
     if (driverProfile === "kafka") return "kafka";
     if (driverProfile === "rocketmq") return "rocketmq";
+    if (driverProfile === "rabbitmq") return "rabbitmq";
     return undefined;
   }
   return driverProfile && driverProfile !== dbType ? driverProfile : dbType;

@@ -1,6 +1,6 @@
 [package]
 name = "dbx-cli"
-version = "0.4.40"
+version = "0.4.41"
 edition = "2021"
 license = "Apache-2.0"
 

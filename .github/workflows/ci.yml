@@ -286,8 +286,8 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      - name: Build Nix package
-        run: nix build .#dbx-desktop --no-link --print-build-logs
+      - name: Validate pnpm dependency hash
+        run: nix build .#dbx-pnpm-deps --no-link --print-build-logs
 
   changes:
     runs-on: ubuntu-22.04
@@ -340,17 +340,13 @@ jobs:
             agents:
               - 'agents/**'
             nix:
-              # The fixed-output pnpm hash must change whenever the workspace dependency graph changes.
+              # This fast check validates only the fixed-output pnpm dependency closure.
               - 'package.json'
               - 'packages/**/package.json'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'flake.nix'
               - 'flake.lock'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'crates/**/Cargo.toml'
-              - 'src-tauri/Cargo.toml'
               - '.github/workflows/ci.yml'
               - '.github/workflows/update-nix-pnpm-hash.yml'
 

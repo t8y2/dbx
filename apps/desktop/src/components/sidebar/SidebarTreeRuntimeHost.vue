@@ -605,6 +605,13 @@ async function toggle() {
     return;
   }
 
+  if (node.type === "group-extensions" && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
+    node.isExpanded = !node.isExpanded;
+    if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
+    emit("node-toggled", node, wasExpanded);
+    return;
+  }
+
   if (node.isExpanded) {
     node.isExpanded = false;
     if (!connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
@@ -728,6 +735,8 @@ async function toggle() {
       await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-fkeys" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
+    } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await connectionStore.refreshTreeNode(node);
     }
     emit("node-toggled", node, wasExpanded);
   } catch (e: any) {
@@ -2989,23 +2998,6 @@ async function confirmPasteTable() {
   }
 }
 
-function copyTableToClipboard() {
-  const node = activeNode.value;
-  if (node.type !== "table" || !node.connectionId || !node.database) return;
-  connectionStore.treeClipboard = {
-    kind: "table-copy",
-    tables: [
-      {
-        connectionId: node.connectionId,
-        database: node.database,
-        schema: node.schema,
-        tableName: node.label,
-      },
-    ],
-  };
-  toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
-}
-
 function openPasteTableDialog() {
   const clipboard = connectionStore.treeClipboard;
   if (clipboard?.kind !== "table-copy" || !canPasteTreeClipboardToCurrentNode()) {
@@ -4091,7 +4083,8 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (isTableNotView.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.duplicateStructure"), action: duplicateStructure, icon: CopyPlus });
-      items.push({ label: t("contextMenu.copyTable"), action: copyTableToClipboard, icon: Copy });
+      // Keep menu copy aligned with keyboard copy so frozen multi-selection and single-row fallback stay compatible.
+      items.push({ label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy });
       if (supportsTruncate.value) {
         destructiveActions.push({
           label: truncateMenuLabel(t("contextMenu.truncateTable")),

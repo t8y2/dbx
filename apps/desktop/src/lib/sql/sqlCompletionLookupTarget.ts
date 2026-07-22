@@ -20,11 +20,24 @@ export function resolveSqlCompletionTableLookupTarget(options: {
   currentDatabase: string;
   currentSchema?: string;
   supportsDatabaseQualifier: boolean;
-  completionContext: Pick<SqlCompletionContext, "qualifier" | "prefix" | "suggestTables" | "insertTable">;
+  supportsDatabaseSchemaQualifier?: boolean;
+  completionContext: Pick<SqlCompletionContext, "qualifier" | "qualifierParts" | "prefix" | "suggestTables" | "insertTable">;
   knownDatabases?: readonly string[];
 }): SqlCompletionTableLookupTarget {
   const { completionContext } = options;
   const qualifier = completionContext.qualifier?.trim();
+  const qualifierParts = completionContext.qualifierParts?.filter(Boolean) ?? qualifier?.split(".").filter(Boolean) ?? [];
+  if (options.supportsDatabaseSchemaQualifier && completionContext.suggestTables && !completionContext.insertTable && qualifierParts.length >= 2) {
+    const databaseQualifier = qualifierParts[qualifierParts.length - 2]!;
+    const schema = qualifierParts[qualifierParts.length - 1]!;
+    const database = findExactName(options.knownDatabases, databaseQualifier) ?? databaseQualifier;
+    return {
+      database,
+      schema,
+      filter: completionContext.prefix,
+      qualifierDatabase: database,
+    };
+  }
   const qualifierIsDatabase = options.supportsDatabaseQualifier && !!qualifier && completionContext.suggestTables && !completionContext.insertTable;
 
   if (qualifierIsDatabase) {

@@ -95,6 +95,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         schema: Some("dbo".to_string()),
         sql: sql.to_string(),
         query_base_sql: sql.to_string(),
+        setup_sql: Vec::new(),
         database_type: DatabaseType::SqlServer,
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),

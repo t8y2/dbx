@@ -85,7 +85,7 @@ import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } fr
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { apiUrl, webPath } from "@/lib/common/webPath";
-import { APP_FONT_SANS_CSS_VAR, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
@@ -204,6 +204,7 @@ const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 const selectedSql = ref("");
 const cursorPos = ref(0);
 const formatSqlRequest = ref<{ id: number; tabId: string } | null>(null);
+const compressSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
 const newQueryContextSource = ref<"tab" | "sidebar">("tab");
 const queryEditorDdlTarget = ref<{ connectionId: string; database: string; catalog?: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
@@ -502,6 +503,11 @@ function applyUiFontFamily(fontFamily: string) {
   document.body.style.fontFamily = `var(${APP_FONT_SANS_CSS_VAR}, ${DEFAULT_UI_FONT_FAMILY})`;
 }
 
+function applyDataGridFontFamily(fontFamily: string) {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(DATA_GRID_FONT_FAMILY_CSS_VAR, fontFamily || DEFAULT_DATA_GRID_FONT_FAMILY);
+}
+
 const appUiFontFamilyStyle = computed<Record<string, string>>(() => {
   const fontFamily = settingsStore.editorSettings.uiFontFamily || DEFAULT_UI_FONT_FAMILY;
   return {
@@ -559,6 +565,14 @@ watch(
   () => settingsStore.editorSettings.uiFontFamily,
   (fontFamily) => {
     applyUiFontFamily(fontFamily);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => settingsStore.editorSettings.tableFontFamily,
+  (fontFamily) => {
+    applyDataGridFontFamily(fontFamily);
   },
   { immediate: true },
 );
@@ -664,6 +678,15 @@ function formatActiveSql() {
   if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
   formatSqlRequest.value = {
     id: (formatSqlRequest.value?.id ?? 0) + 1,
+    tabId: tab.id,
+  };
+}
+
+function compressActiveSql() {
+  const tab = activeTab.value;
+  if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
+  compressSqlRequest.value = {
+    id: (compressSqlRequest.value?.id ?? 0) + 1,
     tabId: tab.id,
   };
 }
@@ -2177,6 +2200,7 @@ onUnmounted(() => {
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"
                   @format-sql="formatActiveSql"
+                  @compress-sql="compressActiveSql"
                   @toggle-sql-keyword-case="toggleSqlKeywordCase"
                   @save-sql="void openSaveSqlDialog()"
                   @open-sql="openSqlFile"
@@ -2197,6 +2221,7 @@ onUnmounted(() => {
                     :executable-sql="executableSql"
                     :active-output-view="activeOutputView"
                     :format-sql-request="formatSqlRequest"
+                    :compress-sql-request="compressSqlRequest"
                     :selected-sql="selectedSql"
                     :cursor-pos="cursorPos"
                     :block-dangerous-redis-commands="blockDangerousRedisCommands"

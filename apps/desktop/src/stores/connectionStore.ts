@@ -9,11 +9,13 @@ import type {
   ConnectionConfig,
   DatabaseType,
   DatabaseConnectionInfo,
+  DatabaseStorageInfo,
   CatalogInfo,
   FavoriteGroup,
   FavoriteItem,
   ForeignKeyInfo,
   ObjectInfo,
+  ObjectStatistics,
   SchemaInfo,
   SidebarLayout,
   TableInfo,
@@ -104,6 +106,8 @@ import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache"
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import i18n from "@/i18n";
 import type { MqAdminConfig } from "@/types/mq";
+import { RABBITMQ_MQ_TENANT, resolveMqSystemKindFromConnection } from "@/lib/mq/mqConsoleDefaults";
+import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseNames, supportsSidebarDatabaseStorage, supportsSidebarTableStorage, type SidebarTableStorageScope } from "@/lib/sidebar/sidebarDatabaseStorage";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -115,6 +119,7 @@ const DISCONNECT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_KEEPALIVE_INTERVAL_SECS = 30;
 const METADATA_LIST_PAGE_CACHE_TTL_MS = 30_000;
 const METADATA_LIST_PAGE_CACHE_MAX_ENTRIES = 160;
+const SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS = 30_000;
 export const COMPLETION_METADATA_CONCURRENCY = 2;
 const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
@@ -127,9 +132,9 @@ function sidebarObjectGroupPageSize(): number {
 
 function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   if (!config || config.db_type !== "mq") return false;
-  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq") return true;
+  if (config.driver_profile === "kafka" || config.driver_profile === "rocketmq" || config.driver_profile === "rabbitmq") return true;
   const kind = (config.external_config as Partial<MqAdminConfig> | undefined)?.systemKind;
-  return kind === "kafka" || kind === "rocketmq";
+  return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
 }
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
@@ -245,6 +250,7 @@ function metadataDriverProfile(config?: ConnectionConfig): string | undefined {
 
 export const useConnectionStore = defineStore("connection", () => {
   const settingsStore = useSettingsStore();
+  const tunnelProfileStore = useTunnelProfileStore();
   const connections = ref<ConnectionConfig[]>([]);
   const isDesktop = isTauriRuntime();
   const activeConnectionId = ref<string | null>(localStorage.getItem(ACTIVE_CONNECTION_STORAGE_KEY));
@@ -263,6 +269,10 @@ export const useConnectionStore = defineStore("connection", () => {
     else localStorage.removeItem(ACTIVE_CONNECTION_STORAGE_KEY);
   });
   const treeNodes = ref<TreeNode[]>([]);
+  const sidebarDatabaseStorageCache = new Map<string, { expiresAt: number; value: DatabaseStorageInfo[] }>();
+  const sidebarDatabaseStorageInFlight = new Map<string, Promise<DatabaseStorageInfo[]>>();
+  const sidebarTableStorageCache = new Map<string, { expiresAt: number; value: ObjectStatistics[] }>();
+  const sidebarTableStorageInFlight = new Map<string, Promise<ObjectStatistics[]>>();
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
   // Structured favorites: groups + items, persisted as one JSON document.
   // Independent from pinnedTreeNodeIds so "Pin" and "Add to Favorites" are
@@ -832,7 +842,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function withConnectionAttemptTimeout<T>(promise: Promise<T>, config: ConnectionConfig): Promise<T> {
-    const timeoutMs = connectionAttemptTimeoutMs(config);
+    const timeoutMs = connectionAttemptTimeoutMs(config, tunnelProfileStore.profileById);
     const timeoutMessage = connectionAttemptTimeoutMessage(timeoutMs);
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1303,8 +1313,22 @@ export const useConnectionStore = defineStore("connection", () => {
     return sortSidebarNames([...byName.keys()]).map((name) => byName.get(name)!);
   }
 
+  function buildExtensionManagementNode(connectionId: string, database: string): TreeNode {
+    return {
+      id: `${connectionId}:${database}:__extensions`,
+      label: "tree.extensions",
+      type: "group-extensions",
+      connectionId,
+      database,
+      isExpanded: false,
+      children: [],
+    };
+  }
+
   function objectGroupCacheKey(node: TreeNode): string {
-    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v5");
+    const config = node.connectionId ? getConfig(node.connectionId) : undefined;
+    const cacheVersion = config?.db_type === "oracle" ? "objects-v6" : "objects-v5";
+    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
 
   function metadataListDriverProfile(connectionId?: string): string | undefined {
@@ -2314,7 +2338,9 @@ export const useConnectionStore = defineStore("connection", () => {
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
       await beforeConnectHandler?.(config);
-      await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
+      if (config.db_type === "sqlserver") {
+        await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
+      }
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
       const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
@@ -2481,6 +2507,9 @@ export const useConnectionStore = defineStore("connection", () => {
     const localAttempt = beginLocalConnectionAttempt(connectionId);
     const connectPromise = (async () => {
       await beforeConnectHandler?.(config);
+      if (config.db_type === "sqlserver") {
+        await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
+      }
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
       const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
@@ -2524,6 +2553,104 @@ export const useConnectionStore = defineStore("connection", () => {
   function setBeforeConnectHandler(handler: BeforeConnectHandler | null) {
     beforeConnectHandler = handler;
   }
+
+  function sidebarDatabaseStorageRequestKey(connectionId: string, databases: readonly string[]): string {
+    return `${connectionId}\0${[...databases].sort().join("\0")}`;
+  }
+
+  async function loadSidebarDatabaseStorage(connectionId: string, options?: { force?: boolean }): Promise<void> {
+    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(connectionId)) return;
+    if (!supportsSidebarDatabaseStorage(getConfig(connectionId))) return;
+    const connectionNode = findConnectionNode(connectionId);
+    const databases = sidebarDatabaseNames(connectionNode?.children);
+    if (!databases.length) return;
+
+    const requestKey = sidebarDatabaseStorageRequestKey(connectionId, databases);
+    const cached = sidebarDatabaseStorageCache.get(requestKey);
+    if (!options?.force && cached && cached.expiresAt > Date.now()) {
+      applySidebarDatabaseStorage(connectionNode?.children, cached.value);
+      return;
+    }
+
+    let request = sidebarDatabaseStorageInFlight.get(requestKey);
+    if (!request) {
+      request = api.listDatabaseStorage(connectionId, databases);
+      sidebarDatabaseStorageInFlight.set(requestKey, request);
+    }
+    try {
+      const storage = await request;
+      sidebarDatabaseStorageCache.set(requestKey, {
+        expiresAt: Date.now() + SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
+        value: storage,
+      });
+      const currentNode = findConnectionNode(connectionId);
+      const currentNames = sidebarDatabaseNames(currentNode?.children);
+      if (sidebarDatabaseStorageRequestKey(connectionId, currentNames) === requestKey) {
+        applySidebarDatabaseStorage(currentNode?.children, storage);
+      }
+    } catch (error) {
+      console.debug("[DBX][sidebar-database-storage:unavailable]", { connectionId, error });
+    } finally {
+      if (sidebarDatabaseStorageInFlight.get(requestKey) === request) {
+        sidebarDatabaseStorageInFlight.delete(requestKey);
+      }
+    }
+  }
+
+  function sidebarTableStorageRequestKey(scope: SidebarTableStorageScope): string {
+    return `${scope.connectionId}\0${scope.database}\0${scope.schema}`;
+  }
+
+  async function loadSidebarTableStorage(scope: SidebarTableStorageScope, options?: { force?: boolean }): Promise<void> {
+    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(scope.connectionId)) return;
+    if (!supportsSidebarTableStorage(getConfig(scope.connectionId))) return;
+    const requestKey = sidebarTableStorageRequestKey(scope);
+    const cached = sidebarTableStorageCache.get(requestKey);
+    if (!options?.force && cached && cached.expiresAt > Date.now()) {
+      applySidebarTableStorage(treeNodes.value, scope, cached.value);
+      return;
+    }
+
+    let request = sidebarTableStorageInFlight.get(requestKey);
+    if (!request) {
+      request = api.listObjectStatistics(scope.connectionId, scope.database, scope.schema);
+      sidebarTableStorageInFlight.set(requestKey, request);
+    }
+    try {
+      const statistics = await request;
+      sidebarTableStorageCache.set(requestKey, {
+        expiresAt: Date.now() + SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
+        value: statistics,
+      });
+      applySidebarTableStorage(treeNodes.value, scope, statistics);
+    } catch (error) {
+      console.debug("[DBX][sidebar-table-storage:unavailable]", { ...scope, error });
+    } finally {
+      if (sidebarTableStorageInFlight.get(requestKey) === request) {
+        sidebarTableStorageInFlight.delete(requestKey);
+      }
+    }
+  }
+
+  const sidebarDatabaseStorageScope = computed(() => {
+    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return "";
+    return [...connectedIds.value]
+      .filter((connectionId) => supportsSidebarDatabaseStorage(getConfig(connectionId)))
+      .map((connectionId) => sidebarDatabaseStorageRequestKey(connectionId, sidebarDatabaseNames(findConnectionNode(connectionId)?.children)))
+      .sort()
+      .join("\n");
+  });
+
+  watch(
+    sidebarDatabaseStorageScope,
+    () => {
+      if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return;
+      for (const connectionId of connectedIds.value) {
+        void loadSidebarDatabaseStorage(connectionId);
+      }
+    },
+    { flush: "post" },
+  );
 
   async function loadDatabases(connectionId: string, options?: LoadTreeOptions) {
     const configForScope = getConfig(connectionId);
@@ -2672,6 +2799,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
           node.isExpanded = true;
+          if (options?.force) void loadSidebarDatabaseStorage(connectionId, { force: true });
         } catch (e) {
           recordMetadataLoadError(connectionId, e);
           throw e;
@@ -2824,15 +2952,17 @@ export const useConnectionStore = defineStore("connection", () => {
 
       const config = getConfig(connectionId);
       if (isFlatMqConnection(config)) {
-        // Kafka/RocketMQ have no tenant/namespace concept. Create a synthetic child
-        // that opens the MQ admin console directly when clicked.
+        // Kafka/RocketMQ have no tenant/namespace concept; RabbitMQ pins a synthetic
+        // tenant and exposes virtual hosts as namespaces inside the console. Create a
+        // synthetic child that opens the MQ admin console directly when clicked.
+        const mqTenant = resolveMqSystemKindFromConnection(config) === "rabbitmq" ? RABBITMQ_MQ_TENANT : "_flat_mq";
         setChildren(node, [
           {
-            id: schemaCacheKey(connectionId, "mq-tenant", "_flat_mq"),
+            id: schemaCacheKey(connectionId, "mq-tenant", mqTenant),
             label: "Topics",
             type: "mq-tenant" as const,
             connectionId,
-            mqTenant: "_flat_mq",
+            mqTenant,
             mqInitialTab: "topics",
           },
         ]);
@@ -3122,7 +3252,7 @@ export const useConnectionStore = defineStore("connection", () => {
         try {
           await ensureConnected(connectionId);
           if (useCachedChildren(node, options)) return;
-          const cacheKey = schemaCacheKey(connectionId, database, "schemas-v2");
+          const cacheKey = schemaCacheKey(connectionId, database, "schemas-v3");
           if (!options?.force) {
             const cached = await loadPersistedTreeChildren(node, cacheKey);
             if (cached.hit) {
@@ -3139,7 +3269,7 @@ export const useConnectionStore = defineStore("connection", () => {
               database,
             ),
           );
-          const children = schemas
+          const children: TreeNode[] = schemas
             .filter((schema) => visibleSchemaNames.has(schema.name))
             .map((schema) => {
               const s = schema.name;
@@ -3155,6 +3285,9 @@ export const useConnectionStore = defineStore("connection", () => {
                 children: [],
               };
             });
+          if (isPostgresLikeForExtensions(getConfig(connectionId)?.db_type)) {
+            children.push(buildExtensionManagementNode(connectionId, database));
+          }
           if (isSidebarSearchQueryChanged(options)) return;
           if (!canApplyTreeMetadataResult(node)) return;
           setChildren(node, children);
@@ -3472,7 +3605,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (useCachedChildren(node, options)) return;
           const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v5" : "objects-grouped-v5");
+          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v5" : "objects-grouped-v6");
           const searchFilter = activeTreeLoadSearchFilter(options);
           const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
           if (!options?.force && !searchFilter) {
@@ -3513,17 +3646,8 @@ export const useConnectionStore = defineStore("connection", () => {
               schema: effectiveSchema,
               objectTypes: supportedSidebarObjectTypes(config),
             });
-            if (isPostgresLikeForExtensions(config?.db_type)) {
-              children.push({
-                id: `${nodeId}:__extensions`,
-                label: "tree.extensions",
-                type: "group-extensions",
-                connectionId,
-                database,
-                schema: effectiveSchema,
-                isExpanded: false,
-                children: [],
-              });
+            if (!schema && isPostgresLikeForExtensions(config?.db_type)) {
+              children.push(buildExtensionManagementNode(connectionId, database));
             }
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
@@ -3653,35 +3777,6 @@ export const useConnectionStore = defineStore("connection", () => {
     );
   }
 
-  async function loadExtensions(connectionId: string, database: string, schema: string) {
-    const node = findNode(treeNodes.value, `${connectionId}:${database}:${schema}:__extensions`);
-    if (!node) return;
-    node.isLoading = true;
-    try {
-      await ensureConnected(connectionId);
-      if (useCachedChildren(node)) return;
-      const extensions = await withMetadataLoadTimeout(connectionId, api.listExtensions(connectionId, database, schema), "extensions");
-      const children: TreeNode[] = extensions.map((ext) => ({
-        id: `${node.id}:${ext.name}`,
-        label: ext.name,
-        type: "extension" as const,
-        connectionId,
-        database,
-        schema,
-        comment: ext.comment ?? null,
-        meta: ext,
-        isExpanded: false,
-      }));
-      setChildren(node, children);
-      node.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e);
-      throw e;
-    } finally {
-      node.isLoading = false;
-    }
-  }
-
   async function loadMoreObjectGroupChildren(node: TreeNode) {
     if (node.type !== "load-more" || !node.loadMore) return;
     const loadMore = node.loadMore;
@@ -3788,6 +3883,36 @@ export const useConnectionStore = defineStore("connection", () => {
         }
       },
     );
+  }
+
+  async function loadExtensions(connectionId: string, database: string) {
+    const node = findNode(treeNodes.value, `${connectionId}:${database}:__extensions`);
+    if (!node) return;
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      if (useCachedChildren(node)) return;
+      const extensions = await withMetadataLoadTimeout(connectionId, api.listExtensions(connectionId, database), "extensions");
+      const children: TreeNode[] = extensions.map((ext) => ({
+        id: `${node.id}:${ext.schema || ""}:${ext.name}`,
+        label: ext.name,
+        type: "extension" as const,
+        connectionId,
+        database,
+        schema: ext.schema ?? undefined,
+        comment: ext.comment ?? null,
+        meta: ext,
+        isExpanded: false,
+      }));
+      setChildren(node, children);
+      node.objectCount = children.length;
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
   }
 
   async function loadTableForLocate(target: LocateTableTarget): Promise<boolean> {
@@ -4269,7 +4394,7 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if (node.type === "group-partitions") {
       node.isExpanded = true;
     } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
-      await loadExtensions(node.connectionId, node.database || "", node.schema || "");
+      await loadExtensions(node.connectionId, node.database || "");
     }
   }
 
@@ -5681,18 +5806,9 @@ export const useConnectionStore = defineStore("connection", () => {
   async function initFromDisk() {
     if (!initFromDiskPromise) {
       initFromDiskPromise = (async () => {
-        pinnedTreeNodeIds.value = await loadPinnedTreeNodeIds();
-        // Run the legacy favorites migration before the structured load so
-        // the first paint already reflects migrated entries. The helper is
-        // idempotent — a re-run is a no-op once the marker is set.
-        const migration = runLegacyFavoritesMigrationIfNeeded(loadPinnedTreeNodeIdsFromLocalStorage, favoritesState.value);
-        if (migration.migrated) {
-          favoritesController.setState(migration.state);
-          pinnedTreeNodeIds.value = migration.remainingPinned;
-          persistPinnedTreeNodeIds();
-        }
+        const [pinnedIds, saved] = await Promise.all([loadPinnedTreeNodeIds(), api.loadConnections(), tunnelProfileStore.init()]);
+        pinnedTreeNodeIds.value = pinnedIds;
         await favoritesController.load();
-        const saved = await api.loadConnections();
         connections.value = saved.map(normalizeConnection);
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
@@ -5810,6 +5926,8 @@ export const useConnectionStore = defineStore("connection", () => {
     setBeforeConnectHandler,
     initFromDisk,
     loadDatabases,
+    loadSidebarDatabaseStorage,
+    loadSidebarTableStorage,
     loadRedisDatabases,
     refreshRedisDbKeyCounts,
     loadEtcdRoot,

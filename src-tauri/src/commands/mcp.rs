@@ -78,7 +78,7 @@ impl NodeRuntime {
         let package_is_compatible = package
             .as_ref()
             .and_then(|package| package.minimum_node_version)
-            .map_or(true, |minimum| parse_node_version(&node_version).is_some_and(|version| version >= minimum));
+            .is_none_or(|minimum| parse_node_version(&node_version).is_some_and(|version| version >= minimum));
         let mcp_version = package.as_ref().and_then(|package| package.version.clone());
         // Resolve the package-declared launcher so npm layout changes do not break the built-in AI assistant.
         let mcp_script_path = package.filter(|_| package_is_compatible).map(|package| package.script_path);

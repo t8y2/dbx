@@ -86,6 +86,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         schema: None,
         sql: sql.clone(),
         query_base_sql: sql,
+        setup_sql: Vec::new(),
         database_type: DatabaseType::ClickHouse,
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),

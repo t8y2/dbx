@@ -5,6 +5,7 @@ import type { MqSystemKind, PeekedMessage, TopicInfo, TopicRef, SendMessageReque
 import { mqSendMessage, mqListTopics, mqPeekMessages } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
+import { resolveRabbitMqSendNamespace } from "@/lib/mq/mqConsoleDefaults";
 import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 
 interface Props {
@@ -26,6 +27,8 @@ const { t } = useI18n();
 const topicName = ref("");
 const messageKey = ref("");
 const messageTag = ref("");
+const exchangeName = ref("");
+const routingKey = ref("");
 const messageValue = ref("");
 const headersText = ref("");
 const loading = ref(false);
@@ -47,6 +50,7 @@ let successTimer: ReturnType<typeof setTimeout> | undefined;
 
 const readOnlyMessage = computed(() => t("mqMessages.readOnlyCannotSend"));
 const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
+const isRabbitMqCluster = computed(() => props.mqSystemKind === "rabbitmq");
 
 const topicOptions = computed(() => {
   return availableTopics.value.map((t) => ({
@@ -62,7 +66,9 @@ const selectedTopicRef = computed<TopicRef | null>(() => {
   const selected = availableTopics.value.find((item) => item.shortName === topic);
   return {
     tenant: props.tenant,
-    namespace: props.namespace,
+    // Cross-vhost listings tag each row with its own vhost; row-level
+    // operations (e.g. peek) must target that vhost, not the "*" selection.
+    namespace: selected?.namespace || props.topic?.namespace || props.namespace,
     topic,
     persistent: selected?.persistent ?? true,
     partitioned: selected?.partitioned,
@@ -172,6 +178,23 @@ async function sendMessage() {
       payloadText: messageValue.value,
       headers,
     };
+    // RabbitMQ: publish through a specific exchange only when one is given;
+    // an empty exchange keeps the default-exchange behavior. The vhost is
+    // resolved for every publish: a topic picked from the datalist keeps the
+    // vhost of that row (cross-vhost listings), then the selected topic prop,
+    // then the current selection; in all-vhosts mode without a row topic the
+    // publish falls back to the connection default vhost (no explicit
+    // namespace).
+    const exchange = exchangeName.value.trim();
+    if (isRabbitMqCluster.value) {
+      if (exchange) {
+        req.exchange = exchange;
+        req.routingKey = routingKey.value.trim() || undefined;
+      }
+      const datalistTopic = availableTopics.value.find((item) => item.shortName === topic);
+      const sendNamespace = resolveRabbitMqSendNamespace(datalistTopic, props.namespace, props.topic);
+      if (sendNamespace) req.namespace = sendNamespace;
+    }
     success.value = await mqSendMessage(props.connectionId, req);
     if (canBrowseMessages.value) {
       peekPartition.value = String(success.value.partition);
@@ -249,6 +272,8 @@ function formatJson() {
 function clearForm() {
   topicName.value = "";
   messageKey.value = "";
+  exchangeName.value = "";
+  routingKey.value = "";
   messageValue.value = "";
   headersText.value = "";
   error.value = undefined;
@@ -326,6 +351,18 @@ watch(
         <label>{{ t("mqMessages.messageTag") }}</label>
         <input v-model="messageTag" type="text" :placeholder="t('mqMessages.optional')" :disabled="readOnly" />
       </div>
+
+      <template v-if="isRabbitMqCluster">
+        <div class="form-group">
+          <label>{{ t("mqMessages.exchange") }}</label>
+          <input v-model="exchangeName" type="text" :placeholder="t('mqMessages.exchangePlaceholder')" :disabled="readOnly" />
+          <div class="form-hint">{{ t("mqMessages.exchangeHint") }}</div>
+        </div>
+        <div v-if="exchangeName.trim()" class="form-group">
+          <label>{{ t("mqMessages.routingKey") }}</label>
+          <input v-model="routingKey" type="text" :placeholder="t('mqMessages.optional')" :disabled="readOnly" />
+        </div>
+      </template>
 
       <!-- 消息内容 -->
       <div class="form-group">

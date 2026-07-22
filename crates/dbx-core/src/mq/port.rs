@@ -43,6 +43,62 @@ pub trait MessageQueueAdmin: Send + Sync {
         Err("Topic route is not supported by this MQ system".to_string())
     }
 
+    // ---- Exchanges / bindings (RabbitMQ) ----
+
+    async fn list_exchanges(&self, _ns: &NamespaceRef) -> Result<Vec<MqExchangeInfo>, String> {
+        Err("Exchanges are not supported by this MQ system".to_string())
+    }
+
+    async fn create_exchange(
+        &self,
+        _ns: &NamespaceRef,
+        _name: &str,
+        _exchange_type: &str,
+        _durable: bool,
+        _auto_delete: bool,
+    ) -> Result<(), String> {
+        Err("Exchanges are not supported by this MQ system".to_string())
+    }
+
+    async fn delete_exchange(&self, _ns: &NamespaceRef, _name: &str) -> Result<(), String> {
+        Err("Exchanges are not supported by this MQ system".to_string())
+    }
+
+    async fn list_bindings(
+        &self,
+        _ns: &NamespaceRef,
+        _exchange: Option<&str>,
+        _queue: Option<&str>,
+    ) -> Result<Vec<MqBindingInfo>, String> {
+        Err("Bindings are not supported by this MQ system".to_string())
+    }
+
+    async fn bind_queue(&self, _ns: &NamespaceRef, _binding: &MqBindingInfo) -> Result<(), String> {
+        Err("Bindings are not supported by this MQ system".to_string())
+    }
+
+    async fn unbind_queue(&self, _ns: &NamespaceRef, _binding: &MqBindingInfo) -> Result<(), String> {
+        Err("Bindings are not supported by this MQ system".to_string())
+    }
+
+    // ---- Client connections / channels (RabbitMQ) ----
+
+    async fn list_client_connections(&self, _ns: &NamespaceRef) -> Result<Vec<MqClientConnectionInfo>, String> {
+        Err("Client connections are not supported by this MQ system".to_string())
+    }
+
+    async fn list_client_channels(
+        &self,
+        _ns: &NamespaceRef,
+        _connection: Option<String>,
+    ) -> Result<Vec<MqChannelInfo>, String> {
+        Err("Client channels are not supported by this MQ system".to_string())
+    }
+
+    async fn close_client_connection(&self, _ns: &NamespaceRef, _name: &str) -> Result<(), String> {
+        Err("Closing client connections is not supported by this MQ system".to_string())
+    }
+
     async fn alter_topic_config(&self, _topic: &TopicRef, _configs: serde_json::Value) -> Result<(), String> {
         Err("Alter topic config is not supported by this MQ system".to_string())
     }
@@ -140,6 +196,65 @@ pub trait MessageQueueAdmin: Send + Sync {
     /// Escape hatch: proxy an arbitrary admin REST call. Covers any endpoint the
     /// typed methods do not.
     async fn raw_request(&self, req: MqRawRequest) -> Result<MqRawResponse, String>;
+
+    // ---- Users & virtual-host permissions (RabbitMQ) ----
+
+    async fn list_users(&self) -> Result<Vec<MqUserInfo>, String> {
+        Err("User management is not supported by this MQ system".to_string())
+    }
+
+    async fn create_user(&self, _name: &str, _password: &str, _tags: Vec<String>) -> Result<(), String> {
+        Err("User management is not supported by this MQ system".to_string())
+    }
+
+    async fn delete_user(&self, _name: &str) -> Result<(), String> {
+        Err("User management is not supported by this MQ system".to_string())
+    }
+
+    async fn list_user_permissions(&self, _ns: &NamespaceRef) -> Result<Vec<MqVhostPermission>, String> {
+        Err("User permissions are not supported by this MQ system".to_string())
+    }
+
+    async fn grant_user_permission(
+        &self,
+        _ns: &NamespaceRef,
+        _user: &str,
+        _configure: &str,
+        _write: &str,
+        _read: &str,
+    ) -> Result<(), String> {
+        Err("User permissions are not supported by this MQ system".to_string())
+    }
+
+    async fn revoke_user_permission(&self, _ns: &NamespaceRef, _user: &str) -> Result<(), String> {
+        Err("User permissions are not supported by this MQ system".to_string())
+    }
+
+    // ---- Policies (RabbitMQ) ----
+
+    async fn list_policies(&self, _ns: &NamespaceRef) -> Result<Vec<MqPolicyInfo>, String> {
+        Err("Policies are not supported by this MQ system".to_string())
+    }
+
+    async fn set_policy(&self, _ns: &NamespaceRef, _policy: &MqPolicyInfo) -> Result<(), String> {
+        Err("Policies are not supported by this MQ system".to_string())
+    }
+
+    async fn delete_policy(&self, _ns: &NamespaceRef, _name: &str) -> Result<(), String> {
+        Err("Policies are not supported by this MQ system".to_string())
+    }
+
+    // ---- Cluster monitoring (RabbitMQ) ----
+
+    /// Broker-wide queue totals and message rates.
+    async fn get_overview(&self) -> Result<MqOverviewInfo, String> {
+        Err("Cluster overview is not supported by this MQ system".to_string())
+    }
+
+    /// Cluster node listing with resource usage.
+    async fn list_nodes(&self) -> Result<Vec<MqNodeInfo>, String> {
+        Err("Cluster node monitoring is not supported by this MQ system".to_string())
+    }
 
     // ---- Message production ----
 

@@ -117,16 +117,22 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	if strings.Contains(query, "information_schema.table_constraints") {
 		return &valueRows{columns: []string{"column_name"}}, nil
 	}
-	if strings.Contains(query, "information_schema.tables") {
-		return nil, &gokb.Error{
-			Code:    gokb.ErrorCode("42501"),
-			Message: "permission denied for function sys_freespace",
-		}
-	}
-	if strings.Contains(query, "SELECT c.relname") {
+	if strings.Contains(query, "CASE c.relkind") && strings.Contains(query, "obj_description(c.oid)") {
 		return &valueRows{
-			columns: []string{"relname", "table_type", "description"},
-			rows:    [][]driver.Value{{"orders", "TABLE", "orders table"}},
+			columns: []string{"table_name", "table_type", "table_comment"},
+			rows:    [][]driver.Value{{"orders", "BASE TABLE", "orders table"}},
+		}, nil
+	}
+	if strings.Contains(query, "SELECT obj_description(c.oid)") {
+		return &valueRows{
+			columns: []string{"table_comment"},
+			rows:    [][]driver.Value{{"orders table"}},
+		}, nil
+	}
+	if strings.Contains(query, "FROM information_schema.columns c") {
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"id", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
 		}, nil
 	}
 	if strings.Contains(query, "sys_get_expr(") {
@@ -340,13 +346,17 @@ func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 		if strings.Contains(query, "pg_get_expr(") {
 			pgCalls++
 		}
+		if (strings.Contains(query, "sys_get_expr(") || strings.Contains(query, "pg_get_expr(")) &&
+			!strings.Contains(query, "col_description(a.attrelid, a.attnum)") {
+			t.Fatalf("catalog columns must use PostgreSQL column comments: %s", query)
+		}
 	}
 	if sysCalls != 1 || pgCalls != 2 {
 		t.Fatalf("fallback choice was not cached: sys=%d pg=%d queries=%v", sysCalls, pgCalls, state.queries)
 	}
 }
 
-func TestListTablesFallsBackForSysFreespacePermission(t *testing.T) {
+func TestMySQLCompatColumnsUsePostgresColumnComments(t *testing.T) {
 	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
 	state := &fallbackDriverState{}
 	expressionFallbackState.Store(state)
@@ -356,22 +366,88 @@ func TestListTablesFallsBackForSysFreespacePermission(t *testing.T) {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-
 	server := newServer()
 	server.db = db
 	server.mode.mysqlCompat = true
-	tables, err := server.listTables("public", metadataListConstraints{})
+
+	columns, err := server.getColumns("public", "orders")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tables) != 1 || tables[0].Name != "orders" {
-		t.Fatalf("unexpected fallback tables: %#v", tables)
+	if len(columns) != 1 || columns[0].Comment == nil || *columns[0].Comment != "primary key" {
+		t.Fatalf("unexpected columns: %#v", columns)
 	}
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.queries) != 2 || !strings.Contains(state.queries[0], "information_schema.tables") || !strings.Contains(state.queries[1], "sys_catalog.sys_class") {
-		t.Fatalf("unexpected fallback query sequence: %v", state.queries)
+	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "col_description(a.attrelid, a.attnum)") {
+		t.Fatalf("MySQL-compatible columns must use PostgreSQL column comments: %v", state.queries)
+	}
+}
+
+func TestAllCompatibilityModesUsePostgresTableComments(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	state := &fallbackDriverState{}
+	expressionFallbackState.Store(state)
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+	for _, mysqlCompat := range []bool{false, true} {
+		state.mu.Lock()
+		state.queries = nil
+		state.mu.Unlock()
+		server.mode.mysqlCompat = mysqlCompat
+
+		tables, err := server.listTables("public", metadataListConstraints{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tables) != 1 || tables[0].Comment == nil || *tables[0].Comment != "orders table" {
+			t.Fatalf("mysqlCompat=%v: unexpected tables: %#v", mysqlCompat, tables)
+		}
+
+		state.mu.Lock()
+		queries := append([]string(nil), state.queries...)
+		state.mu.Unlock()
+		if len(queries) != 1 || !strings.Contains(queries[0], "obj_description(c.oid)") ||
+			!strings.Contains(queries[0], "FROM sys_catalog.sys_class c") {
+			t.Fatalf("mysqlCompat=%v: table comments must share the PostgreSQL-compatible query: %v", mysqlCompat, queries)
+		}
+	}
+}
+
+func TestGetTableCommentUsesPostgresCatalogComment(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	state := &fallbackDriverState{}
+	expressionFallbackState.Store(state)
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+	server.mode.mysqlCompat = true
+
+	comment, err := server.getTableComment("public", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comment == nil || *comment != "orders table" {
+		t.Fatalf("unexpected table comment: %#v", comment)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "FROM sys_catalog.sys_class c") ||
+		!strings.Contains(state.queries[0], "n.nspname = 'public'") || !strings.Contains(state.queries[0], "c.relname = 'orders'") {
+		t.Fatalf("table comment must use the PostgreSQL-compatible catalog query: %v", state.queries)
 	}
 }
 

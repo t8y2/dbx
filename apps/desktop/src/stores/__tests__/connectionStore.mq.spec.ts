@@ -180,6 +180,49 @@ describe("connectionStore MQ sidebar tree", () => {
     expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_flat_mq", initialTab: "topics" }]);
   });
 
+  it("adds a RabbitMQ topics child pinned to the synthetic _rabbitmq tenant", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      mqListTenants: vi.fn(),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = {
+      ...kafkaConnection(),
+      name: "RabbitMQ",
+      driver_profile: "rabbitmq",
+      driver_label: "RabbitMQ",
+      external_config: {
+        systemKind: "rabbitmq",
+        adminUrl: "",
+        auth: { kind: "none" },
+        extra: { addresses: "127.0.0.1:5672" },
+      },
+    } as ConnectionConfig;
+    const node: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: false,
+      children: [],
+    };
+
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+
+    await store.refreshTreeNode(node);
+
+    expect(node.children?.map((child) => ({ label: child.label, tenant: child.mqTenant, initialTab: child.mqInitialTab }))).toEqual([{ label: "Topics", tenant: "_rabbitmq", initialTab: "topics" }]);
+  });
+
   it("detects Kafka from external config when driver profile is missing", async () => {
     const mqListTenants = vi.fn();
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));

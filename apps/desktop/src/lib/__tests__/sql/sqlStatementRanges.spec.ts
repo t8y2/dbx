@@ -443,6 +443,35 @@ COMMENT = '测试';`;
     expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
   });
 
+  it("keeps MySQL ALTER TABLE truncate partition clauses with the statement", () => {
+    const sql = "ALTER TABLE ems.r_r_curve_e_hour\nTRUNCATE PARTITION p202602, p202603, p202604, p202605, p202606;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "ALTER"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(statementRangeAtCursor(sql, indexOf(sql, "TRUNCATE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL truncate partition clauses when comments separate ALTER TABLE", () => {
+    const sql = "ALTER /* online ddl */ TABLE t\nTRUNCATE PARTITION p0;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "TRUNCATE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps MySQL truncate partition clauses when comments precede PARTITION", () => {
+    const sql = "ALTER TABLE t\nTRUNCATE /* keep */ PARTITION p0;";
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "TRUNCATE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps standalone truncate table statements separate from preceding alter statements", () => {
+    const sql = "ALTER TABLE events ADD COLUMN source varchar(100)\nTRUNCATE TABLE events;";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["ALTER TABLE events ADD COLUMN source varchar(100)", "TRUNCATE TABLE events"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "postgres"))).toEqual(["ALTER TABLE events ADD COLUMN source varchar(100)", "TRUNCATE TABLE events"]);
+  });
+
   it("keeps issue #4045 ClickHouse ALTER TABLE UPDATE mutation together", () => {
     const sql = `ALTER TABLE m2_db.history_data5
 UPDATE value = 14.06

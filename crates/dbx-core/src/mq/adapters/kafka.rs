@@ -45,6 +45,11 @@ const KAFKA_CAPABILITIES: MqCapabilities = MqCapabilities {
     supports_message_query: false,
     supports_dlq: false,
     supports_message_trace: false,
+    supports_exchanges: false,
+    supports_client_connections: false,
+    supports_user_permissions: false,
+    supports_policies: false,
+    supports_cluster_monitoring: false,
 };
 
 pub struct KafkaAdmin {
@@ -185,6 +190,7 @@ impl MessageQueueAdmin for KafkaAdmin {
                     persistent: true,
                     internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
                     message_type: None,
+                    namespace: None,
                 }
             })
             .collect())
@@ -662,11 +668,13 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
     } else {
         "PLAINTEXT"
     });
+    let zookeeper_connect_string = extra_str(extra, "zookeeperServers").unwrap_or("");
     let properties =
         extra.get("properties").filter(|value| value.is_object()).cloned().unwrap_or_else(|| serde_json::json!({}));
 
     serde_json::json!({
         "bootstrap_servers": bootstrap_servers(cfg),
+        "zookeeper_connect_string": zookeeper_connect_string,
         "security_protocol": security_protocol,
         "sasl_mechanism": sasl_mechanism,
         "sasl_username": sasl_username,
@@ -829,6 +837,63 @@ mod tests {
         assert_eq!(
             params.pointer("/properties/java.security.krb5.conf").and_then(|v| v.as_str()),
             Some("/tmp/krb5.conf")
+        );
+    }
+
+    #[test]
+    fn connection_params_pass_zookeeper_discovery_without_fake_bootstrap_servers() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "connectionSource": "zookeeper",
+                "zookeeperServers": "zk-1:2181,zk-2:2181/kafka",
+                "securityProtocol": "PLAINTEXT"
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("bootstrap_servers").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(params.get("zookeeper_connect_string").and_then(|v| v.as_str()), Some("zk-1:2181,zk-2:2181/kafka"));
+        assert_eq!(params.get("security_protocol").and_then(|v| v.as_str()), Some("PLAINTEXT"));
+    }
+
+    #[test]
+    fn connection_params_preserve_zookeeper_sasl_and_tls_properties() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "connectionSource": "zookeeper",
+                "zookeeperServers": "zk-secure:2281/kafka",
+                "securityProtocol": "SASL_SSL",
+                "properties": {
+                    "zookeeper.sasl.client": "true",
+                    "zookeeper.sasl.clientconfig": "DbxZooKeeperClient",
+                    "zookeeper.client.secure": "true",
+                    "zookeeper.clientCnxnSocket": "org.apache.zookeeper.ClientCnxnSocketNetty",
+                    "zookeeper.ssl.trustStore.location": "/etc/dbx/zookeeper-truststore.p12"
+                }
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("zookeeper_connect_string").and_then(|v| v.as_str()), Some("zk-secure:2281/kafka"));
+        assert_eq!(params.pointer("/properties/zookeeper.sasl.client").and_then(|v| v.as_str()), Some("true"));
+        assert_eq!(
+            params.pointer("/properties/zookeeper.sasl.clientconfig").and_then(|v| v.as_str()),
+            Some("DbxZooKeeperClient")
+        );
+        assert_eq!(params.pointer("/properties/zookeeper.client.secure").and_then(|v| v.as_str()), Some("true"));
+        assert_eq!(
+            params.pointer("/properties/zookeeper.clientCnxnSocket").and_then(|v| v.as_str()),
+            Some("org.apache.zookeeper.ClientCnxnSocketNetty")
+        );
+        assert_eq!(
+            params.pointer("/properties/zookeeper.ssl.trustStore.location").and_then(|v| v.as_str()),
+            Some("/etc/dbx/zookeeper-truststore.p12")
         );
     }
 

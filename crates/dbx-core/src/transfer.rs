@@ -2083,6 +2083,63 @@ fn generate_transfer_write_sql(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_insert_typed_sql_batches(
+    columns: &[String],
+    column_types: &[Option<String>],
+    rows: &[Vec<serde_json::Value>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    requested_max_rows: usize,
+) -> Vec<(String, usize)> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    let max_rows = requested_max_rows.max(1);
+    let max_sql_bytes = match db_type {
+        DatabaseType::CloudflareD1 => crate::db::cloudflare_d1::MAX_SQL_STATEMENT_BYTES,
+        _ => MAX_TRANSFER_WRITE_SQL_BYTES,
+    };
+    let mut statements = Vec::new();
+    let mut start = 0;
+
+    // First honor the row limit, then use binary search to find the largest statement that
+    // also fits the backend byte limit. This avoids generating every intermediate size.
+    while start < rows.len() {
+        let max_end = start.saturating_add(max_rows).min(rows.len());
+        let mut end = max_end;
+        let mut accepted = generate_insert_typed(columns, column_types, &rows[start..max_end], table, schema, db_type);
+
+        if accepted.len() > max_sql_bytes && max_end > start + 1 {
+            end = start + 1;
+            accepted = generate_insert_typed(columns, column_types, &rows[start..end], table, schema, db_type);
+            let mut low = start + 2;
+            let mut high = max_end;
+            while low <= high {
+                let candidate_end = low + (high - low) / 2;
+                let candidate =
+                    generate_insert_typed(columns, column_types, &rows[start..candidate_end], table, schema, db_type);
+                if candidate.len() <= max_sql_bytes {
+                    accepted = candidate;
+                    end = candidate_end;
+                    low = candidate_end + 1;
+                } else {
+                    high = candidate_end - 1;
+                }
+            }
+        }
+
+        if !accepted.is_empty() {
+            statements.push((accepted, end - start));
+        }
+        start = end;
+    }
+
+    statements
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_transfer_write_sql_batches(
     mode: &TransferMode,
     columns: &[String],
@@ -2095,6 +2152,21 @@ fn generate_transfer_write_sql_batches(
 ) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();
+    }
+
+    if matches!(mode, TransferMode::Append | TransferMode::Overwrite) {
+        return generate_insert_typed_sql_batches(
+            columns,
+            column_types,
+            rows,
+            table,
+            schema,
+            db_type,
+            max_transfer_write_rows(db_type, mode),
+        )
+        .into_iter()
+        .map(|(sql, _)| sql)
+        .collect();
     }
 
     let max_rows = max_transfer_write_rows(db_type, mode);

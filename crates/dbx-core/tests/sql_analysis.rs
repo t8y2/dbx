@@ -34,6 +34,68 @@ fn extracts_nested_query_scopes_for_correlated_subqueries() {
 }
 
 #[test]
+fn extracts_in_subquery_in_a_child_scope() {
+    let sql = "select u.id from users u where u.id in (select o.user_id from orders o)";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    let tables: Vec<_> = analysis.tables.iter().map(|table| (table.name.as_str(), table.scope_id)).collect();
+    assert_eq!(tables, vec![("users", 0), ("orders", 1)]);
+
+    let scopes: Vec<_> = analysis.scopes.iter().map(|scope| (scope.id, scope.parent_id)).collect();
+    assert_eq!(scopes, vec![(0, None), (1, Some(0))]);
+}
+
+#[test]
+fn sqlserver_single_cte_is_not_reported_as_a_physical_table() {
+    let sql = "WITH SalesCte AS (SELECT * FROM dbo.sales) SELECT * FROM salescte";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    let tables: Vec<_> = analysis.tables.iter().map(|table| (table.schema.as_deref(), table.name.as_str())).collect();
+    assert_eq!(tables, vec![(Some("dbo"), "sales")]);
+}
+
+#[test]
+fn sqlserver_recursive_cte_can_reference_itself() {
+    let sql = "WITH numbers AS (SELECT 1 AS value UNION ALL SELECT value + 1 FROM numbers WHERE value < 10) SELECT * FROM numbers";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    assert!(analysis.tables.is_empty());
+}
+
+#[test]
+fn sqlserver_ctes_only_hide_names_after_they_are_declared() {
+    let sql =
+        "WITH first_cte AS (SELECT * FROM later_cte), later_cte AS (SELECT * FROM first_cte) SELECT * FROM later_cte";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    let tables: Vec<_> = analysis.tables.iter().map(|table| table.name.as_str()).collect();
+    assert_eq!(tables, vec!["later_cte"]);
+}
+
+#[test]
+fn sqlserver_qualified_table_is_not_hidden_by_same_named_cte() {
+    let sql = "WITH employees AS (SELECT * FROM dbo.employees) SELECT * FROM employees";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    assert_eq!(analysis.tables.len(), 1);
+    assert_eq!(analysis.tables[0].schema.as_deref(), Some("dbo"));
+    assert_eq!(analysis.tables[0].name, "employees");
+}
+
+#[test]
+fn nested_queries_inherit_and_shadow_cte_names() {
+    let sql = "WITH source AS (SELECT * FROM dbo.outer_source) SELECT * FROM source WHERE EXISTS (WITH source AS (SELECT * FROM dbo.inner_source) SELECT * FROM source) AND EXISTS (SELECT * FROM source)";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    let tables: Vec<_> =
+        analysis.tables.iter().map(|table| (table.schema.as_deref(), table.name.as_str(), table.scope_id)).collect();
+    assert_eq!(tables, vec![(Some("dbo"), "outer_source", 1), (Some("dbo"), "inner_source", 3)]);
+
+    let scopes: Vec<_> = analysis.scopes.iter().map(|scope| (scope.id, scope.parent_id)).collect();
+    assert_eq!(scopes, vec![(0, None), (1, Some(0)), (2, Some(0)), (3, Some(2)), (4, Some(0))]);
+}
+
+#[test]
 fn extracts_unqualified_columns_from_single_table_select() {
     let analysis = analyze_sql_references("select missing, id from users", Some("postgres")).unwrap();
 

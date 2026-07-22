@@ -1255,6 +1255,7 @@ function sqlAliasKeywordWords(...sources: Array<string | undefined>): string[] {
 
 export interface SqlCompletionTable {
   name: string;
+  database?: string;
   schema?: string;
   type?: SqlObjectNavigationType;
   detail?: string;
@@ -1312,6 +1313,7 @@ export type SqlKeywordCase = "preserve" | "upper" | "lower";
 
 export interface SqlCompletionReferencedTable {
   name: string;
+  database?: string;
   schema?: string;
   alias?: string;
   columns?: string[];
@@ -1338,6 +1340,7 @@ export interface SqlCompletionContext {
   selectAliases: string[];
   referencedTables: SqlCompletionReferencedTable[];
   insertTable?: string;
+  insertDatabase?: string;
   insertSchema?: string;
   statementKind: SqlStatementKind;
   tableTriggerWord?: string;
@@ -1967,6 +1970,7 @@ export function getSqlCompletionContext(sql: string, cursor: number): SqlComplet
     selectAliases: prioritizeSelectAliases ? extractSelectAliases(fullStatement) : [],
     referencedTables,
     insertTable: insertInfo?.table,
+    insertDatabase: insertInfo?.database,
     insertSchema: insertInfo?.schema,
     statementKind,
     tableTriggerWord: lastWord || undefined,
@@ -2113,6 +2117,15 @@ function parseTrailingIdentifierPart(input: string, endExclusive: number): { sta
     const start = input.lastIndexOf("`", end - 1);
     if (start < 0) return null;
     return { start, raw: input.slice(start, endExclusive) };
+  }
+
+  if (tailChar === "]") {
+    let start = end - 1;
+    while (start >= 0) {
+      if (input[start] === "[") return { start, raw: input.slice(start, endExclusive) };
+      start -= 1;
+    }
+    return null;
   }
 
   let start = end;
@@ -2305,19 +2318,24 @@ function detectComparisonLeftColumn(beforeCursor: string): string | undefined {
   return match?.[1];
 }
 
-function detectInsertColumnListContext(beforeCursor: string): { table: string; schema?: string } | null {
+function detectInsertColumnListContext(beforeCursor: string): { table: string; database?: string; schema?: string } | null {
   // Keep quoted identifiers intact so schema/table targets resolve to their
   // real names instead of placeholder string contents.
   const cleaned = beforeCursor.replace(/'[^']*'/g, "''");
-  const identifier = '(?:"[^"]+"|`[^`]+`|[A-Za-z_][\\w$]*)';
+  const identifier = '(?:"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*)';
   const qualifiedIdentifier = `${identifier}(?:\\.${identifier}){0,2}`;
   const match = new RegExp(`\\binsert\\s+into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
   if (!match) return null;
   const fullTable = match[1];
   if (!fullTable) return null;
-  const [first, second] = splitQualifiedName(fullTable);
-  if (second) return { table: second, schema: first! };
-  return { table: first! };
+  const parts = splitQualifiedNameParts(fullTable);
+  const table = parts[parts.length - 1];
+  if (!table) return null;
+  return {
+    table,
+    database: parts.length >= 3 ? parts[parts.length - 3] : undefined,
+    schema: parts.length >= 2 ? parts[parts.length - 2] : undefined,
+  };
 }
 
 function detectUpdateCompletionContext(beforeCursor: string): { target: { table: string; schema?: string }; afterTarget: boolean; inSetClause: boolean; afterSetAssignments: boolean } | null {
@@ -2576,7 +2594,8 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
   ]);
 
   // STRAIGHT_JOIN is a standalone MySQL table introducer, not a modifier followed by JOIN.
-  const pattern = /\b(?:from|join|straight_join|update|apply)\s+((?:"[^"]+"|`[^`]+`|[^\s,;()]+)(?:\.(?:"[^"]+"|`[^`]+`|[^\s,;()]+))?)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?/gi;
+  const identifier = '(?:"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$@#]*)';
+  const pattern = new RegExp(`\\b(?:from|join|straight_join|update|apply)\\s+(${identifier}(?:\\.${identifier}){0,3})(?:\\s+(?:as\\s+)?([A-Za-z_][\\w$]*))?`, "gi");
   const referenced: SqlCompletionReferencedTable[] = [];
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(sql)) !== null) {
@@ -2585,7 +2604,7 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
     if (alias && ALIAS_BLACKLIST.has(alias.toLowerCase())) {
       pattern.lastIndex = match.index + match[0].length - alias.length;
     }
-    const quotedName = !!rawName && (rawName.startsWith('"') || rawName.startsWith("`"));
+    const quotedName = !!rawName && (rawName.startsWith('"') || rawName.startsWith("`") || rawName.startsWith("["));
     if (!quotedName && rawName && ALIAS_BLACKLIST.has(rawName.toLowerCase())) continue;
     // Filter out SQL keywords that accidentally matched as aliases
     const cleanAlias = alias && !ALIAS_BLACKLIST.has(alias.toLowerCase()) ? alias : undefined;
@@ -2593,9 +2612,15 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
       referenced.push({ name: unquoteIdentifier(rawName), alias: cleanAlias });
       continue;
     }
-    const [first, second] = splitQualifiedName(rawName);
-    if (!first) continue;
-    const table = second ? { schema: first, name: second, alias: cleanAlias } : { name: first, alias: cleanAlias };
+    const parts = splitQualifiedNameParts(rawName);
+    const name = parts[parts.length - 1];
+    if (!name) continue;
+    const table: SqlCompletionReferencedTable = {
+      name,
+      database: parts.length >= 3 ? parts[parts.length - 3] : undefined,
+      schema: parts.length >= 2 ? parts[parts.length - 2] : undefined,
+      alias: cleanAlias,
+    };
     referenced.push(table);
   }
   return referenced;
@@ -2848,24 +2873,33 @@ function splitTopLevel(text: string, separator: string): string[] {
 }
 
 function splitQualifiedName(input: string): [string | undefined, string | undefined] {
+  const unquoted = splitQualifiedNameParts(input);
+  if (unquoted.length >= 2) return [unquoted[unquoted.length - 2], unquoted[unquoted.length - 1]];
+  return [unquoted[0], undefined];
+}
+
+function splitQualifiedNameParts(input: string): string[] {
   const parts: string[] = [];
   let current = "";
   let inDoubleQuote = false;
   let inBacktick = false;
+  let inBracket = false;
 
   for (let i = 0; i < input.length; i++) {
     const ch = input[i];
-    if (ch === '"' && !inBacktick) {
+    if (ch === '"' && !inBacktick && !inBracket) {
       inDoubleQuote = !inDoubleQuote;
       current += ch;
       continue;
     }
-    if (ch === "`" && !inDoubleQuote) {
+    if (ch === "`" && !inDoubleQuote && !inBracket) {
       inBacktick = !inBacktick;
       current += ch;
       continue;
     }
-    if (ch === "." && !inDoubleQuote && !inBacktick) {
+    if (ch === "[" && !inDoubleQuote && !inBacktick) inBracket = true;
+    if (ch === "]" && inBracket) inBracket = false;
+    if (ch === "." && !inDoubleQuote && !inBacktick && !inBracket) {
       parts.push(current.trim());
       current = "";
     } else {
@@ -2874,15 +2908,11 @@ function splitQualifiedName(input: string): [string | undefined, string | undefi
   }
   if (current.trim()) parts.push(current.trim());
 
-  const unquoted = parts.map((p) => unquoteIdentifier(p)).filter(Boolean);
-  // For three-part names, the completion model can carry schema.table today;
-  // keep the table as the final segment instead of accidentally using catalog.schema.
-  if (unquoted.length >= 2) return [unquoted[unquoted.length - 2], unquoted[unquoted.length - 1]];
-  return [unquoted[0], undefined];
+  return parts.map((p) => unquoteIdentifier(p)).filter(Boolean);
 }
 
 function unquoteIdentifier(value: string): string {
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("`") && value.endsWith("`"))) {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("`") && value.endsWith("`")) || (value.startsWith("[") && value.endsWith("]"))) {
     return value.slice(1, -1);
   }
   return value;
@@ -3585,11 +3615,12 @@ function columnsForInsertTarget(context: SqlCompletionContext, columnsByTable: M
   if (!context.insertTable) return [];
   const tableKey = normalizeIdentifierPart(context.insertTable);
   const schemaKey = context.insertSchema ? normalizeIdentifierPart(context.insertSchema) : undefined;
-  const qualifiedKey = schemaKey ? normalizeCompletionKey(`${context.insertSchema}.${context.insertTable}`) : undefined;
+  const databaseKey = context.insertDatabase ? normalizeIdentifierPart(context.insertDatabase) : undefined;
+  const qualifiedKey = schemaKey ? normalizeCompletionKey(`${context.insertDatabase ? `${context.insertDatabase}.` : ""}${context.insertSchema}.${context.insertTable}`) : undefined;
   return collectCompletionColumns(columnsByTable).filter((column) => {
     if (normalizeIdentifierPart(column.table) !== tableKey) return false;
     if (!schemaKey) return true;
-    if (column.schema && normalizeIdentifierPart(column.schema) === schemaKey) return true;
+    if (!databaseKey && column.schema && normalizeIdentifierPart(column.schema) === schemaKey) return true;
     return !!qualifiedKey && normalizeCompletionKey(column.key) === qualifiedKey;
   });
 }
@@ -3679,33 +3710,36 @@ function hasMatchingReferencedColumnPrefix(context: SqlCompletionContext, column
   return context.referencedTables.some((table) => columnsForReferencedTable(table, columnsByTable).some((column) => matchesPrefix(column.name, context.prefix)));
 }
 
-function qualifiedTableTargetFromContext(context: SqlCompletionContext): { schema: string; table: string } | null {
+function qualifiedTableTargetFromContext(context: SqlCompletionContext): { database?: string; schema: string; table: string } | null {
   const parts = context.qualifierParts ?? context.qualifier?.split(".").filter(Boolean) ?? [];
   if (parts.length < 2) return null;
   const table = parts[parts.length - 1];
   const schema = parts[parts.length - 2];
   if (!schema || !table) return null;
-  return { schema, table };
+  const database = parts.length >= 3 ? parts[parts.length - 3] : undefined;
+  return { database, schema, table };
 }
 
-function referencedTableMatchesColumnQualifier(table: SqlCompletionReferencedTable, qualifier: string, qualifierLower: string, qualifiedTarget: { schema: string; table: string } | null): boolean {
+function referencedTableMatchesColumnQualifier(table: SqlCompletionReferencedTable, qualifier: string, qualifierLower: string, qualifiedTarget: { database?: string; schema: string; table: string } | null): boolean {
   if (table.alias === qualifier || table.alias?.toLowerCase() === qualifierLower) return true;
   if (table.name === qualifier || table.name.toLowerCase() === qualifierLower) return true;
   if (!qualifiedTarget) return false;
   if (normalizeIdentifierPart(table.name) !== normalizeIdentifierPart(qualifiedTarget.table)) return false;
+  if (table.database && qualifiedTarget.database && normalizeIdentifierPart(table.database) !== normalizeIdentifierPart(qualifiedTarget.database)) return false;
   return !table.schema || normalizeIdentifierPart(table.schema) === normalizeIdentifierPart(qualifiedTarget.schema);
 }
 
 function columnMatchesReferencedTable(column: SqlCompletionColumn & { key: string }, table: SqlCompletionReferencedTable): boolean {
   if (normalizeIdentifierPart(column.table) !== normalizeIdentifierPart(table.name)) return false;
   if (!table.schema) return true;
-  return columnMatchesQualifiedTable(column, { schema: table.schema, table: table.name });
+  return columnMatchesQualifiedTable(column, { database: table.database, schema: table.schema, table: table.name });
 }
 
-function columnMatchesQualifiedTable(column: SqlCompletionColumn & { key: string }, target: { schema: string; table: string }): boolean {
+function columnMatchesQualifiedTable(column: SqlCompletionColumn & { key: string }, target: { database?: string; schema: string; table: string }): boolean {
   if (normalizeIdentifierPart(column.table) !== normalizeIdentifierPart(target.table)) return false;
-  if (column.schema && normalizeIdentifierPart(column.schema) === normalizeIdentifierPart(target.schema)) return true;
-  return normalizeCompletionKey(column.key) === normalizeCompletionKey(`${target.schema}.${target.table}`);
+  if (!target.database && column.schema && normalizeIdentifierPart(column.schema) === normalizeIdentifierPart(target.schema)) return true;
+  const key = `${target.database ? `${target.database}.` : ""}${target.schema}.${target.table}`;
+  return normalizeCompletionKey(column.key) === normalizeCompletionKey(key);
 }
 
 function normalizeCompletionKey(key: string): string {
@@ -3769,7 +3803,7 @@ function buildJoinConditionItems(context: SqlCompletionContext, columnsByTable: 
 }
 
 function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsByTable: Map<string, SqlCompletionColumn[]>): SqlCompletionColumn[] {
-  const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name];
+  const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name];
   for (const key of keys) {
     const columns = columnsByTable.get(key);
     if (columns) return applyReferencedColumnAliases(table, columns);
@@ -3779,7 +3813,7 @@ function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsB
 
 function foreignKeysForReferencedTable(table: SqlCompletionReferencedTable, foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>): SqlCompletionForeignKey[] {
   if (!foreignKeysByTable) return [];
-  const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name];
+  const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name];
   for (const key of keys) {
     const foreignKeys = foreignKeysByTable.get(key);
     if (foreignKeys) return foreignKeys;

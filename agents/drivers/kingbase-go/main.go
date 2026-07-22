@@ -377,6 +377,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_tables":
 		result, err := s.listTables(stringParam(params, "schema"), metadataListConstraintsFromParams(params))
 		return result, false, err
+	case "get_table_comment":
+		result, err := s.getTableComment(stringParam(params, "schema"), stringParam(params, "table"))
+		return result, false, err
 	case "list_objects":
 		result, err := s.listObjects(stringParam(params, "schema"), metadataListConstraintsFromParams(params))
 		return result, false, err

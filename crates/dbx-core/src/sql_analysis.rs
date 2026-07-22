@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -79,6 +80,7 @@ struct Analyzer {
     columns: Vec<SqlColumnReference>,
     scopes: Vec<SqlReferenceScope>,
     scope_stack: Vec<usize>,
+    cte_scope_stack: Vec<HashSet<String>>,
     next_scope_id: usize,
     is_sqlserver: bool,
 }
@@ -221,7 +223,9 @@ impl Analyzer {
         self.next_scope_id += 1;
         self.scopes.push(SqlReferenceScope { id: scope_id, parent_id });
         self.scope_stack.push(scope_id);
+        self.cte_scope_stack.push(HashSet::new());
         self.visit_query(query);
+        self.cte_scope_stack.pop();
         self.scope_stack.pop();
     }
 
@@ -233,9 +237,37 @@ impl Analyzer {
         self.scope_stack.last().copied()
     }
 
+    fn add_visible_cte(&mut self, ident: &Ident) {
+        let key = self.cte_name_key(ident);
+        if let Some(visible_ctes) = self.cte_scope_stack.last_mut() {
+            visible_ctes.insert(key);
+        }
+    }
+
+    fn is_visible_cte(&self, name: &ObjectName) -> bool {
+        if name.0.len() != 1 {
+            return false;
+        }
+        let Some(ident) = name.0.first().and_then(ObjectNamePart::as_ident) else {
+            return false;
+        };
+        let key = self.cte_name_key(ident);
+        self.cte_scope_stack.iter().rev().any(|visible_ctes| visible_ctes.contains(&key))
+    }
+
+    fn cte_name_key(&self, ident: &Ident) -> String {
+        if self.is_sqlserver || ident.quote_style.is_none() {
+            ident.value.to_ascii_lowercase()
+        } else {
+            ident.value.clone()
+        }
+    }
+
     fn visit_query(&mut self, query: &Query) {
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
+                // Add each name before its body: recursive/self and earlier CTEs are visible, later CTEs are not.
+                self.add_visible_cte(&cte.alias.name);
                 self.visit_child_query(&cte.query);
             }
         }
@@ -362,7 +394,8 @@ impl Analyzer {
     fn visit_table_factor(&mut self, factor: &TableFactor) {
         match factor {
             TableFactor::Table { name, alias, args, .. } => {
-                if args.is_none() {
+                // Qualified names remain physical objects even when their final component matches a visible CTE.
+                if args.is_none() && !self.is_visible_cte(name) {
                     if let Some(table) = table_reference_from_name(
                         name,
                         alias.as_ref().map(|a| a.name.value.clone()),
@@ -426,7 +459,7 @@ impl Analyzer {
             }
             Expr::InSubquery { expr, subquery, .. } => {
                 self.visit_expr(expr);
-                self.visit_query(subquery);
+                self.visit_child_query(subquery);
             }
             Expr::InUnnest { expr, array_expr, .. } => {
                 self.visit_expr(expr);

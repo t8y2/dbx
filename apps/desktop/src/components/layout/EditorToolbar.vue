@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, Layers, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste } from "@lucide/vue";
+import { Play, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, Layers, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -39,6 +39,7 @@ const emit = defineEmits<{
   explain: [];
   "update:explainMode": [mode: "explain" | "autotrace"];
   formatSql: [];
+  compressSql: [];
   toggleSqlKeywordCase: [];
   saveSql: [];
   openSql: [];
@@ -252,6 +253,14 @@ function databaseOptionIsProduction(database: string): boolean {
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.formatSql") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @click="emit('compressSql')">
+            <Minimize2 class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.compressSql") }}</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>

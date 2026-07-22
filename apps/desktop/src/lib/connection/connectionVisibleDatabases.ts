@@ -12,6 +12,8 @@ type VisibleDatabaseConnectionFields = Pick<
   "db_type" | "driver_profile" | "host" | "port" | "username" | "database" | "connection_string" | "url_params" | "redis_connection_mode" | "redis_sentinel_master" | "redis_sentinel_nodes" | "redis_cluster_nodes" | "etcd_endpoints" | "jdbc_driver_class"
 >;
 
+type VisibleObjectFilterConnectionFields = VisibleDatabaseConnectionFields & Pick<ConnectionConfig, "visible_databases" | "visible_schemas">;
+
 export function buildDraftVisibleDatabasesConnectionId(seed: string): string {
   return `${DRAFT_VISIBLE_DATABASES_PREFIX}${seed}`;
 }
@@ -36,6 +38,12 @@ export function appendVisibleDatabaseSelection(visibleDatabases: string[] | unde
 
 export function visibleDatabaseSelectionIsStale(previous: VisibleDatabaseConnectionFields, current: VisibleDatabaseConnectionFields): boolean {
   return visibleDatabaseFingerprint(previous) !== visibleDatabaseFingerprint(current);
+}
+
+export function visibleObjectFiltersNeedReset(previous: VisibleObjectFilterConnectionFields, current: VisibleObjectFilterConnectionFields): boolean {
+  const hasVisibleDatabaseFilter = Array.isArray(current.visible_databases);
+  const hasVisibleSchemaFilter = !!current.visible_schemas && Object.keys(current.visible_schemas).length > 0;
+  return (hasVisibleDatabaseFilter || hasVisibleSchemaFilter) && visibleDatabaseSelectionIsStale(previous, current);
 }
 
 function visibleDatabaseFingerprint(connection: VisibleDatabaseConnectionFields): string {

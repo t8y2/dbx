@@ -2,7 +2,7 @@ use dbx_core::connection::AppState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 pub struct LoginRateLimit {
@@ -18,6 +18,7 @@ pub struct WebState {
     pub password_hash: RwLock<Option<String>>,
     pub sessions: RwLock<HashSet<String>>,
     pub sse_channels: RwLock<HashMap<String, broadcast::Sender<String>>>,
+    pub table_import_channels: RwLock<HashMap<String, watch::Sender<String>>>,
     pub sql_file_executions: RwLock<HashMap<String, CancellationToken>>,
     pub login_rate_limit: Mutex<LoginRateLimit>,
     /// Table export temp files: export_id -> (file_path, format)

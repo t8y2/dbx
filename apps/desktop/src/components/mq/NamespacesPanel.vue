@@ -4,15 +4,19 @@ import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { NamespaceRef, NamespaceInfo, NamespaceConfig } from "@/types/mq";
 import { mqListNamespaces, mqCreateNamespace, mqDeleteNamespace } from "@/lib/backend/api";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 interface Props {
   connectionId: string;
   tenant?: string;
   supportsNamespaces: boolean;
+  supportsPermissions?: boolean;
   readOnly?: boolean;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  supportsPermissions: true,
+});
 const emit = defineEmits<{
   namespaceSelected: [namespace: string];
   namespaceRolesSelected: [namespace: string];
@@ -25,6 +29,9 @@ const loading = ref(false);
 const error = ref<string>();
 const showCreateDialog = ref(false);
 const selectedNamespace = ref<string>();
+const deleteTarget = ref<NamespaceInfo>();
+const showDeleteDialog = ref(false);
+const deleting = ref(false);
 
 const formData = ref({
   namespace: "",
@@ -86,11 +93,16 @@ async function handleCreate() {
   }
 }
 
-async function handleDelete(ns: NamespaceInfo) {
+function handleDelete(ns: NamespaceInfo) {
   if (!guardWritable()) return;
-  if (!confirm(t("mqNamespaces.confirmDelete", { name: ns.namespace }))) return;
-  if (!props.tenant) return;
-  loading.value = true;
+  deleteTarget.value = ns;
+  showDeleteDialog.value = true;
+}
+
+async function confirmDelete() {
+  const ns = deleteTarget.value;
+  if (!ns || !props.tenant) return;
+  deleting.value = true;
   error.value = undefined;
   try {
     const nsRef: NamespaceRef = {
@@ -101,11 +113,12 @@ async function handleDelete(ns: NamespaceInfo) {
     if (selectedNamespace.value === ns.namespace) {
       selectedNamespace.value = undefined;
     }
+    showDeleteDialog.value = false;
     await loadNamespaces();
   } catch (e: unknown) {
     error.value = formatError(e);
   } finally {
-    loading.value = false;
+    deleting.value = false;
   }
 }
 
@@ -150,7 +163,7 @@ watch(
           <tr>
             <th>{{ t("mqNamespaces.name") }}</th>
             <th>{{ t("mqNamespaces.tenant") }}</th>
-            <th>{{ t("mqNamespaces.adminRoles") }}</th>
+            <th v-if="supportsPermissions">{{ t("mqNamespaces.adminRoles") }}</th>
             <th>{{ t("mqNamespaces.actions") }}</th>
           </tr>
         </thead>
@@ -158,14 +171,14 @@ watch(
           <tr v-for="ns in namespaces" :key="ns.namespace" :class="{ selected: selectedNamespace === ns.namespace }" @click="selectNamespace(ns)">
             <td class="namespace-name">{{ ns.namespace }}</td>
             <td>{{ ns.tenant }}</td>
-            <td>
+            <td v-if="supportsPermissions">
               <span v-if="ns.adminRoles.length" class="tag-list">
                 <span v-for="role in ns.adminRoles" :key="role" class="tag">{{ role }}</span>
               </span>
               <span v-else class="text-muted">{{ t("mqNamespaces.none") }}</span>
             </td>
             <td class="actions">
-              <button @click.stop="editNamespaceRoles(ns)" class="btn-sm">{{ t("mqNamespaces.editRoles") }}</button>
+              <button v-if="supportsPermissions" @click.stop="editNamespaceRoles(ns)" class="btn-sm">{{ t("mqNamespaces.editRoles") }}</button>
               <button @click.stop="handleDelete(ns)" :disabled="readOnly" class="btn-sm btn-danger">{{ t("mqNamespaces.delete") }}</button>
             </td>
           </tr>
@@ -197,6 +210,9 @@ watch(
         </div>
       </div>
     </div>
+
+    <!-- Delete Confirm Dialog -->
+    <DangerConfirmDialog v-model:open="showDeleteDialog" :title="t('mqNamespaces.delete')" :message="t('mqNamespaces.confirmDelete', { name: deleteTarget?.namespace ?? '' })" :confirm-label="t('mqNamespaces.delete')" :loading="deleting" :close-on-confirm="false" @confirm="confirmDelete" />
   </div>
 </template>
 

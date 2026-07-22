@@ -2,7 +2,7 @@
 
 ## 概述
 
-该功能为 DBX 增加了消息队列（Message Queue）管理能力，支持 **Apache Pulsar**、**Apache Kafka** 与 **Apache RocketMQ**。三种系统在连接对话框中为独立顶层入口；控制台复用 `MqAdminConsole` 壳层，按 `systemKind` 与 capabilities 展示可用面板。
+该功能为 DBX 增加了消息队列（Message Queue）管理能力，支持 **Apache Pulsar**、**Apache Kafka**、**Apache RocketMQ** 与 **RabbitMQ**。四种系统在连接对话框中为独立顶层入口；控制台复用 `MqAdminConsole` 壳层，按 `systemKind` 与 capabilities 展示可用面板。
 
 ## 功能特性
 
@@ -420,6 +420,41 @@ docker run -d --name dbx-rocketmq-broker -p 10911:10911 \
   -e NAMESRV_ADDR=host.docker.internal:9876 \
   apache/rocketmq:5.3.1 sh mqbroker -n host.docker.internal:9876
 ```
+
+### RabbitMQ 连接示例
+
+```json
+{
+  "db_type": "mq",
+  "driver_profile": "rabbitmq",
+  "driver_label": "RabbitMQ",
+  "external_config": {
+    "systemKind": "rabbitmq",
+    "adminUrl": "",
+    "auth": { "kind": "basic", "username": "guest", "password": "guest" },
+    "extra": {
+      "addresses": "127.0.0.1:5672",
+      "virtualHost": "/"
+    }
+  }
+}
+```
+
+Agent 构建与安装：
+
+```bash
+cd agents
+./gradlew :rabbitmq:shadowJar
+# 将 shadow JAR 安装到 DBX 数据目录 agents/drivers/rabbitmq/agent.jar
+```
+
+Docker 快速启动（AMQP 5672 + Management 15672，仅用于本地验证）：
+
+```bash
+docker run -d --name dbx-rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
+```
+
+说明：RabbitMQ 适配器将 topic 映射为队列（queue），支持队列列表/声明/删除、清空队列（purge）、消费者列表、消息预览（basic.get + requeue）与发送（basic.publish）；vhost 映射为 namespace，可在控制台查看/创建/删除。AMQP 操作按 vhost 透传（agent 侧 per-vhost 通道缓存），tenant 语义不适用（固定合成 `_rabbitmq`）。
 
 ### Kafka 适配器参考
 

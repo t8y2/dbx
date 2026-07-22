@@ -435,6 +435,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         schema: Some("dbo".to_string()),
         sql: sql.clone(),
         query_base_sql: sql,
+        setup_sql: Vec::new(),
         database_type: DatabaseType::SqlServer,
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),
@@ -703,4 +704,139 @@ async fn live_sqlserver_completion_assistant_searches_metadata_before_limiting()
 
     let cleanup = format!("DROP TABLE [{schema}].[{table}];");
     let _ = dbx_core::db::sqlserver::execute_batch(&mut client, &cleanup).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server instance"]
+async fn live_sqlserver_cross_database_metadata_and_query() {
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let default_database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "master".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let database_a = format!("dbx_completion_a_{}", &suffix[..8]);
+    let database_b = format!("dbx_completion_b_{}", &suffix[..8]);
+
+    let mut master =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some("master"), None, Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server master");
+    dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!("CREATE DATABASE [{database_a}]; CREATE DATABASE [{database_b}];"),
+    )
+    .await
+    .expect("create completion databases");
+
+    let mut client_a = dbx_core::db::sqlserver::connect(
+        &host,
+        port,
+        &user,
+        &password,
+        Some(&database_a),
+        None,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("connect database A");
+    let mut client_b = dbx_core::db::sqlserver::connect(
+        &host,
+        port,
+        &user,
+        &password,
+        Some(&database_b),
+        None,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("connect database B");
+    dbx_core::db::sqlserver::execute_batch(&mut client_a, "CREATE SCHEMA [IN]")
+        .await
+        .expect("create database A IN schema");
+    dbx_core::db::sqlserver::execute_batch(&mut client_a, "CREATE SCHEMA [OUT]")
+        .await
+        .expect("create database A OUT schema");
+    dbx_core::db::sqlserver::execute_batch(
+        &mut client_a,
+        "CREATE TABLE [IN].[orders_in] (id INT PRIMARY KEY); CREATE TABLE [OUT].[orders] (id INT PRIMARY KEY, source_marker NVARCHAR(20)); INSERT INTO [OUT].[orders] VALUES (1, N'A');",
+    )
+    .await
+    .expect("create database A fixtures");
+    dbx_core::db::sqlserver::execute_batch(&mut client_b, "CREATE SCHEMA [OUT]")
+        .await
+        .expect("create database B OUT schema");
+    dbx_core::db::sqlserver::execute_batch(
+        &mut client_b,
+        "CREATE TABLE [OUT].[orders_out] (id INT PRIMARY KEY); CREATE TABLE [OUT].[orders] (id INT PRIMARY KEY, target_marker NVARCHAR(20)); INSERT INTO [OUT].[orders] VALUES (1, N'B');",
+    )
+    .await
+    .expect("create database B fixtures");
+    drop(client_a);
+    drop(client_b);
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-cross-database-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "live-sqlserver-cross-database";
+    let mut config = live_sqlserver_config(connection_id, &default_database);
+    config.host = host;
+    config.port = port;
+    config.username = user;
+    config.password = password;
+    state.configs.write().await.insert(connection_id.to_string(), config);
+
+    let tables_a = dbx_core::schema::list_tables_core(
+        &state,
+        connection_id,
+        &database_a,
+        "IN",
+        Some("orders"),
+        Some(20),
+        None,
+        None,
+    )
+    .await
+    .expect("list database A tables");
+    let tables_b = dbx_core::schema::list_tables_core(
+        &state,
+        connection_id,
+        &database_b,
+        "OUT",
+        Some("orders"),
+        Some(20),
+        None,
+        None,
+    )
+    .await
+    .expect("list database B tables");
+    assert!(tables_a.iter().any(|table| table.name == "orders_in"));
+    assert!(tables_b.iter().any(|table| table.name == "orders_out"));
+
+    let columns_a = dbx_core::schema::get_columns_core(&state, connection_id, &database_a, "OUT", "orders")
+        .await
+        .expect("load database A columns");
+    let columns_b = dbx_core::schema::get_columns_core(&state, connection_id, &database_b, "OUT", "orders")
+        .await
+        .expect("load database B columns");
+    assert!(columns_a.iter().any(|column| column.name == "source_marker"));
+    assert!(!columns_a.iter().any(|column| column.name == "target_marker"));
+    assert!(columns_b.iter().any(|column| column.name == "target_marker"));
+    assert!(!columns_b.iter().any(|column| column.name == "source_marker"));
+
+    let query = format!("SELECT a.source_marker, b.target_marker FROM [{database_a}].[OUT].[orders] a JOIN [{database_b}].[OUT].[orders] b ON a.id = b.id");
+    let result =
+        dbx_core::query::execute_sql_statement(&state, connection_id, &default_database, &query, Some("dbo"), None)
+            .await
+            .expect("execute cross-database join");
+    assert_eq!(result.rows, vec![vec![serde_json::json!("A"), serde_json::json!("B")]]);
+
+    state.remove_connection_pools_detached(connection_id).await;
+    for database in [&database_a, &database_b] {
+        let cleanup =
+            format!("ALTER DATABASE [{database}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{database}];");
+        dbx_core::db::sqlserver::execute_batch(&mut master, &cleanup).await.expect("drop completion database");
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -13,7 +13,19 @@ import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileJson, Fi
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import { autoMapImportColumns, buildTableImportParseOptions, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, suggestImportTargetDataTypes, validateImportMappings, type TableImportWizardStep } from "@/lib/table/tableImport";
+import {
+  autoMapImportColumns,
+  buildTableImportParseOptions,
+  formatTableImportElapsed,
+  nextTableImportWizardStep,
+  previousTableImportWizardStep,
+  requiredImportTargetColumns,
+  resolveTableImportElapsed,
+  suggestImportTargetDataTypes,
+  tableImportProgressPercent,
+  validateImportMappings,
+  type TableImportWizardStep,
+} from "@/lib/table/tableImport";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { ColumnInfo } from "@/types/database";
@@ -83,7 +95,10 @@ const emptyStringAsNull = ref(true);
 const selectedSheet = ref("");
 const jsonShape = ref<api.TableImportJsonShape>("auto");
 const previewLimit = ref(50);
+const liveElapsedMs = ref(0);
 let previewReloadTimer: ReturnType<typeof setTimeout> | null = null;
+let importElapsedTimer: ReturnType<typeof setInterval> | null = null;
+let importStartedAt = 0;
 let dataTypeOptionsRequestId = 0;
 let previewRequestId = 0;
 let batchEncodingRequestId = 0;
@@ -158,11 +173,9 @@ const canGoNext = computed(() => {
   if (wizardStep.value === "mapping") return mappingValidation.value.valid;
   return false;
 });
-const progressPercent = computed(() => {
-  const p = progress.value;
-  if (!p || p.totalRows <= 0) return 0;
-  return Math.min(100, Math.round((p.rowsImported / p.totalRows) * 100));
-});
+const rawProgressPercent = computed(() => tableImportProgressPercent(progress.value));
+const progressPercentFloor = ref(0);
+const progressPercent = computed(() => Math.max(rawProgressPercent.value, progressPercentFloor.value));
 const currentStepIndex = computed(() => wizardSteps.findIndex((step) => step.value === wizardStep.value));
 const targetLabel = computed(() => {
   const pieces = [selectedConnection.value?.name, props.prefillDatabase, props.prefillSchema, targetTableName.value].filter(Boolean);
@@ -181,9 +194,43 @@ const createColumnSummaries = computed(() =>
   })),
 );
 const parseOptions = computed<api.TableImportParseOptions>(() => taskParseOptions(sourceFormat.value, selectedSheet.value));
-const terminalStatus = computed(() => progress.value?.status && ["done", "error", "cancelled"].includes(progress.value.status));
+const terminalStatus = computed(() => !!progress.value?.status && ["done", "error", "cancelled"].includes(progress.value.status));
+const displayedElapsedMs = computed(() => resolveTableImportElapsed(liveElapsedMs.value, progress.value?.elapsedMs, terminalStatus.value));
+const progressLabelKey = computed(() => {
+  if (terminalStatus.value) return `tableImport.status_${progress.value?.status || "idle"}`;
+  return `tableImport.phase_${progress.value?.phase || "writing"}`;
+});
+
+function previewRowsLabel(currentPreview: api.TableImportPreview | null | undefined): string {
+  if (!currentPreview) return "-";
+  if (currentPreview.totalRowsExact !== false) return currentPreview.totalRows.toLocaleString();
+  return t("tableImport.previewPartial", { rows: currentPreview.rows.length });
+}
+
+function stopImportElapsedClock() {
+  if (importElapsedTimer) {
+    clearInterval(importElapsedTimer);
+    importElapsedTimer = null;
+  }
+}
+
+function refreshImportElapsedClock() {
+  if (importStartedAt > 0) {
+    liveElapsedMs.value = Math.max(0, Math.round(performance.now() - importStartedAt));
+  }
+}
+
+function startImportElapsedClock() {
+  stopImportElapsedClock();
+  importStartedAt = performance.now();
+  liveElapsedMs.value = 0;
+  importElapsedTimer = setInterval(refreshImportElapsedClock, 100);
+}
 
 function resetState() {
+  stopImportElapsedClock();
+  importStartedAt = 0;
+  liveElapsedMs.value = 0;
   previewRequestId++;
   batchEncodingRequestId++;
   if (previewReloadTimer) {
@@ -274,10 +321,21 @@ function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): 
 
 function importParseOptions(format: api.TableImportSourceFormat, currentPreview: api.TableImportPreview, sheetName = ""): api.TableImportParseOptions {
   const options = taskParseOptions(format, sheetName);
-  if (isDelimitedFormat(format) && options.encoding === "auto" && currentPreview.effectiveEncoding) {
+  if (isDelimitedFormat(format) && currentPreview.totalRowsExact !== false && options.encoding === "auto" && currentPreview.effectiveEncoding) {
     options.encoding = currentPreview.effectiveEncoding;
   }
   return options;
+}
+
+function preparedImportSource(currentPreview: api.TableImportPreview): api.TableImportPreparedSource {
+  return {
+    fingerprint: currentPreview.sourceFingerprint,
+    columns: currentPreview.columns,
+    rows: currentPreview.rows,
+    totalRows: currentPreview.totalRows,
+    totalRowsExact: currentPreview.totalRowsExact !== false,
+    effectiveEncoding: currentPreview.effectiveEncoding ?? null,
+  };
 }
 
 function mergeDataTypeOptions(...groups: readonly string[][]): string[] {
@@ -358,7 +416,9 @@ async function loadTargetColumns() {
 }
 
 async function previewSelectedImportFile(fileOrPath: string | File) {
-  return api.previewTableImportFile(fileOrPath, {
+  const reusablePreview = preview.value?.sourceRef ? preview.value : null;
+  return api.previewTableImportFile(reusablePreview?.filePath || fileOrPath, {
+    sourceRef: reusablePreview?.sourceRef || null,
     sourceFormat: sourceFormat.value,
     parseOptions: parseOptions.value,
     previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -445,20 +505,22 @@ async function prepareBatchSources(sources: ImportSource[]) {
       });
       const sheets = format === "excel" && initialPreview.sheets?.length ? initialPreview.sheets : [""];
       for (const sheetName of sheets) {
-        const taskPreview =
-          sheetName && sheetName !== initialPreview.sheets?.[0]
-            ? await api.previewTableImportFile(source, {
-                sourceFormat: format,
-                parseOptions: taskParseOptions(format, sheetName),
-                previewLimit: Math.max(1, Number(previewLimit.value) || 50),
-              })
-            : initialPreview;
+        const reusableSource = initialPreview.sourceRef ? initialPreview.filePath : source;
+        const effectiveSheetName = sheetName && sheetName === initialPreview.sheets?.[0] ? "" : sheetName;
+        const taskPreview = effectiveSheetName
+          ? await api.previewTableImportFile(reusableSource, {
+              sourceRef: initialPreview.sourceRef || null,
+              sourceFormat: format,
+              parseOptions: taskParseOptions(format, effectiveSheetName),
+              previewLimit: Math.max(1, Number(previewLimit.value) || 50),
+            })
+          : initialPreview;
         const tableBase = sheetName ? `${suggestedTableName(sourceName(source))}_${sheetName}` : sourceName(source);
         tasks.push({
           id: uuid(),
           source,
           format,
-          sheetName,
+          sheetName: effectiveSheetName,
           tableName: uniqueTableName(tableBase, usedNames),
           preview: taskPreview,
           columnMapping: Object.fromEntries(taskPreview.columns.map((column) => [column, column])),
@@ -591,15 +653,22 @@ async function startImport() {
   const tableName = targetTableName.value;
   if (!canImport.value || !currentPreview || !props.prefillConnectionId || !tableName) return;
   running.value = true;
+  progressPercentFloor.value = 0;
   cancelling.value = false;
   errorMessage.value = "";
   wizardStep.value = "execution";
   importId.value = uuid();
+  startImportElapsedClock();
   progress.value = {
     importId: importId.value,
     status: "running",
+    phase: "preparing",
     rowsImported: 0,
     totalRows: currentPreview.totalRows,
+    totalRowsExact: currentPreview.totalRowsExact !== false,
+    bytesRead: 0,
+    totalBytes: currentPreview.sizeBytes,
+    elapsedMs: 0,
   };
 
   try {
@@ -620,12 +689,13 @@ async function startImport() {
         createTable: targetMode.value === "create",
         batchSize: Math.max(1, Number(batchSize.value) || 500),
         dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
+        preparedSource: preparedImportSource(currentPreview),
       },
       (nextProgress) => {
-        progress.value = nextProgress;
+        progress.value = { ...nextProgress, elapsedMs: nextProgress.elapsedMs ?? liveElapsedMs.value };
       },
     );
-    progress.value = { importId: summary.importId, status: "done", rowsImported: summary.rowsImported, totalRows: summary.totalRows };
+    progress.value = { importId: summary.importId, status: "done", rowsImported: summary.rowsImported, totalRows: summary.totalRows, elapsedMs: summary.elapsedMs };
     toast(t("tableImport.success", { count: summary.rowsImported }), 2500);
     store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, tableName);
     if (targetMode.value === "create") {
@@ -641,9 +711,12 @@ async function startImport() {
       status: progress.value?.status === "cancelled" ? "cancelled" : "error",
       rowsImported: progress.value?.rowsImported ?? 0,
       totalRows: progress.value?.totalRows ?? currentPreview.totalRows,
+      elapsedMs: progress.value?.elapsedMs ?? liveElapsedMs.value,
       error: message,
     };
   } finally {
+    refreshImportElapsedClock();
+    stopImportElapsedClock();
     running.value = false;
     cancelling.value = false;
   }
@@ -652,13 +725,18 @@ async function startImport() {
 async function startBatchImport() {
   if (!props.prefillConnectionId || !batchTasks.value.length || running.value) return;
   running.value = true;
+  progressPercentFloor.value = 0;
   cancelling.value = false;
   errorMessage.value = "";
   wizardStep.value = "execution";
-  const totalRows = batchTasks.value.reduce((sum, task) => sum + task.preview.totalRows, 0);
+  const totalRowsExact = batchTasks.value.every((task) => task.preview.totalRowsExact !== false);
+  const totalRows = totalRowsExact ? batchTasks.value.reduce((sum, task) => sum + task.preview.totalRows, 0) : 0;
+  const totalBytes = batchTasks.value.reduce((sum, task) => sum + task.preview.sizeBytes, 0);
   let completedRows = 0;
+  let completedBytes = 0;
   importId.value = uuid();
-  progress.value = { importId: importId.value, status: "running", rowsImported: 0, totalRows };
+  startImportElapsedClock();
+  progress.value = { importId: importId.value, status: "running", phase: "preparing", rowsImported: 0, totalRows, totalRowsExact, bytesRead: 0, totalBytes, elapsedMs: 0 };
 
   try {
     const tableNames = batchTasks.value.map((task) => task.tableName.trim().toLowerCase());
@@ -696,18 +774,35 @@ async function startBatchImport() {
           createTable: true,
           batchSize: Math.max(1, Number(batchSize.value) || 500),
           dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
+          preparedSource: preparedImportSource(task.preview),
+          retainSource: true,
         },
         (nextProgress) => {
           task.rowsImported = nextProgress.rowsImported;
-          progress.value = { ...nextProgress, rowsImported: completedRows + nextProgress.rowsImported, totalRows };
+          const hasRemainingTasks = index < batchTasks.value.length - 1;
+          const aggregateStatus = nextProgress.status === "done" && hasRemainingTasks ? "running" : nextProgress.status;
+          const aggregatePhase = nextProgress.status === "done" && hasRemainingTasks ? "preparing" : nextProgress.phase;
+          progress.value = {
+            ...nextProgress,
+            status: aggregateStatus,
+            phase: aggregatePhase,
+            rowsImported: completedRows + nextProgress.rowsImported,
+            totalRows,
+            totalRowsExact,
+            bytesRead: completedBytes + (nextProgress.bytesRead ?? 0),
+            totalBytes,
+            elapsedMs: liveElapsedMs.value,
+          };
         },
       );
       task.status = "done";
       task.rowsImported = summary.rowsImported;
       completedRows += summary.rowsImported;
+      completedBytes += task.preview.sizeBytes;
       store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, task.tableName);
     }
-    progress.value = { importId: importId.value, status: "done", rowsImported: completedRows, totalRows };
+    refreshImportElapsedClock();
+    progress.value = { importId: importId.value, status: "done", phase: "done", rowsImported: completedRows, totalRows: completedRows, totalRowsExact: true, bytesRead: totalBytes, totalBytes, elapsedMs: liveElapsedMs.value };
     toast(t("tableImport.success", { count: completedRows }), 2500);
     store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined).catch((error) => {
       console.warn("[DBX][table-import:refresh-created-table-failed]", error);
@@ -725,12 +820,25 @@ async function startBatchImport() {
       status: progress.value?.status === "cancelled" ? "cancelled" : "error",
       rowsImported: progress.value?.rowsImported ?? completedRows,
       totalRows,
+      elapsedMs: progress.value?.elapsedMs ?? liveElapsedMs.value,
       error: message,
     };
   } finally {
+    refreshImportElapsedClock();
+    stopImportElapsedClock();
+    await releaseTableImportSources();
     running.value = false;
     cancelling.value = false;
   }
+}
+
+async function releaseTableImportSources() {
+  const sourceRefs = new Set<string>();
+  if (preview.value?.sourceRef) sourceRefs.add(preview.value.sourceRef);
+  for (const task of batchTasks.value) {
+    if (task.preview.sourceRef) sourceRefs.add(task.preview.sourceRef);
+  }
+  await Promise.allSettled([...sourceRefs].map((sourceRef) => api.releaseTableImportSource(sourceRef)));
 }
 
 async function cancelImport() {
@@ -769,7 +877,9 @@ async function reloadBatchPreviewsForEncoding() {
   try {
     for (const task of batchTasks.value) {
       if (!isDelimitedFormat(task.format)) continue;
-      const nextPreview = await api.previewTableImportFile(task.source, {
+      const reusableSource = task.preview.sourceRef ? task.preview.filePath : task.source;
+      const nextPreview = await api.previewTableImportFile(reusableSource, {
+        sourceRef: task.preview.sourceRef || null,
         sourceFormat: task.format,
         parseOptions: taskParseOptions(task.format, task.sheetName),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -797,6 +907,8 @@ watch(
       resetState();
       void loadTargetColumns();
       void loadDataTypeOptions();
+    } else if (!running.value) {
+      void releaseTableImportSources();
     }
   },
   { immediate: true },
@@ -818,11 +930,19 @@ watch(targetMode, (mode) => {
     void loadDataTypeOptions();
   }
 });
+
+watch(rawProgressPercent, (percent) => {
+  if (progress.value?.status === "running") {
+    progressPercentFloor.value = Math.max(progressPercentFloor.value, percent);
+  } else if (progress.value?.status === "done") {
+    progressPercentFloor.value = 100;
+  }
+});
 </script>
 
 <template>
   <Dialog v-model:open="open">
-    <DialogScrollContent class="flex max-h-[calc(100dvh-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
+    <DialogScrollContent class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
       <DialogHeader class="shrink-0 pr-8">
         <DialogTitle class="flex items-center gap-2 text-base">
           <FileUp class="h-4 w-4" />
@@ -1056,7 +1176,9 @@ watch(targetMode, (mode) => {
               <RefreshCw v-else class="mr-1.5 h-3.5 w-3.5" />
               {{ preview ? t("tableImport.reloadPreview") : t("tableImport.loadPreview") }}
             </Button>
-            <span v-if="preview" class="text-xs text-muted-foreground">{{ t("tableImport.previewReady", { rows: preview.totalRows, columns: preview.columns.length }) }}</span>
+            <span v-if="preview" class="text-xs text-muted-foreground">
+              {{ preview.totalRowsExact !== false ? t("tableImport.previewReady", { rows: preview.totalRows, columns: preview.columns.length }) : t("tableImport.previewReadyPartial", { rows: preview.rows.length, columns: preview.columns.length }) }}
+            </span>
           </div>
         </div>
 
@@ -1068,7 +1190,7 @@ watch(targetMode, (mode) => {
             </div>
             <div class="rounded-md border px-3 py-2">
               <div class="text-muted-foreground">{{ t("tableImport.rows") }}</div>
-              <div class="font-medium">{{ preview.totalRows.toLocaleString() }}</div>
+              <div class="font-medium">{{ previewRowsLabel(preview) }}</div>
             </div>
             <div class="rounded-md border px-3 py-2">
               <div class="text-muted-foreground">{{ t("tableImport.mapped") }}</div>
@@ -1165,7 +1287,7 @@ watch(targetMode, (mode) => {
             </div>
             <div class="rounded-md border px-3 py-2">
               <div class="text-muted-foreground">{{ t("tableImport.rows") }}</div>
-              <div class="font-medium">{{ preview?.totalRows.toLocaleString() }}</div>
+              <div class="font-medium">{{ previewRowsLabel(preview) }}</div>
             </div>
             <div class="rounded-md border px-3 py-2">
               <div class="text-muted-foreground">{{ t("tableImport.mapped") }}</div>
@@ -1226,14 +1348,19 @@ watch(targetMode, (mode) => {
         <div v-else class="space-y-4">
           <div class="rounded-md border px-4 py-5">
             <div class="flex items-center gap-3">
-              <Loader2 v-if="running && !cancelling" class="h-5 w-5 animate-spin text-primary" />
-              <Square v-else-if="cancelling || progress?.status === 'cancelled'" class="h-5 w-5 fill-current text-destructive" />
+              <Square v-if="cancelling || progress?.status === 'cancelled'" class="h-5 w-5 fill-current text-destructive" />
               <CheckCircle2 v-else-if="progress?.status === 'done'" class="h-5 w-5 text-emerald-600" />
               <AlertTriangle v-else-if="progress?.status === 'error'" class="h-5 w-5 text-destructive" />
+              <Loader2 v-else-if="running" class="h-5 w-5 animate-spin text-primary" />
               <FileUp v-else class="h-5 w-5 text-muted-foreground" />
               <div class="min-w-0 flex-1">
-                <div class="text-sm font-medium">{{ t(`tableImport.status_${progress?.status || "idle"}`) }}</div>
-                <div class="mt-1 text-xs text-muted-foreground">{{ progress?.rowsImported ?? 0 }} / {{ progress?.totalRows ?? preview?.totalRows ?? 0 }} · {{ progressPercent }}%</div>
+                <div class="text-sm font-medium">{{ t(progressLabelKey) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">
+                  <template v-if="progress?.totalRowsExact !== false && (progress?.totalRows ?? 0) > 0">{{ progress?.rowsImported ?? 0 }} / {{ progress?.totalRows ?? 0 }}</template>
+                  <template v-else>{{ progress?.rowsImported ?? 0 }} {{ t("tableImport.rowsImported") }}</template>
+                  · {{ progressPercent }}% ·
+                  {{ t("tableImport.elapsed", { duration: formatTableImportElapsed(displayedElapsedMs) }) }}
+                </div>
               </div>
             </div>
             <div class="mt-4 h-2 overflow-hidden rounded bg-muted">

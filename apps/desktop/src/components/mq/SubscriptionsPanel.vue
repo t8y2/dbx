@@ -6,6 +6,7 @@ import type { TopicRef, TopicInfo, SubscriptionInfo, ResetPosition, SkipCount, P
 import { mqListSubscriptions, mqCreateSubscription, mqDeleteSubscription, mqResetCursor, mqSkipMessages, mqClearBacklog, mqPeekMessages, mqExpireMessages } from "@/lib/backend/api";
 import RocketMqConsumerGroupDialogs, { type RocketMqConsumerGroupDialogKind } from "./rocketmq/RocketMqConsumerGroupDialogs.vue";
 import MqTypeFilterBar from "./shared/MqTypeFilterBar.vue";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { DEFAULT_ROCKETMQ_CONSUMER_GROUP_TYPE_FILTERS, matchesRocketMqConsumerGroupTypeFilters, resolveRocketMqConsumerGroupMessageModel, resolveRocketMqConsumerGroupType, ROCKETMQ_CONSUMER_GROUP_TYPES, type RocketMqConsumerGroupType } from "@/lib/mq/rocketmqConsumerGroupTypes";
 
 interface Props {
@@ -43,6 +44,12 @@ const selectedSub = ref<SubscriptionInfo>();
 const peekedMessages = ref<PeekedMessage[]>([]);
 const peekLoading = ref(false);
 const peekCount = ref(5);
+const deleteTarget = ref<SubscriptionInfo>();
+const showDeleteDialog = ref(false);
+const deleting = ref(false);
+const clearBacklogTarget = ref<SubscriptionInfo>();
+const showClearBacklogDialog = ref(false);
+const clearingBacklog = ref(false);
 
 const formData = ref({
   subName: "",
@@ -122,7 +129,7 @@ function getListTopicRef(): TopicRef | null {
   if (!props.topic) return null;
   return {
     tenant: props.tenant,
-    namespace: props.namespace,
+    namespace: props.topic.namespace || props.namespace,
     topic: props.topic.shortName,
     persistent: props.topic.persistent,
     partitioned: props.topic.partitioned,
@@ -133,7 +140,7 @@ function getPulsarTopicRef(): TopicRef | null {
   if (!props.tenant || !props.namespace || !props.topic) return null;
   return {
     tenant: props.tenant,
-    namespace: props.namespace,
+    namespace: props.topic.namespace || props.namespace,
     topic: props.topic.shortName,
     persistent: props.topic.persistent,
     partitioned: props.topic.partitioned,
@@ -246,20 +253,27 @@ async function handleCreate() {
   }
 }
 
-async function handleDelete(sub: SubscriptionInfo) {
+function handleDelete(sub: SubscriptionInfo) {
   if (!guardWritable()) return;
-  if (!confirm(t("mqSubscriptions.confirmDelete", { name: sub.name }))) return;
+  deleteTarget.value = sub;
+  showDeleteDialog.value = true;
+}
+
+async function confirmDelete() {
+  const sub = deleteTarget.value;
+  if (!sub) return;
   const topicRef = getListTopicRef();
   if (!topicRef) return;
-  loading.value = true;
+  deleting.value = true;
   error.value = undefined;
   try {
     await mqDeleteSubscription(props.connectionId, topicRef, sub.name, false);
+    showDeleteDialog.value = false;
     await loadSubscriptions();
   } catch (e: unknown) {
     error.value = formatError(e);
   } finally {
-    loading.value = false;
+    deleting.value = false;
   }
 }
 
@@ -304,20 +318,27 @@ async function handleSkipMessages() {
   }
 }
 
-async function handleClearBacklog(sub: SubscriptionInfo) {
+function handleClearBacklog(sub: SubscriptionInfo) {
   if (!guardWritable()) return;
-  if (!confirm(t("mqSubscriptions.confirmClearBacklog", { name: sub.name }))) return;
+  clearBacklogTarget.value = sub;
+  showClearBacklogDialog.value = true;
+}
+
+async function confirmClearBacklog() {
+  const sub = clearBacklogTarget.value;
+  if (!sub) return;
   const topicRef = getPulsarTopicRef();
   if (!topicRef) return;
-  loading.value = true;
+  clearingBacklog.value = true;
   error.value = undefined;
   try {
     await mqClearBacklog(props.connectionId, topicRef, sub.name);
+    showClearBacklogDialog.value = false;
     await loadSubscriptions();
   } catch (e: unknown) {
     error.value = formatError(e);
   } finally {
-    loading.value = false;
+    clearingBacklog.value = false;
   }
 }
 
@@ -628,6 +649,19 @@ watch(
         </div>
       </div>
     </div>
+    <!-- Delete Confirm Dialog -->
+    <DangerConfirmDialog v-model:open="showDeleteDialog" :title="t('mqSubscriptions.delete')" :message="t('mqSubscriptions.confirmDelete', { name: deleteTarget?.name ?? '' })" :confirm-label="t('mqSubscriptions.delete')" :loading="deleting" :close-on-confirm="false" @confirm="confirmDelete" />
+
+    <!-- Clear Backlog Confirm Dialog -->
+    <DangerConfirmDialog
+      v-model:open="showClearBacklogDialog"
+      :title="t('mqSubscriptions.clearBacklog')"
+      :message="t('mqSubscriptions.confirmClearBacklog', { name: clearBacklogTarget?.name ?? '' })"
+      :confirm-label="t('mqSubscriptions.clearBacklog')"
+      :loading="clearingBacklog"
+      :close-on-confirm="false"
+      @confirm="confirmClearBacklog"
+    />
   </div>
 </template>
 

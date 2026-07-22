@@ -2054,7 +2054,51 @@ test("detects INSERT INTO column list with three-part qualified table", () => {
   const context = getSqlCompletionContext(sql, sql.length);
 
   assert.equal(context.insertTable, "users");
+  assert.equal(context.insertDatabase, "analytics");
   assert.equal(context.insertSchema, "public");
+});
+
+test("detects SQL Server bracket-qualified database, schema, and table references", () => {
+  const sql = "SELECT * FROM [DatabaseA].[IN].[orders] a LEFT JOIN [DatabaseB].[OUT].[orders] b ON b.";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ name, database, schema, alias }) => ({ name, database, schema, alias })),
+    [
+      { name: "orders", database: "DatabaseA", schema: "IN", alias: "a" },
+      { name: "orders", database: "DatabaseB", schema: "OUT", alias: "b" },
+    ],
+  );
+});
+
+test("scopes SQL Server cross-database alias columns to the referenced database", () => {
+  const sql = "SELECT * FROM [DatabaseA].[OUT].[orders] a LEFT JOIN [DatabaseB].[OUT].[orders] b ON b.";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map([
+      ["DatabaseA.OUT.orders", [{ name: "source_marker", table: "orders", schema: "OUT" }]],
+      ["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]],
+    ]),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.deepEqual(
+    items.filter((item) => item.type === "column").map((item) => item.label),
+    ["target_marker"],
+  );
+});
+
+test("suggests INSERT columns for a SQL Server three-part target", () => {
+  const sql = "INSERT INTO [DatabaseB].[OUT].[orders] (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map([["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]]]),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.equal(items.find((item) => item.type === "snippet" && item.label === "orders.*")?.apply, "target_marker");
 });
 
 test("detects MySQL backtick-qualified INSERT INTO column list context", () => {

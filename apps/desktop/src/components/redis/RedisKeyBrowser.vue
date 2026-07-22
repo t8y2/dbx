@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
+import { computed, nextTick, ref, shallowRef, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock, Copy } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -34,6 +34,7 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { useToast } from "@/composables/useToast";
 import { redisKeySearchPattern } from "@/lib/redis/redisKeyPattern";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
+import { collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
 import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldActivateRedisCreateKeyTypeHelpOnFocus } from "@/lib/redis/redisCreateKeyTypeHelp";
 import { optionHelpPanelOffsetTop } from "@/lib/common/optionHelpPanelOffset";
 
@@ -66,11 +67,14 @@ const props = defineProps<{
   blockDangerousRedisCommands: boolean;
 }>();
 
-const flatKeys = ref<RedisKeyInfo[]>([]);
+const flatKeys = shallowRef<RedisKeyInfo[]>([]);
 const treeKeys = ref<RedisKeyTreeNode[]>([]);
 const loading = ref(false);
 const loadingMore = ref(false);
+const searchPending = ref(false);
 const isFetchingAll = ref(false);
+const fetchAllStopRequested = ref(false);
+const fetchAllLoadedCount = ref(0);
 const rootRef = ref<HTMLElement>();
 const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
@@ -131,19 +135,20 @@ watch(redisKeySeparator, () => {
   if (flatKeys.value.length > 0) rebuildTree(false);
 });
 const lastTotalKeys = ref(0);
+const displayedKeyCount = computed(() => (isFetchingAll.value ? fetchAllLoadedCount.value : flatKeys.value.length));
 const fetchAllProgressText = computed(() => {
   if (!isFetchingAll.value) return "";
   if (lastTotalKeys.value > 0) {
-    return t("redis.fetchAllProgress", { loaded: flatKeys.value.length, total: lastTotalKeys.value });
+    return t("redis.fetchAllProgress", { loaded: displayedKeyCount.value, total: lastTotalKeys.value });
   }
-  return t("redis.fetchAllProgressUnknown", { loaded: flatKeys.value.length });
+  return t("redis.fetchAllProgressUnknown", { loaded: displayedKeyCount.value });
 });
 const keyCountText = computed(() => {
   if (loading.value && flatKeys.value.length === 0) return loadingEmptyText.value;
   if (!isSearchMode.value && lastTotalKeys.value > 0) {
-    return t("redis.loadedKeys", { loaded: flatKeys.value.length, total: lastTotalKeys.value });
+    return t("redis.loadedKeys", { loaded: displayedKeyCount.value, total: lastTotalKeys.value });
   }
-  return t("redis.keys", { count: flatKeys.value.length });
+  return t("redis.keys", { count: displayedKeyCount.value });
 });
 const selectedKey = computed(() => flatKeys.value.find((key) => key.key_raw === selectedKeyRaw.value) ?? null);
 const dangerDetails = computed(() => {
@@ -236,13 +241,7 @@ async function updateCreateKeyTypeHelpOffset() {
 watch(activeCreateKeyTypeHelp, () => {
   void updateCreateKeyTypeHelpOffset();
 });
-const visibleRows = computed(() => {
-  const rows = useFlatKeySearchRows.value ? flatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(treeKeys.value, expandedGroupIds.value);
-  return rows.map((row) => ({
-    ...row,
-    id: row.node.id,
-  }));
-});
+const visibleRows = computed(() => (useFlatKeySearchRows.value ? flatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(treeKeys.value, expandedGroupIds.value)));
 let commandHistoryId = 0;
 
 function countLeaves(node: RedisKeyTreeNode): number {
@@ -330,16 +329,14 @@ async function fetchScanBatchPage(maxIterations: number, options: { count?: numb
   return api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, maxIterations, options.includeTypes ?? false);
 }
 
-function appendScanResult(result: RedisScanResult, options: { updateTree?: boolean } = {}) {
-  const newKeys: RedisKeyInfo[] = [];
-  for (const key of result.keys) {
-    if (loadedKeyRaws.has(key.key_raw)) continue;
-    loadedKeyRaws.add(key.key_raw);
-    newKeys.push(key);
-  }
-  if (newKeys.length > 0) {
+function appendScanResult(result: RedisScanResult, options: { updateTree?: boolean; buffer?: RedisKeyInfo[] } = {}): number {
+  const newKeys = collectUniqueRedisKeys(result.keys, loadedKeyRaws);
+  if (options.buffer) {
+    for (const key of newKeys) options.buffer.push(key);
+  } else if (newKeys.length > 0) {
     flatKeys.value = [...flatKeys.value, ...newKeys];
   }
+  const loadedCount = flatKeys.value.length + (options.buffer?.length ?? 0);
   scanCursor.value = result.cursor;
   hasMore.value = result.cursor !== 0;
   // DBSIZE is only called on the first batch page (cursor==0); subsequent
@@ -362,9 +359,11 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
   }
 
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
-    loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+    loaded: isSearchMode.value ? undefined : loadedCount,
     total: result.total_keys > 0 || (result.cursor === 0 && result.keys.length === 0) ? result.total_keys : undefined,
   });
+
+  return newKeys.length;
 }
 
 async function scanNextPage(requestId = searchRequestId): Promise<boolean> {
@@ -383,8 +382,13 @@ async function streamValueSearch(requestId: number) {
 
 async function loadKeys() {
   if (!redisBrowserIsActive) return;
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = null;
+  searchPending.value = false;
   const requestId = ++searchRequestId;
   isFetchingAll.value = false;
+  fetchAllStopRequested.value = false;
+  fetchAllLoadedCount.value = 0;
   loading.value = true;
   loadedKeyRaws.clear();
   flatKeys.value = [];
@@ -424,33 +428,39 @@ async function loadMore() {
 // Fetch-all uses large key-only SCAN pages and rebuilds the tree once at the
 // end; per-page tree sorting dominates runtime on million-key pattern scans.
 const FETCH_ALL_SCAN_COUNT = 50000;
-const FETCH_ALL_BATCH_ITERATIONS = 1;
+const FETCH_ALL_BATCH_ITERATIONS = 8;
 
 async function fetchAll() {
   if (!hasMore.value || isFetchingAll.value) return;
   const requestId = searchRequestId;
+  const bufferedKeys: RedisKeyInfo[] = [];
   isFetchingAll.value = true;
+  fetchAllStopRequested.value = false;
+  fetchAllLoadedCount.value = flatKeys.value.length;
   let changed = false;
   try {
-    while (requestId === searchRequestId && isFetchingAll.value && hasMore.value) {
+    while (requestId === searchRequestId && !fetchAllStopRequested.value && hasMore.value) {
       const result = await fetchScanBatchPage(FETCH_ALL_BATCH_ITERATIONS, {
         count: FETCH_ALL_SCAN_COUNT,
         includeTypes: false,
       });
       if (requestId !== searchRequestId) break;
-      appendScanResult(result, { updateTree: false });
-      changed = true;
+      changed = appendScanResult(result, { updateTree: false, buffer: bufferedKeys }) > 0 || changed;
+      fetchAllLoadedCount.value = flatKeys.value.length + bufferedKeys.length;
     }
   } finally {
     if (requestId === searchRequestId) {
+      if (bufferedKeys.length > 0) flatKeys.value = [...flatKeys.value, ...bufferedKeys];
       if (changed && !useFlatKeySearchRows.value) rebuildTree(isSearchMode.value);
       isFetchingAll.value = false;
+      fetchAllStopRequested.value = false;
+      fetchAllLoadedCount.value = 0;
     }
   }
 }
 
 function stopFetchAll() {
-  isFetchingAll.value = false;
+  fetchAllStopRequested.value = true;
 }
 
 function toggleGroup(groupId: string) {
@@ -553,6 +563,10 @@ function onRedisRowContextMenu(event: MouseEvent, node: RedisKeyTreeNode, openCo
 }
 
 function resetLoadedKeys() {
+  searchRequestId++;
+  isFetchingAll.value = false;
+  fetchAllStopRequested.value = false;
+  fetchAllLoadedCount.value = 0;
   loadedKeyRaws.clear();
   flatKeys.value = [];
   treeKeys.value = [];
@@ -945,7 +959,10 @@ let hasAutoFocusedSearch = false;
 
 function onSearchInput() {
   if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(loadKeys, 400);
+  searchPending.value = true;
+  searchTimer = setTimeout(() => {
+    void loadKeys();
+  }, 400);
 }
 
 function setSearchMode(mode: RedisSearchMode) {
@@ -1017,8 +1034,11 @@ function pauseRedisBrowserBackgroundWork() {
   redisBrowserIsActive = false;
   searchRequestId++;
   isFetchingAll.value = false;
+  fetchAllStopRequested.value = false;
+  fetchAllLoadedCount.value = 0;
   loading.value = false;
   loadingMore.value = false;
+  searchPending.value = false;
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = null;
   unregisterRedisDbFlushedListener();
@@ -1195,7 +1215,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           <div v-if="flatKeys.length === 0 && !loading" class="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs p-4 text-center">
             <template v-if="hasMore">
               <span class="mb-3">{{ t("redis.noKeysInScanHint") }}</span>
-              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore" @click="loadMore">
+              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore || searchPending" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
                 {{ t("redis.loadMoreKeys") }}
               </Button>
@@ -1245,11 +1265,11 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             </template>
           </RecycleScroller>
           <div v-if="hasMore && !isFetchingAll" class="shrink-0 border-t px-2 py-1.5 flex items-center gap-1.5">
-            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading" @click="loadMore">
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading || searchPending" @click="loadMore">
               <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
               {{ t("redis.loadMoreKeys") }}
             </Button>
-            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loading || !hasMore" @click="fetchAll">
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loading || searchPending || !hasMore" @click="fetchAll">
               {{ t("redis.fetchAllKeys") }}
             </Button>
           </div>
@@ -1257,7 +1277,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <div class="text-xs text-muted-foreground text-center">
               {{ fetchAllProgressText }}
             </div>
-            <Button variant="destructive" size="sm" class="h-7 text-xs w-full" @click="stopFetchAll">
+            <Button variant="destructive" size="sm" class="h-7 text-xs w-full" :disabled="fetchAllStopRequested" @click="stopFetchAll">
               {{ t("redis.stopFetchAll") }}
             </Button>
           </div>

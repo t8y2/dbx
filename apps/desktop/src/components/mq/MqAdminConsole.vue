@@ -2,11 +2,25 @@
 import { formatError } from "@/lib/backend/errorUtils";
 import { ref, computed, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { MqAdminConfig, MqClusterInfo, MqSystemKind, TopicInfo } from "@/types/mq";
-import { mqTestConnection } from "@/lib/backend/api";
+import type { MqAdminConfig, MqClusterInfo, MqSystemKind, NamespaceRef, TopicInfo } from "@/types/mq";
+import { mqCreateNamespace, mqListNamespaces, mqTestConnection } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { mqClusterOptionsFromExtra } from "@/lib/mq/mqTenantForm";
-import { defaultMqCapabilitiesForSystemKind, isFlatMqSystemKind, normalizeMqTabForSystemKind, resolveAvailableMqTabs, resolveInitialMqTab, resolveMqSystemKindFromConnection, type MqTab } from "@/lib/mq/mqConsoleDefaults";
+import {
+  defaultMqCapabilitiesForSystemKind,
+  isAllVhostsNamespace,
+  isFlatMqSystemKind,
+  normalizeMqTabForSystemKind,
+  RABBITMQ_ALL_VHOSTS,
+  RABBITMQ_MQ_TENANT,
+  resolveAvailableMqTabs,
+  resolveInitialMqTab,
+  resolveMqSystemKindFromConnection,
+  resolveRabbitMqDefaultVhost,
+  type MqTab,
+} from "@/lib/mq/mqConsoleDefaults";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import type { AcceptableValue } from "reka-ui";
 import TenantsPanel from "./TenantsPanel.vue";
 import NamespacesPanel from "./NamespacesPanel.vue";
 import TopicsPanel from "./TopicsPanel.vue";
@@ -21,6 +35,10 @@ import RocketMqMessagesPanel from "./RocketMqMessagesPanel.vue";
 import SendMessagePanel from "./SendMessagePanel.vue";
 import MessageQueryPanel from "./MessageQueryPanel.vue";
 import BrokerPanel from "./BrokerPanel.vue";
+import RabbitMqClientsPanel from "./rabbitmq/RabbitMqClientsPanel.vue";
+import RabbitMqPermissionsPanel from "./rabbitmq/RabbitMqPermissionsPanel.vue";
+import RabbitMqPoliciesPanel from "./rabbitmq/RabbitMqPoliciesPanel.vue";
+import RabbitMqMonitoringPanel from "./rabbitmq/RabbitMqMonitoringPanel.vue";
 
 interface Props {
   connectionId: string;
@@ -35,9 +53,20 @@ const connectionStore = useConnectionStore();
 const configuredSystemKind = computed(() => resolveMqSystemKindFromConnection(connectionStore.getConfig(props.connectionId)));
 const FLAT_MQ_CONTEXT = "_flat_mq";
 
-function normalizeFlatMqTenant(tenant?: string): string | undefined {
+function normalizeFlatMqTenant(tenant: string | undefined, systemKind: MqSystemKind | undefined): string | undefined {
+  // RabbitMQ has no tenant concept: the console pins a synthetic tenant and
+  // exposes virtual hosts as namespaces instead.
+  if (systemKind === "rabbitmq") return tenant ? RABBITMQ_MQ_TENANT : undefined;
   if (tenant === "_kafka" || tenant === FLAT_MQ_CONTEXT) return FLAT_MQ_CONTEXT;
   return tenant;
+}
+
+// The connection's default virtual host acts as the initial RabbitMQ namespace.
+const rabbitMqDefaultVhost = computed(() => resolveRabbitMqDefaultVhost(connectionStore.getConfig(props.connectionId)));
+
+function initialMqNamespace(systemKind: MqSystemKind | undefined): string | undefined {
+  if (systemKind === "rabbitmq") return rabbitMqDefaultVhost.value;
+  return isFlatMqSystemKind(systemKind) ? FLAT_MQ_CONTEXT : undefined;
 }
 
 // State
@@ -48,8 +77,8 @@ const activeTab = ref<MqTab>(
     systemKind: configuredSystemKind.value,
   }),
 );
-const selectedTenant = ref<string | undefined>(normalizeFlatMqTenant(props.initialTenant));
-const selectedNamespace = ref<string | undefined>(isFlatMqSystemKind(configuredSystemKind.value) ? FLAT_MQ_CONTEXT : undefined);
+const selectedTenant = ref<string | undefined>(normalizeFlatMqTenant(props.initialTenant, configuredSystemKind.value));
+const selectedNamespace = ref<string | undefined>(initialMqNamespace(configuredSystemKind.value));
 const selectedTopic = ref<TopicInfo>();
 const selectedSubscriptionName = ref<string>();
 const capabilities = ref<MqClusterInfo["capabilities"]>();
@@ -58,9 +87,18 @@ const loading = ref(false);
 const error = ref<string>();
 const preferDlqTopic = ref(props.initialTab === "dlq");
 
+// RabbitMQ vhost switcher (tab-bar namespace dropdown).
+const CREATE_NAMESPACE_VALUE = "__create_namespace__";
+const rabbitMqVhosts = ref<string[]>([]);
+const showCreateNamespaceDialog = ref(false);
+const createNamespaceName = ref("");
+const createNamespaceError = ref<string>();
+const creatingNamespace = ref(false);
+
 // Computed
 const mqSystemKind = computed<MqSystemKind | undefined>(() => clusterInfo.value?.systemKind ?? configuredSystemKind.value);
 const isFlatMqCluster = computed(() => isFlatMqSystemKind(mqSystemKind.value));
+const isRabbitMqCluster = computed(() => mqSystemKind.value === "rabbitmq");
 const isRocketMqCluster = computed(() => mqSystemKind.value === "rocketmq");
 const rocketmqClusterLabel = computed(() => {
   if (!isRocketMqCluster.value) return undefined;
@@ -72,10 +110,17 @@ const rocketmqClusterLabel = computed(() => {
   const clusterName = extra?.clusterName ?? extra?.cluster_name;
   return typeof clusterName === "string" && clusterName.trim() ? clusterName.trim() : undefined;
 });
-const effectiveTenant = computed(() => (isFlatMqCluster.value ? normalizeFlatMqTenant(selectedTenant.value) || FLAT_MQ_CONTEXT : selectedTenant.value));
-const effectiveNamespace = computed(() => (isFlatMqCluster.value ? selectedNamespace.value || FLAT_MQ_CONTEXT : selectedNamespace.value));
+const effectiveTenant = computed(() => {
+  if (isRabbitMqCluster.value) return RABBITMQ_MQ_TENANT;
+  return isFlatMqCluster.value ? normalizeFlatMqTenant(selectedTenant.value, mqSystemKind.value) || FLAT_MQ_CONTEXT : selectedTenant.value;
+});
+const effectiveNamespace = computed(() => {
+  if (isRabbitMqCluster.value) return selectedNamespace.value || rabbitMqDefaultVhost.value;
+  return isFlatMqCluster.value ? selectedNamespace.value || FLAT_MQ_CONTEXT : selectedNamespace.value;
+});
 const breadcrumbTenant = computed(() => (isFlatMqCluster.value ? undefined : selectedTenant.value));
-const breadcrumbNamespace = computed(() => (isFlatMqCluster.value ? undefined : selectedNamespace.value));
+const breadcrumbNamespace = computed(() => (isFlatMqCluster.value && !isRabbitMqCluster.value ? undefined : selectedNamespace.value));
+const breadcrumbNamespaceLabel = computed(() => (isAllVhostsNamespace(breadcrumbNamespace.value) ? t("mqAdmin.allNamespaces") : breadcrumbNamespace.value));
 const effectiveCapabilities = computed(() => capabilities.value ?? defaultMqCapabilitiesForSystemKind(configuredSystemKind.value));
 const canManageTenants = computed(() => effectiveCapabilities.value.supportsTenants);
 const canManageNamespaces = computed(() => effectiveCapabilities.value.supportsNamespaces);
@@ -94,7 +139,12 @@ const canManagePolicies = computed(() => {
   return canManageRateLimits.value || canManageBacklogQuota.value || canManageRetention.value;
 });
 const canManagePermissions = computed(() => effectiveCapabilities.value.supportsPermissions);
+const canManageUserPermissions = computed(() => effectiveCapabilities.value.supportsUserPermissions ?? false);
+const canManageRabbitMqPolicies = computed(() => effectiveCapabilities.value.supportsPolicies ?? false);
+const canClusterMonitor = computed(() => effectiveCapabilities.value.supportsClusterMonitoring ?? false);
 const canSendMessage = computed(() => effectiveCapabilities.value.supportsSendMessage ?? false);
+const canManageExchanges = computed(() => effectiveCapabilities.value.supportsExchanges ?? false);
+const canManageClientConnections = computed(() => effectiveCapabilities.value.supportsClientConnections ?? false);
 const canMessageQuery = computed(() => effectiveCapabilities.value.supportsMessageQuery ?? false);
 const canMessageTrace = computed(() => effectiveCapabilities.value.supportsMessageTrace ?? false);
 const canUseRawApi = computed(() => effectiveCapabilities.value.supportsRawAdminApi);
@@ -146,9 +196,58 @@ async function loadClusterInfo() {
   }
 }
 
+async function loadRabbitMqVhosts() {
+  try {
+    const namespaces = await mqListNamespaces(props.connectionId, RABBITMQ_MQ_TENANT);
+    rabbitMqVhosts.value = namespaces.map((ns) => ns.namespace);
+  } catch (e: unknown) {
+    console.warn("[DBX] Failed to load RabbitMQ vhosts:", e);
+  }
+}
+
+function switchNamespace(namespace: string) {
+  selectedNamespace.value = namespace;
+  selectedTopic.value = undefined;
+  selectedSubscriptionName.value = undefined;
+}
+
+function handleNamespaceSelect(value: AcceptableValue) {
+  if (typeof value !== "string") return;
+  if (value === CREATE_NAMESPACE_VALUE) {
+    if (props.readOnly) return;
+    createNamespaceName.value = "";
+    createNamespaceError.value = undefined;
+    showCreateNamespaceDialog.value = true;
+    return;
+  }
+  switchNamespace(value);
+}
+
+async function handleCreateNamespace() {
+  if (props.readOnly) return;
+  const name = createNamespaceName.value.trim();
+  if (!name) {
+    createNamespaceError.value = t("mqNamespaces.namespaceNameRequired");
+    return;
+  }
+  creatingNamespace.value = true;
+  createNamespaceError.value = undefined;
+  try {
+    const ns: NamespaceRef = { tenant: RABBITMQ_MQ_TENANT, namespace: name };
+    await mqCreateNamespace(props.connectionId, ns, {});
+    showCreateNamespaceDialog.value = false;
+    await loadRabbitMqVhosts();
+    switchNamespace(name);
+  } catch (e: unknown) {
+    createNamespaceError.value = formatError(e);
+  } finally {
+    creatingNamespace.value = false;
+  }
+}
+
 function selectTenant(tenant: string) {
   selectedTenant.value = tenant;
-  selectedNamespace.value = isFlatMqCluster.value ? FLAT_MQ_CONTEXT : undefined;
+  selectedNamespace.value = initialMqNamespace(mqSystemKind.value);
   selectedTopic.value = undefined;
   selectedSubscriptionName.value = undefined;
   if (canManageNamespaces.value) {
@@ -246,9 +345,16 @@ function reconcileActiveTab() {
 
 watch(availableTabs, reconcileActiveTab);
 watch(
+  isRabbitMqCluster,
+  (isRabbitMq) => {
+    if (isRabbitMq) void loadRabbitMqVhosts();
+  },
+  { immediate: true },
+);
+watch(
   () => props.initialTenant,
   (tenant) => {
-    const normalized = normalizeFlatMqTenant(tenant);
+    const normalized = normalizeFlatMqTenant(tenant, mqSystemKind.value);
     if (normalized && normalized !== selectedTenant.value) {
       selectTenant(normalized);
     }
@@ -287,7 +393,7 @@ onMounted(async () => {
         <span v-if="breadcrumbTenant" class="breadcrumb-separator">›</span>
         <button v-if="breadcrumbTenant" class="breadcrumb-button" @click="goToTenantLevel" :title="t('mqAdmin.viewTenant')">{{ breadcrumbTenant }}</button>
         <span v-if="breadcrumbNamespace" class="breadcrumb-separator">›</span>
-        <button v-if="breadcrumbNamespace" class="breadcrumb-button" @click="goToNamespaceLevel" :title="t('mqAdmin.viewNamespace')">{{ breadcrumbNamespace }}</button>
+        <button v-if="breadcrumbNamespace" class="breadcrumb-button" @click="goToNamespaceLevel" :title="t('mqAdmin.viewNamespace')">{{ breadcrumbNamespaceLabel }}</button>
         <span v-if="selectedTopic" class="breadcrumb-separator">›</span>
         <button v-if="selectedTopic" class="breadcrumb-button" @click="goToTopicLevel" :title="t('mqAdmin.viewTopic')">{{ selectedTopic.shortName }}</button>
       </div>
@@ -299,15 +405,38 @@ onMounted(async () => {
 
     <!-- Tab Bar -->
     <div class="mq-tabs">
-      <button v-for="tab in availableTabs" :key="tab" :class="{ active: activeTab === tab }" @click="setActiveTab(tab)">
-        {{ t(tabLabelKey(tab)) }}
-      </button>
+      <div class="mq-tabs-list">
+        <button v-for="tab in availableTabs" :key="tab" :class="{ active: activeTab === tab }" @click="setActiveTab(tab)">
+          {{ t(tabLabelKey(tab)) }}
+        </button>
+      </div>
+      <div v-if="isRabbitMqCluster" class="mq-namespace-switcher">
+        <Select :model-value="selectedNamespace" @update:model-value="handleNamespaceSelect">
+          <SelectTrigger class="h-7 w-[180px] rounded-[6px] text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem :value="RABBITMQ_ALL_VHOSTS">{{ t("mqAdmin.allNamespaces") }}</SelectItem>
+            <SelectItem v-for="vhost in rabbitMqVhosts" :key="vhost" :value="vhost">{{ vhost }}</SelectItem>
+            <SelectItem :value="CREATE_NAMESPACE_VALUE" :disabled="readOnly">＋ {{ t("mqAdmin.newNamespace") }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
     </div>
 
     <!-- Main Content Area -->
     <div class="mq-content">
       <TenantsPanel v-if="activeTab === 'tenants'" :connection-id="connectionId" :supports-tenants="canManageTenants" :read-only="readOnly" :cluster-options="clusterOptions" @tenant-selected="handleTenantSelected" />
-      <NamespacesPanel v-else-if="activeTab === 'namespaces'" :connection-id="connectionId" :tenant="selectedTenant" :supports-namespaces="canManageNamespaces" :read-only="readOnly" @namespace-selected="handleNamespaceSelected" @namespace-roles-selected="handleNamespaceRolesSelected" />
+      <NamespacesPanel
+        v-else-if="activeTab === 'namespaces'"
+        :connection-id="connectionId"
+        :tenant="effectiveTenant"
+        :supports-namespaces="canManageNamespaces"
+        :supports-permissions="canManagePermissions"
+        :read-only="readOnly"
+        @namespace-selected="handleNamespaceSelected"
+        @namespace-roles-selected="handleNamespaceRolesSelected"
+      />
       <TopicsPanel
         v-else-if="activeTab === 'topics'"
         :connection-id="connectionId"
@@ -317,6 +446,7 @@ onMounted(async () => {
         :supports-partitioned-topics="canManagePartitionedTopics"
         :is-flat-mq-cluster="isFlatMqCluster"
         :mq-system-kind="mqSystemKind"
+        :supports-exchanges="canManageExchanges"
         @topic-selected="handleTopicSelected"
         @navigate-tab="handleNavigateTab"
       />
@@ -337,7 +467,9 @@ onMounted(async () => {
         :supports-expire-messages="canExpireMessages"
         @subscription-selected="handleSubscriptionSelected"
       />
+      <RabbitMqMonitoringPanel v-else-if="activeTab === 'monitoring' && isRabbitMqCluster && canClusterMonitor" :connection-id="connectionId" />
       <MonitoringPanel v-else-if="activeTab === 'monitoring'" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :mq-system-kind="mqSystemKind" />
+      <RabbitMqClientsPanel v-else-if="activeTab === 'clients' && isRabbitMqCluster && canManageClientConnections" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
       <ProducerConsumerPanel
         v-else-if="activeTab === 'clients'"
         :connection-id="connectionId"
@@ -386,6 +518,7 @@ onMounted(async () => {
         :supports-peek-messages="canPeekMessages"
       />
       <BrokerPanel v-else-if="activeTab === 'broker'" :connection-id="connectionId" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
+      <RabbitMqPoliciesPanel v-else-if="activeTab === 'policies' && isRabbitMqCluster && canManageRabbitMqPolicies" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
       <PoliciesPanel
         v-else-if="activeTab === 'policies' && canManagePolicies"
         :connection-id="connectionId"
@@ -398,8 +531,30 @@ onMounted(async () => {
         :supports-backlog-quota="canManageBacklogQuota"
         :supports-retention="canManageRetention"
       />
+      <RabbitMqPermissionsPanel v-else-if="activeTab === 'permissions' && isRabbitMqCluster && canManageUserPermissions" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
       <PermissionsPanel v-else-if="activeTab === 'permissions' && canManagePermissions" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
       <RawApiPanel v-else-if="activeTab === 'raw' && canUseRawApi" :connection-id="connectionId" :tenant="selectedTenant" :namespace="selectedNamespace" :topic="selectedTopic" :read-only="readOnly" />
+    </div>
+
+    <!-- Create Namespace (vhost) Dialog -->
+    <div v-if="showCreateNamespaceDialog" class="dialog-overlay" @click="showCreateNamespaceDialog = false">
+      <div class="dialog" @click.stop>
+        <div class="dialog-header">
+          <h3>{{ t("mqAdmin.newNamespace") }}</h3>
+          <button @click="showCreateNamespaceDialog = false" class="btn-close">×</button>
+        </div>
+        <div class="dialog-body">
+          <div class="form-group">
+            <label>{{ t("mqNamespaces.namespaceName") }}</label>
+            <input v-model="createNamespaceName" type="text" :placeholder="t('mqNamespaces.namespaceNamePlaceholder')" :disabled="readOnly" />
+          </div>
+          <div v-if="createNamespaceError" class="form-error">{{ createNamespaceError }}</div>
+        </div>
+        <div class="dialog-footer">
+          <button @click="showCreateNamespaceDialog = false" class="btn-secondary">{{ t("mqNamespaces.cancel") }}</button>
+          <button @click="handleCreateNamespace" :disabled="creatingNamespace || readOnly" class="btn-primary">{{ t("mqNamespaces.create") }}</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -482,12 +637,19 @@ onMounted(async () => {
 
 .mq-tabs {
   display: flex;
+  align-items: center;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-background-secondary);
+}
+
+.mq-tabs-list {
+  display: flex;
+  flex: 1;
+  min-width: 0;
   overflow-x: auto;
 }
 
-.mq-tabs button {
+.mq-tabs-list button {
   padding: 10px 20px;
   border: none;
   background: transparent;
@@ -499,15 +661,22 @@ onMounted(async () => {
   transition: all 0.2s;
 }
 
-.mq-tabs button:hover {
+.mq-tabs-list button:hover {
   color: var(--color-text);
   background: var(--color-hover);
 }
 
-.mq-tabs button.active {
+.mq-tabs-list button.active {
   color: var(--color-primary);
   border-bottom-color: var(--color-primary);
   background: var(--color-background);
+}
+
+.mq-namespace-switcher {
+  display: flex;
+  align-items: center;
+  padding: 4px 12px;
+  flex: 0 0 auto;
 }
 
 .mq-content {
@@ -529,5 +698,116 @@ onMounted(async () => {
 
 .mq-content :deep(tbody tr:last-child td) {
   border-bottom: 1px solid var(--color-border);
+}
+
+/* Create namespace dialog */
+.dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.dialog {
+  background: var(--color-background);
+  border-radius: 8px;
+  width: 90%;
+  max-width: 500px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.dialog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dialog-header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.btn-close {
+  border: none;
+  background: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  padding: 0;
+  line-height: 1;
+}
+
+.dialog-body {
+  padding: 20px;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--color-border);
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.form-group input[type="text"] {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 14px;
+  box-sizing: border-box;
+  background: var(--color-background);
+  color: var(--color-text);
+}
+
+.form-error {
+  color: var(--color-error);
+  font-size: 13px;
+}
+
+.btn-primary,
+.btn-secondary {
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-background);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: white;
+  border-color: var(--color-primary);
+}
+
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

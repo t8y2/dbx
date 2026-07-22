@@ -10,6 +10,7 @@ export type SqlSemanticTableReference = SqlTableReference & {
 
 export interface SqlSemanticNavigationTarget {
   name: string;
+  database?: string;
   schema?: string;
   alias?: string;
   columns?: string[];
@@ -51,12 +52,16 @@ function sourceSchema(source: SqlSemanticRowSource): string | undefined {
   return source.metadataTarget?.schema ?? source.qualifierParts[source.qualifierParts.length - 1];
 }
 
+function sourceDatabase(source: SqlSemanticRowSource): string | undefined {
+  return source.metadataTarget?.database;
+}
+
 function sourceTableName(source: SqlSemanticRowSource): string {
   return source.metadataTarget?.table ?? source.name;
 }
 
 function sourceReferenceKey(source: SqlSemanticTableReference): string {
-  return [normalized(source.schema), normalized(source.name), normalized(source.alias), source.span.start_line, source.span.start_column].join(":");
+  return [normalized(source.database), normalized(source.schema), normalized(source.name), normalized(source.alias), source.span.start_line, source.span.start_column].join(":");
 }
 
 function existingScopeId(analysis: SqlReferenceAnalysis): number {
@@ -72,6 +77,7 @@ export function sqlSemanticTableReferences(model: SqlSemanticModel, scopeId = 0)
       const schema = sourceSchema(source);
       return {
         name: sourceTableName(source),
+        database: sourceDatabase(source),
         schema,
         alias: source.alias,
         span: semanticSpanToSqlTextSpan(model.sql, span),
@@ -95,11 +101,13 @@ export function mergeSqlSemanticReferenceAnalysis(analysis: SqlReferenceAnalysis
   for (const table of semanticTables) {
     const existing = [...merged.values()].find((candidate) => {
       if (normalized(candidate.name) !== normalized(table.name)) return false;
+      if (candidate.database && table.database && normalized(candidate.database) !== normalized(table.database)) return false;
       if (candidate.alias && table.alias && normalized(candidate.alias) !== normalized(table.alias)) return false;
       if (candidate.schema && table.schema && normalized(candidate.schema) !== normalized(table.schema)) return false;
       return true;
     });
     if (existing) {
+      existing.database = existing.database ?? table.database;
       existing.schema = existing.schema ?? table.schema;
       existing.alias = existing.alias ?? table.alias;
       existing.columns = existing.columns ?? table.columns;
@@ -118,6 +126,7 @@ export function mergeSqlSemanticReferenceAnalysis(analysis: SqlReferenceAnalysis
 export function sqlSemanticCompletionReferenceTables(model: SqlSemanticModel): SqlCompletionReferencedTable[] {
   return sqlSemanticTableReferences(model).map((table) => ({
     name: table.name,
+    database: table.database ?? undefined,
     schema: table.schema ?? undefined,
     alias: table.alias ?? undefined,
     columns: table.columns,
@@ -129,15 +138,17 @@ export function resolveSqlSemanticNavigationTarget(model: SqlSemanticModel, iden
   const normalizedParts = identifierParts.map(normalized).filter(Boolean);
   const name = normalizedParts[normalizedParts.length - 1];
   const qualifier = normalizedParts.length > 1 ? normalizedParts[normalizedParts.length - 2] : undefined;
+  const database = normalizedParts.length > 2 ? normalizedParts[normalizedParts.length - 3] : undefined;
 
   const source =
     model.rowSources.find((candidate) => {
       const candidateName = normalized(sourceTableName(candidate));
       const candidateAlias = normalized(candidate.alias);
+      const candidateDatabase = normalized(sourceDatabase(candidate));
       const candidateSchema = normalized(sourceSchema(candidate));
       if (qualifier) {
-        if (candidateAlias && candidateAlias === qualifier) return true;
-        return candidateName === name && (!candidateSchema || candidateSchema === qualifier);
+        if (!database && candidateAlias && candidateAlias === qualifier) return true;
+        return candidateName === name && (!candidateSchema || candidateSchema === qualifier) && (!database || !candidateDatabase || candidateDatabase === database);
       }
       return candidateName === name || candidateAlias === name;
     }) ?? null;
@@ -146,6 +157,7 @@ export function resolveSqlSemanticNavigationTarget(model: SqlSemanticModel, iden
   const schema = sourceSchema(source);
   return {
     name: sourceTableName(source),
+    database: sourceDatabase(source),
     schema,
     alias: source.alias,
     columns: source.columns,

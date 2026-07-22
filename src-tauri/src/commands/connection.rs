@@ -692,6 +692,26 @@ async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sql
     Ok(pool)
 }
 
+async fn test_redis_connection(
+    state: &Arc<AppState>,
+    tunnel_id: &str,
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    connect_timeout: std::time::Duration,
+) -> Result<String, String> {
+    // Connection tests must exercise the same Redis lifecycle as a saved connection,
+    // including compatibility auth, TLS, and database selection.
+    if config.uses_redis_cluster() {
+        drop(state.connect_redis_cluster(tunnel_id, config).await?);
+    } else if config.uses_redis_sentinel() {
+        drop(state.connect_redis_sentinel(tunnel_id, config).await?);
+    } else {
+        drop(db::redis_driver::connect_standalone(config, host, port, connect_timeout).await?);
+    }
+    Ok("Connection successful".to_string())
+}
+
 #[tauri::command]
 pub async fn test_connection(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
     test_connection_with_info_inner(state.inner(), config).await.map(|result| result.message)
@@ -812,17 +832,9 @@ async fn test_connection_with_info_inner(
                 Err(e) => Err(e),
             },
             DatabaseType::Redis => {
-                let con = if config.uses_redis_cluster() {
-                    state.connect_redis_cluster(&tunnel_id, &config).await?;
-                    return Ok(ConnectionTestResult::success("Connection successful"));
-                } else if config.uses_redis_sentinel() {
-                    state.connect_redis_sentinel(&tunnel_id, &config).await?;
-                    return Ok(ConnectionTestResult::success("Connection successful"));
-                } else {
-                    db::redis_driver::connect(&url, connect_timeout).await?
-                };
-                drop(con);
-                Ok("Connection successful".to_string())
+                // Keep the result inside the outer lifecycle so temporary transports
+                // are reset after both successful and failed Redis tests.
+                test_redis_connection(state, &tunnel_id, &config, &host, port, connect_timeout).await
             }
             #[cfg(feature = "duckdb-bundled")]
             DatabaseType::DuckDb => {
@@ -877,6 +889,7 @@ async fn test_connection_with_info_inner(
                     username,
                     password,
                     Some(&config.ca_cert_path),
+                    config.url_params.as_deref(),
                     connect_timeout,
                 )?;
                 db::clickhouse_driver::test_connection(&client, connect_timeout)
@@ -884,10 +897,7 @@ async fn test_connection_with_info_inner(
                     .map(|_| "Connection successful".to_string())
             }
             DatabaseType::SqlServer => {
-                match state
-                    .test_sqlserver_connection_with_legacy_fallback_with_info(&config, &host, port, connect_timeout)
-                    .await
-                {
+                match state.test_sqlserver_connection_with_info(&config, &host, port, connect_timeout).await {
                     Ok(details) => {
                         database_info = details.database_info;
                         Ok(details.message)
@@ -1114,7 +1124,7 @@ pub async fn connect_db(
                 )))
             } else {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
-                    db::redis_driver::connect(&url, connect_timeout).await?,
+                    db::redis_driver::connect_standalone(&db_config, &host, port, connect_timeout).await?,
                 )))
             };
             con
@@ -1210,14 +1220,13 @@ pub async fn connect_db(
                 username,
                 password,
                 Some(&db_config.ca_cert_path),
+                db_config.url_params.as_deref(),
                 connect_timeout,
             )?;
             db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::ClickHouse(client)
         }
-        DatabaseType::SqlServer => {
-            state.connect_sqlserver_pool_with_legacy_fallback(&db_config, &host, port, connect_timeout).await?
-        }
+        DatabaseType::SqlServer => state.connect_sqlserver_pool(&db_config, &host, port, connect_timeout).await?,
         DatabaseType::Elasticsearch => {
             let mut client = db::elasticsearch_driver::EsClient::from_config(
                 &url,

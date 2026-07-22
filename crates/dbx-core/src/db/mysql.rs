@@ -751,8 +751,10 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     }
 
     let lower = error.to_ascii_lowercase();
-    let setup_query_rejected =
-        lower.contains("1193") || lower.contains("unknown system variable") || lower.contains("syntax error");
+    let setup_query_rejected = lower.contains("1193")
+        || lower.contains("unknown system variable")
+        || lower.contains("syntax error")
+        || lower.contains("not supported");
     let sphinxql_setup_query_rejected = lower.contains("sphinxql")
         && lower.contains("only 0 and 1 could be used as boolean values")
         && lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'"));
@@ -1596,7 +1598,7 @@ pub async fn list_tables_filtered(
             log::debug!(
                 "Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES failed: {err}"
             );
-            return list_tables_show(pool, database)
+            return list_tables_show_filtered(pool, database, filter)
                 .await
                 .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types));
         }
@@ -1619,23 +1621,14 @@ pub async fn list_tables_filtered(
         })
         .collect();
 
-    if tables.is_empty() && should_fallback_empty_list_tables(filter) {
+    if tables.is_empty() {
         log::debug!("Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables");
-        return list_tables_show(pool, database)
+        return list_tables_show_filtered(pool, database, filter)
             .await
             .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types));
     }
 
     Ok(tables)
-}
-
-// `Option::is_none_or` requires Rust 1.82, while DBX still supports Rust 1.77.2.
-#[allow(clippy::unnecessary_map_or)]
-fn should_fallback_empty_list_tables(filter: Option<&str>) -> bool {
-    // MySQL proxies such as MyCat can return an empty information_schema.TABLES
-    // even when SHOW TABLES exposes objects. Avoid the fallback for active
-    // searches so normal MySQL "no match" queries do not rescan large schemas.
-    filter.map_or(true, |filter| filter.trim().is_empty())
 }
 
 fn filter_list_tables_fallback(
@@ -1980,11 +1973,33 @@ struct TableStatusMeta {
 }
 
 async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<HashMap<String, TableStatusMeta>, String> {
-    let sql = if database.trim().is_empty() {
-        "SHOW TABLE STATUS".to_string()
-    } else {
-        format!("SHOW TABLE STATUS FROM {}", quote_identifier(database))
-    };
+    query_table_status_show(pool, database, None).await
+}
+
+async fn list_table_status_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+) -> Result<HashMap<String, TableStatusMeta>, String> {
+    match query_table_status_show(pool, database, filter).await {
+        Ok(status) => Ok(status),
+        Err(filtered_err) => {
+            log::debug!(
+                "Falling back to unfiltered SHOW TABLE STATUS for database `{database}` after filtered SHOW failed: {filtered_err}"
+            );
+            query_table_status_show(pool, database, None)
+                .await
+                .map(|status| filter_table_status_fallback(status, filter))
+        }
+    }
+}
+
+async fn query_table_status_show(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+) -> Result<HashMap<String, TableStatusMeta>, String> {
+    let sql = show_table_status_sql(database, filter);
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -2006,17 +2021,53 @@ async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<Hash
         .collect())
 }
 
+fn filter_table_status_fallback(
+    status: HashMap<String, TableStatusMeta>,
+    filter: Option<&str>,
+) -> HashMap<String, TableStatusMeta> {
+    let filter = filter.unwrap_or("").trim();
+    status
+        .into_iter()
+        .filter(|(name, meta)| {
+            crate::sql::contains_or_fuzzy_match(name, filter)
+                || meta.comment.as_deref().is_some_and(|comment| crate::sql::contains_or_fuzzy_match(comment, filter))
+        })
+        .collect()
+}
+
 async fn list_table_names_show(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
-    let sql = show_tables_sql(database, true);
+    list_table_names_show_filtered(pool, database, None, &[]).await
+}
+
+async fn list_table_names_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+    exact_names: &[String],
+) -> Result<Vec<TableInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let rows: Vec<mysql_async::Row> = match conn.query_iter(&sql).await {
-        Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
-        Err(_) => {
-            let sql = show_tables_sql(database, false);
-            let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-            result.collect_and_drop().await.map_err(|e| e.to_string())?
+    let mut last_error = None;
+    let mut rows = None;
+    for attempt in show_tables_query_attempts(database, filter, exact_names) {
+        match conn.query_iter(&attempt.sql).await {
+            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+                Ok(result_rows) => {
+                    rows = Some(result_rows);
+                    break;
+                }
+                Err(err) => last_error = Some(err.to_string()),
+            },
+            Err(err) => {
+                if attempt.server_filtered {
+                    log::debug!(
+                        "Filtered SHOW TABLES is unsupported for database `{database}`; trying a compatible SHOW form: {err}"
+                    );
+                }
+                last_error = Some(err.to_string());
+            }
         }
-    };
+    }
+    let rows = rows.ok_or_else(|| last_error.unwrap_or_else(|| "SHOW TABLES returned no result".to_string()))?;
     let mut tables: Vec<TableInfo> = rows
         .iter()
         .filter_map(|row| {
@@ -2038,13 +2089,99 @@ async fn list_table_names_show(pool: &MySqlPool, database: &str) -> Result<Vec<T
     Ok(tables)
 }
 
-fn show_tables_sql(database: &str, full: bool) -> String {
+struct ShowTablesQueryAttempt {
+    sql: String,
+    server_filtered: bool,
+}
+
+fn show_tables_query_attempts(
+    database: &str,
+    filter: Option<&str>,
+    exact_names: &[String],
+) -> Vec<ShowTablesQueryAttempt> {
+    // DBeaver-style server filtering is preferred for large schemas, but some
+    // MySQL proxies only implement bare SHOW TABLES forms.
+    let filtered_full = show_tables_filtered_sql(database, true, filter, exact_names);
+    let filtered_plain = show_tables_filtered_sql(database, false, filter, exact_names);
+    let unfiltered_full = show_tables_filtered_sql(database, true, None, &[]);
+    let unfiltered_plain = show_tables_filtered_sql(database, false, None, &[]);
+    let has_server_filter = filtered_full != unfiltered_full;
+    let mut attempts = Vec::with_capacity(if has_server_filter { 4 } else { 2 });
+    if has_server_filter {
+        attempts.push(ShowTablesQueryAttempt { sql: filtered_full, server_filtered: true });
+        attempts.push(ShowTablesQueryAttempt { sql: filtered_plain, server_filtered: true });
+    }
+    attempts.push(ShowTablesQueryAttempt { sql: unfiltered_full, server_filtered: false });
+    attempts.push(ShowTablesQueryAttempt { sql: unfiltered_plain, server_filtered: false });
+    attempts
+}
+
+fn show_tables_filtered_sql(database: &str, full: bool, filter: Option<&str>, exact_names: &[String]) -> String {
     let prefix = if full { "SHOW FULL TABLES" } else { "SHOW TABLES" };
-    if database.trim().is_empty() {
+    let mut sql = if database.trim().is_empty() {
         prefix.to_string()
     } else {
         format!("{prefix} FROM {}", quote_identifier(database))
+    };
+    let conditions = show_tables_filter_conditions(database, filter, exact_names);
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" OR "));
     }
+    sql
+}
+
+fn show_table_status_sql(database: &str, filter: Option<&str>) -> String {
+    let mut sql = if database.trim().is_empty() {
+        "SHOW TABLE STATUS".to_string()
+    } else {
+        format!("SHOW TABLE STATUS FROM {}", quote_identifier(database))
+    };
+    if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+        let patterns = mysql_fallback_like_patterns(filter);
+        let conditions = patterns
+            .iter()
+            .flat_map(|pattern| {
+                [
+                    format!("Name LIKE {} ESCAPE '\\\\'", quote_value(pattern)),
+                    format!("Comment LIKE {} ESCAPE '\\\\'", quote_value(pattern)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" OR "));
+    }
+    sql
+}
+
+fn show_tables_filter_conditions(database: &str, filter: Option<&str>, exact_names: &[String]) -> Vec<String> {
+    if database.trim().is_empty() {
+        // Catalogless services do not expose a stable Tables_in_<db> column name.
+        // Preserve the existing compatible SHOW syntax; local filtering still
+        // guarantees correctness for these uncommon endpoints.
+        return Vec::new();
+    }
+    let table_name_column = quote_identifier(&format!("Tables_in_{database}"));
+    let mut conditions = filter
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .into_iter()
+        .flat_map(mysql_fallback_like_patterns)
+        .map(|pattern| format!("{table_name_column} LIKE {} ESCAPE '\\\\'", quote_value(&pattern)))
+        .collect::<Vec<_>>();
+    conditions.extend(exact_names.iter().map(|name| format!("{table_name_column} = {}", quote_value(name))));
+    conditions
+}
+
+fn mysql_fallback_like_patterns(filter: &str) -> Vec<String> {
+    let escaped = filter.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let mut patterns = vec![format!("%{escaped}%")];
+    if crate::sql::fuzzy_filter_enabled(filter) {
+        patterns.push(crate::sql::fuzzy_like_pattern_with_escape(filter, |value| {
+            value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        }));
+    }
+    patterns
 }
 
 async fn list_tables_show_with_status(
@@ -2066,6 +2203,35 @@ async fn list_tables_show_with_status(
         }
     }
     Ok((tables, status))
+}
+
+async fn list_tables_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+) -> Result<Vec<TableInfo>, String> {
+    if filter.is_none_or(|filter| filter.trim().is_empty()) {
+        return list_tables_show(pool, database).await;
+    }
+
+    let status = match list_table_status_show_filtered(pool, database, filter).await {
+        Ok(status) => status,
+        Err(err) => {
+            log::warn!("Skipping filtered table status for database `{}`: {}", database, err);
+            HashMap::new()
+        }
+    };
+    let exact_names = status.keys().cloned().collect::<Vec<_>>();
+    // DBeaver also uses SHOW FULL TABLES with server-side WHERE/LIKE filtering.
+    // Keeping the filter on the SHOW query avoids turning a normal empty search
+    // into an unbounded scan while preserving TABLE/VIEW classification.
+    let mut tables = list_table_names_show_filtered(pool, database, filter, &exact_names).await?;
+    for table in &mut tables {
+        if let Some(meta) = status.get(&table.name) {
+            table.comment = meta.comment.clone();
+        }
+    }
+    Ok(tables)
 }
 
 pub async fn list_tables_show(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
@@ -2136,6 +2302,14 @@ fn requested_object_type(object_types: Option<&[String]>, object_type: &str) -> 
     object_types.is_none_or(|types| {
         types.is_empty() || types.iter().any(|candidate| candidate.eq_ignore_ascii_case(object_type))
     })
+}
+
+fn wants_table_objects(object_types: Option<&[String]>) -> bool {
+    requested_object_type(object_types, "TABLE") || requested_object_type(object_types, "VIEW")
+}
+
+fn wants_routine_objects(object_types: Option<&[String]>) -> bool {
+    requested_object_type(object_types, "PROCEDURE") || requested_object_type(object_types, "FUNCTION")
 }
 
 fn sql_pagination(limit: Option<usize>, offset: Option<usize>) -> String {
@@ -2260,36 +2434,49 @@ pub async fn list_objects(
     offset: Option<usize>,
 ) -> Result<PagedObjectList, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let wants_tables = requested_object_type(object_types, "TABLE") || requested_object_type(object_types, "VIEW");
-    let wants_routines =
-        requested_object_type(object_types, "PROCEDURE") || requested_object_type(object_types, "FUNCTION");
+    let wants_tables = wants_table_objects(object_types);
+    let wants_routines = wants_routine_objects(object_types);
     let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
     let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
     let mut objects = Vec::new();
 
     if wants_tables {
         let tables_sql = list_tables_objects_sql(database, object_types, query_limit, query_offset);
-        let result = match conn.query_iter(&tables_sql).await {
-            Ok(result) => result,
+        let table_rows = match conn.query_iter(&tables_sql).await {
+            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+                Ok(rows) if !rows.is_empty() => Some(rows),
+                Ok(_) => {
+                    log::debug!(
+                        "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES returned no named tables"
+                    );
+                    None
+                }
+                Err(err) => {
+                    log::debug!(
+                        "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES rows failed: {err}"
+                    );
+                    None
+                }
+            },
             Err(err) => {
                 log::debug!(
                     "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES failed: {err}"
                 );
-                return list_table_objects_show(pool, database)
-                    .await
-                    .map(|objects| PagedObjectList { objects, paging_applied: false });
+                None
             }
         };
-        let table_rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-        if table_rows.is_empty() && !wants_routines {
-            log::debug!(
-                "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES returned no named tables"
+        if let Some(table_rows) = table_rows {
+            objects.extend(table_rows.iter().map(|row| row_to_object(row, database)));
+        } else {
+            drop(conn);
+            objects.extend(
+                list_table_objects_show_filtered(pool, database, object_types, query_limit, query_offset).await?,
             );
-            return list_table_objects_show(pool, database)
-                .await
-                .map(|objects| PagedObjectList { objects, paging_applied: false });
+            if !wants_routines {
+                return Ok(PagedObjectList { objects, paging_applied });
+            }
+            conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
         }
-        objects.extend(table_rows.iter().map(|row| row_to_object(row, database)));
     }
 
     // Routines are queried separately: some MySQL-compatible servers (sharding proxies,
@@ -2352,6 +2539,33 @@ pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result
     }
 
     Ok(objects)
+}
+
+async fn list_table_objects_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<ObjectInfo>, String> {
+    let (tables, status) = list_tables_show_with_status(pool, database).await?;
+    Ok(filter_table_objects_fallback(table_infos_to_objects(tables, &status, database), object_types, limit, offset))
+}
+
+fn filter_table_objects_fallback(
+    objects: Vec<ObjectInfo>,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Vec<ObjectInfo> {
+    let wants_table = requested_object_type(object_types, "TABLE");
+    let wants_view = requested_object_type(object_types, "VIEW");
+    objects
+        .into_iter()
+        .filter(|object| if object.object_type.eq_ignore_ascii_case("VIEW") { wants_view } else { wants_table })
+        .skip(offset.unwrap_or(0))
+        .take(limit.unwrap_or(usize::MAX))
+        .collect()
 }
 
 pub async fn list_starrocks_table_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
@@ -3999,6 +4213,21 @@ mod tests {
     use crate::db::connection_timeout;
     use mysql_async::consts::ColumnFlags;
 
+    fn mysql_test_object(name: &str, object_type: &str) -> ObjectInfo {
+        ObjectInfo {
+            name: name.to_string(),
+            object_type: object_type.to_string(),
+            schema: Some("app".to_string()),
+            valid: None,
+            signature: None,
+            comment: None,
+            created_at: None,
+            updated_at: None,
+            parent_schema: None,
+            parent_name: None,
+        }
+    }
+
     #[test]
     fn bytes_to_string_reuses_valid_utf8_and_falls_back_lossy() {
         assert_eq!(super::bytes_to_string_lossy("héllo 世界".as_bytes().to_vec()), "héllo 世界");
@@ -4233,11 +4462,60 @@ mod tests {
     }
 
     #[test]
-    fn mysql_empty_list_tables_fallback_allows_sidebar_paging_and_type_filters() {
-        assert!(should_fallback_empty_list_tables(None));
-        assert!(should_fallback_empty_list_tables(Some("")));
-        assert!(should_fallback_empty_list_tables(Some("  ")));
-        assert!(!should_fallback_empty_list_tables(Some("missing")));
+    fn mysql_filtered_show_fallback_is_server_bounded() {
+        let tables_sql = show_tables_filtered_sql("app", true, Some("missing_%"), &[]);
+        let status_sql = show_table_status_sql("app", Some("missing_%"));
+
+        assert!(tables_sql.starts_with("SHOW FULL TABLES FROM `app` WHERE "));
+        assert!(tables_sql.contains("`Tables_in_app` LIKE"));
+        assert!(tables_sql.contains("missing"));
+        assert!(tables_sql.contains("ESCAPE"));
+        assert!(status_sql.starts_with("SHOW TABLE STATUS FROM `app` WHERE "));
+        assert!(status_sql.contains("Name LIKE"));
+        assert!(status_sql.contains("Comment LIKE"));
+        assert!(status_sql.contains("missing"));
+        assert!(status_sql.contains("ESCAPE"));
+        assert!(!tables_sql.eq(&show_tables_filtered_sql("app", true, None, &[])));
+    }
+
+    #[test]
+    fn mysql_filtered_show_fallback_attempts_bare_show_after_syntax_errors() {
+        let attempts = show_tables_query_attempts("app", Some("orders"), &[]);
+
+        assert_eq!(attempts.len(), 4);
+        assert!(attempts[0].server_filtered);
+        assert!(attempts[0].sql.starts_with("SHOW FULL TABLES FROM `app` WHERE "));
+        assert!(attempts[1].server_filtered);
+        assert!(attempts[1].sql.starts_with("SHOW TABLES FROM `app` WHERE "));
+        assert!(!attempts[2].server_filtered);
+        assert_eq!(attempts[2].sql, "SHOW FULL TABLES FROM `app`");
+        assert!(!attempts[3].server_filtered);
+        assert_eq!(attempts[3].sql, "SHOW TABLES FROM `app`");
+    }
+
+    #[test]
+    fn mysql_unfiltered_show_avoids_duplicate_attempts() {
+        let attempts = show_tables_query_attempts("app", None, &[]);
+
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].sql, "SHOW FULL TABLES FROM `app`");
+        assert_eq!(attempts[1].sql, "SHOW TABLES FROM `app`");
+        assert!(attempts.iter().all(|attempt| !attempt.server_filtered));
+    }
+
+    #[test]
+    fn mysql_unfiltered_status_fallback_is_filtered_locally_once() {
+        let status = HashMap::from([
+            (
+                "orders".to_string(),
+                TableStatusMeta { comment: Some("purchase history".to_string()), ..Default::default() },
+            ),
+            ("users".to_string(), TableStatusMeta::default()),
+        ]);
+
+        let filtered = filter_table_status_fallback(status, Some("purchase"));
+
+        assert_eq!(filtered.keys().map(String::as_str).collect::<Vec<_>>(), vec!["orders"]);
     }
 
     #[test]
@@ -4279,6 +4557,47 @@ mod tests {
         let filtered = filter_list_tables_fallback(rows, Some("ood"), None, None, Some(&["TABLE".to_string()]));
 
         assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["t_0001"]);
+    }
+
+    #[test]
+    fn mysql_object_browser_fallback_keeps_tables_views_and_routines_by_default() {
+        let table_objects = vec![mysql_test_object("orders", "TABLE"), mysql_test_object("orders_view", "VIEW")];
+        let mut objects = filter_table_objects_fallback(table_objects, None, None, None);
+        objects.push(mysql_test_object("refresh_orders", "PROCEDURE"));
+
+        assert_eq!(
+            objects.iter().map(|object| object.object_type.as_str()).collect::<Vec<_>>(),
+            vec!["TABLE", "VIEW", "PROCEDURE"]
+        );
+    }
+
+    #[test]
+    fn mysql_object_browser_routine_only_does_not_use_table_fallback() {
+        let object_types = vec!["PROCEDURE".to_string(), "FUNCTION".to_string()];
+
+        assert!(!wants_table_objects(Some(&object_types)));
+        assert!(wants_routine_objects(Some(&object_types)));
+        assert!(filter_table_objects_fallback(
+            vec![mysql_test_object("orders", "TABLE")],
+            Some(&object_types),
+            None,
+            None,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn mysql_object_browser_fallback_filters_type_limit_and_offset() {
+        let objects = vec![
+            mysql_test_object("a_table", "TABLE"),
+            mysql_test_object("b_view", "VIEW"),
+            mysql_test_object("c_table", "TABLE"),
+        ];
+        let object_types = vec!["TABLE".to_string()];
+
+        let filtered = filter_table_objects_fallback(objects, Some(&object_types), Some(1), Some(1));
+
+        assert_eq!(filtered.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(), vec!["c_table"]);
     }
 
     #[test]
@@ -4402,9 +4721,9 @@ mod tests {
 
     #[test]
     fn mysql_show_metadata_sql_supports_catalogless_services() {
-        assert_eq!(show_tables_sql("", true), "SHOW FULL TABLES");
-        assert_eq!(show_tables_sql("", false), "SHOW TABLES");
-        assert_eq!(show_tables_sql("app", true), "SHOW FULL TABLES FROM `app`");
+        assert_eq!(show_tables_filtered_sql("", true, None, &[]), "SHOW FULL TABLES");
+        assert_eq!(show_tables_filtered_sql("", false, None, &[]), "SHOW TABLES");
+        assert_eq!(show_tables_filtered_sql("app", true, None, &[]), "SHOW FULL TABLES FROM `app`");
         assert_eq!(show_columns_sql("", "idx", true), "SHOW FULL COLUMNS FROM `idx`");
         assert_eq!(show_columns_sql("app", "idx", false), "SHOW COLUMNS FROM `app`.`idx`");
     }
@@ -4856,6 +5175,17 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     #[test]
     fn mysql_cnch_group_concat_syntax_error_retries_without_session_variable() {
         let error = "MySQL connection failed: Server error: `ERROR HY000 (1105): unknown error: Error 62 (HY000): Code: 62, e.displayText() = DB::Exception: host = cnch-server-2: Syntax error: failed at position 13 ('group_concat_max_len'): group_concat_max_len = 1048576. Expected one of: Dot, token, Equals SQLSTATE: 42000 (version 21.8.7.1)'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_group_concat_not_supported_error_retries_without_session_variable() {
+        let error =
+            "MySQL connection failed: Server error: `ERROR 1235 (42000): SET of group_concat_max_len is not supported'";
 
         assert_eq!(
             mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),

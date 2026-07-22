@@ -4109,6 +4109,48 @@ test("buildQueryResultExportRequest uses exportRowLimit when enabled", async () 
   }
 });
 
+test("buildQueryResultExportRequest includes PostgreSQL batch setup for a truncated temporary-table result", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "analytics", "Query", "query", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  const batchSql = ["CREATE TEMPORARY TABLE t1 AS SELECT id FROM events", "CREATE INDEX t1_id ON t1(id)", "SELECT * FROM t1", "DROP TABLE t1"].join(";\n");
+  tab.lastExecutedSql = batchSql;
+  tab.resultBaseSql = batchSql;
+  tab.result = {
+    columns: ["id"],
+    rows: [[1]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    statement_index: 2,
+    sourceStatement: "SELECT * FROM t1",
+    truncated: true,
+    has_more: false,
+  };
+
+  globalThis.fetch = withConnectionHealthMock(async () => new Response("unexpected request", { status: 500 }));
+
+  try {
+    const request = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "export-temp",
+      filePath: "C:\\tmp\\temp.csv",
+      format: "csv",
+    });
+
+    assert.equal(request?.sql, "SELECT * FROM t1");
+    assert.deepEqual(request?.setupSql, ["CREATE TEMPORARY TABLE t1 AS SELECT id FROM events", "CREATE INDEX t1_id ON t1(id)"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("buildQueryResultExportRequest caps progress total when export row limit is enabled", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

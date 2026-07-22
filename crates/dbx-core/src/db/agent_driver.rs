@@ -1130,6 +1130,23 @@ impl AgentDriverClient {
         .await
     }
 
+    pub async fn get_table_comment<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        // Kingbase Go exposes this driver-specific RPC without widening the common
+        // agent protocol contract that every SQL agent is expected to implement.
+        self.call_with_timeout(
+            "get_table_comment",
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
     pub async fn list_indexes<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: &str,

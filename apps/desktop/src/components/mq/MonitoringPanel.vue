@@ -174,7 +174,7 @@ function getTopicRef(): TopicRef | null {
   if (!props.topic || !props.tenant || !props.namespace) return null;
   return {
     tenant: props.tenant,
-    namespace: props.namespace,
+    namespace: props.topic.namespace || props.namespace,
     topic: props.topic.shortName,
     persistent: props.topic.persistent,
     partitioned: props.topic.partitioned,

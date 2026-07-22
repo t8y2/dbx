@@ -55,6 +55,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
+import { getAiConfigModelIds, isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 import { ACTIVE_TEMPLATES_TOTAL_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
@@ -297,14 +298,7 @@ const modelSearchQuery = ref("");
 
 // Configured providers for quick switching - get from aiConfigs
 const configuredProviders = computed(() => {
-  const providers = orderAiConfigsForDisplay(
-    settings.aiConfigs.filter((c) => {
-      // Check directly if config has required fields
-      const preset = AI_PROVIDER_PRESETS[c.provider];
-      if (c.provider === "codex-cli" || c.provider === "claude-code-cli") return true;
-      return !!c.endpoint?.trim() && !!c.model?.trim() && (!preset.requiresApiKey || !!c.apiKey?.trim());
-    }),
-  );
+  const providers = orderAiConfigsForDisplay(settings.aiConfigs.filter((config) => isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey)));
   // Apply search filter - hide providers with no matching models
   if (modelSearchQuery.value.trim()) {
     const query = modelSearchQuery.value.trim().toLowerCase();
@@ -334,12 +328,7 @@ const activeFullConfig = computed(() => {
 function getModelsForConfig(configId: string): string[] {
   const config = settings.aiConfigs.find((c) => c.id === configId);
   if (!config) return [];
-  const models = config.models?.map((m) => m.name) || [];
-  // Always include the current model
-  if (config.model && !models.includes(config.model)) {
-    return [config.model, ...models];
-  }
-  return models;
+  return getAiConfigModelIds(config);
 }
 
 function getConfigModelOptionIds(configId: string): string[] {

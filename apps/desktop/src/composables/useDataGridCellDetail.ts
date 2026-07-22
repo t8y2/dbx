@@ -20,7 +20,7 @@ export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>
     appAppearance: () => (isDark.value ? "dark" : "light") as import("@/lib/app/appTheme").AppThemeAppearance,
     appPalette: () => themePalette.value,
     fontSize: () => settingsStore.editorSettings.fontSize,
-    fontFamily: () => settingsStore.editorSettings.fontFamily,
+    fontFamily: () => settingsStore.editorSettings.tableFontFamily,
   });
 
   watch(geometryPreviewOpen, async (open) => {

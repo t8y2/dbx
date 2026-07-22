@@ -377,17 +377,8 @@ pub async fn connect_standalone(
     timeout: std::time::Duration,
 ) -> Result<redis::aio::MultiplexedConnection, String> {
     let mut last_error = None;
-    for auth in redis_auth_candidates(&config.username, &config.password) {
-        let client = redis::Client::open(connection_info(
-            host,
-            port,
-            config.ssl,
-            config.redis_tls_insecure(),
-            &auth.username,
-            &auth.password,
-            redis_database_index(config),
-        ))
-        .map_err(|e| format!("Redis connection failed: {e}"))?;
+    for info in standalone_connection_infos(config, host, port) {
+        let client = redis::Client::open(info).map_err(|e| format!("Redis connection failed: {e}"))?;
         match connect_client_with_timeout(client, timeout, "Redis").await {
             Ok(con) => return Ok(con),
             Err(err) if last_error.is_none() || is_redis_auth_error(&err) => {
@@ -401,6 +392,23 @@ pub async fn connect_standalone(
         }
     }
     Err(last_error.unwrap_or_else(|| "Redis connection failed".to_string()))
+}
+
+fn standalone_connection_infos(config: &ConnectionConfig, host: &str, port: u16) -> Vec<ConnectionInfo> {
+    redis_auth_candidates(&config.username, &config.password)
+        .into_iter()
+        .map(|auth| {
+            connection_info(
+                host,
+                port,
+                config.ssl,
+                config.redis_tls_insecure(),
+                &auth.username,
+                &auth.password,
+                redis_database_index(config),
+            )
+        })
+        .collect()
 }
 
 async fn connect_client_with_timeout(
@@ -2948,9 +2956,10 @@ mod tests {
         parse_stream_entries, redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot,
         redis_command_raw_to_json, redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw,
         redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint,
-        redis_value_matches_query, redis_value_to_bytes, RedisAuthCandidate, RedisBlob, RedisBlobEncoding,
-        RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint,
-        RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamEntry, RedisStreamField, RedisValue, RedisValueData,
+        redis_value_matches_query, redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob,
+        RedisBlobEncoding, RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem,
+        RedisNodeEndpoint, RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamEntry, RedisStreamField, RedisValue,
+        RedisValueData,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -4029,8 +4038,43 @@ mod tests {
     }
 
     #[test]
+    fn standalone_connection_infos_cover_no_auth_acl_fallback_tls_and_database() {
+        let mut config = redis_test_connection_config();
+        let no_auth = standalone_connection_infos(&config, "127.0.0.1", 6379);
+        assert_eq!(no_auth.len(), 1);
+        assert_eq!(no_auth[0].redis.username, None);
+        assert_eq!(no_auth[0].redis.password, None);
+        assert_eq!(no_auth[0].redis.db, 0);
+
+        config.username = "app-user".to_string();
+        config.password = "secret".to_string();
+        config.database = Some("4".to_string());
+        config.ssl = true;
+        config.url_params = Some("tls_insecure=true".to_string());
+        let infos = standalone_connection_infos(&config, "cache.example.com", 6380);
+
+        assert_eq!(infos.len(), 2);
+        assert!(matches!(infos[0].addr, ConnectionAddr::TcpTls { port: 6380, insecure: true, .. }));
+        assert_eq!(infos[0].redis.username.as_deref(), Some("app-user"));
+        assert_eq!(infos[0].redis.password.as_deref(), Some("secret"));
+        assert_eq!(infos[0].redis.db, 4);
+        assert_eq!(infos[1].redis.username, None);
+        assert_eq!(infos[1].redis.password.as_deref(), Some("app-user@secret"));
+        assert_eq!(infos[1].redis.db, 4);
+    }
+
+    #[test]
     fn redis_database_index_uses_numeric_database_only() {
-        let mut config = ConnectionConfig {
+        let mut config = redis_test_connection_config();
+        config.database = Some("4".to_string());
+
+        assert_eq!(redis_database_index(&config), 4);
+        config.database = Some("not-a-number".to_string());
+        assert_eq!(redis_database_index(&config), 0);
+    }
+
+    fn redis_test_connection_config() -> ConnectionConfig {
+        ConnectionConfig {
             id: "redis".to_string(),
             name: "Redis".to_string(),
             db_type: crate::models::connection::DatabaseType::Redis,
@@ -4042,7 +4086,7 @@ mod tests {
             port: 6379,
             username: String::new(),
             password: String::new(),
-            database: Some("4".to_string()),
+            database: None,
             visible_databases: None,
             visible_schemas: None,
             attached_databases: Vec::new(),
@@ -4080,11 +4124,7 @@ mod tests {
             is_production: false,
             production_databases: vec![],
             database_info: None,
-        };
-
-        assert_eq!(redis_database_index(&config), 4);
-        config.database = Some("not-a-number".to_string());
-        assert_eq!(redis_database_index(&config), 0);
+        }
     }
 
     #[test]

@@ -25,3 +25,18 @@ test("keeps a loaded editor font when an old appearance draft only changes the U
   assert.equal(store.editorSettings.fontFamily, savedEditorFont);
   assert.equal(store.editorSettings.uiFontFamily, staleDraft.uiFontFamily);
 });
+
+test("applies a result grid font without overwriting editor or interface fonts", () => {
+  setActivePinia(createPinia());
+  const store = useSettingsStore();
+  const draftBase = editorSettingsDraftFromSettings(store.editorSettings);
+  const tableFontFamily = `"IBM Plex Mono", monospace`;
+  const patch = editorSettingsPatchFromDraft({ ...draftBase, tableFontFamily }, draftBase);
+
+  store.updateEditorSettings(patch);
+
+  assert.equal(patch.fontFamily, undefined);
+  assert.equal(patch.uiFontFamily, undefined);
+  assert.equal(patch.tableFontFamily, tableFontFamily);
+  assert.equal(store.editorSettings.tableFontFamily, tableFontFamily);
+});

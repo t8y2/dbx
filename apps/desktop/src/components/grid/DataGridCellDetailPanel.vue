@@ -143,7 +143,7 @@ defineExpose({ openSearch });
           /></a>
         </div>
         <template v-if="editing"
-          ><div class="min-h-0 flex-1" :style="editorStyle">
+          ><div class="dbx-data-grid-value-font min-h-0 flex-1" :style="editorStyle">
             <TemporalCellEditor v-if="temporalEditorConfig" v-model="detailEditValue" :kind="temporalEditorConfig.kind" :fraction-precision="temporalEditorConfig.fractionPrecision" variant="inline" :commit-on-close="false" @cancel="emit('cancel')" @commit="emit('commit')" />
             <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
           </div>
@@ -162,7 +162,7 @@ defineExpose({ openSearch });
         />
         <pre
           v-else
-          class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
+          class="dbx-data-grid-value-font overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
           :class="[{ 'cursor-text': detail.isEditable }, panelIsBottom && detail.imagePreviewUrl ? 'min-h-24 max-h-32 shrink-0' : '', valueFillsHeight && !detail.imagePreviewUrl ? 'min-h-0 flex-1' : '']"
           @dblclick="emit('startEdit')"
           >{{ detail.rawValuePreview }}</pre

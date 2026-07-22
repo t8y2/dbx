@@ -45,6 +45,11 @@ const ROCKETMQ_CAPABILITIES: MqCapabilities = MqCapabilities {
     supports_message_query: true,
     supports_dlq: true,
     supports_message_trace: true,
+    supports_exchanges: false,
+    supports_client_connections: false,
+    supports_user_permissions: false,
+    supports_policies: false,
+    supports_cluster_monitoring: false,
 };
 
 const TOPIC_LIST_PAGE_SIZE: u32 = 200;
@@ -726,6 +731,7 @@ fn topic_info_from_agent_value(t: &serde_json::Value) -> TopicInfo {
         persistent: true,
         internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
         message_type: t.get("messageType").and_then(|v| v.as_str()).map(String::from),
+        namespace: None,
     }
 }
 

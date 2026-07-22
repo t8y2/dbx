@@ -16,7 +16,7 @@ If you are not sure what to pick, choose an issue with clear reproduction steps,
 
 - Node.js >= 22.13.0
 - pnpm 10.27.0
-- Rust >= 1.77
+- Rust >= 1.88
 - Make
 
 Linux desktop builds also need WebKit/GTK packages. See [README.md](README.md#getting-started) for the exact commands.

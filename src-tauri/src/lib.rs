@@ -1149,6 +1149,7 @@ pub fn run() {
             commands::plugins::install_jdbc_plugin_local,
             commands::plugins::uninstall_jdbc_plugin,
             commands::schema::list_databases,
+            commands::schema::list_database_storage,
             commands::schema::list_doris_catalogs,
             commands::schema::list_doris_catalog_databases,
             commands::schema::list_sqlserver_linked_servers,
@@ -1405,6 +1406,18 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_topic_internal_stats,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_exchanges,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_create_exchange,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_delete_exchange,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_bindings,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_bind,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_unbind,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_subscriptions,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_subscription,
@@ -1431,6 +1444,12 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_unload_topic,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_client_connections,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_client_channels,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_close_client_connection,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_set_publish_rate,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_set_dispatch_rate,
@@ -1448,6 +1467,28 @@ pub fn run() {
             commands::mq_cmd::mq_revoke_permission,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_permissions,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_users,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_create_user,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_delete_user,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_user_permissions,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_grant_user_permission,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_revoke_user_permission,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_policies,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_set_policy,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_delete_policy,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_overview,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_nodes,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_issue_token,
             #[cfg(feature = "mq-admin")]

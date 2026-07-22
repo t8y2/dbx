@@ -43,6 +43,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | iotdb | Apache IoTDB | IoTDB JDBC |
 | etcd | etcd | jetcd |
 | zookeeper | Apache ZooKeeper | Apache Curator |
+| rabbitmq | RabbitMQ | RabbitMQ AMQP Java client |
 
 
 ## Multi-JRE Support

@@ -300,7 +300,7 @@ export function splitQualifiedIdentifier(identifier: string): string[] {
 }
 
 /** Match identifier against known table names (case-insensitive). Supports qualified identifiers like schema.table. */
-export function matchTable<T extends { name: string; schema?: string }>(identifier: string, tables: T[]): T | null {
+export function matchTable<T extends { name: string; database?: string; schema?: string }>(identifier: string, tables: T[]): T | null {
   const parts = splitQualifiedIdentifier(identifier);
   const normalizedIdentifier = parts.length > 0 ? parts.join(".").toLowerCase() : identifier.toLowerCase();
 
@@ -311,7 +311,8 @@ export function matchTable<T extends { name: string; schema?: string }>(identifi
     // Use the final two parts so catalog.schema.table still resolves against schema-scoped metadata.
     const qualifier = parts[parts.length - 2].toLowerCase();
     const name = parts[parts.length - 1].toLowerCase();
-    const qualified = tables.find((t) => t.name.toLowerCase() === name && t.schema?.toLowerCase() === qualifier);
+    const database = parts.length >= 3 ? parts[parts.length - 3].toLowerCase() : undefined;
+    const qualified = tables.find((t) => t.name.toLowerCase() === name && t.schema?.toLowerCase() === qualifier && (!database || !t.database || t.database.toLowerCase() === database));
     if (qualified) return qualified;
   }
 

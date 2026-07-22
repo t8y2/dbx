@@ -176,6 +176,86 @@ pub async fn mq_get_topic_internal_stats(
     dbx_core::mq::service::mq_get_topic_internal_stats_core(&state, &connection_id, topic).await
 }
 
+// ---- Exchanges ----
+
+#[tauri::command]
+pub async fn mq_list_exchanges(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+) -> Result<Vec<dbx_core::mq::MqExchangeInfo>, String> {
+    dbx_core::mq::service::mq_list_exchanges_core(&state, &connection_id, ns).await
+}
+
+#[tauri::command]
+pub async fn mq_create_exchange(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    name: String,
+    exchange_type: String,
+    durable: bool,
+    auto_delete: bool,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Create exchange").await?;
+    dbx_core::mq::service::mq_create_exchange_core(
+        &state,
+        &connection_id,
+        ns,
+        &name,
+        &exchange_type,
+        durable,
+        auto_delete,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mq_delete_exchange(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    name: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete exchange").await?;
+    dbx_core::mq::service::mq_delete_exchange_core(&state, &connection_id, ns, &name).await
+}
+
+// ---- Bindings ----
+
+#[tauri::command]
+pub async fn mq_list_bindings(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    exchange: Option<String>,
+    queue: Option<String>,
+) -> Result<Vec<dbx_core::mq::MqBindingInfo>, String> {
+    dbx_core::mq::service::mq_list_bindings_core(&state, &connection_id, ns, exchange, queue).await
+}
+
+#[tauri::command]
+pub async fn mq_bind(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    binding: dbx_core::mq::MqBindingInfo,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Create binding").await?;
+    dbx_core::mq::service::mq_bind_core(&state, &connection_id, ns, binding).await
+}
+
+#[tauri::command]
+pub async fn mq_unbind(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    binding: dbx_core::mq::MqBindingInfo,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete binding").await?;
+    dbx_core::mq::service::mq_unbind_core(&state, &connection_id, ns, binding).await
+}
+
 // ---- Subscriptions ----
 
 #[tauri::command]
@@ -321,6 +401,38 @@ pub async fn mq_unload_topic(
     dbx_core::mq::service::mq_unload_topic_core(&state, &connection_id, topic).await
 }
 
+// ---- Client connections / channels (RabbitMQ) ----
+
+#[tauri::command]
+pub async fn mq_list_client_connections(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+) -> Result<Vec<dbx_core::mq::MqClientConnectionInfo>, String> {
+    dbx_core::mq::service::mq_list_client_connections_core(&state, &connection_id, ns).await
+}
+
+#[tauri::command]
+pub async fn mq_list_client_channels(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    connection: Option<String>,
+) -> Result<Vec<dbx_core::mq::MqChannelInfo>, String> {
+    dbx_core::mq::service::mq_list_client_channels_core(&state, &connection_id, ns, connection).await
+}
+
+#[tauri::command]
+pub async fn mq_close_client_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    ns: dbx_core::mq::NamespaceRef,
+    name: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Close client connection").await?;
+    dbx_core::mq::service::mq_close_client_connection_core(&state, &connection_id, ns, &name).await
+}
+
 // ---- Rate limits / quotas / retention ----
 
 #[tauri::command]
@@ -421,6 +533,167 @@ pub async fn mq_list_permissions(
     dbx_core::mq::service::mq_list_permissions_core(&state, &connection_id, scope).await
 }
 
+// ---- Users / user permissions (RabbitMQ) ----
+
+#[tauri::command]
+pub async fn mq_list_users(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<Vec<dbx_core::mq::MqUserInfo>, String> {
+    dbx_core::mq::service::mq_list_users_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn mq_create_user(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    name: String,
+    password: String,
+    tags: Option<Vec<String>>,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Create user").await?;
+    dbx_core::mq::service::mq_create_user_core(&state, &connection_id, &name, &password, tags.unwrap_or_default()).await
+}
+
+#[tauri::command]
+pub async fn mq_delete_user(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    name: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete user").await?;
+    dbx_core::mq::service::mq_delete_user_core(&state, &connection_id, &name).await
+}
+
+/// RabbitMQ user permissions live under the synthetic `_rabbitmq` tenant;
+/// `*` is the all-vhosts marker and is only meaningful for listings.
+fn user_permission_ns(virtual_host: Option<String>, all_vhosts: Option<bool>) -> dbx_core::mq::NamespaceRef {
+    let namespace = match (all_vhosts.unwrap_or(false), virtual_host) {
+        (true, _) => "*".to_string(),
+        (false, Some(vhost)) if !vhost.trim().is_empty() => vhost,
+        _ => "*".to_string(),
+    };
+    dbx_core::mq::NamespaceRef { tenant: "_rabbitmq".to_string(), namespace }
+}
+
+#[tauri::command]
+pub async fn mq_list_user_permissions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    virtual_host: Option<String>,
+    user: Option<String>,
+    all_vhosts: Option<bool>,
+) -> Result<Vec<dbx_core::mq::MqVhostPermission>, String> {
+    let ns = user_permission_ns(virtual_host, all_vhosts);
+    let mut permissions = dbx_core::mq::service::mq_list_user_permissions_core(&state, &connection_id, ns).await?;
+    if let Some(user) = user {
+        permissions.retain(|p| p.user == user);
+    }
+    Ok(permissions)
+}
+
+#[tauri::command]
+pub async fn mq_grant_user_permission(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    user: String,
+    virtual_host: String,
+    configure: Option<String>,
+    write: Option<String>,
+    read: Option<String>,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Grant user permission").await?;
+    let ns = user_permission_ns(Some(virtual_host), None);
+    let all = || ".*".to_string();
+    dbx_core::mq::service::mq_grant_user_permission_core(
+        &state,
+        &connection_id,
+        ns,
+        &user,
+        &configure.unwrap_or_else(all),
+        &write.unwrap_or_else(all),
+        &read.unwrap_or_else(all),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mq_revoke_user_permission(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    user: String,
+    virtual_host: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Revoke user permission").await?;
+    let ns = user_permission_ns(Some(virtual_host), None);
+    dbx_core::mq::service::mq_revoke_user_permission_core(&state, &connection_id, ns, &user).await
+}
+
+// ---- Policies & cluster monitoring (RabbitMQ) ----
+
+#[tauri::command]
+pub async fn mq_list_policies(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    virtual_host: Option<String>,
+    all_vhosts: Option<bool>,
+) -> Result<Vec<dbx_core::mq::MqPolicyInfo>, String> {
+    let ns = user_permission_ns(virtual_host, all_vhosts);
+    dbx_core::mq::service::mq_list_policies_core(&state, &connection_id, ns).await
+}
+
+#[tauri::command]
+pub async fn mq_set_policy(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    virtual_host: String,
+    name: String,
+    pattern: String,
+    apply_to: Option<String>,
+    priority: Option<i32>,
+    definition: std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Set policy").await?;
+    let ns = user_permission_ns(Some(virtual_host.clone()), None);
+    let policy = dbx_core::mq::MqPolicyInfo {
+        name,
+        vhost: virtual_host,
+        pattern,
+        apply_to: apply_to.unwrap_or_default(),
+        priority: priority.unwrap_or(0),
+        definition,
+    };
+    dbx_core::mq::service::mq_set_policy_core(&state, &connection_id, ns, policy).await
+}
+
+#[tauri::command]
+pub async fn mq_delete_policy(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    virtual_host: String,
+    name: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete policy").await?;
+    let ns = user_permission_ns(Some(virtual_host), None);
+    dbx_core::mq::service::mq_delete_policy_core(&state, &connection_id, ns, &name).await
+}
+
+#[tauri::command]
+pub async fn mq_get_overview(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::mq::MqOverviewInfo, String> {
+    dbx_core::mq::service::mq_get_overview_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn mq_list_nodes(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<Vec<dbx_core::mq::MqNodeInfo>, String> {
+    dbx_core::mq::service::mq_list_nodes_core(&state, &connection_id).await
+}
+
 // ---- Client tokens ----
 
 #[tauri::command]
@@ -478,6 +751,7 @@ pub async fn mq_alter_topic_config(
     topic: dbx_core::mq::TopicRef,
     configs: serde_json::Value,
 ) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Alter topic config").await?;
     dbx_core::mq::service::mq_alter_topic_config_core(&state, &connection_id, topic, configs).await
 }
 
@@ -487,6 +761,7 @@ pub async fn mq_skip_topic_accumulation(
     connection_id: String,
     topic: dbx_core::mq::TopicRef,
 ) -> Result<serde_json::Value, String> {
+    ensure_connection_writable(&state, &connection_id, "Skip topic accumulation").await?;
     dbx_core::mq::service::mq_skip_topic_accumulation_core(&state, &connection_id, topic).await
 }
 
@@ -557,5 +832,6 @@ pub async fn mq_send_message(
     connection_id: String,
     req: dbx_core::mq::SendMessageRequest,
 ) -> Result<dbx_core::mq::SendMessageResponse, String> {
+    ensure_connection_writable(&state, &connection_id, "Send message").await?;
     dbx_core::mq::service::mq_send_message_core(&state, &connection_id, req).await
 }

@@ -2551,17 +2551,30 @@ pub async fn execute_statements_in_transaction(
             .map_err(|e| query_error_with_omitted_sql_context(&e, sql_ctx))?
     };
 
+    execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, statements, schema).await
+}
+
+/// Execute multiple SQL statements transactionally on an already-resolved pool.
+/// This preserves session-scoped pools used by long-running imports.
+pub async fn execute_statements_in_transaction_on_pool(
+    state: &AppState,
+    pool_key: &str,
+    connection_id: &str,
+    database: &str,
+    statements: &[String],
+    schema: Option<&str>,
+) -> Result<db::QueryResult, String> {
     // Read-only check: intercept all transaction paths before dispatching
-    check_read_only_for_connection_multi(state, &pool_key, statements).await?;
+    check_read_only_for_connection_multi(state, pool_key, statements).await?;
 
     let start = std::time::Instant::now();
     let db_type = connection_database_type(state, connection_id).await;
-    let operation_budget = configured_operation_budget_for_pool_key(state, &pool_key).await;
+    let operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
 
     // Clone the pool handle within the lock, then drop it before any async work.
     let path = {
         let conns = state.connections.read().await;
-        conns.get(&pool_key).map(|p| match p {
+        conns.get(pool_key).map(|p| match p {
             PoolKind::Postgres(pg) => TxPath::Pg(pg.clone()),
             PoolKind::Mysql(mp, _mode) => TxPath::Mysql(mp.clone(), false),
             PoolKind::Sqlite(sq) => TxPath::Sqlite(sq.clone()),
@@ -2597,11 +2610,11 @@ pub async fn execute_statements_in_transaction(
 
     let result = match path {
         Some(TxPath::Pg(pool)) => {
-            let cancel_context = state.get_postgres_cancel_context(&pool_key).await;
+            let cancel_context = state.get_postgres_cancel_context(pool_key).await;
             exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
         Some(TxPath::Mysql(pool, _bare)) => {
-            exec_tx_mysql_inner(state, &pool_key, pool, statements, start, operation_budget.clone()).await
+            exec_tx_mysql_inner(state, pool_key, pool, statements, start, operation_budget.clone()).await
         }
         Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
         Some(TxPath::CloudflareD1(client)) => {
@@ -2615,18 +2628,18 @@ pub async fn execute_statements_in_transaction(
         }
         Some(TxPath::Explicit) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_explicit_inner(state, &pool_key, mysql_dialect, Some(database), statements, schema, start).await
+            exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
         }
         Some(TxPath::None) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_none_inner(state, &pool_key, mysql_dialect, Some(database), statements, schema, start).await
+            exec_tx_none_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
         }
         None => Err("Connection not found for transaction".to_string()),
     };
 
     if let Err(err) = result.as_ref() {
         if matches!(pool_error_action(db_type, err), PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
-            state.remove_pool_by_key(&pool_key).await;
+            state.remove_pool_by_key(pool_key).await;
         }
     }
 

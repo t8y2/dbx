@@ -61,7 +61,7 @@ const SOFTWARE_APP_SCHEMA = {
   releaseNotes: `${SITE_URL}/en/changelog`,
   screenshot: `${SITE_URL}/screenshot-dark.png`,
   featureList: [
-    "60+ database engines (MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, and many more)",
+    "70+ database engines (MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, and many more)",
     "AI-powered SQL generation and explanation",
     "MCP Server integration for AI coding agents",
     "Schema browser and diff tools",

@@ -109,3 +109,38 @@ export function notifyTableDataGridColumnOrderChanged(scopeKey: string) {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent<TableDataGridColumnOrderChangedDetail>(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, { detail: { scopeKey } }));
 }
+
+const FROZEN_STORAGE_PREFIX = "dbx-data-grid-frozen-columns:";
+
+export interface DataGridColumnFrozenState {
+  frozenCount: number;
+  orderBeforeFreeze: string[] | null;
+}
+
+export function loadDataGridColumnFrozenState(scopeKey: string): DataGridColumnFrozenState {
+  const emptyState = { frozenCount: 0, orderBeforeFreeze: null };
+  const raw = safeLocalStorageGet(`${FROZEN_STORAGE_PREFIX}${scopeKey}`);
+  if (!raw) return emptyState;
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === "number") return { frozenCount: parsed, orderBeforeFreeze: null };
+    if (typeof parsed !== "object" || parsed === null || !("frozenCount" in parsed)) return emptyState;
+    const frozenCount = typeof parsed.frozenCount === "number" ? parsed.frozenCount : 0;
+    const orderBeforeFreeze = Array.isArray(parsed.orderBeforeFreeze) ? parsed.orderBeforeFreeze.filter((key: unknown): key is string => typeof key === "string") : null;
+    return { frozenCount, orderBeforeFreeze };
+  } catch {
+    return emptyState;
+  }
+}
+
+export function loadDataGridColumnFrozenCount(scopeKey: string): number {
+  return loadDataGridColumnFrozenState(scopeKey).frozenCount;
+}
+
+export function saveDataGridColumnFrozenCount(scopeKey: string, frozenCount: number, orderBeforeFreeze: readonly string[] | null = null) {
+  safeLocalStorageSet(`${FROZEN_STORAGE_PREFIX}${scopeKey}`, JSON.stringify({ version: STORAGE_VERSION, frozenCount, ...(orderBeforeFreeze ? { orderBeforeFreeze: [...orderBeforeFreeze] } : {}) }));
+}
+
+export function removeDataGridColumnFrozenCount(scopeKey: string) {
+  safeLocalStorageRemove(`${FROZEN_STORAGE_PREFIX}${scopeKey}`);
+}

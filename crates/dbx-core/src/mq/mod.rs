@@ -29,6 +29,7 @@ use crate::db::agent_driver::AgentLaunchSpec;
 use crate::models::connection::ConnectionConfig;
 use crate::mq::adapters::kafka::KafkaAdmin;
 use crate::mq::adapters::pulsar::PulsarAdmin;
+use crate::mq::adapters::rabbitmq::RabbitMqAdmin;
 use crate::mq::adapters::rocketmq::RocketMqAdmin;
 use crate::mq::config::MqAdminConfig;
 use crate::mq::port::MessageQueueAdmin;
@@ -154,6 +155,13 @@ async fn build_adapter(
                 "RocketMQ adapter requires an agent launch spec. The RocketMQ agent driver is not installed or not configured.",
             )?;
             let adapter = RocketMqAdmin::new(mqc, launch).await?;
+            Ok(Arc::new(adapter))
+        }
+        MqSystemKindInternal::RabbitMq => {
+            let launch = agent_launch.ok_or(
+                "RabbitMQ adapter requires an agent launch spec. The RabbitMQ agent driver is not installed or not configured.",
+            )?;
+            let adapter = RabbitMqAdmin::new(mqc, launch).await?;
             Ok(Arc::new(adapter))
         }
     }

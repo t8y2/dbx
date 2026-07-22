@@ -16,7 +16,7 @@
 
 - Node.js >= 22.13.0
 - pnpm 10.27.0
-- Rust >= 1.77
+- Rust >= 1.88
 - Make
 
 Linux 桌面端还需要 WebKit/GTK 相关依赖，具体命令见 [README.zh-CN.md](README.zh-CN.md#快速开始)。

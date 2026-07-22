@@ -59,6 +59,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "ca_cert_path": config.ca_cert_path,
         "client_cert_path": config.client_cert_path,
         "client_key_path": config.client_key_path,
+        "connect_timeout_secs": config.effective_connect_timeout_secs(),
         "etcd_endpoints": etcd_endpoints,
         "zookeeper_connect_string": zookeeper_connect_string,
         "gbase_server": config.gbase_server,
@@ -732,6 +733,16 @@ mod tests {
         assert_eq!(params["connection_string"], "zk-1:2181,zk-2:2181/app");
         assert_eq!(params["zookeeper_connect_string"], "zk-1:2181,zk-2:2181/app");
         assert_eq!(params["connection_timeout_ms"], 20_000);
+    }
+
+    #[test]
+    fn agent_params_include_effective_connect_timeout_seconds() {
+        let mut cfg = config(DatabaseType::Mysql, Some("app"));
+        cfg.connect_timeout_secs = 45;
+
+        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "app");
+
+        assert_eq!(params["connect_timeout_secs"], 45);
     }
 
     #[test]

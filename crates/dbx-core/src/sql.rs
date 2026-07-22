@@ -1888,6 +1888,10 @@ fn leading_executable_sql_with_options(sql: &str, options: SqlParsingOptions) ->
             i += 1;
         }
 
+        if i >= bytes.len() {
+            break;
+        }
+
         if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
             i += 2;
             while i < bytes.len() && bytes[i] != b'\n' {
@@ -1929,6 +1933,10 @@ fn first_executable_sql_token_with_options(sql: &str, options: SqlParsingOptions
     while i < bytes.len() {
         while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'(') {
             i += 1;
+        }
+
+        if i >= bytes.len() {
+            break;
         }
 
         if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
@@ -2417,6 +2425,21 @@ mod tests {
             split_sql_script("CREATE TABLE a(id int); INSERT INTO a VALUES (1);").unwrap(),
             vec!["CREATE TABLE a(id int)", "INSERT INTO a VALUES (1)"]
         );
+    }
+
+    #[test]
+    fn mysql_split_skips_comment_only_statement() {
+        assert!(split_sql_statements_for_database("-- DBX SQL preview crash reproducer\n\n;", DatabaseType::Mysql)
+            .is_empty());
+    }
+
+    #[test]
+    fn mysql_keyword_detection_skips_comment_only_input() {
+        assert!(!starts_with_executable_sql_keyword_for_database(
+            "-- DBX SQL preview crash reproducer\n\n",
+            &["SELECT"],
+            DatabaseType::Mysql,
+        ));
     }
 
     #[test]

@@ -68,6 +68,7 @@ export interface DrawCanvasDataGridOptions {
   infiniteScrollEnabled: boolean;
   pageSize: number;
   currentPage: number;
+  frozenColumnCount?: number;
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -243,6 +244,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     infiniteScrollEnabled,
     pageSize,
     currentPage,
+    frozenColumnCount = 0,
   } = options;
   const dpr = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
   const pixelWidth = Math.max(1, Math.ceil(width * dpr));
@@ -441,8 +443,13 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       }
     };
 
+    // 第一轮：绘制非冻结列（跳过冻结列，冻结列稍后绘制以确保覆盖在上方）
     let x = rowNumberWidth + columnOffset - scrollLeft;
     for (let visibleColIdx = firstCol; visibleColIdx < renderedColumnWidths.length && x - maxPreviewLeftShift < width; visibleColIdx++) {
+      if (visibleColIdx < frozenColumnCount) {
+        x += renderedColumnWidths[visibleColIdx] ?? 0;
+        continue;
+      }
       const colWidth = renderedColumnWidths[visibleColIdx] ?? 0;
       drawCell(visibleColIdx, x);
       x += colWidth;
@@ -450,6 +457,51 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     if (columnPreviewSourceVisibleIndex !== null && columnPreviewSourceVisibleIndex !== undefined && (columnPreviewOffsets[columnPreviewSourceVisibleIndex] ?? 0) !== 0) {
       drawCell(columnPreviewSourceVisibleIndex, rowNumberWidth + (offsets[columnPreviewSourceVisibleIndex] ?? 0) - scrollLeft);
     }
+    // 第二轮：绘制冻结列（不受水平滚动影响，覆盖在非冻结列之上）
+    if (frozenColumnCount > 0 && frozenColumnCount <= renderedColumnWidths.length) {
+      const frozenWidth = offsets[frozenColumnCount] ?? 0;
+      // 用不透明底色覆盖冻结区域（遮挡第一轮溢入的非冻结列内容）
+      // 注意：rowBase 在浅色主题下可能是 color-mix(..., transparent) 半透明色，
+      // 单次半透明填充无法遮挡文字，需先填不透明底再叠加半透明色调
+      if (rowIsActive && !item.isDeleted) {
+        ctx.fillStyle = theme.cellSelectedSingle;
+        ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      } else {
+        ctx.fillStyle = theme.background;
+        ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+        if (rowBase !== theme.background) {
+          ctx.fillStyle = rowBase;
+          ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+        }
+      }
+      // 绘制冻结列的每个单元格（x 坐标不受 scrollLeft 影响）
+      for (let fcIdx = 0; fcIdx < frozenColumnCount; fcIdx++) {
+        const cellX = rowNumberWidth + (offsets[fcIdx] ?? 0);
+        drawCell(fcIdx, cellX);
+      }
+      // 重绘行底部边框（冻结区域部分）
+      ctx.strokeStyle = theme.border;
+      ctx.beginPath();
+      ctx.moveTo(rowNumberWidth, rowBorderY);
+      ctx.lineTo(rowNumberWidth + frozenWidth, rowBorderY);
+      ctx.stroke();
+    }
     ctx.globalAlpha = 1;
+  }
+
+  // 画冻结列分隔线（与 DOM 模式和列头一致：2px 灰色右边框）
+  // DOM 的 border-right 右边缘对齐单元格右边缘，中心偏左 1px；
+  // Canvas 的 stroke 以坐标点为中心，需左移 1px 使两者对齐
+  if (frozenColumnCount > 0 && frozenColumnCount < renderedColumnWidths.length) {
+    const frozenWidth = offsets[frozenColumnCount] ?? 0;
+    const separatorX = rowNumberWidth + frozenWidth - 1;
+    ctx.save();
+    ctx.strokeStyle = "rgb(100, 116, 139)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(separatorX, 0);
+    ctx.lineTo(separatorX, height);
+    ctx.stroke();
+    ctx.restore();
   }
 }

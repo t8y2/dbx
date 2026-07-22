@@ -5,10 +5,12 @@ export type MqUiAuthKind = MqAuthKind | "kerberos";
 
 const KAFKA_AUTH_KINDS = new Set<MqUiAuthKind>(["none", "basic", "kerberos"]);
 const ROCKETMQ_AUTH_KINDS = new Set<MqUiAuthKind>(["none", "basic"]);
+const RABBITMQ_AUTH_KINDS = new Set<MqUiAuthKind>(["none", "basic"]);
 
 export function isMqAuthKindAllowedForSystem(systemKind: MqSystemKind, authKind: MqUiAuthKind): boolean {
   if (systemKind === "kafka") return KAFKA_AUTH_KINDS.has(authKind);
   if (systemKind === "rocketmq") return ROCKETMQ_AUTH_KINDS.has(authKind);
+  if (systemKind === "rabbitmq") return RABBITMQ_AUTH_KINDS.has(authKind);
   return authKind !== "kerberos";
 }
 
@@ -20,6 +22,9 @@ export function detectMqUiAuthKind({ systemKind, authKind, saslMechanism, jaasCo
     return authKind === "basic" ? "basic" : "none";
   }
   if (systemKind === "rocketmq") {
+    return authKind === "basic" ? "basic" : "none";
+  }
+  if (systemKind === "rabbitmq") {
     return authKind === "basic" ? "basic" : "none";
   }
 

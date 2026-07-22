@@ -65,11 +65,11 @@ const filteredColumnFields = computed(() => (props.columnDetail ? filterDataGrid
                 <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-48 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)"
                   ><img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-48 w-full object-contain"
                 /></a>
-                <pre class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
+                <pre class="dbx-data-grid-value-font max-h-44 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
                 <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}</div>
                 <div v-if="field.formattedJson" class="mt-2 space-y-1">
                   <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
-                  <pre class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
+                  <pre class="dbx-data-grid-value-font max-h-44 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
                 </div>
               </td>
               <td class="px-2 py-2">
@@ -135,11 +135,11 @@ const filteredColumnFields = computed(() => (props.columnDetail ? filterDataGrid
                 <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-40 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)"
                   ><img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-40 w-full object-contain"
                 /></a>
-                <pre class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
+                <pre class="dbx-data-grid-value-font max-h-36 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
                 <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}</div>
                 <div v-if="field.formattedJson" class="mt-2 space-y-1">
                   <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
-                  <pre class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
+                  <pre class="dbx-data-grid-value-font max-h-36 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
                 </div>
               </td>
               <td class="px-2 py-2">

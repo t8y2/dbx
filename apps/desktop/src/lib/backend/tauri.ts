@@ -6,6 +6,7 @@ import type {
   ConnectionTestResult,
   DatabaseConnectionInfo,
   DatabaseInfo,
+  DatabaseStorageInfo,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -767,6 +768,10 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
   return invoke("list_databases", { connectionId });
 }
 
+export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
+  return invoke("list_database_storage", { connectionId, databases });
+}
+
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {
   return invoke("list_doris_catalogs", { connectionId });
 }
@@ -1209,7 +1214,7 @@ export async function listOwners(connectionId: string, database: string, schema:
   return invoke("list_owners", { connectionId, database, schema });
 }
 
-export async function listExtensions(connectionId: string, database: string, schema: string): Promise<ExtensionInfo[]> {
+export async function listExtensions(connectionId: string, database: string, schema?: string): Promise<ExtensionInfo[]> {
   return invoke("list_extensions", { connectionId, database, schema });
 }
 
@@ -2295,6 +2300,7 @@ export async function sortTablesByFkDependency(options: SortTablesByFkOptions): 
 // --- Table File Import ---
 export type TableImportMode = "append" | "truncate";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
+export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
 export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel";
 export type TableImportJsonShape = "auto" | "objects" | "arrays";
 export type TableImportTextEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
@@ -2336,8 +2342,19 @@ export interface TableImportPreview {
   columns: string[];
   rows: unknown[][];
   totalRows: number;
+  totalRowsExact?: boolean;
+  sourceFingerprint: string;
   effectiveEncoding?: TableImportTextEncoding | null;
   sheets?: string[];
+}
+
+export interface TableImportPreparedSource {
+  fingerprint: string;
+  columns: string[];
+  rows: unknown[][];
+  totalRows: number;
+  totalRowsExact?: boolean;
+  effectiveEncoding?: TableImportTextEncoding | null;
 }
 
 export interface TableImportRequest {
@@ -2355,19 +2372,27 @@ export interface TableImportRequest {
   createTable?: boolean;
   batchSize: number;
   dateTimeFormat?: string;
+  preparedSource?: TableImportPreparedSource | null;
+  retainSource?: boolean;
 }
 
 export interface TableImportSummary {
   importId: string;
   rowsImported: number;
   totalRows: number;
+  elapsedMs: number;
 }
 
 export interface TableImportProgress {
   importId: string;
   status: TableImportStatus;
+  phase?: TableImportPhase;
   rowsImported: number;
   totalRows: number;
+  totalRowsExact?: boolean;
+  bytesRead?: number;
+  totalBytes?: number;
+  elapsedMs: number;
   error?: string | null;
 }
 
@@ -2389,7 +2414,9 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
     }
   });
   try {
-    return await invoke("import_table_file", { request });
+    const summary = await invoke<TableImportSummary>("import_table_file", { request });
+    unlisten();
+    return summary;
   } catch (e) {
     unlisten();
     throw e;
@@ -2398,6 +2425,10 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
 
 export async function cancelTableImport(importId: string): Promise<boolean> {
   return invoke("cancel_table_import", { importId });
+}
+
+export async function releaseTableImportSource(_sourceRef: string): Promise<boolean> {
+  return false;
 }
 
 // --- Database Export ---
@@ -2484,6 +2515,7 @@ export interface QueryResultExportRequest {
   schema?: string;
   sql: string;
   queryBaseSql: string;
+  setupSql?: string[];
   databaseType: DatabaseType;
   useAgentCursor: boolean;
   filePath: string;

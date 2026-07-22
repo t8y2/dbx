@@ -17,6 +17,10 @@ fn default_jre_key() -> String {
     DEFAULT_JRE_KEY.to_string()
 }
 
+fn strip_utf8_bom(value: &str) -> &str {
+    value.strip_prefix('\u{feff}').unwrap_or(value)
+}
+
 fn is_valid_jar_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -136,6 +140,21 @@ mod tests {
         }"#;
         let state: AgentState = serde_json::from_str(json).expect("deserialize legacy state");
         assert!(state.pending_jre_cleanup.is_empty());
+    }
+
+    #[test]
+    fn loads_agent_state_with_utf8_bom() {
+        let manager = test_manager("state-utf8-bom");
+        fs::create_dir_all(manager.base_dir()).unwrap();
+        fs::write(
+            manager.state_path(),
+            b"\xEF\xBB\xBF{\"installed_drivers\":{\"kafka\":{\"version\":\"0.1.4\",\"installed_at\":\"now\",\"jre\":\"21\"}}}",
+        )
+        .unwrap();
+
+        let state = manager.load_state();
+
+        assert_eq!(state.installed_drivers.get("kafka").map(|driver| driver.version.as_str()), Some("0.1.4"));
     }
 
     #[test]
@@ -278,6 +297,25 @@ mod tests {
             vec!["--config".to_string(), driver_dir.join("config.json").to_string_lossy().to_string()]
         );
         assert_eq!(launch.working_dir.as_deref(), Some(driver_dir.as_path()));
+    }
+
+    #[test]
+    fn resolves_manifest_agent_launch_with_utf8_bom() {
+        let manager = test_manager("manifest-agent-utf8-bom");
+        let driver_dir = manager.driver_dir("kafka");
+        fs::create_dir_all(&driver_dir).unwrap();
+        fs::write(
+            manager.driver_launch_config_path("kafka"),
+            b"\xEF\xBB\xBF{\"command\":\"java\",\"args\":[\"-jar\",\"{driver_dir}/agent.jar\"]}",
+        )
+        .unwrap();
+
+        let launch = manager
+            .resolve_agent_launch_spec(&AgentState::default(), "kafka", DEFAULT_JRE_KEY)
+            .expect("manifest launch with UTF-8 BOM should resolve");
+
+        assert_eq!(launch.program, PathBuf::from("java"));
+        assert_eq!(launch.args, vec!["-jar".to_string(), format!("{}/agent.jar", driver_dir.to_string_lossy())]);
     }
 }
 
@@ -550,7 +588,10 @@ impl AgentManager {
     }
 
     pub fn load_state(&self) -> AgentState {
-        std::fs::read_to_string(self.state_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        std::fs::read_to_string(self.state_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(strip_utf8_bom(&s)).ok())
+            .unwrap_or_default()
     }
 
     pub fn save_state(&self, state: &AgentState) -> Result<(), String> {
@@ -629,7 +670,7 @@ impl AgentManager {
     ) -> Result<AgentLaunchSpec, String> {
         let json = std::fs::read_to_string(config_path)
             .map_err(|e| format!("Failed to read {driver_key} agent launch config: {e}"))?;
-        let config: AgentLaunchConfig = serde_json::from_str(&json)
+        let config: AgentLaunchConfig = serde_json::from_str(strip_utf8_bom(&json))
             .map_err(|e| format!("Failed to parse {driver_key} agent launch config: {e}"))?;
         let command = config.command.trim();
         if command.is_empty() {

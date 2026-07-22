@@ -18,6 +18,7 @@ export function sqlSemanticReferencedTables(model: SqlSemanticModel): SqlComplet
     .filter((source) => source.kind !== "unknown")
     .map((source) => ({
       name: source.name,
+      database: source.metadataTarget?.database,
       schema: source.qualifierParts[source.qualifierParts.length - 1],
       alias: source.alias,
       columns: source.columns,
@@ -180,6 +181,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
   const qualifier = model.cursorIntent.qualifierParts.length > 0 ? model.cursorIntent.qualifierParts.join(".") : undefined;
   const referencedTables = sqlSemanticReferencedTables(model);
   const mutationTarget = semanticMutationTarget(model);
+  const mutationDatabase = mutationTarget?.metadataTarget?.database;
   const mutationSchema = mutationTarget?.qualifierParts[mutationTarget.qualifierParts.length - 1];
   const suggestTables = scope.kind === "table" || scope.kind === "schema" || scope.kind === "catalog";
   const suggestColumns = scope.kind === "columns";
@@ -203,6 +205,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
     selectAliases: projectionAliases.length > 0 ? projectionAliases : base.selectAliases,
     referencedTables: referencedTables.length > 0 ? referencedTables : base.referencedTables,
     insertTable: model.cursorIntent.kind === "insert_column" ? mutationTarget?.name : base.insertTable,
+    insertDatabase: model.cursorIntent.kind === "insert_column" ? mutationDatabase : base.insertDatabase,
     insertSchema: model.cursorIntent.kind === "insert_column" ? mutationSchema : base.insertSchema,
     updateTarget: model.cursorIntent.kind === "update_column" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.updateTarget,
     deleteTarget: model.cursorIntent.kind === "delete_target" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.deleteTarget,

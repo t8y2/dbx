@@ -88,7 +88,7 @@ watch(jsonPreviewContainer, async (element) => {
       appAppearance: () => (isDark.value ? "dark" : "light"),
       appPalette: () => themePalette.value,
       fontSize: () => settingsStore.editorSettings.fontSize,
-      fontFamily: () => settingsStore.editorSettings.fontFamily,
+      fontFamily: () => settingsStore.editorSettings.tableFontFamily,
     });
     await jsonPreviewEditor.create(element, props.detail?.formattedJson ?? "", "json");
   } else if (!element && jsonPreviewEditor) {
@@ -181,7 +181,7 @@ watch(
             <img :src="detail.imagePreviewUrl" :alt="detail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-72 w-full object-contain" />
           </a>
           <div v-if="jsonView && detail.formattedJson" ref="jsonPreviewContainer" data-cell-detail-editor-root class="h-[44vh] min-h-60 overflow-hidden rounded border bg-muted/20 p-3" />
-          <pre v-else class="max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': detail.value === null }">{{ detail.rawValuePreview }}</pre>
+          <pre v-else class="dbx-data-grid-value-font max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': detail.value === null }">{{ detail.rawValuePreview }}</pre>
           <div v-if="detail.isValuePreviewTruncated && !jsonView" class="text-[11px] text-muted-foreground">
             {{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}
           </div>

@@ -4406,6 +4406,10 @@ export const useQueryStore = defineStore("query", () => {
     if (!effectiveDbType) return undefined;
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
     const queryBaseSql = queryResultBaseSql(tab);
+    const resultStatementIndex = tab.result.statement_index;
+    const batchSql = tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
+    const batchStatements = effectiveDbType === "postgres" && tab.result.truncated === true && Number.isInteger(resultStatementIndex) && resultStatementIndex! > 0 ? splitSqlStatementRanges(batchSql, effectiveDbType) : [];
+    const setupSql = batchStatements[resultStatementIndex!]?.sql === tab.result.sourceStatement ? batchStatements.slice(0, resultStatementIndex).map((statement) => statement.sql) : undefined;
     const rowLimit = settings.exportRowLimitEnabled ? settings.exportRowLimit : null;
     const totalRows = typeof tab.resultTotalRowCount === "number" ? (rowLimit === null ? tab.resultTotalRowCount : Math.min(tab.resultTotalRowCount, rowLimit)) : null;
     const clientSessionId = tabClientSessionId(tab, "export");
@@ -4417,6 +4421,7 @@ export const useQueryStore = defineStore("query", () => {
       schema: tab.schema,
       sql,
       queryBaseSql,
+      setupSql,
       databaseType: effectiveDbType,
       useAgentCursor,
       filePath: options.filePath,

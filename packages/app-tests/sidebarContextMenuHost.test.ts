@@ -2,6 +2,26 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
+function functionBody(source: string, name: string): string {
+  const signature = `function ${name}(`;
+  const asyncSignature = `async ${signature}`;
+  const signatureIndex = source.indexOf(asyncSignature) >= 0 ? source.indexOf(asyncSignature) : source.indexOf(signature);
+  assert.notEqual(signatureIndex, -1, `Could not find function ${name}`);
+  const bodyStart = source.indexOf("{", signatureIndex);
+  assert.notEqual(bodyStart, -1, `Could not find body for ${name}`);
+
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(bodyStart + 1, index);
+    }
+  }
+  throw new Error(`Could not parse body for ${name}`);
+}
+
 test("tree-level context menu opens with the current row items atomically", () => {
   const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
   const contextMenu = readFileSync("apps/desktop/src/components/ui/CustomContextMenu.vue", "utf8");
@@ -38,4 +58,16 @@ test("tree host owns sidebar data-open generations", () => {
   assert.match(connectionTree, /function openSidebarData/);
   assert.match(connectionTree, /runSidebarDataOpenImmediately/);
   assert.match(connectionTree, /createSidebarActionTarget\(node\)/);
+});
+
+test("table copy menu uses the shared single and multi-selection clipboard path", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const copySelectedNamesBody = functionBody(runtimeHost, "copySelectedNames");
+
+  assert.match(runtimeHost, /label: t\("contextMenu\.copyTable"\), action: copySelectedNames, icon: Copy/);
+  assert.doesNotMatch(runtimeHost, /function copyTableToClipboard\(/);
+  assert.match(copySelectedNamesBody, /const selectedNodes = selectedTreeNodesInVisibleOrder\(\)/);
+  assert.match(copySelectedNamesBody, /selectedNodes\.length > 1 && selectedNodes\.some\(\(node\) => node\.id === activeNode\.value\.id\) \? selectedNodes : \[activeNode\.value\]/);
+  assert.match(copySelectedNamesBody, /updateTreeClipboardForNodes\(nodes\)/);
+  assert.match(copySelectedNamesBody, /copyToClipboard\(nodes\.map\(copyNameForTreeNode\)\.join\("\\n"\)\)/);
 });

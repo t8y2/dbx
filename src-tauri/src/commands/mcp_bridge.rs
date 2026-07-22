@@ -703,7 +703,7 @@ fn mongo_filter_is_effectively_unbounded(filter_json: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(filter_json)
         .ok()
         .as_ref()
-        .map_or(true, |value| mongo_filter_contains_opaque_logic(value) || mongo_filter_value_is_unbounded(value))
+        .is_none_or(|value| mongo_filter_contains_opaque_logic(value) || mongo_filter_value_is_unbounded(value))
 }
 
 fn mongo_filter_contains_opaque_logic(value: &serde_json::Value) -> bool {
@@ -877,10 +877,10 @@ fn mongo_filter_value_is_unbounded(value: &serde_json::Value) -> bool {
         "$comment" => true,
         "$and" => value
             .as_array()
-            .map_or(true, |clauses| clauses.is_empty() || clauses.iter().all(mongo_filter_value_is_unbounded)),
+            .is_none_or(|clauses| clauses.is_empty() || clauses.iter().all(mongo_filter_value_is_unbounded)),
         "$or" => value
             .as_array()
-            .map_or(true, |clauses| clauses.is_empty() || clauses.iter().any(mongo_filter_value_is_unbounded)),
+            .is_none_or(|clauses| clauses.is_empty() || clauses.iter().any(mongo_filter_value_is_unbounded)),
         "$nor" => true,
         _ if mongo_field_predicate_is_empty_nin(value) => true,
         "_id" if mongo_field_predicate_is_exists_true(value) => true,

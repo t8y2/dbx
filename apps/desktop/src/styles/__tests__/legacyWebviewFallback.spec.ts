@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const globalsCss = readFileSync(new URL("../globals.css", import.meta.url), "utf8");
+const dialogContentSource = readFileSync(new URL("../../components/ui/dialog/DialogContent.vue", import.meta.url), "utf8");
+const dialogScrollContentSource = readFileSync(new URL("../../components/ui/dialog/DialogScrollContent.vue", import.meta.url), "utf8");
+const connectionDialogSource = readFileSync(new URL("../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 
 describe("legacy WebView CSS fallbacks", () => {
   it("scopes component overrides to WebViews without OKLCH support", () => {
@@ -23,5 +26,18 @@ describe("legacy WebView CSS fallbacks", () => {
 
     expect(tabsNestingDepth).toBeGreaterThan(0);
     expect(nestingDepth).toBe(0);
+  });
+
+  it("falls back to the legacy viewport height when dynamic viewport units are unavailable", () => {
+    const fallback = globalsCss.indexOf("--dbx-viewport-height: 100vh;");
+    const supports = globalsCss.indexOf("@supports (height: 100dvh)");
+    const enhanced = globalsCss.indexOf("--dbx-viewport-height: min(100vh, 100dvh);");
+
+    expect(fallback).toBeGreaterThan(-1);
+    expect(supports).toBeGreaterThan(fallback);
+    expect(enhanced).toBeGreaterThan(supports);
+    expect(dialogContentSource).toContain("max-h-[calc(var(--dbx-viewport-height)-2rem)]");
+    expect(dialogScrollContentSource).toContain("max-h-[calc(var(--dbx-viewport-height)-6rem)]");
+    expect(connectionDialogSource).toContain("max-height: calc(var(--dbx-viewport-height) - 2rem);");
   });
 });

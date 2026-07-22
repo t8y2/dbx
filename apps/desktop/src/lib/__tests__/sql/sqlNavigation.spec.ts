@@ -76,6 +76,13 @@ describe("matchTable", () => {
     expect(matchTable("catalog.maac00.accounts", [table])).toBe(table);
   });
 
+  it("uses the database qualifier when scoped tables provide it", () => {
+    const databaseA = { database: "DatabaseA", schema: "OUT", name: "orders" };
+    const databaseB = { database: "DatabaseB", schema: "OUT", name: "orders" };
+
+    expect(matchTable("[DatabaseB].[OUT].[orders]", [databaseA, databaseB])).toBe(databaseB);
+  });
+
   it("matches quoted schema-qualified table identifiers", () => {
     const table = { schema: "MAAC00", name: "Accounts" };
 

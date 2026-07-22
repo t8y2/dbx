@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSqlServerLegacyCompatibilityMode, requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityMode } from "@/lib/connection/sqlServerLegacyCompatibility";
+import { isSqlServerNativeEncryptionDisabled, requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, setSqlServerNativeEncryptionDisabled, sqlServerUsesLegacyCompatibility } from "@/lib/connection/sqlServerLegacyCompatibility";
 import type { ConnectionConfig } from "@/types/database";
 
 function connectionConfig(urlParams?: string): ConnectionConfig {
@@ -25,26 +25,51 @@ function connectionConfig(urlParams?: string): ConnectionConfig {
 }
 
 describe("SQL Server legacy compatibility", () => {
-  it("treats existing disabled encryption params as legacy compatibility opt-in", () => {
-    expect(isSqlServerLegacyCompatibilityMode("sqlserverEncryption=disabled")).toBe(true);
-    expect(isSqlServerLegacyCompatibilityMode("applicationName=dbx;encrypt=false")).toBe(true);
-    expect(isSqlServerLegacyCompatibilityMode("?Encrypt=0&applicationName=dbx")).toBe(true);
-    expect(isSqlServerLegacyCompatibilityMode("encrypt=true")).toBe(false);
+  it("recognizes native encryption policy independently from the legacy driver profile", () => {
+    expect(isSqlServerNativeEncryptionDisabled("sqlserverEncryption=disabled")).toBe(true);
+    expect(isSqlServerNativeEncryptionDisabled("applicationName=dbx;encrypt=false")).toBe(true);
+    expect(isSqlServerNativeEncryptionDisabled("?Encrypt=0&applicationName=dbx")).toBe(true);
+    expect(isSqlServerNativeEncryptionDisabled("encrypt=true")).toBe(false);
   });
 
-  it("updates URL params without keeping conflicting encryption params", () => {
-    expect(setSqlServerLegacyCompatibilityMode("applicationName=dbx;encrypt=true", true)).toBe("applicationName=dbx&sqlserverEncryption=disabled");
-    expect(setSqlServerLegacyCompatibilityMode("applicationName=dbx;sqlserverEncryption=disabled", false)).toBe("applicationName=dbx");
+  it("updates native encryption params without changing the driver profile", () => {
+    expect(setSqlServerNativeEncryptionDisabled("applicationName=dbx;encrypt=true", true)).toBe("applicationName=dbx&sqlserverEncryption=disabled");
+    expect(setSqlServerNativeEncryptionDisabled("applicationName=dbx;sqlserverEncryption=disabled", false)).toBe("applicationName=dbx");
   });
 
-  it("requires the hidden component only for SQL Server legacy compatibility connections", () => {
-    expect(requiresSqlServerLegacyCompatibilityComponent(connectionConfig("sqlserverEncryption=disabled"))).toBe(true);
-    expect(requiresSqlServerLegacyCompatibilityComponent(connectionConfig("encrypt=true"))).toBe(false);
+  it("keeps historical disabled-encryption connections on the native driver", () => {
+    const config = connectionConfig("sqlserverEncryption=disabled");
+
+    expect(sqlServerUsesLegacyCompatibility(config)).toBe(false);
+    expect(requiresSqlServerLegacyCompatibilityComponent(config)).toBe(false);
     expect(
       requiresSqlServerLegacyCompatibilityComponent({
-        ...connectionConfig("sqlserverEncryption=disabled"),
+        ...config,
+        driver_profile: "sqlserver-legacy",
         db_type: "mysql",
       }),
     ).toBe(false);
+  });
+
+  it("treats a persisted legacy driver profile as compatibility mode", () => {
+    const config = connectionConfig("");
+    config.driver_profile = "sqlserver-legacy";
+
+    expect(sqlServerUsesLegacyCompatibility(config)).toBe(true);
+    expect(requiresSqlServerLegacyCompatibilityComponent(config)).toBe(true);
+  });
+
+  it("updates the explicit driver profile without rewriting native encryption params", () => {
+    const config = connectionConfig("applicationName=dbx&encrypt=false");
+
+    setSqlServerLegacyCompatibilityConfig(config, true);
+    expect(config.driver_profile).toBe("sqlserver-legacy");
+    expect(config.driver_label).toBe("SQL Server legacy compatibility component");
+    expect(config.url_params).toBe("applicationName=dbx&encrypt=false");
+
+    setSqlServerLegacyCompatibilityConfig(config, false);
+    expect(config.driver_profile).toBe("sqlserver");
+    expect(config.driver_label).toBe("SQL Server");
+    expect(config.url_params).toBe("applicationName=dbx&encrypt=false");
   });
 });

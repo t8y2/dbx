@@ -1,12 +1,12 @@
 [package]
 name = "dbx"
-version = "0.5.63"
+version = "0.5.64"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 
 [lib]
 name = "dbx_lib"
@@ -53,6 +53,9 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
 mongodb = "3.2.5"
 percent-encoding = "2"
+minisign-verify = "0.2.5"
+semver = "1"
+sha2 = "0.10"
 russh = "0.60"
 csv = "1.4.0"
 calamine = "0.30.1"

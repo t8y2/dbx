@@ -25,6 +25,7 @@ export interface RedisKeyTreeGroupNode {
 export type RedisKeyTreeNode = RedisKeyTreeLeafNode | RedisKeyTreeGroupNode;
 
 export interface RedisKeyTreeRow {
+  id: string;
   node: RedisKeyTreeNode;
   depth: number;
 }
@@ -44,10 +45,12 @@ function buildLeafId(db: number, keyRaw: string): string {
 }
 
 export function redisKeyToFlatTreeRow(key: RedisKeyInfo, db: number): RedisKeyTreeRow {
+  const nodeId = buildLeafId(db, key.key_raw);
   return {
+    id: nodeId,
     node: {
       kind: "leaf",
-      id: buildLeafId(db, key.key_raw),
+      id: nodeId,
       label: key.key_display,
       fullKeyDisplay: key.key_display,
       keyRaw: key.key_raw,
@@ -220,7 +223,7 @@ export function flattenVisibleRedisKeyTree(nodes: RedisKeyTreeNode[], expandedGr
   const stack: RedisKeyTreeRow[] = [];
 
   for (let index = nodes.length - 1; index >= 0; index--) {
-    stack.push({ node: nodes[index], depth });
+    stack.push({ id: nodes[index].id, node: nodes[index], depth });
   }
 
   while (stack.length > 0) {
@@ -231,7 +234,8 @@ export function flattenVisibleRedisKeyTree(nodes: RedisKeyTreeNode[], expandedGr
 
     const childDepth = row.depth + 1;
     for (let index = row.node.children.length - 1; index >= 0; index--) {
-      stack.push({ node: row.node.children[index], depth: childDepth });
+      const child = row.node.children[index];
+      stack.push({ id: child.id, node: child, depth: childDepth });
     }
   }
 

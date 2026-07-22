@@ -653,6 +653,56 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
 
+pub async fn list_database_storage_core(
+    state: &AppState,
+    connection_id: &str,
+    database_names: &[String],
+) -> Result<Vec<db::DatabaseStorageInfo>, String> {
+    const DATABASE_STORAGE_TIMEOUT: Duration = Duration::from_secs(5);
+    const MAX_DATABASE_STORAGE_NAMES: usize = 2048;
+
+    if database_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let config = connection_config(state, connection_id).await;
+    if !config.as_ref().is_some_and(|config| {
+        config.db_type == DatabaseType::Postgres && config.driver_profile.as_deref() != Some("cockroachdb")
+    }) {
+        return Ok(Vec::new());
+    }
+
+    let pool = {
+        let connections = state.connections.read().await;
+        match connections.get(connection_id) {
+            Some(PoolKind::Postgres(pool)) => pool.clone(),
+            _ => return Ok(Vec::new()),
+        }
+    };
+    let mut seen = std::collections::HashSet::new();
+    let requested = database_names
+        .iter()
+        .filter(|name| !name.is_empty() && seen.insert((*name).clone()))
+        .take(MAX_DATABASE_STORAGE_NAMES)
+        .cloned()
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    match tokio::time::timeout(DATABASE_STORAGE_TIMEOUT, db::postgres::list_database_storage(&pool, &requested)).await {
+        Ok(result) => result,
+        Err(_) => {
+            log::warn!(
+                "[list_database_storage:timeout] connection_id={} database_count={} timeout_ms={}",
+                connection_id,
+                requested.len(),
+                DATABASE_STORAGE_TIMEOUT.as_millis()
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
 pub async fn list_sqlserver_linked_servers_core(
     state: &AppState,
     connection_id: &str,
@@ -1303,6 +1353,12 @@ pub async fn get_table_comment_core(
                         .await?;
                     return oracle_table_comment_from_query_result(result);
                 }
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+                    let timeout = agent_metadata_timeout(db_config.as_ref());
+                    drop(connections);
+                    let mut client = client.lock().await;
+                    return client.get_table_comment::<Option<String>>(database, schema, table, timeout).await;
+                }
             }
         }
 
@@ -1567,6 +1623,91 @@ fn oracle_object_statistics_rows_only_sql(schema: &str) -> String {
     )
 }
 
+fn dameng_object_statistics_dba_segments_sql(schema: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         LEFT JOIN ( \
+           SELECT owner, table_name, SUM(bytes) AS BYTES \
+           FROM ( \
+             SELECT s.OWNER, s.SEGMENT_NAME AS TABLE_NAME, s.BYTES \
+             FROM DBA_SEGMENTS s \
+             WHERE s.OWNER = {} AND s.SEGMENT_TYPE IN ('TABLE','TABLE PARTITION','TABLE SUBPARTITION') \
+             UNION ALL \
+             SELECT i.TABLE_OWNER AS OWNER, i.TABLE_NAME, s.BYTES \
+             FROM ALL_INDEXES i \
+             JOIN DBA_SEGMENTS s ON s.OWNER = i.OWNER AND s.SEGMENT_NAME = i.INDEX_NAME \
+             WHERE i.TABLE_OWNER = {} AND s.SEGMENT_TYPE IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION') \
+           ) \
+           GROUP BY owner, table_name \
+         ) s ON s.OWNER = t.OWNER AND s.TABLE_NAME = t.TABLE_NAME \
+         WHERE t.OWNER = {} AND (t.NESTED IS NULL OR t.NESTED = 'NO') \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+    )
+}
+
+fn dameng_object_statistics_user_segments_sql(schema: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, NVL(s.BYTES, 0) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         LEFT JOIN ( \
+           SELECT table_name, SUM(bytes) AS BYTES \
+           FROM ( \
+             SELECT s.SEGMENT_NAME AS TABLE_NAME, s.BYTES \
+             FROM USER_SEGMENTS s \
+             WHERE s.SEGMENT_TYPE IN ('TABLE','TABLE PARTITION','TABLE SUBPARTITION') \
+             UNION ALL \
+             SELECT i.TABLE_NAME, s.BYTES \
+             FROM ALL_INDEXES i \
+             JOIN USER_SEGMENTS s ON s.SEGMENT_NAME = i.INDEX_NAME \
+             WHERE i.TABLE_OWNER = {} AND s.SEGMENT_TYPE IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION') \
+           ) \
+           GROUP BY table_name \
+         ) s ON s.TABLE_NAME = t.TABLE_NAME \
+         WHERE t.OWNER = {} AND t.OWNER = USER AND (t.NESTED IS NULL OR t.NESTED = 'NO') \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+        oracle_owner_filter(schema),
+    )
+}
+
+fn dameng_object_statistics_rows_only_sql(schema: &str) -> String {
+    format!(
+        "SELECT t.TABLE_NAME, t.OWNER, t.NUM_ROWS, CAST(NULL AS NUMBER) AS TOTAL_BYTES \
+         FROM ALL_TABLES t \
+         WHERE t.OWNER = {} AND (t.NESTED IS NULL OR t.NESTED = 'NO') \
+         ORDER BY t.TABLE_NAME",
+        oracle_owner_filter(schema),
+    )
+}
+
+fn kingbase_object_statistics_sql(schema: &str) -> String {
+    format!(
+        "SELECT c.relname, n.nspname, \
+                CAST(CASE WHEN c.reltuples < 0 THEN 0 ELSE c.reltuples END AS BIGINT) AS estimated_rows, \
+                CAST(sys_total_relation_size(c.oid) AS BIGINT) AS total_bytes \
+         FROM sys_catalog.sys_class c \
+         JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {} AND c.relkind IN ('r','m','f','p') \
+         ORDER BY c.relname",
+        sql_string(schema),
+    )
+}
+
+fn gbase8a_object_statistics_sql(database: &str) -> String {
+    format!(
+        "SELECT TABLE_NAME, TABLE_SCHEMA, TABLE_ROWS, \
+                COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES \
+         FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {} AND TABLE_TYPE <> 'VIEW' \
+         ORDER BY TABLE_NAME",
+        sql_string(database),
+    )
+}
+
 fn query_result_cell_i64(row: &[serde_json::Value], index: usize) -> Option<i64> {
     let value = row.get(index)?;
     if value.is_null() {
@@ -1749,7 +1890,7 @@ async fn oracle_agent_list_object_statistics(
     ];
     let mut last_error = None;
     for (source, sql, accept_empty) in queries {
-        match oracle_agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await {
+        match agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await {
             Ok(result) if accept_empty || !result.rows.is_empty() => {
                 return Ok(oracle_object_statistics_from_query_result(result));
             }
@@ -1774,7 +1915,58 @@ async fn oracle_agent_list_object_statistics(
     Err(last_error.unwrap_or_else(|| "Oracle object statistics are unavailable".to_string()))
 }
 
-async fn oracle_agent_object_statistics_query(
+async fn dameng_agent_list_object_statistics(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    schema: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ObjectStatistics>, String> {
+    let mut client = client.lock().await;
+    let queries = [
+        ("dba-segments", dameng_object_statistics_dba_segments_sql(schema), true),
+        ("user-segments", dameng_object_statistics_user_segments_sql(schema), false),
+        ("rows-only", dameng_object_statistics_rows_only_sql(schema), true),
+    ];
+    let mut last_error = None;
+    for (source, sql, accept_empty) in queries {
+        match agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await {
+            Ok(result) if accept_empty || !result.rows.is_empty() => {
+                return Ok(oracle_object_statistics_from_query_result(result));
+            }
+            Ok(_) => {
+                log::debug!(
+                    "[schema][dameng:list_object_statistics:empty-fallback] schema={} source={}",
+                    schema,
+                    source
+                );
+            }
+            Err(error) => {
+                log::debug!(
+                    "[schema][dameng:list_object_statistics:fallback-failed] schema={} source={} error={}",
+                    schema,
+                    source,
+                    error
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Dameng object statistics are unavailable".to_string()))
+}
+
+async fn agent_list_object_statistics(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    schema: &str,
+    sql: String,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ObjectStatistics>, String> {
+    let mut client = client.lock().await;
+    let result = agent_object_statistics_query(&mut client, database, schema, &sql, timeout_duration).await?;
+    Ok(oracle_object_statistics_from_query_result(result))
+}
+
+async fn agent_object_statistics_query(
     client: &mut db::agent_driver::AgentDriverClient,
     database: &str,
     schema: &str,
@@ -2447,11 +2639,13 @@ fn escape_presto_like_pattern(value: &str) -> String {
 mod tests {
     use super::db;
     use super::{
-        clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
-        filter_object_infos, filter_table_infos, filter_visible_schema_names,
-        is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error, mysql_object_source_sql,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
+        dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
+        filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
+        gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error,
+        kingbase_object_statistics_sql, mysql_object_source_sql, mysql_table_metadata_catalog,
+        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
@@ -3218,6 +3412,57 @@ mod tests {
     }
 
     #[test]
+    fn kingbase_extension_sql_uses_sys_catalog_and_escapes_schema() {
+        let sql = super::kingbase_list_extensions_sql(Some("app's"), super::KingbaseExtensionCatalog::Sys);
+
+        assert!(sql.contains("FROM sys_catalog.sys_extension e"));
+        assert!(sql.contains("JOIN sys_catalog.sys_namespace n"));
+        assert!(sql.contains("LEFT JOIN sys_catalog.sys_description d"));
+        assert!(sql.contains("WHERE n.nspname = 'app''s'"));
+    }
+
+    #[test]
+    fn kingbase_available_extension_sql_supports_pg_catalog_fallback() {
+        let sql = super::kingbase_list_available_extensions_sql(super::KingbaseExtensionCatalog::Pg);
+
+        assert!(sql.contains("FROM pg_catalog.pg_available_extensions"));
+        assert!(sql.contains("WHERE installed_version IS NULL"));
+    }
+
+    #[test]
+    fn extension_infos_from_query_result_maps_installed_extensions() {
+        let result = db::QueryResult {
+            columns: vec![
+                "extname".to_string(),
+                "extversion".to_string(),
+                "description".to_string(),
+                "nspname".to_string(),
+            ],
+            column_types: Vec::new(),
+            column_sortables: Vec::new(),
+            rows: vec![vec![
+                serde_json::json!("kdb_utils"),
+                serde_json::json!("1.0"),
+                serde_json::json!("KingBase utilities"),
+                serde_json::json!("public"),
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        };
+
+        let extensions = super::extension_infos_from_query_result(result, true);
+
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].name, "kdb_utils");
+        assert_eq!(extensions[0].version, "1.0");
+        assert_eq!(extensions[0].comment.as_deref(), Some("KingBase utilities"));
+        assert_eq!(extensions[0].schema.as_deref(), Some("public"));
+    }
+
+    #[test]
     fn agent_metadata_timeout_defaults_to_sixty_seconds_and_honors_longer_config() {
         assert_eq!(super::agent_metadata_timeout(None), Some(std::time::Duration::from_secs(60)));
 
@@ -3406,6 +3651,40 @@ mod tests {
         assert!(rows_only_sql.contains("ALL_TABLES"));
         assert!(rows_only_sql.contains("CAST(NULL AS NUMBER) AS TOTAL_BYTES"));
         assert!(!rows_only_sql.contains("ALL_SEGMENTS"));
+    }
+
+    #[test]
+    fn dameng_object_statistics_sql_uses_available_segment_views() {
+        let dba_sql = dameng_object_statistics_dba_segments_sql("app's");
+        assert!(dba_sql.contains("DBA_SEGMENTS"));
+        assert!(dba_sql.contains("ALL_INDEXES"));
+        assert!(!dba_sql.contains("ALL_SEGMENTS"));
+        assert!(!dba_sql.contains("ALL_LOBS"));
+        assert!(dba_sql.contains("OWNER = 'APP''S'"));
+        assert!(dba_sql.contains("t.NESTED IS NULL OR t.NESTED = 'NO'"));
+
+        let user_sql = dameng_object_statistics_user_segments_sql("app's");
+        assert!(user_sql.contains("USER_SEGMENTS"));
+        assert!(user_sql.contains("t.OWNER = USER"));
+
+        let rows_only_sql = dameng_object_statistics_rows_only_sql("app's");
+        assert!(rows_only_sql.contains("CAST(NULL AS NUMBER) AS TOTAL_BYTES"));
+        assert!(!rows_only_sql.contains("SEGMENTS"));
+    }
+
+    #[test]
+    fn agent_database_object_statistics_sql_uses_native_catalogs() {
+        let kingbase_sql = kingbase_object_statistics_sql("core's");
+        assert!(kingbase_sql.contains("sys_catalog.sys_class"));
+        assert!(kingbase_sql.contains("sys_catalog.sys_namespace"));
+        assert!(kingbase_sql.contains("sys_total_relation_size"));
+        assert!(kingbase_sql.contains("n.nspname = 'core''s'"));
+
+        let gbase_sql = gbase8a_object_statistics_sql("shop's");
+        assert!(gbase_sql.contains("information_schema.TABLES"));
+        assert!(gbase_sql.contains("DATA_LENGTH"));
+        assert!(gbase_sql.contains("INDEX_LENGTH"));
+        assert!(gbase_sql.contains("TABLE_SCHEMA = 'shop''s'"));
     }
 
     #[test]
@@ -3874,6 +4153,42 @@ async fn list_object_statistics_once(
                 client,
                 database,
                 schema,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
+        }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Dameng) {
+            drop(connections);
+            return dameng_agent_list_object_statistics(
+                client,
+                database,
+                schema,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
+        }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            let sql = kingbase_object_statistics_sql(schema);
+            drop(connections);
+            return agent_list_object_statistics(
+                client,
+                database,
+                schema,
+                sql,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
+        }
+        if db_config.as_ref().is_some_and(|config| {
+            config.db_type == DatabaseType::Gbase && config.driver_profile.as_deref() != Some("gbase8s")
+        }) {
+            let sql = gbase8a_object_statistics_sql(database);
+            drop(connections);
+            return agent_list_object_statistics(
+                client,
+                database,
+                schema,
+                sql,
                 agent_metadata_timeout(db_config.as_ref()),
             )
             .await;
@@ -4827,10 +5142,25 @@ pub async fn list_extensions_core(
     state: &AppState,
     connection_id: &str,
     database: &str,
-    schema: &str,
+    schema: Option<&str>,
 ) -> Result<Vec<db::ExtensionInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let db_config = connection_config(state, connection_id).await;
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            let connections = state.connections.read().await;
+            if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+                drop(connections);
+                return kingbase_agent_list_extensions(
+                    client,
+                    database,
+                    schema,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await;
+            }
+        }
+
         let connections = state.connections.read().await;
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
@@ -4849,6 +5179,20 @@ pub async fn list_available_extensions_core(
 ) -> Result<Vec<db::ExtensionInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let db_config = connection_config(state, connection_id).await;
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            let connections = state.connections.read().await;
+            if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+                drop(connections);
+                return kingbase_agent_list_available_extensions(
+                    client,
+                    database,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await;
+            }
+        }
+
         let connections = state.connections.read().await;
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
@@ -4858,6 +5202,140 @@ pub async fn list_available_extensions_core(
         }
     })
     .await
+}
+
+#[derive(Clone, Copy)]
+enum KingbaseExtensionCatalog {
+    Sys,
+    Pg,
+}
+
+impl KingbaseExtensionCatalog {
+    fn catalog_name(self) -> &'static str {
+        match self {
+            Self::Sys => "sys_catalog",
+            Self::Pg => "pg_catalog",
+        }
+    }
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Sys => "sys",
+            Self::Pg => "pg",
+        }
+    }
+}
+
+fn kingbase_list_extensions_sql(schema: Option<&str>, catalog: KingbaseExtensionCatalog) -> String {
+    let catalog_name = catalog.catalog_name();
+    let prefix = catalog.prefix();
+    let schema_filter = schema
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|schema| format!("WHERE n.nspname = {}", sql_string(schema)))
+        .unwrap_or_default();
+    let order_by = if schema_filter.is_empty() { "n.nspname, e.extname" } else { "e.extname" };
+    format!(
+        "SELECT e.extname, COALESCE(e.extversion, '') AS extversion, d.description, n.nspname \
+         FROM {catalog_name}.{prefix}_extension e \
+         JOIN {catalog_name}.{prefix}_namespace n ON n.oid = e.extnamespace \
+         LEFT JOIN {catalog_name}.{prefix}_description d ON d.objoid = e.oid AND d.objsubid = 0 \
+         {schema_filter} \
+         ORDER BY {order_by}"
+    )
+}
+
+fn kingbase_list_available_extensions_sql(catalog: KingbaseExtensionCatalog) -> String {
+    let catalog_name = catalog.catalog_name();
+    let prefix = catalog.prefix();
+    format!(
+        "SELECT name, default_version, comment \
+         FROM {catalog_name}.{prefix}_available_extensions \
+         WHERE installed_version IS NULL \
+         ORDER BY name"
+    )
+}
+
+async fn kingbase_agent_query_result(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    sql: &str,
+    max_rows: usize,
+    timeout_duration: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    let params = agent_execute_query_params(
+        sql,
+        if database.is_empty() { None } else { Some(database) },
+        None,
+        QueryExecutionOptions { max_rows: Some(max_rows), ..Default::default() },
+    );
+    let mut client = client.lock().await;
+    client.execute_query_with_timeout(params, timeout_duration).await
+}
+
+async fn kingbase_agent_query_result_with_catalog_fallback(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    sys_sql: String,
+    pg_sql: String,
+    max_rows: usize,
+    timeout_duration: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    match kingbase_agent_query_result(client.clone(), database, &sys_sql, max_rows, timeout_duration).await {
+        Ok(result) => Ok(result),
+        Err(sys_error) => kingbase_agent_query_result(client, database, &pg_sql, max_rows, timeout_duration)
+            .await
+            .map_err(|pg_error| format!("{sys_error}; pg_catalog fallback failed: {pg_error}")),
+    }
+}
+
+async fn kingbase_agent_list_extensions(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    schema: Option<&str>,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ExtensionInfo>, String> {
+    let result = kingbase_agent_query_result_with_catalog_fallback(
+        client,
+        database,
+        kingbase_list_extensions_sql(schema, KingbaseExtensionCatalog::Sys),
+        kingbase_list_extensions_sql(schema, KingbaseExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(extension_infos_from_query_result(result, true))
+}
+
+async fn kingbase_agent_list_available_extensions(
+    client: Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>,
+    database: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ExtensionInfo>, String> {
+    let result = kingbase_agent_query_result_with_catalog_fallback(
+        client,
+        database,
+        kingbase_list_available_extensions_sql(KingbaseExtensionCatalog::Sys),
+        kingbase_list_available_extensions_sql(KingbaseExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(extension_infos_from_query_result(result, false))
+}
+
+fn extension_infos_from_query_result(result: db::QueryResult, include_schema: bool) -> Vec<db::ExtensionInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(&row, 0)?;
+            let version = query_result_cell_string(&row, 1).unwrap_or_default();
+            let comment = query_result_cell_string(&row, 2).filter(|value| !value.trim().is_empty());
+            let schema = include_schema.then(|| query_result_cell_string(&row, 3)).flatten();
+            Some(db::ExtensionInfo { name, version, comment, schema })
+        })
+        .collect()
 }
 
 pub async fn list_owners_core(
@@ -6278,6 +6756,45 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_table_ddl_includes_partition_key_for_parent_only() {
+        for partition_key in [
+            "RANGE (created_at)",
+            "LIST (\"Tenant ID\")",
+            "HASH ((lower(code)))",
+            "RANGE (date_trunc('month'::text, created_at))",
+        ] {
+            let ddl = render_postgres_table_ddl_with_partition_key(
+                "public",
+                "events",
+                &[column("created_at", "timestamp without time zone")],
+                &[],
+                &[],
+                None,
+                Some(partition_key),
+            );
+
+            assert!(ddl.ends_with(&format!(") PARTITION BY {partition_key};\n")), "ddl: {ddl}");
+            assert!(!ddl.contains("PARTITION OF"));
+        }
+    }
+
+    #[test]
+    fn postgres_table_ddl_keeps_ordinary_table_unchanged() {
+        let ddl = render_postgres_table_ddl_with_partition_key(
+            "public",
+            "users",
+            &[column("id", "integer")],
+            &[],
+            &[],
+            None,
+            None,
+        );
+
+        assert!(ddl.ends_with(");\n"), "ddl: {ddl}");
+        assert!(!ddl.contains("PARTITION BY"));
+    }
+
+    #[test]
     fn postgres_table_ddl_keeps_composite_foreign_key_together() {
         let columns = vec![column("a", "integer"), column("b", "integer"), column("c", "integer")];
         let foreign_keys = vec![
@@ -6458,14 +6975,23 @@ pub fn opengauss_table_ddl_sql(schema: &str, table: &str) -> String {
 }
 
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (columns, indexes, fkeys, table_comment) = tokio::try_join!(
+    let (columns, indexes, fkeys, table_comment, partition_key) = tokio::try_join!(
         db::postgres::get_columns(pool, schema, table),
         db::postgres::list_indexes(pool, schema, table),
         db::postgres::list_foreign_keys(pool, schema, table),
         async { db::postgres::get_table_comment(pool, schema, table).await },
+        db::postgres::get_table_partition_key(pool, schema, table),
     )?;
 
-    Ok(render_postgres_table_ddl(schema, table, &columns, &indexes, &fkeys, table_comment.as_deref()))
+    Ok(render_postgres_table_ddl_with_partition_key(
+        schema,
+        table,
+        &columns,
+        &indexes,
+        &fkeys,
+        table_comment.as_deref(),
+        partition_key.as_deref(),
+    ))
 }
 
 pub fn render_postgres_table_ddl(
@@ -6475,6 +7001,18 @@ pub fn render_postgres_table_ddl(
     indexes: &[db::IndexInfo],
     fkeys: &[db::ForeignKeyInfo],
     table_comment: Option<&str>,
+) -> String {
+    render_postgres_table_ddl_with_partition_key(schema, table, columns, indexes, fkeys, table_comment, None)
+}
+
+fn render_postgres_table_ddl_with_partition_key(
+    schema: &str,
+    table: &str,
+    columns: &[db::ColumnInfo],
+    indexes: &[db::IndexInfo],
+    fkeys: &[db::ForeignKeyInfo],
+    table_comment: Option<&str>,
+    partition_key: Option<&str>,
 ) -> String {
     let table_name = format!("{}.{}", pg_ident(schema), pg_ident(table));
     let mut ddl = format!("CREATE TABLE {table_name} (\n");
@@ -6521,7 +7059,11 @@ pub fn render_postgres_table_ddl(
             ref_columns
         ));
     }
-    ddl.push_str("\n);\n");
+    if let Some(partition_key) = partition_key.filter(|key| !key.trim().is_empty()) {
+        ddl.push_str(&format!("\n) PARTITION BY {partition_key};\n"));
+    } else {
+        ddl.push_str("\n);\n");
+    }
 
     if let Some(comment) = table_comment.filter(|comment| !comment.trim().is_empty()) {
         ddl.push_str(&format!("\nCOMMENT ON TABLE {table_name} IS {};", sql_string(comment)));

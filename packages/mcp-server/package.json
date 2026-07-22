@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/mcp-server",
-  "version": "0.4.40",
+  "version": "0.4.41",
   "description": "MCP server for DBX — query databases from Claude Code, Cursor, and other AI agents",
   "keywords": [
     "ai-agent",
@@ -34,12 +34,12 @@
     "prepublishOnly": "node bin/dbx-mcp-server.js --verify-platform"
   },
   "optionalDependencies": {
-    "@dbx-app/mcp-darwin-arm64": "0.4.40",
-    "@dbx-app/mcp-darwin-x64": "0.4.40",
-    "@dbx-app/mcp-linux-arm64-gnu": "0.4.40",
-    "@dbx-app/mcp-linux-x64-gnu": "0.4.40",
-    "@dbx-app/mcp-win32-arm64": "0.4.40",
-    "@dbx-app/mcp-win32-x64": "0.4.40"
+    "@dbx-app/mcp-darwin-arm64": "0.4.41",
+    "@dbx-app/mcp-darwin-x64": "0.4.41",
+    "@dbx-app/mcp-linux-arm64-gnu": "0.4.41",
+    "@dbx-app/mcp-linux-x64-gnu": "0.4.41",
+    "@dbx-app/mcp-win32-arm64": "0.4.41",
+    "@dbx-app/mcp-win32-x64": "0.4.41"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

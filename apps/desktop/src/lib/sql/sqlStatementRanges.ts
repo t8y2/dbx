@@ -689,6 +689,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (currentBodyKeyword === "ALTER" && isMysqlAlterTableTruncatePartitionContinuation(sql, boundaries[boundaries.length - 1].from, lineStart.from, lineStart.keyword, databaseType)) {
+      continue;
+    }
+
     if (currentBodyKeyword === "ALTER" && ALTER_BODY_KEYWORDS.has(lineStart.keyword)) {
       continue;
     }
@@ -929,6 +933,12 @@ function isClickHouseAlterTableUpdateContinuation(sql: string, statementFrom: nu
   return CLICKHOUSE_ALTER_TABLE_HEADER.test(sql.slice(statementFrom, lineStartFrom));
 }
 
+function isMysqlAlterTableTruncatePartitionContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "mysql" || keyword !== "TRUNCATE") return false;
+  if (!startsWithSqlWords(sql, statementFrom, ["ALTER", "TABLE"])) return false;
+  return nextSqlWord(sql, lineStartFrom + keyword.length) === "PARTITION";
+}
+
 function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean {
   const text = sql.slice(statementFrom, statementFrom + 256);
   return /^CREATE\s+(?:TEMPORARY\s+)?TABLE\b/i.test(text);
@@ -1097,9 +1107,49 @@ function nextNonWhitespaceChar(sql: string, pos: number): string | null {
 }
 
 function nextSqlWord(sql: string, pos: number): string | null {
+  return nextSqlWordToken(sql, pos)?.word ?? null;
+}
+
+function startsWithSqlWords(sql: string, pos: number, expectedWords: readonly string[]): boolean {
   let i = pos;
-  while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
-  return /^[A-Za-z_][\w$]*/.exec(sql.slice(i))?.[0]?.toUpperCase() ?? null;
+  for (const expectedWord of expectedWords) {
+    const token = nextSqlWordToken(sql, i);
+    if (token?.word !== expectedWord) return false;
+    i = token.end;
+  }
+  return true;
+}
+
+function nextSqlWordToken(sql: string, pos: number): { word: string; end: number } | null {
+  let i = pos;
+  // SQL comments may legally appear anywhere whitespace can separate keywords.
+  while (i < sql.length) {
+    if (isSqlWhitespace(sql[i])) {
+      i += 1;
+      continue;
+    }
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      i += 2;
+      while (i < sql.length && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
+      continue;
+    }
+    if (sql[i] === "#") {
+      i += 1;
+      while (i < sql.length && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      const commentEnd = sql.indexOf("*/", i + 2);
+      if (commentEnd < 0) return null;
+      i = commentEnd + 2;
+      continue;
+    }
+    break;
+  }
+
+  const match = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
+  if (!match) return null;
+  return { word: match[0].toUpperCase(), end: i + match[0].length };
 }
 
 function isExplainLikeKeyword(keyword: string | null): boolean {

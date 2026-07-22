@@ -14,6 +14,17 @@ env:
   CNB_REGISTRY: "docker.cnb.cool"
 
 jobs:
+  nix-packaging:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build Nix desktop package
+        run: nix build .#dbx-desktop --no-link --print-build-logs
+
   bump-jdbc-plugin-version:
     runs-on: ubuntu-latest
     outputs:
@@ -247,9 +258,15 @@ jobs:
           $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
           $zipName = "DBX_${version}_${arch}-portable.zip"
           $exePath = "target/${{ matrix.target }}/release/dbx.exe"
+          $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
 
           if (!(Test-Path $exePath)) {
             Write-Error "Missing Windows executable: $exePath"
+            exit 1
+          }
+          if (!$appVersion -or $appVersion -ne $version) {
+            Write-Error "Release tag version $version does not match the built DBX package version $appVersion"
             exit 1
           }
 
@@ -259,8 +276,26 @@ jobs:
           Copy-Item "README.md" (Join-Path $portableDir "README.md") -Force
           Set-Content -Path (Join-Path $portableDir "portable.dbx") -Value "" -NoNewline
 
+          $portableExe = Join-Path $portableDir "DBX.exe"
+          $manifest = [ordered]@{
+            schema_version = 1
+            version = $appVersion
+            arch = $arch
+            executable = "DBX.exe"
+            executable_sha256 = (Get-FileHash -LiteralPath $portableExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json
+          Set-Content -Path (Join-Path $portableDir "portable-update.json") -Value $manifest -Encoding utf8NoBOM
+
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
-          gh release upload "${env:GITHUB_REF_NAME}" $zipName --repo "${env:GITHUB_REPOSITORY}" --clobber
+          pnpm tauri signer sign $zipName
+
+          $signatureName = "${zipName}.sig"
+          if (!(Test-Path $signatureName)) {
+            Write-Error "Missing portable update signature: $signatureName"
+            exit 1
+          }
+
+          gh release upload "${env:GITHUB_REF_NAME}" $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
       - name: Upload Windows WebView2 offline installer
         if: matrix.arch == 'x64' || matrix.arch == 'arm64'
@@ -306,7 +341,7 @@ jobs:
             gh release view "${GITHUB_REF_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
               --json assets \
-              --jq '.assets[].name | select(endswith(".sig"))'
+              --jq '.assets[].name | select(endswith(".sig") and (endswith("-portable.zip.sig") | not))'
           )
 
           if [ "${#SIG_ASSETS[@]}" -eq 0 ]; then
@@ -381,7 +416,8 @@ jobs:
             --clobber
 
   publish:
-    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin]
+    # Keep the release as a draft until every platform and the Nix package pass.
+    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, nix-packaging]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release

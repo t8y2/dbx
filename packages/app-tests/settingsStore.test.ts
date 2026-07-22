@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createPinia, setActivePinia } from "pinia";
 import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sql/sqlFormatterConfig.ts";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
-import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
 import { tableOpenPageLimit } from "../../apps/desktop/src/lib/table/tableOpenPageLimit.ts";
 import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 
@@ -163,6 +163,15 @@ test("keeps saved UI font family", () => {
   const uiFontFamily = `"Aptos", system-ui, sans-serif`;
   assert.equal(normalizeEditorSettings({ uiFontFamily } as any).uiFontFamily, uiFontFamily);
   assert.equal(normalizeEditorSettings({ uiFontFamily: SYSTEM_UI_FONT_FAMILY } as any).uiFontFamily, SYSTEM_UI_FONT_FAMILY);
+});
+
+test("defaults result grid font family without changing saved custom fonts", () => {
+  const tableFontFamily = `"IBM Plex Mono", monospace`;
+
+  assert.equal(DEFAULT_EDITOR_SETTINGS.tableFontFamily, DEFAULT_DATA_GRID_FONT_FAMILY);
+  assert.equal(normalizeEditorSettings({}).tableFontFamily, DEFAULT_DATA_GRID_FONT_FAMILY);
+  assert.equal(normalizeEditorSettings({ tableFontFamily: "" as any }).tableFontFamily, DEFAULT_DATA_GRID_FONT_FAMILY);
+  assert.equal(normalizeEditorSettings({ tableFontFamily }).tableFontFamily, tableFontFamily);
 });
 
 test("defaults dangerous SQL confirmation to enabled", () => {

@@ -23,7 +23,7 @@ import type {
 } from "@/types/database";
 import { inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey } from "@/lib/app/pinnedItems";
 import { FavoritesController, refreshFavoritesPlaceholdersInTree, runLegacyFavoritesMigrationIfNeeded } from "@/lib/app/favorites";
-import { collectFavoritedTreeNodes, defaultGroupId, treeNodeFavoriteKey } from "@/lib/app/favoritesTree";
+import { collectFavoritedTreeNodes, defaultGroupId, isFavoritableTreeNode, treeNodeFavoriteKey } from "@/lib/app/favoritesTree";
 import {
   reconcileLayout,
   buildTreeNodesFromLayout,
@@ -1042,6 +1042,18 @@ export const useConnectionStore = defineStore("connection", () => {
    *  cannot be favorited (no connectionId or wrong node type) so callers can
    *  short-circuit. */
   function favoriteKeyForNode(node: TreeNode): string | null {
+    return favoritesController.favoriteKeyForNode(node);
+  }
+
+  /** Resolve a tree node id (e.g. `c:a:t1`) to the corresponding favorite
+   *  key. Used by the drag-and-drop channel, which only sees ids from the
+   *  DOM. Returns null when the id does not point at a favoritable tree
+   *  node (a connection, schema placeholder, etc.) or when the node is not
+   *  in the structured favorites state. */
+  function favoriteKeyForTreeNodeId(nodeId: string): string | null {
+    const node = findNode(treeNodes.value, nodeId);
+    if (!node) return null;
+    if (!isFavoritableTreeNode(node)) return null;
     return favoritesController.favoriteKeyForNode(node);
   }
 
@@ -5840,6 +5852,7 @@ export const useConnectionStore = defineStore("connection", () => {
     getFavoriteNote,
     getFavoriteItemForKey,
     favoriteKeyForNode,
+    favoriteKeyForTreeNodeId,
     isFavoritedKey,
     getFavoriteGroupForKey,
     getFavoriteGroupById,

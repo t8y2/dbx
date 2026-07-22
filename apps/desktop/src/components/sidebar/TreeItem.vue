@@ -849,9 +849,11 @@ function resolveFavoriteDropIndex(draggedId: string, targetId: string, position:
   if (!draggedItem) return -1;
   const siblings = connectionStore.getFavoriteSiblingsForKey(draggedId);
   if (siblings.index < 0) return -1;
-  // The drop handler passes the target's tree node id (e.g. `c:a:t1`) — map
-  // it back to the structured favorite key so we can look up the group.
-  const targetKey = connectionStore.favoriteKeyForNode({ ...activeNode.value, id: targetId });
+  // The drop channel only carries the target's tree node id. We need its
+  // real connectionId/database/schema/etc. to recompute the fav:v1 key —
+  // patching `activeNode` with the target id would mix the two and produce
+  // a wrong key. Ask the store to look the target up by id instead.
+  const targetKey = connectionStore.favoriteKeyForTreeNodeId(targetId);
   if (!targetKey) return -1;
   const targetItem = connectionStore.getFavoriteItemForKey(targetKey);
   // Drops on the group subnode fall back to the group's edge; drops on

@@ -486,6 +486,43 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void mysqlConnectTimeoutSecondsAreMappedToMilliseconds() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyConnectTimeout", JsonNode.class, Properties.class);
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:mysql://ddb.example.test:6000/app",
+              "jdbc_driver_class": "com.mysql.cj.jdbc.Driver",
+              "connect_timeout_secs": 45
+            }
+            """);
+
+        method.invoke(null, connection, properties);
+
+        assertEquals("45", properties.getProperty("loginTimeout"));
+        assertEquals("45000", properties.getProperty("connectTimeout"));
+    }
+
+    @Test
+    void explicitJdbcUrlConnectTimeoutIsNotOverridden() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyConnectTimeout", JsonNode.class, Properties.class);
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:mysql://ddb.example.test:6000/app?connectTimeout=5000",
+              "connect_timeout_secs": 45
+            }
+            """);
+
+        method.invoke(null, connection, properties);
+
+        assertEquals("45", properties.getProperty("loginTimeout"));
+        assertFalse(properties.containsKey("connectTimeout"));
+    }
+
+    @Test
     void jdbcxHighPrivilegeExtensionsAreDisabledByDefault() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod(
             "applyJdbcxExtensionSecurity",

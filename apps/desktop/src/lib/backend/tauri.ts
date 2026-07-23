@@ -832,8 +832,8 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
   return invoke("completion_assistant_search", { request });
 }
 
-export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string): Promise<ObjectSource> {
-  return invoke("get_object_source", { connectionId, database, schema, name, objectType, signature });
+export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string): Promise<ObjectSource> {
+  return invoke("get_object_source", { connectionId, database, schema, name, objectType, signature, relationName });
 }
 
 export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false): Promise<string[]> {

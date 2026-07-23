@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
-import type { ConnectionConfig, ObjectInfo, TreeNode } from "@/types/database";
+import type { ConnectionConfig, ObjectInfo, TreeNode, TriggerInfo } from "@/types/database";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -92,7 +92,13 @@ describe("sidebar object-group routing", () => {
 
   it("keeps table-level trigger groups on listTriggers", async () => {
     const listObjects = vi.fn<() => Promise<ObjectInfo[]>>().mockResolvedValue([]);
-    const listTriggers = vi.fn<() => Promise<never[]>>().mockResolvedValue([]);
+    const listTriggers = vi.fn<() => Promise<TriggerInfo[]>>().mockResolvedValue([
+      {
+        name: "trg_orders_audit",
+        timing: "AFTER",
+        event: "UPDATE",
+      },
+    ]);
     const { connection, store } = await createStore({ listObjects, listTriggers });
     const tableTriggerGroup: TreeNode = {
       ...objectGroup("group-triggers", `${connection.id}:app:app:orders:__triggers`),
@@ -105,7 +111,18 @@ describe("sidebar object-group routing", () => {
 
     expect(listTriggers).toHaveBeenCalledWith(connection.id, "app", "app", "orders", undefined);
     expect(listObjects).not.toHaveBeenCalled();
-    expect(storedTriggerGroup).toMatchObject({ isExpanded: true, isLoading: false, children: [] });
+    expect(storedTriggerGroup).toMatchObject({
+      isExpanded: true,
+      isLoading: false,
+      children: [
+        {
+          label: "trg_orders_audit (AFTER UPDATE)",
+          objectName: "trg_orders_audit",
+          tableName: "orders",
+          type: "trigger",
+        },
+      ],
+    });
   });
 
   it("propagates rejected schema-level metadata while clearing the loading state", async () => {

@@ -4013,6 +4013,7 @@ export const useConnectionStore = defineStore("connection", () => {
         triggers.map((tr) => ({
           id: `${parentId}:${tr.name}`,
           label: `${tr.name} (${tr.timing} ${tr.event})`,
+          objectName: tr.name,
           type: "trigger" as const,
           connectionId,
           database,

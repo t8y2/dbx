@@ -143,6 +143,32 @@ describe("createAiMessageRenderer", () => {
     expect(markdown).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps reusing stable blocks past the shared cache limits", () => {
+    const markdown = vi.fn((text: string) => `<p>${text}</p>`);
+    // Far more stable blocks than the shared caches can hold.
+    const renderer = createAiMessageRenderer({ markdown, maxEntries: 2, maxSegmentEntries: 2, maxCacheChars: 200 });
+    const head = Array.from({ length: 40 }, (_, i) => `${i}:${"内容".repeat(150)}`).join("\n\n") + "\n\n";
+
+    renderer.render(`${head}尾`, { streaming: true });
+    markdown.mockClear();
+    renderer.render(`${head}尾巴`, { streaming: true });
+
+    expect(markdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the streaming blocks when another answer starts", () => {
+    const markdown = vi.fn((text: string) => `<p>${text}</p>`);
+    const renderer = createAiMessageRenderer({ markdown });
+    const head = `${"内容".repeat(200)}\n\n`;
+
+    renderer.render(`${head}尾`, { streaming: true });
+    renderer.render("另一个回答", { streaming: true });
+    markdown.mockClear();
+    renderer.render(`${head}尾`, { streaming: true });
+
+    expect(markdown).toHaveBeenCalledTimes(2);
+  });
+
   it("does not cache streaming versions as finished messages", () => {
     const markdown = vi.fn((text: string) => `<p>${text}</p>`);
     const renderer = createAiMessageRenderer({ markdown, maxEntries: 2 });
@@ -191,6 +217,13 @@ describe("splitStreamingTextBlocks", () => {
 
   it("does not split a message that defines link references", () => {
     expect(splitStreamingTextBlocks(`[1]: https://example.com\n\n${long}\n\n见 [文档][1]`)).toHaveLength(1);
+    // The label may escape its closing bracket.
+    expect(splitStreamingTextBlocks(`[a\\]b]: https://example.com\n\n${long}\n\n见 [文档][a\\]b]`)).toHaveLength(1);
+  });
+
+  it("does not split a message containing raw HTML blocks", () => {
+    expect(splitStreamingTextBlocks(`${long}\n\n<!-- 注释开始\n\n注释结束 -->`)).toHaveLength(1);
+    expect(splitStreamingTextBlocks(`${long}\n\n<pre>\n\n还有内容\n</pre>`)).toHaveLength(1);
   });
 
   it("does not split when the next block has not arrived yet", () => {

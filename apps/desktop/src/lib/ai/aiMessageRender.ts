@@ -46,7 +46,10 @@ const DEFAULT_MAX_CACHE_CHARS = 400_000;
 const STREAM_BLOCK_MIN_CHARS = 240;
 const BLANK_LINE_RE = /\n{2,}/g;
 const FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const LINK_REFERENCE_RE = /^ {0,3}\[[^\]\n]+\]:/m;
+// Labels may escape their closing bracket, so `[a\]b]: url` is a definition too.
+const LINK_REFERENCE_RE = /^ {0,3}\[(?:\\.|[^\]\n\\])+\]:/m;
+// Raw HTML blocks stay open across blank lines, which no block boundary may cut.
+const RAW_HTML_BLOCK_RE = /<!--|<\?|<!\[CDATA\[|<\/?(?:script|style|pre|textarea)\b/i;
 const SQL_LANGUAGES = new Map([
   ["sql", "SQL"],
   ["mysql", "MYSQL"],
@@ -81,6 +84,9 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
   const maxCacheChars = Math.max(2, Math.floor(options.maxCacheChars ?? DEFAULT_MAX_CACHE_CHARS));
   const cache = createRenderCache<AiMessageRenderSegment[]>(maxEntries, Math.floor(maxCacheChars / 2));
   const segmentCache = createRenderCache<AiMessageRenderSegment>(maxSegmentEntries, Math.floor(maxCacheChars / 2));
+  // Bounded by the one answer being streamed, and dropped as soon as another answer starts.
+  const streamBlocks = new Map<string, AiMessageRenderSegment>();
+  let streamContent = "";
 
   function renderSegment(segment: MessageSegment, flags: SegmentRenderFlags): AiMessageRenderSegment {
     if (segment.type === "text") {
@@ -112,6 +118,19 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
     return rendered;
   }
 
+  /**
+   * Blocks of the message being streamed right now. They are held apart from the shared caches:
+   * an LRU sized for finished messages would evict them while the same message is still growing.
+   */
+  function renderStreamingBlock(block: string): AiMessageRenderSegment {
+    const cached = streamBlocks.get(block);
+    if (cached) return cached;
+
+    const rendered = renderSegment({ type: "text", content: block }, { pending: false, live: false });
+    streamBlocks.set(block, rendered);
+    return rendered;
+  }
+
   function renderTail(segment: MessageSegment): AiMessageRenderSegment[] {
     const pending = segment.type === "code" && segment.closed !== true;
     // Only the trailing block of a streaming message keeps changing. Blocks before it are final,
@@ -119,13 +138,18 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
     if (segment.type === "text") {
       const blocks = splitStreamingTextBlocks(segment.content);
       const live = blocks[blocks.length - 1];
-      return [...blocks.slice(0, -1).map((block) => renderCachedSegment({ type: "text", content: block }, { pending: false, live: false })), renderSegment({ type: "text", content: live }, { pending: false, live: true })];
+      return [...blocks.slice(0, -1).map(renderStreamingBlock), renderSegment({ type: "text", content: live }, { pending: false, live: true })];
     }
     return [renderSegment(segment, { pending, live: true })];
   }
 
   function render(content: string, renderOptions: AiMessageRenderOptions = {}): AiMessageRenderSegment[] {
     const streaming = renderOptions.streaming === true;
+    if (streaming) {
+      // A content that no longer extends the previous one belongs to another answer.
+      if (!content.startsWith(streamContent)) streamBlocks.clear();
+      streamContent = content;
+    }
     const cacheable = !streaming && content.length <= maxCacheableChars;
     const cached = cacheable ? cache.get(content) : undefined;
     if (cached) return cached;
@@ -146,6 +170,8 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
   function clear() {
     cache.clear();
     segmentCache.clear();
+    streamBlocks.clear();
+    streamContent = "";
   }
 
   return { render, clear };
@@ -159,8 +185,9 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
  * carry state across it. Anything ambiguous stays joined and is simply re-parsed.
  */
 export function splitStreamingTextBlocks(content: string): string[] {
-  // Link reference definitions apply to the whole document, so blocks cannot be parsed apart.
-  if (LINK_REFERENCE_RE.test(content)) return [content];
+  // Link reference definitions apply to the whole document, and raw HTML blocks can span any
+  // number of blank lines: neither survives being parsed block by block.
+  if (LINK_REFERENCE_RE.test(content) || RAW_HTML_BLOCK_RE.test(content)) return [content];
 
   const blocks: string[] = [];
   let buffer = "";

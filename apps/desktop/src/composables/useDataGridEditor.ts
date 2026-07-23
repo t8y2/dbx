@@ -871,7 +871,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function clonedRowData(item: RowItem): CellValue[] {
     const columnInfoByName = new Map((tableMeta.value?.columns ?? []).map((column) => [column.name.toLowerCase(), column]));
     return item.data.map((val, i) => {
-      const columnName = result.value.columns[i];
+      const columnName = sourceColumns.value?.[i] ?? result.value.columns[i];
       const columnInfo = columnInfoByName.get(columnName.toLowerCase());
       return shouldClearClonedColumn(columnName, columnInfo) ? null : val;
     });

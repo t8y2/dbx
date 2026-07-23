@@ -72,6 +72,10 @@ const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
 const SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS = 500;
 type CloseConfirmContext = "tab" | "batch" | "app";
 
+function hasHiddenPhysicalRowKey(databaseType: DatabaseType | undefined, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[]): boolean {
+  return hiddenPrimaryKeys.some((projection) => !usesSyntheticRowIdKey(databaseType, [projection.sourceName]));
+}
+
 function cloneTabDraft<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -2781,13 +2785,13 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function analyzeQueryMetadataInBackground(tabId: string, sql: string, result: QueryResult, executionDatabase: string, traceId: string, elapsed: () => string, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = []) {
+  function analyzeQueryMetadataInBackground(tabId: string, sql: string, result: QueryResult, executionDatabase: string, traceId: string, elapsed: () => string, databaseType: DatabaseType | undefined, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = []) {
     void (async () => {
       const tab = tabs.value.find((t) => t.id === tabId);
       if (!tab || tab.result !== result) return;
       queryExecutionLog("info", "metadata:start", { traceId, elapsed: elapsed() });
       const patch = await buildQueryMetadataPatch(tab, sql, executionDatabase, traceId, elapsed, hiddenPrimaryKeys);
-      if (patch?.queryAnalysis && hiddenPrimaryKeys.length > 0) {
+      if (patch?.queryAnalysis && hasHiddenPhysicalRowKey(databaseType, hiddenPrimaryKeys)) {
         patch.queryAnalysis = { ...patch.queryAnalysis, allowInsert: false };
       }
       const current = tabs.value.find((t) => t.id === tabId);
@@ -3623,7 +3627,7 @@ export const useQueryStore = defineStore("query", () => {
           elapsed: elapsed(),
         });
         if (current.mode === "query" && current.result) {
-          analyzeQueryMetadataInBackground(id, displayedQueryMetadataSql(current, queryMetadataSql), current.result, executionDatabase, traceId, elapsed, hiddenPrimaryKeys);
+          analyzeQueryMetadataInBackground(id, displayedQueryMetadataSql(current, queryMetadataSql), current.result, executionDatabase, traceId, elapsed, effectiveDbType, hiddenPrimaryKeys);
         }
       } else {
         queryExecutionLog("warn", "stale-result", {
@@ -4073,7 +4077,7 @@ export const useQueryStore = defineStore("query", () => {
       const metadataStartedAt = performance.now();
       const connection = useConnectionStore().getConfig(tab.connectionId);
       const executionDatabase = dataTabExecutionDatabase(connection, tab.database, tab.catalog);
-      analyzeQueryMetadataInBackground(id, sourceStatement, tab.result, executionDatabase, uuid().slice(0, 8), () => `${Math.round(performance.now() - metadataStartedAt)}ms`);
+      analyzeQueryMetadataInBackground(id, sourceStatement, tab.result, executionDatabase, uuid().slice(0, 8), () => `${Math.round(performance.now() - metadataStartedAt)}ms`, effectiveDatabaseTypeForConnection(connection));
     }
   }
 

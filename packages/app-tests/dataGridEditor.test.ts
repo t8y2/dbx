@@ -429,6 +429,60 @@ test("cloning a row clears auto-generated key columns", async () => {
   assert.deepEqual(editor.newRows.value, [[null, "Ada"]]);
 });
 
+test("cloning an Oracle keyless row clears the hidden ROWID source column", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["ID", "PLATFORM", "__DBX_PK_0"],
+    rows: [[72, "轻卡", "AAAPr9AAEAAAACXAAA"] as CellValue[]],
+  }));
+  const rowStatusFilter = ref<"all" | "changed" | "edited" | "new" | "deleted">("all");
+  let editor: ReturnType<typeof useDataGridEditor>;
+
+  editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "oracle"),
+    connectionId: computed(() => undefined),
+    database: computed(() => undefined),
+    tableMeta: computed(() => ({
+      tableName: "TT_PLATFORM_CARS",
+      columns: [column("ID"), column("PLATFORM")],
+      primaryKeys: ["__DBX_ROWID"],
+    })),
+    sourceColumns: computed(() => ["ID", "PLATFORM", "__DBX_ROWID"]),
+    onExecuteSql: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
+    sql: computed(() => undefined),
+    searchText: ref(""),
+    whereFilterInput: ref(""),
+    orderByInput: ref(""),
+    currentWhereInput: computed(() => undefined),
+    rowStatusFilter,
+    pageSize: ref(100),
+    currentPage: ref(1),
+    getRowItem: (rowId) => {
+      if (rowId !== 0) return undefined;
+      return {
+        id: 0,
+        sourceIndex: 0,
+        data: result.value.rows[0],
+        isNew: false,
+        isDeleted: false,
+        isDirtyCol: [false, false, false],
+        status: "clean",
+      };
+    },
+    emit: () => {},
+  });
+
+  editor.cloneRow(0);
+  await nextTick();
+
+  assert.deepEqual(editor.newRows.value, [[72, "轻卡", null]]);
+});
+
 test("saving deleted rows reloads current table data", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

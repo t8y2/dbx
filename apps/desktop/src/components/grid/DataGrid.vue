@@ -65,6 +65,7 @@ import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, 
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
+import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -6848,13 +6849,16 @@ const tableInfoTabListStyle = computed(() => ({
   gridTemplateColumns: `repeat(${tableInfoTabs.value.length}, minmax(0, 1fr))`,
 }));
 
-async function toggleTableInfo(tab: TableInfoTab = activeTableInfoTab.value) {
-  if (showTableInfo.value && activeTableInfoTab.value === tab) {
+async function toggleTableInfo(tab?: TableInfoTab) {
+  // Kept-alive grids retain local state, so only a closed drawer should refresh
+  // from the shared preference; an open drawer keeps its current working tab.
+  const nextTab = tableInfoTabForDrawerToggle(showTableInfo.value, activeTableInfoTab.value, settingsStore.editorSettings.tableInfoActiveTab, tab);
+  if (showTableInfo.value && activeTableInfoTab.value === nextTab) {
     showTableInfo.value = false;
     return;
   }
   showTableInfo.value = true;
-  await selectTableInfoTab(tab);
+  await selectTableInfoTab(nextTab);
 }
 
 async function selectTableInfoTab(tab: TableInfoTab) {

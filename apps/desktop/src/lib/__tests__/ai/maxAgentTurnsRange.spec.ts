@@ -1,15 +1,5 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-
-const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
-
-const MAX_AGENT_TURNS_MIN = 5;
-const MAX_AGENT_TURNS_MAX = 500;
-
-// Mirrors maxAgentTurnsOutOfRange() in EditorSettingsDialog.vue.
-function maxAgentTurnsOutOfRange(v: number | undefined): boolean {
-  return typeof v === "number" && (v < MAX_AGENT_TURNS_MIN || v > MAX_AGENT_TURNS_MAX);
-}
+import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 
 describe("maxAgentTurnsOutOfRange", () => {
   it("accepts values within [min, max]", () => {
@@ -32,11 +22,22 @@ describe("maxAgentTurnsOutOfRange", () => {
     // and Number() parses to Infinity. The check must not short-circuit on it.
     expect(maxAgentTurnsOutOfRange(Number.POSITIVE_INFINITY)).toBe(true);
   });
+});
 
-  it("does not reintroduce the Number.isFinite short-circuit removed in this fix", () => {
-    const fnStart = settingsDialogSource.indexOf("function maxAgentTurnsOutOfRange");
-    const fnEnd = settingsDialogSource.indexOf("\n}", fnStart);
-    const fnSource = settingsDialogSource.slice(fnStart, fnEnd);
-    expect(fnSource).not.toContain("Number.isFinite");
+describe("normalizeMaxAgentTurns", () => {
+  it("preserves and rounds finite values within the supported range", () => {
+    expect(normalizeMaxAgentTurns(100)).toBe(100);
+    expect(normalizeMaxAgentTurns(30.6)).toBe(31);
+  });
+
+  it("clamps finite values outside the supported range", () => {
+    expect(normalizeMaxAgentTurns(MAX_AGENT_TURNS_MIN - 1)).toBe(MAX_AGENT_TURNS_MIN);
+    expect(normalizeMaxAgentTurns(MAX_AGENT_TURNS_MAX + 1)).toBe(MAX_AGENT_TURNS_MAX);
+  });
+
+  it("uses the default for empty and non-finite input", () => {
+    expect(normalizeMaxAgentTurns(undefined)).toBe(MAX_AGENT_TURNS_DEFAULT);
+    expect(normalizeMaxAgentTurns(Number.NaN)).toBe(MAX_AGENT_TURNS_DEFAULT);
+    expect(normalizeMaxAgentTurns(Number.POSITIVE_INFINITY)).toBe(MAX_AGENT_TURNS_DEFAULT);
   });
 });

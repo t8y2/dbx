@@ -47,6 +47,7 @@ import {
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
+import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import { normalizeAiModelEffortLevels, normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
@@ -2142,9 +2143,6 @@ function globalInstructionsTooLong(): boolean {
 // Agent turn limit (global, applies to all AI providers).
 // Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/agent_loop.rs —
 // keep in sync; the backend clamp on save/load is the actual source of truth.
-const MAX_AGENT_TURNS_DEFAULT = 30;
-const MAX_AGENT_TURNS_MIN = 5;
-const MAX_AGENT_TURNS_MAX = 500;
 const editMaxAgentTurns = ref<number | undefined>(undefined);
 const maxAgentTurnsSaving = ref(false);
 const maxAgentTurnsLoaded = ref(false);
@@ -2159,15 +2157,8 @@ async function loadMaxAgentTurnsSetting() {
   }
 }
 
-function maxAgentTurnsOutOfRange(): boolean {
-  const v = editMaxAgentTurns.value;
-  return typeof v === "number" && (v < MAX_AGENT_TURNS_MIN || v > MAX_AGENT_TURNS_MAX);
-}
-
 async function saveMaxAgentTurnsSetting() {
-  const raw = editMaxAgentTurns.value;
-  const value = typeof raw === "number" && Number.isFinite(raw) ? Math.round(raw) : MAX_AGENT_TURNS_DEFAULT;
-  const clamped = Math.min(MAX_AGENT_TURNS_MAX, Math.max(MAX_AGENT_TURNS_MIN, value));
+  const clamped = normalizeMaxAgentTurns(editMaxAgentTurns.value);
   maxAgentTurnsSaving.value = true;
   try {
     await saveMaxAgentTurns(clamped);
@@ -4802,11 +4793,11 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
                 <div class="flex items-center gap-2">
                   <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" />
-                  <span class="text-xs" :class="maxAgentTurnsOutOfRange() ? 'text-destructive' : 'text-muted-foreground'">
+                  <span class="text-xs" :class="maxAgentTurnsOutOfRange(editMaxAgentTurns) ? 'text-destructive' : 'text-muted-foreground'">
                     {{ t("ai.maxAgentTurnsRange", { min: MAX_AGENT_TURNS_MIN, max: MAX_AGENT_TURNS_MAX, default: MAX_AGENT_TURNS_DEFAULT }) }}
                   </span>
                   <div class="flex-1"></div>
-                  <Button type="button" size="sm" :disabled="maxAgentTurnsSaving || maxAgentTurnsOutOfRange()" @click="saveMaxAgentTurnsSetting">
+                  <Button type="button" size="sm" :disabled="maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)" @click="saveMaxAgentTurnsSetting">
                     {{ maxAgentTurnsSaving ? t("common.processing") : t("common.save") }}
                   </Button>
                 </div>

@@ -9,17 +9,18 @@ if (!startupScript) throw new Error("Startup theme script not found");
 
 type StartupThemeOptions = {
   mode?: string | null;
+  cornerStyle?: string | null;
   prefersDark?: boolean;
   storageError?: boolean;
 };
 
-function runStartupTheme({ mode = null, prefersDark = false, storageError = false }: StartupThemeOptions = {}) {
+function runStartupTheme({ mode = null, cornerStyle = null, prefersDark = false, storageError = false }: StartupThemeOptions = {}) {
   const toggle = vi.fn();
-  const root = { classList: { toggle }, style: { colorScheme: "" } };
+  const root = { classList: { toggle }, dataset: { cornerStyle: "" }, style: { colorScheme: "" } };
   const localStorage = {
-    getItem: vi.fn(() => {
+    getItem: vi.fn((key: string) => {
       if (storageError) throw new DOMException("Storage unavailable", "SecurityError");
-      return mode;
+      return key === "dbx-corner-style" ? cornerStyle : mode;
     }),
   };
   const matchMedia = vi.fn(() => ({ matches: prefersDark }));
@@ -64,6 +65,18 @@ describe("startup theme", () => {
     expect(root.style.colorScheme).toBe("light");
   });
 
+  it.each([
+    [null, "small"],
+    ["invalid", "small"],
+    ["none", "none"],
+    ["small", "small"],
+    ["large", "large"],
+  ])("normalizes the startup corner style %s to %s", (cornerStyle, expected) => {
+    const { root } = runStartupTheme({ cornerStyle });
+
+    expect(root.dataset.cornerStyle).toBe(expected);
+  });
+
   it("falls back to light when localStorage is unavailable", () => {
     const { root, toggle } = runStartupTheme({ storageError: true, prefersDark: true });
 
@@ -80,7 +93,7 @@ describe("startup theme", () => {
 
   it("falls back to light when system appearance detection is unavailable", () => {
     const toggle = vi.fn();
-    const root = { classList: { toggle }, style: { colorScheme: "" } };
+    const root = { classList: { toggle }, dataset: { cornerStyle: "" }, style: { colorScheme: "" } };
 
     Function("document", "localStorage", "window", startupScript)({ documentElement: root }, { getItem: () => "system" }, {});
 

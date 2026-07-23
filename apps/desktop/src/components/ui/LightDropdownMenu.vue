@@ -67,7 +67,7 @@ const props = withDefaults(
     sideOffset: 4,
     matchTriggerWidth: true,
     closeOnSelect: true,
-    triggerClass: "flex h-6 items-center gap-1 rounded-[6px] border border-border bg-background px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50 aria-expanded:bg-muted aria-expanded:text-foreground",
+    triggerClass: "flex h-6 items-center gap-1 rounded-md border border-border bg-background px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50 aria-expanded:bg-muted aria-expanded:text-foreground",
     triggerIconClass: "h-3 w-3",
     contentClass: "",
     labelClass: "",
@@ -260,7 +260,7 @@ watch(
     <div
       v-if="isOpen"
       ref="menuRef"
-      class="ring-foreground/10 fixed z-50 max-h-(--reka-dropdown-menu-content-available-height) min-w-32 overflow-x-hidden overflow-y-auto rounded-[6px] p-1 ring-1 cn-menu-translucent text-popover-foreground"
+      class="ring-foreground/10 fixed z-50 max-h-(--reka-dropdown-menu-content-available-height) min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 ring-1 cn-menu-translucent text-popover-foreground"
       :class="cn(matchTriggerWidth ? 'w-(--reka-dropdown-menu-trigger-width)' : '', contentClass)"
       :style="menuStyle"
       role="menu"

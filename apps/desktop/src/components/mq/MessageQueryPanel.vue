@@ -586,7 +586,7 @@ watch(topicName, () => {
   width: 32px;
   height: 32px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -629,7 +629,7 @@ watch(topicName, () => {
   width: 100%;
   padding: 7px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;
@@ -657,7 +657,7 @@ watch(topicName, () => {
 
 .panel-error {
   padding: 10px 14px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-error-bg);
   color: var(--color-error);
   font-size: 13px;
@@ -670,7 +670,7 @@ watch(topicName, () => {
 
 .results-table-wrap {
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   overflow: auto;
 }
 
@@ -706,7 +706,7 @@ watch(topicName, () => {
 .btn-primary,
 .btn-sm {
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;
@@ -750,7 +750,7 @@ watch(topicName, () => {
   width: min(720px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
   overflow: auto;
-  border-radius: 10px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
   display: flex;
@@ -829,7 +829,7 @@ watch(topicName, () => {
 
 .panel-success {
   padding: 10px 14px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: color-mix(in srgb, var(--color-primary) 12%, transparent);
   color: var(--color-primary);
   font-size: 13px;
@@ -838,7 +838,7 @@ watch(topicName, () => {
 .btn-secondary {
   padding: 7px 16px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;
@@ -851,7 +851,7 @@ watch(topicName, () => {
   max-height: 360px;
   overflow: auto;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background-secondary);
   color: var(--color-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;

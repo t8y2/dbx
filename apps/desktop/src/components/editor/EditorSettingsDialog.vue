@@ -112,7 +112,7 @@ import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import McpConnectionScopePicker from "@/components/settings/McpConnectionScopePicker.vue";
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
-import { APP_THEME_PALETTES, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
+import { APP_THEME_PALETTES, type AppCornerStyle, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
 import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -137,7 +137,7 @@ const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
 const tunnelProfileStore = useTunnelProfileStore();
-const { isDark, themeMode, themePalette, setThemeMode, setThemePalette } = useTheme();
+const { isDark, themeMode, themePalette, cornerStyle, setThemeMode, setThemePalette, setCornerStyle } = useTheme();
 
 const appThemePaletteOptions = computed(
   (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
@@ -153,6 +153,11 @@ const appThemeModeOptions = computed(() => [
   { value: "light" as AppThemeMode, label: t("toolbar.themeLight"), icon: Sun },
   { value: "dark" as AppThemeMode, label: t("toolbar.themeDark"), icon: Moon },
   { value: "system" as AppThemeMode, label: t("toolbar.themeSystem"), icon: SunMoon },
+]);
+const appCornerStyleOptions = computed(() => [
+  { value: "none" as AppCornerStyle, label: t("settings.cornerStyleNone"), previewRadius: "0px" },
+  { value: "small" as AppCornerStyle, label: t("settings.cornerStyleSmall"), previewRadius: "4px" },
+  { value: "large" as AppCornerStyle, label: t("settings.cornerStyleLarge"), previewRadius: "10px" },
 ]);
 
 const props = defineProps<{
@@ -3630,22 +3635,43 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
               </div>
 
-              <div class="settings-appearance-group">
-                <Label>{{ t("settings.theme") }}</Label>
-                <div class="settings-appearance-button-row flex flex-wrap gap-2">
-                  <Button
-                    v-for="option in appThemeModeOptions"
-                    :key="option.value"
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    class="settings-choice-button h-8 gap-1.5 rounded-[6px] px-3"
-                    :class="themeMode === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
-                    @click="setThemeMode(option.value)"
-                  >
-                    <component :is="option.icon" class="h-3.5 w-3.5" />
-                    {{ option.label }}
-                  </Button>
+              <div class="settings-appearance-theme-grid">
+                <div class="settings-appearance-group min-w-0">
+                  <Label>{{ t("settings.theme") }}</Label>
+                  <div class="settings-appearance-button-row flex flex-wrap gap-2">
+                    <Button
+                      v-for="option in appThemeModeOptions"
+                      :key="option.value"
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="settings-choice-button h-8 gap-1.5 px-3"
+                      :class="themeMode === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                      @click="setThemeMode(option.value)"
+                    >
+                      <component :is="option.icon" class="h-3.5 w-3.5" />
+                      {{ option.label }}
+                    </Button>
+                  </div>
+                </div>
+
+                <div class="settings-appearance-group min-w-0">
+                  <Label>{{ t("settings.cornerStyle") }}</Label>
+                  <div class="settings-appearance-button-row flex flex-wrap gap-2">
+                    <Button
+                      v-for="option in appCornerStyleOptions"
+                      :key="option.value"
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="settings-choice-button h-8 px-3"
+                      :class="cornerStyle === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                      :style="{ borderRadius: option.previewRadius }"
+                      @click="setCornerStyle(option.value)"
+                    >
+                      {{ option.label }}
+                    </Button>
+                  </div>
                 </div>
               </div>
 
@@ -5855,12 +5881,19 @@ onUnmounted(cleanupPreviewEditor);
   gap: 0.625rem;
 }
 
+.settings-appearance-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
 .settings-option-stack > * + * {
   margin-top: 0.625rem;
 }
 
 @media (max-width: 760px) {
   .settings-appearance-top-grid,
+  .settings-appearance-theme-grid,
   .settings-appearance-choice-grid {
     grid-template-columns: 1fr;
   }

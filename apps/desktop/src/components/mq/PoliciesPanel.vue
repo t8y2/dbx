@@ -321,7 +321,7 @@ watch(
 .json-section {
   padding: 14px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background-secondary);
 }
 
@@ -346,7 +346,7 @@ select {
   width: 100%;
   padding: 7px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   box-sizing: border-box;
@@ -367,7 +367,7 @@ pre {
   padding: 12px;
   max-height: 360px;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 12px;
@@ -379,7 +379,7 @@ pre {
 .readonly-hint {
   padding: 12px 16px;
   margin-bottom: 12px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   font-size: 13px;
 }
 
@@ -408,7 +408,7 @@ pre {
 .btn-sm {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;

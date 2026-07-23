@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import {
+  APP_CORNER_STYLE_STORAGE_KEY,
   APP_THEME_PALETTE_CLASS_NAMES,
   APP_THEME_PALETTE_STORAGE_KEY,
   APP_THEME_STORAGE_KEY,
@@ -7,10 +8,12 @@ import {
   getTauriThemeForMode,
   isSystemAppThemeMode,
   normalizeAppThemeMode,
+  normalizeAppCornerStyle,
   normalizeAppThemePalette,
   resolveAppThemeAppearance,
   type AppThemeMode,
   type AppThemePalette,
+  type AppCornerStyle,
 } from "@/lib/app/appTheme";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -19,7 +22,10 @@ const savedThemeMode = safeLocalStorageGet(APP_THEME_STORAGE_KEY);
 const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(savedThemeMode));
 const savedThemePalette = safeLocalStorageGet(APP_THEME_PALETTE_STORAGE_KEY);
 const themePalette = ref<AppThemePalette>(normalizeAppThemePalette(savedThemePalette));
+const savedCornerStyle = safeLocalStorageGet(APP_CORNER_STYLE_STORAGE_KEY);
+const cornerStyle = ref<AppCornerStyle>(normalizeAppCornerStyle(savedCornerStyle));
 if (savedThemeMode && savedThemeMode !== themeMode.value) safeLocalStorageSet(APP_THEME_STORAGE_KEY, themeMode.value);
+if (savedCornerStyle && savedCornerStyle !== cornerStyle.value) safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
 const systemPrefersDark = ref(readSystemPrefersDark());
 const isDark = computed(() => resolveAppThemeAppearance(themeMode.value, systemPrefersDark.value) === "dark");
 
@@ -55,6 +61,7 @@ function applyTheme() {
   for (const className of APP_THEME_PALETTE_CLASS_NAMES) doc.classList.remove(className);
   const paletteClass = getAppThemePaletteClass(themePalette.value);
   if (paletteClass) doc.classList.add(paletteClass);
+  doc.dataset.cornerStyle = cornerStyle.value;
   doc.style.colorScheme = dark ? "dark" : "light";
 
   // force reflow so the class toggle takes effect before re-enabling transitions
@@ -90,6 +97,12 @@ function setThemePalette(palette: AppThemePalette) {
   applyTheme();
 }
 
+function setCornerStyle(style: AppCornerStyle) {
+  cornerStyle.value = normalizeAppCornerStyle(style);
+  safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
+  applyTheme();
+}
+
 export function useTheme() {
   setupSystemThemeListener();
 
@@ -97,5 +110,5 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, themePalette, applyTheme, setThemeMode, setThemePalette, toggleTheme };
+  return { isDark, themeMode, themePalette, cornerStyle, applyTheme, setThemeMode, setThemePalette, setCornerStyle, toggleTheme };
 }

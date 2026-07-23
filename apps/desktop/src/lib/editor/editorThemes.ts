@@ -780,7 +780,7 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       alignItems: "center",
       background: "transparent",
       border: "1px solid transparent",
-      borderRadius: "6px",
+      borderRadius: "var(--dbx-radius-fixed-6)",
       boxSizing: "border-box",
       color: "transparent",
       display: "inline-flex",
@@ -898,7 +898,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     },
     ".cm-tooltip.cm-tooltip-autocomplete > ul > li": {
       alignItems: "center",
-      borderRadius: "6px",
+      borderRadius: "var(--dbx-radius-fixed-6)",
       color: "var(--popover-foreground)",
       display: "flex",
       fontSize: `clamp(12px, var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px), 14px)`,

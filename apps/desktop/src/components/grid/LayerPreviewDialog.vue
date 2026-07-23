@@ -436,7 +436,7 @@ onBeforeUnmount(() => cleanupMap());
 
 <template>
   <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent :show-close-button="false" :style="contentStyle" class="layer-preview-dialog flex w-[96vw] max-w-[1800px] h-[88vh] max-h-[960px] min-w-[640px] min-h-[400px] flex-col gap-0 overflow-hidden rounded-xl border p-0 shadow-2xl" @escape-key-down="close">
+    <DialogContent :show-close-button="false" :style="contentStyle" class="layer-preview-dialog flex w-[96vw] max-w-[1800px] h-[88vh] max-h-[960px] min-w-[640px] min-h-[400px] flex-col gap-0 overflow-hidden rounded-lg border p-0 shadow-2xl" @escape-key-down="close">
       <!-- Header -->
       <div class="flex h-12 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
         <div class="flex min-w-0 shrink-0 items-center gap-2">
@@ -503,7 +503,7 @@ onBeforeUnmount(() => cleanupMap());
   background: #1a1a2e;
 }
 .layer-preview-dialog .leaflet-popup-content-wrapper {
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   font-size: 12px;
 }
 .layer-preview-dialog .leaflet-popup-content {

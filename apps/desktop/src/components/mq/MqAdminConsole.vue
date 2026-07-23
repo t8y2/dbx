@@ -412,7 +412,7 @@ onMounted(async () => {
       </div>
       <div v-if="isRabbitMqCluster" class="mq-namespace-switcher">
         <Select :model-value="selectedNamespace" @update:model-value="handleNamespaceSelect">
-          <SelectTrigger class="h-7 w-[180px] rounded-[6px] text-xs">
+          <SelectTrigger class="h-7 w-[180px] rounded-lg text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -601,7 +601,7 @@ onMounted(async () => {
 
 .breadcrumb-button {
   border: none;
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: transparent;
   color: var(--color-text);
   cursor: pointer;
@@ -629,7 +629,7 @@ onMounted(async () => {
 .readonly-badge {
   padding: 2px 8px;
   border: 1px solid var(--color-warning);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   color: var(--color-warning);
   font-size: 12px;
   font-weight: 500;
@@ -716,7 +716,7 @@ onMounted(async () => {
 
 .dialog {
   background: var(--color-background);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   width: 90%;
   max-width: 500px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
@@ -772,7 +772,7 @@ onMounted(async () => {
   width: 100%;
   padding: 8px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   font-size: 14px;
   box-sizing: border-box;
   background: var(--color-background);
@@ -788,7 +788,7 @@ onMounted(async () => {
 .btn-secondary {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;

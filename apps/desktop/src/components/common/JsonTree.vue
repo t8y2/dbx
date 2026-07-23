@@ -241,7 +241,7 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
   min-height: 24px;
   align-items: flex-start;
   gap: 4px;
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
 }
 
 .json-tree-row:hover {

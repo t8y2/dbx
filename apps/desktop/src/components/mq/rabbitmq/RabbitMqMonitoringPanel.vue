@@ -307,7 +307,7 @@ onUnmounted(() => {
 .refresh-interval {
   padding: 4px 8px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;
@@ -335,7 +335,7 @@ onUnmounted(() => {
   padding: 12px 14px;
   background: var(--color-background);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -356,7 +356,7 @@ onUnmounted(() => {
   overflow: auto;
   background: var(--color-background);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
 }
 
 table {
@@ -400,7 +400,7 @@ td {
 .status-badge {
   display: inline-block;
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   font-size: 11px;
   font-weight: 500;
 }
@@ -418,7 +418,7 @@ td {
 .btn-secondary {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;

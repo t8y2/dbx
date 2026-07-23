@@ -242,7 +242,7 @@ onUnmounted(() => {
 .refresh-interval {
   padding: 4px 8px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   font-size: 13px;
   background: var(--color-background);
   cursor: pointer;
@@ -256,7 +256,7 @@ onUnmounted(() => {
 .btn-sm {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;
@@ -315,7 +315,7 @@ onUnmounted(() => {
   padding: 16px;
   background: var(--color-background-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   transition: all 0.2s;
 }
 
@@ -355,7 +355,7 @@ onUnmounted(() => {
 .broker-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background-secondary);
 }
 
@@ -411,7 +411,7 @@ onUnmounted(() => {
 .btn-secondary {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;

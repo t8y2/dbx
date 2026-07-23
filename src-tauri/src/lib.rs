@@ -1080,6 +1080,8 @@ pub fn run() {
             commands::prompt_template::set_ai_global_custom_instructions,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
+            commands::app_settings::load_max_agent_turns,
+            commands::app_settings::save_max_agent_turns,
             commands::app_settings::complete_app_close,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,

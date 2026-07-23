@@ -248,6 +248,7 @@ jobs:
 
       - name: Upload Windows portable ZIP
         if: matrix.arch == 'x64' || matrix.arch == 'arm64'
+        timeout-minutes: 20
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -287,7 +288,13 @@ jobs:
           Set-Content -Path (Join-Path $portableDir "portable-update.json") -Value $manifest -Encoding utf8NoBOM
 
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
-          pnpm tauri signer sign $zipName
+          # Tauri prompts interactively when the password is omitted, so pass an explicit
+          # empty value for the existing passwordless updater key used by DBX releases.
+          if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            pnpm tauri signer sign "--password=" $zipName
+          } else {
+            pnpm tauri signer sign $zipName
+          }
 
           $signatureName = "${zipName}.sig"
           if (!(Test-Path $signatureName)) {

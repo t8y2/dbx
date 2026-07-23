@@ -106,6 +106,10 @@ pub async fn ai_agent_stream(
         .await
         .get(&connection_id)
         .is_some_and(|config| dbx_core::production_safety::is_production_database(config, &database));
+    let max_agent_turns = state.storage.load_max_agent_turns().await.unwrap_or_else(|err| {
+        log::warn!("Failed to load max_agent_turns setting, using default: {err}");
+        dbx_core::agent_loop::DEFAULT_MAX_AGENT_TURNS
+    });
     let agent_ctx = AgentLoopContext {
         state: state.inner().clone(),
         connection_id,
@@ -117,6 +121,7 @@ pub async fn ai_agent_stream(
             allow_writes: !production_database && allow_write_sql.unwrap_or(false),
             allow_dangerous: !production_database && allow_write_sql.unwrap_or(false),
         },
+        max_agent_turns,
     };
     let is_agent_mode = mode.as_deref() == Some("agent");
 

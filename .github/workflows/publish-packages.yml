@@ -6,6 +6,11 @@ on:
       tag:
         description: "Release tag (e.g. v0.3.10)"
         required: true
+      notify:
+        description: "Send release notification"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -400,6 +405,7 @@ jobs:
   notify-qq:
     name: QQ Notify
     needs: [promote-release]
+    if: ${{ inputs.notify }}
     runs-on: ubuntu-latest
     steps:
       - name: Build message

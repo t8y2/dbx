@@ -3,6 +3,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,6 +48,7 @@ import {
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
+import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import { normalizeAiModelEffortLevels, normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
@@ -64,6 +66,8 @@ import {
   forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
   getAppSupportInfo,
+  loadMaxAgentTurns,
+  saveMaxAgentTurns,
   saveWebdavSyncSecretsPreference,
   saveWebdavSavedPassword,
   saveSnippetSavedToken,
@@ -379,7 +383,7 @@ const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
 const systemFonts = ref<string[]>([]);
 const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
-const uiScaleOptions = [0.75, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2, 1.25, 1.5, 1.75, 2];
+const uiScaleOptions = [0.75, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2, 1.25, 1.5, 1.75];
 const fontSearchTriggerClass =
   "h-8 w-full max-w-none justify-between gap-1.5 rounded-[6px] border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-transparent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
 const appearanceFontSearchTriggerClass = `${fontSearchTriggerClass} gap-0 pl-2 pr-1.5`;
@@ -1953,6 +1957,7 @@ watch(activeSettingsTab, async (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "ai") {
+    void loadMaxAgentTurnsSetting();
     // Await completion so we don't snapshot an empty default when the store
     // is still loading its first payload (init via App.vue is fire-and-forget).
     await promptTemplateStore.ensureLoaded();
@@ -2136,6 +2141,45 @@ function globalInstructionsTooLong(): boolean {
   return promptTemplateCharacterCount(editGlobalInstructions.value) > GLOBAL_INSTRUCTIONS_MAX;
 }
 
+// Agent turn limit for DBX's API-backed agent loop. CLI providers enforce their own limits.
+// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/agent_loop.rs —
+// keep in sync; the backend clamp on save/load is the actual source of truth.
+const editMaxAgentTurns = ref<number | undefined>(undefined);
+const maxAgentTurnsSaving = ref(false);
+const maxAgentTurnsLoaded = ref(false);
+const maxAgentTurnsLoading = ref(false);
+const maxAgentTurnsLoadError = ref("");
+
+async function loadMaxAgentTurnsSetting() {
+  if (maxAgentTurnsLoaded.value || maxAgentTurnsLoading.value) return;
+  maxAgentTurnsLoading.value = true;
+  maxAgentTurnsLoadError.value = "";
+  try {
+    editMaxAgentTurns.value = await loadMaxAgentTurns();
+    maxAgentTurnsLoaded.value = true;
+  } catch (e: any) {
+    maxAgentTurnsLoadError.value = e?.message || String(e);
+    toast(maxAgentTurnsLoadError.value, 5000);
+  } finally {
+    maxAgentTurnsLoading.value = false;
+  }
+}
+
+async function saveMaxAgentTurnsSetting() {
+  if (!maxAgentTurnsLoaded.value) return;
+  const clamped = normalizeMaxAgentTurns(editMaxAgentTurns.value);
+  maxAgentTurnsSaving.value = true;
+  try {
+    await saveMaxAgentTurns(clamped);
+    editMaxAgentTurns.value = clamped;
+    toast(t("ai.maxAgentTurnsSaved"));
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
+  } finally {
+    maxAgentTurnsSaving.value = false;
+  }
+}
+
 // AI Config Delete Confirmation
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
@@ -2194,6 +2238,24 @@ const aiTestResult = ref<"" | "success" | "error">("");
 const aiTestError = ref("");
 const aiTestLatency = ref<number | null>(null);
 const aiTestErrorCopied = ref(false);
+const aiTestErrorCategoryKeys: Record<string, string> = {
+  auth: "ai.testErrorAuth",
+  modelNotFound: "ai.testErrorModelNotFound",
+  rateLimit: "ai.testErrorRateLimit",
+  timeout: "ai.testErrorTimeout",
+  tokenLimit: "ai.testErrorTokenLimit",
+  safety: "ai.testErrorSafety",
+  emptyResponse: "ai.testErrorEmptyResponse",
+  network: "ai.testErrorNetwork",
+  unknown: "ai.testErrorUnknown",
+};
+const aiTestErrorPresentation = computed(() => {
+  const match = aiTestError.value.match(/^\[([^\]]+)]\s*(.*)$/s);
+  if (!match) return { summary: "", detail: aiTestError.value };
+  const key = aiTestErrorCategoryKeys[match[1]];
+  return key ? { summary: t(key), detail: match[2] } : { summary: "", detail: aiTestError.value };
+});
+const aiTestErrorDisplay = computed(() => [aiTestErrorPresentation.value.summary, aiTestErrorPresentation.value.detail].filter(Boolean).join(" "));
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
@@ -2675,7 +2737,7 @@ async function aiTestConn() {
     aiTestLatency.value = result.latencyMs ?? null;
   } catch (e: any) {
     aiTestResult.value = "error";
-    aiTestError.value = e?.message || String(e);
+    aiTestError.value = translateBackendError(t, e?.message || String(e));
   } finally {
     aiTesting.value = false;
   }
@@ -3479,7 +3541,7 @@ onUnmounted(cleanupPreviewEditor);
                     "
                   >
                     <SelectTrigger class="h-8 w-full">
-                      <SelectValue />
+                      <SelectValue>{{ Math.round(editUiScale * 100) }}%</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)" class="pl-2.5"> {{ Math.round(scale * 100) }}% </SelectItem>
@@ -4749,6 +4811,28 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
               </div>
 
+              <!-- Agent Turn Limit (list mode, global) -->
+              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
+                <Separator />
+                <div>
+                  <h3 class="text-sm font-medium">{{ t("ai.maxAgentTurns") }}</h3>
+                  <p class="text-xs text-muted-foreground">{{ t("ai.maxAgentTurnsDescription") }}</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving" />
+                  <span class="text-xs" :class="maxAgentTurnsOutOfRange(editMaxAgentTurns) ? 'text-destructive' : 'text-muted-foreground'">
+                    {{ t("ai.maxAgentTurnsRange", { min: MAX_AGENT_TURNS_MIN, max: MAX_AGENT_TURNS_MAX, default: MAX_AGENT_TURNS_DEFAULT }) }}
+                  </span>
+                  <div class="flex-1"></div>
+                  <Button v-if="maxAgentTurnsLoadError" type="button" size="sm" variant="outline" :disabled="maxAgentTurnsLoading" @click="loadMaxAgentTurnsSetting">
+                    {{ t("common.retry") }}
+                  </Button>
+                  <Button type="button" size="sm" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)" @click="saveMaxAgentTurnsSetting">
+                    {{ maxAgentTurnsSaving ? t("common.processing") : t("common.save") }}
+                  </Button>
+                </div>
+              </div>
+
               <!-- Prompt Templates Management (list mode) -->
               <div v-if="aiConfigListMode === 'list'" class="space-y-3">
                 <Separator />
@@ -5559,7 +5643,7 @@ onUnmounted(cleanupPreviewEditor);
               <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
             </template>
             <template v-else>
-              <div class="flex flex-1 items-center gap-2">
+              <div class="flex min-w-0 flex-1 items-center gap-2">
                 <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim()) || (!aiIsCliProvider && !aiEditModel?.trim())" @click="aiTestConn">
                   <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
                   {{ t("connection.test") }}
@@ -5568,8 +5652,11 @@ onUnmounted(cleanupPreviewEditor);
                   <span>{{ t("connection.testSuccess") }}</span>
                   <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
                 </span>
-                <span v-else-if="aiTestResult === 'error'" class="min-w-0 max-w-[360px] flex items-center gap-1.5 text-xs text-destructive">
-                  <span class="select-text truncate" :title="aiTestError">{{ aiTestError }}</span>
+                <span v-else-if="aiTestResult === 'error'" class="flex min-w-0 max-w-lg items-center gap-1.5 text-xs text-destructive">
+                  <span class="min-w-0 select-text leading-4" :title="aiTestErrorDisplay">
+                    <span v-if="aiTestErrorPresentation.summary" class="block font-medium">{{ aiTestErrorPresentation.summary }}</span>
+                    <span class="block truncate text-destructive/80">{{ aiTestErrorPresentation.detail }}</span>
+                  </span>
                   <Button
                     type="button"
                     variant="ghost"

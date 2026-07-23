@@ -1546,7 +1546,7 @@ async function send() {
     );
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    messages.value[assistantIdx].content = `Error: ${message}`;
+    messages.value[assistantIdx].content = `${t("ai.requestFailed")}\n\n${translateBackendError(t, message)}`;
   } finally {
     if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
     flushAssistantDeltas();
@@ -1948,7 +1948,7 @@ async function openExternalUrl(url: string) {
             </div>
 
             <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
-              <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
+              <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
                 <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
                   <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
                     <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': reasoningExpanded }" />

@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.5.64",
+  "version": "0.5.65",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -21,6 +21,7 @@
     "release:agents": "node scripts/release.mjs agents",
     "release:app": "node scripts/release.mjs app",
     "release:packages": "node scripts/release.mjs packages",
+    "test:release": "node --test scripts/release.test.mjs",
     "build:knowledge-base": "node scripts/build-knowledge-base.mjs",
     "typecheck": "vue-tsc --noEmit --project apps/desktop/tsconfig.json",
     "build": "vite build --config apps/desktop/vite.config.ts",

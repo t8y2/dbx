@@ -610,8 +610,8 @@ async fn main() {
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
         .route(
-            "/app-settings/favorites-state",
-            get(routes::app_settings::load_favorites_state).post(routes::app_settings::save_favorites_state),
+            "/app-settings/max-agent-turns",
+            get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
         )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync

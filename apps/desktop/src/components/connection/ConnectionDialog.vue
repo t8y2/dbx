@@ -2202,7 +2202,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "mq",
     titleKey: "connection.databaseCategoryMq",
-    optionValues: ["mq", "kafka", "rocketmq"],
+    optionValues: ["mq", "kafka", "rocketmq", "rabbitmq"],
   },
   {
     key: "registry_config",

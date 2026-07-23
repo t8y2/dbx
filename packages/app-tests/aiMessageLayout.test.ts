@@ -15,6 +15,15 @@ function userMessageTemplate(): string {
   return source.slice(start, end);
 }
 
+function assistantMessageTemplate(): string {
+  const start = source.indexOf(`<div v-else-if="msg.content || msg.reasoning || msg.isThinking"`);
+  const end = source.indexOf(`</template>`, start);
+
+  assert.notEqual(start, -1, "assistant message template should exist");
+  assert.notEqual(end, -1, "assistant message template should end before the message loop");
+  return source.slice(start, end);
+}
+
 test("AI assistant template compiles", () => {
   const { descriptor, errors } = parse(source, { filename: aiAssistantPath });
   assert.deepEqual(errors, []);
@@ -41,4 +50,14 @@ test("user message edit action remains available by pointer and keyboard", () =>
   assert.match(template, /focus:pointer-events-auto focus:opacity-100/);
   assert.match(template, /:title="t\('ai\.editMessage'\)"[\s\S]*?@click="startEditMessage\(i\)"/);
   assert.match(template, /v-if="!isGenerating"/);
+});
+
+test("assistant messages wrap long paths and continuous error text inside the bubble", () => {
+  const template = assistantMessageTemplate();
+
+  assert.match(template, /max-w-\[95%\][^"\n]*\[overflow-wrap:anywhere\]/);
+});
+
+test("AI request failures use localized backend diagnostics", () => {
+  assert.match(source, /messages\.value\[assistantIdx\]\.content = `\$\{t\("ai\.requestFailed"\)\}\\n\\n\$\{translateBackendError\(t, message\)\}`/);
 });

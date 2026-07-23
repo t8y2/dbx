@@ -7278,7 +7278,7 @@ const filteredDdlContent = computed(() => {
 });
 
 watch(
-  filteredDdlContent,
+  [filteredDdlContent, searchQuery],
   async () => {
     ddlSearchMatchIndex.value = 0;
     await nextTick();

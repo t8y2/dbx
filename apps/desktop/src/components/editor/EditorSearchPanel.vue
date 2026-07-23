@@ -537,7 +537,7 @@ defineExpose({
 .editor-search-panel--editor :deep(.border-input) {
   background: #ffffff;
   border-color: #c7ccd5;
-  border-radius: 5px;
+  border-radius: var(--dbx-radius-fixed-5);
   box-shadow: 0 1px 0 rgb(15 23 42 / 0.03) inset;
 }
 

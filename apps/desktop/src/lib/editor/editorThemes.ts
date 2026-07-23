@@ -869,7 +869,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       background: "var(--popover)",
       backgroundClip: "padding-box",
       border: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 18%)"),
-      borderRadius: "8px",
+      borderRadius: "var(--dbx-radius-lg)",
       boxShadow: "0 8px 18px rgb(0 0 0 / 0.14)",
       color: "var(--popover-foreground)",
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,

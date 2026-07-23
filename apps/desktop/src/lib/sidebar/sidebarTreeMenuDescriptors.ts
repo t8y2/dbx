@@ -1,6 +1,26 @@
-import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import type { Component } from "vue";
 import type { DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import { createSidebarActionTarget, type SidebarActionTarget } from "./sidebarActionTarget";
+
+// Local mirror of the `ContextMenuItem` shape declared inside the
+// `<script setup>` block of `@/components/ui/CustomContextMenu.vue`.
+// `vue-tsc` with `isolatedModules` does not surface named `export`
+// declarations from a `<script setup>` block, so the original
+// `import type` from the .vue file fails with TS2614 here. The two
+// declarations are intentionally kept in lockstep — see the
+// comment on the same field in `CustomContextMenu.vue`.
+export interface ContextMenuItem {
+  label: string;
+  action?: () => void;
+  disabled?: boolean | (() => boolean);
+  separator?: boolean;
+  icon?: Component;
+  iconClass?: string;
+  shortcut?: string;
+  variant?: "default" | "destructive";
+  visible?: boolean;
+  children?: ContextMenuItem[];
+}
 
 export type SidebarMenuActionId = `${TreeNodeType}:${string}`;
 

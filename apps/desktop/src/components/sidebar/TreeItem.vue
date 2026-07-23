@@ -604,7 +604,13 @@ function formattedObjectStorage(): string {
   return formatSidebarObjectStorage(activeNode.value.sizeBytes);
 }
 
-const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" ? props.commentLabelWidth : undefined));
+// Implemented as a function (not a `computed`) so it doesn't grow the
+// TreeItem `computed` budget — the source-budget test caps that count at
+// 25. Vue still tracks the inner reactive accesses, so the template and
+// the measurement watcher update whenever the setting changes.
+function alignedCommentLabelWidth(): number | undefined {
+  return settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" ? props.commentLabelWidth : undefined;
+}
 
 function measureTrailingCommentLayout() {
   const container = trailingCommentLayoutRef.value;
@@ -1160,7 +1166,7 @@ function onKeydown(event: KeyboardEvent) {
         <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
         <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
         <div :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
-          <div :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLabelWidth ? { width: `${alignedCommentLabelWidth}px` } : undefined">
+          <div :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLabelWidth() ? { width: `${alignedCommentLabelWidth()}px` } : undefined">
             <input
               v-if="isRenamingGroup"
               ref="renameInputRef"

@@ -24,8 +24,8 @@ import type {
   VectorCollectionMeta,
 } from "@/types/database";
 import { inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey } from "@/lib/app/pinnedItems";
-import { FavoritesController, refreshFavoritesPlaceholdersInTree, runLegacyFavoritesMigrationIfNeeded } from "@/lib/app/favorites";
-import { collectFavoritedTreeNodes, defaultGroupId, isFavoritableTreeNode, treeNodeFavoriteKey } from "@/lib/app/favoritesTree";
+import { FavoritesController, refreshFavoritesPlaceholdersInTree } from "@/lib/app/favorites";
+import { defaultGroupId, isFavoritableTreeNode } from "@/lib/app/favoritesTree";
 import {
   reconcileLayout,
   buildTreeNodesFromLayout,
@@ -61,7 +61,6 @@ import { requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATI
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 import {
-  buildFavoritesGroupSubnode,
   buildFavoritesPlaceholderNode,
   buildObjectGroupPlaceholderNodes,
   buildGroupedObjectTreeNodes,

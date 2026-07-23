@@ -355,7 +355,11 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app", { force: true });
 
     expect(store.connectionErrors[connection.id]).toBeUndefined();
-    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions"]);
+    const childLabels = store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label) ?? [];
+    // The favorites placeholder sorts to the top of the children list (added
+    // by the favorites PR), so it appears first; the extensions placeholder
+    // (added by main) is appended after the real schemas.
+    expect(childLabels).toEqual(["tree.favorites", "public", "tree.extensions"]);
   });
 
   it("clears a failed metadata warning when the driver hint finishes during retry", async () => {

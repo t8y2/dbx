@@ -471,10 +471,13 @@ fn is_command_line_too_long_error(message: &str) -> bool {
 
 fn classify_claude_code_run_error(stderr: &str) -> String {
     let lower = stderr.to_ascii_lowercase();
-    if lower.contains("not authenticated") || lower.contains("login") || lower.contains("auth") {
-        format!("[claudeCodeNotAuthenticated] {stderr}")
-    } else if lower.contains("invalid mcp configuration") || lower.contains("mcp config file not found") {
+    if lower.contains("invalid mcp configuration") || lower.contains("mcp config file not found") {
         format!("[claudeCodeMcpConfigInvalid] {stderr}")
+    } else if lower.contains("not authenticated")
+        || lower.contains("authentication required")
+        || lower.contains("please login")
+    {
+        format!("[claudeCodeNotAuthenticated] {stderr}")
     } else if lower.contains("dbx-mcp-server") || lower.contains("enoent") {
         format!("[dbxMcpMissing] {stderr}")
     } else if lower.contains("mcp") && (lower.contains("dbx") || lower.contains("server")) {
@@ -794,6 +797,16 @@ esac
 
         assert!(error.starts_with("[claudeCodeMcpConfigInvalid]"));
         assert!(!error.contains("[dbxMcpMissing]"));
+    }
+
+    #[test]
+    fn invalid_mcp_config_path_containing_auth_is_not_reported_as_authentication_failure() {
+        let error = classify_claude_code_run_error(
+            r#"Invalid MCP configuration: MCP config file not found: C:\Users\auth-test\AppData\Local\Temp\dbx\mcp.json"#,
+        );
+
+        assert!(error.starts_with("[claudeCodeMcpConfigInvalid]"));
+        assert!(!error.contains("[claudeCodeNotAuthenticated]"));
     }
 
     #[test]

@@ -672,6 +672,11 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	tableComment, _ := s.getTableComment(effective, table)
+	return renderTableDDL(effective, table, columns, tableComment), nil
+}
+
+func renderTableDDL(schema, table string, columns []columnInfo, tableComment *string) string {
 	definitions := make([]string, 0, len(columns)+1)
 	primary := []string{}
 	for _, column := range columns {
@@ -683,7 +688,18 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 	if len(primary) > 0 {
 		definitions = append(definitions, "PRIMARY KEY ("+strings.Join(primary, ", ")+")")
 	}
-	return "CREATE TABLE " + quoteIdentifier(effective) + "." + quoteIdentifier(table) + " (\n  " + strings.Join(definitions, ",\n  ") + "\n);", nil
+	qualifiedTable := quoteIdentifier(schema) + "." + quoteIdentifier(table)
+	ddl := "CREATE TABLE " + qualifiedTable + " (\n  " + strings.Join(definitions, ",\n  ") + "\n);"
+	if tableComment != nil && strings.TrimSpace(*tableComment) != "" {
+		ddl += "\nCOMMENT ON TABLE " + qualifiedTable + " IS " + quoteLiteral(*tableComment) + ";"
+	}
+	for _, column := range columns {
+		if column.Comment == nil || strings.TrimSpace(*column.Comment) == "" {
+			continue
+		}
+		ddl += "\nCOMMENT ON COLUMN " + qualifiedTable + "." + quoteIdentifier(column.Name) + " IS " + quoteLiteral(*column.Comment) + ";"
+	}
+	return ddl
 }
 
 func columnDDLDefinition(column columnInfo) string {

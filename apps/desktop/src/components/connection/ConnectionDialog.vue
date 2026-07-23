@@ -6652,7 +6652,7 @@ function openExternalUrl(url: string) {
 }
 
 .connection-config-step :is([data-slot="input"], [data-slot="select-trigger"], [data-slot="tabs-list"], [data-slot="tabs-trigger"], textarea) {
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4, 4px);
 }
 
 .dark .connection-db-picker-option--selected {

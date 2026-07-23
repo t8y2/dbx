@@ -3,6 +3,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -2675,7 +2676,7 @@ async function aiTestConn() {
     aiTestLatency.value = result.latencyMs ?? null;
   } catch (e: any) {
     aiTestResult.value = "error";
-    aiTestError.value = e?.message || String(e);
+    aiTestError.value = translateBackendError(t, e?.message || String(e));
   } finally {
     aiTesting.value = false;
   }

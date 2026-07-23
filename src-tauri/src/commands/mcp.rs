@@ -261,7 +261,7 @@ fn resolve_managed_mcp_command(
 fn require_managed_mcp_command(command: Option<(String, Vec<String>)>) -> Result<(String, Vec<String>), String> {
     command.ok_or_else(|| {
         format!(
-            "DBX MCP Server is unavailable: no compatible Node.js ({}) installation containing {} was found. Install MCP Server from DBX settings and try again.",
+            "[dbxMcpMissing] No compatible Node.js ({}) installation containing {} was found.",
             MCP_MIN_NODE_VERSION_REQUIREMENT, MCP_PACKAGE_NAME
         )
     })
@@ -1137,7 +1137,7 @@ mod tests {
 
         assert!(error.contains(MCP_MIN_NODE_VERSION_REQUIREMENT));
         assert!(error.contains(MCP_PACKAGE_NAME));
-        assert!(error.contains("DBX settings"));
+        assert!(error.starts_with("[dbxMcpMissing]"));
     }
 
     #[test]

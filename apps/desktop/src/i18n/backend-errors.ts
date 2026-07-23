@@ -1,5 +1,18 @@
 import type { ComposerTranslation } from "vue-i18n";
 
+const taggedAiCliErrorKeys: Record<string, string> = {
+  claudeCodeNotInstalled: "ai.cliErrors.claudeCodeNotInstalled",
+  claudeCodeCliPathInvalid: "ai.cliErrors.claudeCodeCliPathInvalid",
+  claudeCodeEnvInvalid: "ai.cliErrors.claudeCodeEnvInvalid",
+  claudeCodeEnvReserved: "ai.cliErrors.claudeCodeEnvReserved",
+  claudeCodeNotAuthenticated: "ai.cliErrors.claudeCodeNotAuthenticated",
+  claudeCodeMcpConfigInvalid: "ai.cliErrors.claudeCodeMcpConfigInvalid",
+  dbxMcpMissing: "ai.cliErrors.dbxMcpMissing",
+  claudeCodeMcpStartupFailed: "ai.cliErrors.claudeCodeMcpStartupFailed",
+  claudeCodeCommandLineTooLong: "ai.cliErrors.claudeCodeCommandLineTooLong",
+  claudeCodeRunFailed: "ai.cliErrors.claudeCodeRunFailed",
+};
+
 const patterns: [RegExp, string][] = [
   [/^(.+?) driver is not installed\. Please install it from the Driver Manager\.$/, "connection.driverNotInstalled"],
   [/^JRE (.+?) runtime is not installed\. Please install it from the Driver Manager\.$/, "connection.jreNotInstalled"],
@@ -49,6 +62,16 @@ const paramNames: Record<string, string> = {
 };
 
 export function translateBackendError(t: ComposerTranslation, message: string): string {
+  const tagged = message.match(/^\[([A-Za-z][A-Za-z0-9]+)\]\s*([\s\S]*)$/);
+  if (tagged) {
+    const [, code, rawDetail] = tagged;
+    const key = taggedAiCliErrorKeys[code];
+    if (key) {
+      const detail = rawDetail.trim();
+      return [t(key), t("ai.cliErrors.code", { code }), t("ai.cliErrors.reportHint"), detail ? `${t("ai.cliErrors.details")}\n${detail}` : ""].filter(Boolean).join("\n\n");
+    }
+  }
+
   for (const [regex, key] of patterns) {
     const match = message.match(regex);
     if (match) {

@@ -12,15 +12,9 @@ use futures::{io::AsyncReadExt, io::AsyncWriteExt, TryStreamExt};
 use percent_encoding::percent_decode_str;
 use std::{collections::HashSet, time::Duration};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MongoDocumentResult {
-    pub documents: Vec<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_documents: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extended_documents: Option<Vec<serde_json::Value>>,
-    pub total: u64,
-}
+pub use super::document_result::DocumentQueryResult;
+/// Backward-compatible name for callers of Mongo-specific APIs.
+pub type MongoDocumentResult = DocumentQueryResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MongoDropIndexesResult {
@@ -676,7 +670,13 @@ pub async fn find_documents(
         extended_documents.push(Bson::Document(doc).into_relaxed_extjson());
     }
 
-    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
+    Ok(MongoDocumentResult {
+        documents,
+        raw_documents: None,
+        extended_documents: Some(extended_documents),
+        total,
+        total_is_exact: true,
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -812,7 +812,13 @@ pub async fn find_documents_extended_json(
         documents.push(bson_to_browser_json(&Bson::Document(doc)));
     }
 
-    Ok(MongoDocumentResult { extended_documents: Some(documents.clone()), documents, raw_documents: None, total })
+    Ok(MongoDocumentResult {
+        extended_documents: Some(documents.clone()),
+        documents,
+        raw_documents: None,
+        total,
+        total_is_exact: true,
+    })
 }
 
 /// Run `db.collection.aggregate(pipeline, options)`.
@@ -858,6 +864,7 @@ pub async fn aggregate_documents(
             raw_documents: None,
             extended_documents: Some(vec![extended]),
             total: 1,
+            total_is_exact: true,
         });
     }
 
@@ -909,7 +916,13 @@ async fn drain_document_cursor(
         documents.truncate(max_rows);
         extended_documents.truncate(max_rows);
     }
-    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
+    Ok(MongoDocumentResult {
+        documents,
+        raw_documents: None,
+        extended_documents: Some(extended_documents),
+        total,
+        total_is_exact: true,
+    })
 }
 
 fn parse_aggregate_options_document(options_json: Option<&str>) -> Result<Document, String> {
@@ -963,7 +976,13 @@ pub async fn distinct(
     let extended_documents = values.into_iter().map(|value| value.into_relaxed_extjson()).collect::<Vec<_>>();
     let total = documents.len() as u64;
 
-    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
+    Ok(MongoDocumentResult {
+        documents,
+        raw_documents: None,
+        extended_documents: Some(extended_documents),
+        total,
+        total_is_exact: true,
+    })
 }
 
 pub async fn create_index(
@@ -1329,12 +1348,14 @@ fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
             raw_documents: None,
             extended_documents: Some(vec![Bson::Document(document).into_relaxed_extjson()]),
             total: 1,
+            total_is_exact: true,
         },
         None => MongoDocumentResult {
             documents: Vec::new(),
             raw_documents: None,
             extended_documents: Some(Vec::new()),
             total: 0,
+            total_is_exact: true,
         },
     }
 }

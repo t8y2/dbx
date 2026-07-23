@@ -27,6 +27,7 @@ The Database Test Lab provides small, pinned Docker Compose environments for tes
 | Qdrant | `qdrant/1.8` | `qdrant/qdrant:v1.8.3` | `docker.cnb.cool/znb/images/qdrant:v1.8.3` | `6334` | `dbx-qdrant-1.8` |
 | Redis | `redis/3.0.7` | `redis:3.0.7-alpine` | `docker.cnb.cool/znb/images/redis:3.0.7-alpine` | `6380` | `dbx-redis-3.0.7` |
 | Redis | `redis/7.4` | `redis:7.4.9-alpine` | `docker.cnb.cool/znb/images/redis:7.4.9-alpine` | `6380` | `dbx-redis-7.4` |
+| r-nacos | `rnacos/0.8` | `qingpan/rnacos:v0.8.5` | `docker.cnb.cool/znb/images/rnacos:v0.8.5` | `8849` | `dbx-rnacos-0.8` |
 | ZooKeeper | `zookeeper/3.9` | `zookeeper:3.9.5` | `docker.cnb.cool/znb/images/zookeeper:3.9.5` | `2182` | `dbx-zookeeper-3.9` |
 
 Every network recipe uses a host port one greater than the database standard port, and the recipe validator enforces that contract. The default password is `123456`, and the default database is `dbx`. Redis has no named databases, so it uses DB 0 with a `dbx:` smoke-key prefix. Compose uses the CNB image column; the Docker Hub column preserves the official upstream reference for provenance and direct pulls. Redis 3.0.7 is amd64-only; on arm64 hosts the command prints an architecture warning and Docker uses emulation. Every other recipe supports both amd64 and arm64.
@@ -35,6 +36,12 @@ Nacos uses the `nacos` administrator, password `123456`, and its default `public
 
 ```bash
 DB_PORT=8818 NACOS_CONSOLE_PORT=8010 NACOS_GRPC_PORT=9818 NACOS_RAFT_PORT=9819 make db DB=nacos@3.2
+```
+
+r-nacos uses the `admin` administrator and password `123456`. The DBX recipe defaults its HTTP, gRPC, and web-console host ports to `8849`, `9849`, and `10849`; the upstream standalone Compose file publishes `8848:8848`, `9848:9848`, and `10848:10848`. To avoid local port conflicts, use this custom host-port mapping (not the upstream defaults):
+
+```bash
+DB_PORT=3848 RNACOS_GRPC_PORT=3748 RNACOS_CONSOLE_PORT=3048 make db DB=rnacos@0.8
 ```
 
 etcd creates the `root` user with password `123456`, grants the root role, then enables authentication. Its default client and peer ports are `2380` and `2381`. To use the upstream Docker command's ports, run:
@@ -71,6 +78,7 @@ make db
 make db-list
 make db DB=postgresql@17.4
 make db-verify DB=postgresql@17.4
+make db DB=rnacos@0.8
 ```
 
 `make db` without parameters prints every currently supported copy-and-paste start command, plus optional parameters. With `DB=product@version`, it waits for the Compose health check and prints the DBX connection fields. `db-verify` also runs the recipe's smoke command inside the database container and checks its expected output. It is the preferred command before reporting a database-specific fix.

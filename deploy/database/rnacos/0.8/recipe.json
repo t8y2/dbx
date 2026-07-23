@@ -1,0 +1,13 @@
+{
+  "database": "rnacos",
+  "name": "r-nacos",
+  "version": "0.8.5",
+  "displayVersion": "0.8",
+  "image": "docker.cnb.cool/znb/images/rnacos:v0.8.5",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 8848,
+  "connection": { "host": "127.0.0.1", "port": 8849, "username": "admin", "password": "123456", "database": "dbx", "namespace": "public", "grpcPort": 9849, "consolePort": 10849 },
+  "shell": ["bash"],
+  "smoke": { "steps": [{ "name": "check the HTTP health endpoint", "command": ["bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8848; printf 'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; cat <&3"], "expect": "success" }] }
+}

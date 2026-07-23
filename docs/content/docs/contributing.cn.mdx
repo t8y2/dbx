@@ -157,6 +157,10 @@ make
 make dev-fast
 ```
 
+开发版可以与已安装的 DBX 同时运行。两者使用同一份本地 DBX 数据，因此连接和历史记录会同时可用；请避免在两个窗口中同时修改同一个连接、收藏 SQL 或全局设置。
+
+测试 MCP bridge 时，后启动的实例会写入共享的 `mcp-bridge-port` 发现文件并接收 MCP 请求。Redis PubSub 优先使用端口 `4224`（设置 `DBX_PORT` 时优先使用该端口）；端口被占用时会自动回退到可用的本地端口，前端会使用实际监听端口。
+
 ### Windows
 
 在 PowerShell 中执行：

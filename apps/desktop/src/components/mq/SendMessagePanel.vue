@@ -491,7 +491,7 @@ watch(
 
 .readonly-hint {
   padding: 10px 14px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-warning-alpha);
   color: var(--color-warning);
   font-size: 13px;
@@ -499,7 +499,7 @@ watch(
 
 .panel-error {
   padding: 10px 14px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-error-bg);
   color: var(--color-error);
   font-size: 13px;
@@ -512,7 +512,7 @@ watch(
   padding: 14px 18px;
   border: 1px solid color-mix(in srgb, var(--color-success) 34%, transparent);
   border-left: 4px solid var(--color-success);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: color-mix(in srgb, var(--color-success) 13%, var(--color-background));
   color: var(--color-success);
   font-size: 15px;
@@ -572,7 +572,7 @@ watch(
   flex: 1;
   padding: 7px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;
@@ -592,7 +592,7 @@ watch(
   width: 32px;
   height: 32px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -624,7 +624,7 @@ input[type="text"],
 input[type="number"] {
   padding: 7px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;
@@ -643,7 +643,7 @@ input[type="number"]:focus {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -713,7 +713,7 @@ input[type="number"]:focus {
 .btn-sm {
   padding: 7px 16px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;
@@ -755,7 +755,7 @@ input[type="number"]:focus {
   margin-top: 4px;
   padding: 14px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background-secondary);
 }
 
@@ -777,7 +777,7 @@ input[type="number"]:focus {
 .peek-default-hint {
   margin: 0 0 12px;
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: color-mix(in srgb, var(--color-primary) 8%, transparent);
   color: var(--color-text-secondary);
   font-size: 12px;
@@ -811,7 +811,7 @@ input[type="number"]:focus {
 .message-empty {
   padding: 18px;
   border: 1px dashed var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   color: var(--color-text-tertiary);
   text-align: center;
   font-size: 13px;
@@ -828,7 +828,7 @@ input[type="number"]:focus {
 .message-row {
   padding: 10px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
 }
 
@@ -851,7 +851,7 @@ input[type="number"]:focus {
   padding: 10px;
   max-height: 160px;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background-tertiary, var(--color-background-secondary));
   color: var(--color-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -871,7 +871,7 @@ input[type="number"]:focus {
 .message-headers span {
   padding: 2px 6px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   color: var(--color-text-secondary);
   background: var(--color-background-secondary);
   font-size: 12px;

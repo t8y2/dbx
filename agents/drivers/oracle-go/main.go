@@ -63,6 +63,17 @@ ORDER BY CASE
   WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
   ELSE 2
 END, username`
+
+// Oracle schemas are users, so expose every user visible through ALL_USERS; system filtering remains database-picker behavior.
+const oracleListSchemasSQL = `
+SELECT username AS owner
+FROM all_users
+WHERE username IS NOT NULL
+ORDER BY CASE
+  WHEN username = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') THEN 0
+  WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
+  ELSE 2
+END, username`
 const oracleListTablesBaseSQL = `
 SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
 FROM (
@@ -1062,13 +1073,44 @@ func (s *server) listSchemas(visibleSchemas []string) ([]string, error) {
 	if visibleSchemas != nil && len(visibleSchemas) == 0 {
 		return []string{}, nil
 	}
-	databases, err := s.listDatabasesFiltered(visibleSchemas)
+	sqlText, args := oracleListSchemasSQLWithVisibleSchemas(visibleSchemas)
+	rows, err := s.queryRows(sqlText, args)
 	if err != nil {
+		if isOraclePGALimitError(err) {
+			databases, fallbackErr := s.currentSchemaDatabase()
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			result := make([]string, 0, len(databases))
+			for _, database := range databases {
+				result = append(result, database.Name)
+			}
+			return emptyIfNil(result), nil
+		}
 		return nil, err
 	}
-	result := make([]string, 0, len(databases))
-	for _, database := range databases {
-		result = append(result, database.Name)
+	defer s.closeRows(rows)
+	var result []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		result = append(result, name)
+	}
+	if err := rows.Err(); err != nil {
+		if isOraclePGALimitError(err) {
+			databases, fallbackErr := s.currentSchemaDatabase()
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			result = result[:0]
+			for _, database := range databases {
+				result = append(result, database.Name)
+			}
+			return emptyIfNil(result), nil
+		}
+		return nil, err
 	}
 	return emptyIfNil(result), nil
 }
@@ -1104,8 +1146,16 @@ func (s *server) listDatabasesFiltered(visibleSchemas []string) ([]databaseInfo,
 }
 
 func oracleListDatabasesSQLWithVisibleSchemas(visibleSchemas []string) (string, []any) {
+	return oracleListSQLWithVisibleSchemas(oracleListDatabasesSQL, visibleSchemas)
+}
+
+func oracleListSchemasSQLWithVisibleSchemas(visibleSchemas []string) (string, []any) {
+	return oracleListSQLWithVisibleSchemas(oracleListSchemasSQL, visibleSchemas)
+}
+
+func oracleListSQLWithVisibleSchemas(baseSQL string, visibleSchemas []string) (string, []any) {
 	if len(visibleSchemas) == 0 {
-		return oracleListDatabasesSQL, nil
+		return baseSQL, nil
 	}
 	placeholders := make([]string, 0, len(visibleSchemas))
 	args := make([]any, 0, len(visibleSchemas))
@@ -1114,7 +1164,7 @@ func oracleListDatabasesSQLWithVisibleSchemas(visibleSchemas []string) (string, 
 		args = append(args, schema)
 	}
 	sqlText := strings.Replace(
-		oracleListDatabasesSQL,
+		baseSQL,
 		"\nORDER BY CASE",
 		"\n  AND username IN ("+strings.Join(placeholders, ",")+")\nORDER BY CASE",
 		1,
@@ -3628,6 +3678,10 @@ func normalizeValue(value any, columnTypeName string) any {
 		}
 		return string(v)
 	case time.Time:
+		// Oracle DATE and plain TIMESTAMP are wall-clock values; adding an offset makes clients shift them.
+		if isOracleTimezoneLessDateTime(columnTypeName) {
+			return v.Format("2006-01-02T15:04:05.999999999")
+		}
 		return v.Format(time.RFC3339Nano)
 	case int64, float64, bool, string:
 		return v
@@ -3636,6 +3690,14 @@ func normalizeValue(value any, columnTypeName string) any {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func isOracleTimezoneLessDateTime(columnTypeName string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
+	if normalized == "DATE" || normalized == "TIMESTAMPDTY" || normalized == "TIMESTAMP" {
+		return true
+	}
+	return strings.HasPrefix(normalized, "TIMESTAMP(") && strings.HasSuffix(normalized, ")")
 }
 
 func isOracleBinaryColumnType(columnTypeName string) bool {

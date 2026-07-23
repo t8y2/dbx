@@ -483,7 +483,7 @@ pub async fn find_documents(
     collection: &str,
     skip: u64,
     limit: i64,
-) -> Result<crate::db::mongo_driver::MongoDocumentResult, String> {
+) -> Result<crate::db::document_result::DocumentQueryResult, String> {
     if client.kind == VectorDbKind::ChromaDb {
         let start = std::time::Instant::now();
         let url = format!(
@@ -520,11 +520,12 @@ pub async fn find_documents(
                 Value::Object(map)
             })
             .collect();
-        return Ok(crate::db::mongo_driver::MongoDocumentResult {
+        return Ok(crate::db::document_result::DocumentQueryResult {
             documents,
             raw_documents: None,
             extended_documents: None,
             total: result.affected_rows,
+            total_is_exact: true,
         });
     }
 
@@ -567,11 +568,12 @@ pub async fn find_documents(
             Value::Object(map)
         })
         .collect();
-    Ok(crate::db::mongo_driver::MongoDocumentResult {
+    Ok(crate::db::document_result::DocumentQueryResult {
         documents,
         raw_documents: None,
         extended_documents: None,
         total: result.affected_rows,
+        total_is_exact: true,
     })
 }
 

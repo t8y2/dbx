@@ -9,13 +9,11 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
-
-const STORAGE_KEY = "dbx-sql-file-folders";
+import { getSqlFileFolderPaths, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
 
 const emit = defineEmits<{
   close: [];
@@ -52,19 +50,12 @@ function selectPath(path: string | null) {
 }
 
 function loadSavedFolders(): string[] {
-  try {
-    const raw = safeLocalStorageGet(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((p): p is string => typeof p === "string") : [];
-  } catch {
-    return [];
-  }
+  return getSqlFileFolderPaths();
 }
 
 function saveFolders() {
   const paths = folders.value.map((f) => f.path);
-  safeLocalStorageSet(STORAGE_KEY, JSON.stringify(paths));
+  saveSqlFileFolderPaths(paths);
 }
 
 async function pickFolder() {
@@ -141,11 +132,13 @@ function collectPaths(entries: SqlFileEntry[], into: Set<string>) {
 
 async function refreshFolder(folderPath: string) {
   await loadFolderEntries(folderPath);
+  notifySqlFileFoldersChanged();
   toast(t("sqlFileTree.refreshed"), 1500);
 }
 
 async function refreshAll() {
   await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
+  notifySqlFileFoldersChanged();
   toast(t("sqlFileTree.refreshed"), 1500);
 }
 

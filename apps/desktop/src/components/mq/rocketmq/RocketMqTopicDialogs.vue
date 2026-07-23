@@ -508,7 +508,7 @@ watch(
 
 .dialog {
   background: var(--color-background);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   width: 90%;
   max-width: 520px;
   max-height: 85vh;
@@ -605,7 +605,7 @@ watch(
 .config-value {
   padding: 7px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   font-size: 13px;
 }
 
@@ -632,7 +632,7 @@ watch(
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   box-sizing: border-box;
   background: var(--color-background);
   color: var(--color-text);
@@ -662,7 +662,7 @@ watch(
   padding: 8px 12px;
   background: var(--color-error-bg);
   color: var(--color-error);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   font-size: 13px;
 }
 
@@ -679,7 +679,7 @@ watch(
 .btn-sm {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   cursor: pointer;
   font-size: 13px;

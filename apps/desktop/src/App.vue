@@ -44,6 +44,7 @@ import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
 import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
+import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
@@ -1482,7 +1483,19 @@ async function changeActiveConnection(connectionId: string) {
   try {
     await connectionStore.ensureConnected(connectionId);
     const options = await getDatabaseOptions(connectionId);
-    queryStore.updateDatabase(tab.id, resolveDefaultDatabase(connection, options));
+    const database = resolveDefaultDatabase(connection, options);
+    queryStore.updateDatabase(tab.id, database);
+    if (connection.db_type === "oracle") {
+      try {
+        // Oracle returns the session's current schema first; preserve that order before toolbar sorting.
+        const schema = schemaAfterConnectionSwitch(connection.db_type, await api.listSchemas(connectionId, database));
+        if (schema && activeTab.value?.id === tab.id && activeTab.value.connectionId === connectionId) {
+          queryStore.updateSchema(tab.id, schema);
+        }
+      } catch {
+        // Schema metadata failure must not turn a successful connection switch into a connection error.
+      }
+    }
   } catch (e: any) {
     toast(
       t("connection.connectFailed", {
@@ -1621,7 +1634,30 @@ async function handleQuickOpenSelect(item: any) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
 
-  // For all types, set the active connection
+  // Handle SQL file types first — they don't require a database connection
+  if (item.type === "sql_file" && item.filePath) {
+    try {
+      const content = await api.readExternalSqlFile(item.filePath);
+      const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
+      const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
+      const database = connection ? resolveDefaultDatabase(connection, []) : "";
+      queryStore.openExternalSqlFile(connectionId, database, item.filePath, content);
+    } catch (e: any) {
+      toast(e?.message || String(e), 5000);
+    }
+    return;
+  }
+
+  if (item.type === "sql_library_file" && item.sqlFileId) {
+    const file = await savedSqlStore.ensureFileContent(item.sqlFileId);
+    if (!file) return;
+    queryStore.openSavedSql(file);
+    connectionStore.activeConnectionId = file.connectionId;
+    void savedSqlStore.recordFileUsage(file.id);
+    return;
+  }
+
+  // For all other types, set the active connection
   connectionStore.activeConnectionId = item.connectionId;
 
   // Ensure connection is connected

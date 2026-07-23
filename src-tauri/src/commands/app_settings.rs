@@ -8,8 +8,19 @@ use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
 use crate::{
-    apply_debug_log_level, apply_desktop_settings, hide_main_window_for_close, request_app_close, CloseBehaviorState,
+    apply_debug_log_level, apply_desktop_settings, hide_main_window_for_close, refresh_native_menus, request_app_close,
+    AppLocaleState, CloseBehaviorState,
 };
+
+const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
+
+fn open_tabs_state_key(debug_build: bool) -> &'static str {
+    if debug_build {
+        DEVELOPMENT_OPEN_TABS_STATE_KEY
+    } else {
+        "open_tabs"
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DriverStoreMigrationResult {
@@ -40,6 +51,22 @@ pub async fn save_desktop_settings(
         eprintln!("Failed to apply desktop settings: {err}");
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn load_max_agent_turns(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
+    state.storage.load_max_agent_turns().await
+}
+
+#[tauri::command]
+pub fn set_app_locale(app: AppHandle, locale_state: State<'_, AppLocaleState>, locale: String) -> Result<(), String> {
+    locale_state.set(locale);
+    refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"))
+}
+
+#[tauri::command]
+pub async fn save_max_agent_turns(state: State<'_, Arc<AppState>>, max_agent_turns: u32) -> Result<(), String> {
+    state.storage.save_max_agent_turns(max_agent_turns).await
 }
 
 #[tauri::command]
@@ -105,12 +132,12 @@ pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: ser
 
 #[tauri::command]
 pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
-    state.storage.load_open_tabs_state().await
+    state.storage.load_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions))).await
 }
 
 #[tauri::command]
 pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serde_json::Value) -> Result<(), String> {
-    state.storage.save_open_tabs_state(&payload).await
+    state.storage.save_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions)), &payload).await
 }
 
 #[tauri::command]
@@ -471,7 +498,10 @@ fn load_native_debug_logs_from_dir(log_dir: PathBuf) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{driver_store_migration_result, resolve_driver_store_dirs_from_settings, DesktopSettings};
+    use super::{
+        driver_store_migration_result, open_tabs_state_key, resolve_driver_store_dirs_from_settings, DesktopSettings,
+        DEVELOPMENT_OPEN_TABS_STATE_KEY,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -536,6 +566,12 @@ mod tests {
 
         assert_eq!(plugins_dir, PathBuf::from(path("D:/develop/DBX/plugins")));
         assert_eq!(agents_dir, Some(PathBuf::from(path("D:/develop/DBX/agents"))));
+    }
+
+    #[test]
+    fn isolates_open_tabs_for_development_builds() {
+        assert_eq!(open_tabs_state_key(true), DEVELOPMENT_OPEN_TABS_STATE_KEY);
+        assert_eq!(open_tabs_state_key(false), "open_tabs");
     }
 
     fn path(value: &str) -> String {

@@ -243,6 +243,37 @@ describe("useSqlExecution", () => {
     expect(refreshObjects).not.toHaveBeenCalled();
   });
 
+  it("records a later PostgreSQL batch error and skips metadata refresh", async () => {
+    const activeTab = ref<QueryTab | undefined>(queryTab("app"));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const historyStore = useHistoryStore();
+    const connectionStore = useConnectionStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      const tab = activeTab.value;
+      if (!tab) return;
+      const successfulResult = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+      tab.result = successfulResult;
+      tab.results = [successfulResult, { columns: ["Error"], execution_error: true, rows: [["relation missing_table does not exist"]], affected_rows: 0, execution_time_ms: 1 }];
+      tab.activeResultIndex = 0;
+    });
+    const addHistory = vi.spyOn(historyStore, "add").mockResolvedValue(undefined);
+    const refreshObjects = vi.spyOn(connectionStore, "refreshObjectListTreeNode").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => "BEGIN; SELECT 1 AS value; SELECT * FROM missing_table"),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: "relation missing_table does not exist", affected_rows: undefined }));
+    expect(refreshObjects).not.toHaveBeenCalled();
+  });
+
   it("does not treat an unmarked MySQL Error alias as a batch failure", async () => {
     const activeTab = ref<QueryTab | undefined>(queryTab("app"));
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));

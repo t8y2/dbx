@@ -244,7 +244,7 @@ function handleKeydown(event: KeyboardEvent) {
     <PopoverContent :align="SEARCHABLE_SELECT_HELP_PANEL_ALIGN" :class="cn('w-auto max-w-[calc(100vw-1rem)] border-0 bg-transparent p-0 shadow-none ring-0', contentClass)">
       <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
         <div ref="listCard" :class="cn('shrink-0 rounded-md border bg-popover p-1.5 shadow-md', listClass)">
-          <div class="relative rounded-sm border bg-background">
+          <div class="relative rounded-md border bg-background">
             <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
             <span v-if="!searchText" class="pointer-events-none absolute left-[25px] top-1/2 -translate-y-1/2 text-sm text-muted-foreground">{{ searchPlaceholder }}</span>
             <Input ref="searchInput" :model-value="searchText" class="h-6 border-0 pl-6 pr-2 text-sm caret-foreground shadow-none focus-visible:ring-0" @update:model-value="(value) => (searchText = String(value))" @keydown="handleKeydown" />
@@ -261,7 +261,7 @@ function handleKeydown(event: KeyboardEvent) {
                 :title="optionTooltip(option) ? undefined : optionTitle(option)"
                 :class="
                   cn(
-                    'group flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                    'group flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
                     props.itemClass,
                     index === highlightIndex && 'bg-accent text-accent-foreground',
                   )
@@ -286,7 +286,7 @@ function handleKeydown(event: KeyboardEvent) {
                 :title="customOptionValue"
                 :class="
                   cn(
-                    'flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                    'flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
                     props.itemClass,
                     filteredOptions.length === highlightIndex && 'bg-accent text-accent-foreground',
                   )
@@ -308,7 +308,7 @@ function handleKeydown(event: KeyboardEvent) {
               :title="customOptionValue"
               :class="
                 cn(
-                  'flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                  'flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
                   props.itemClass,
                   0 === highlightIndex && 'bg-accent text-accent-foreground',
                 )

@@ -1,11 +1,39 @@
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useQuickOpen } from "@/composables/useQuickOpen";
+import * as api from "@/lib/backend/api";
+import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
 
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: vi.fn(),
 }));
+
+vi.mock("@/stores/savedSqlStore", () => ({
+  useSavedSqlStore: vi.fn(),
+}));
+
+vi.mock("@/lib/backend/api", () => ({
+  listSqlFilesInFolder: vi.fn(),
+  readExternalSqlFile: vi.fn(),
+}));
+
+vi.mock("@/lib/sqlFile/sqlFileFolders", async () => {
+  const { ref } = await import("vue");
+  return {
+    getSqlFileFolderPaths: vi.fn(),
+    sqlFileFoldersVersion: ref(0),
+  };
+});
+
+function emptySavedSqlStore() {
+  return {
+    allFiles: [] as any[],
+    orphanedFileIds: vi.fn().mockReturnValue(new Set<string>()),
+    getFile: vi.fn().mockReturnValue(undefined),
+  };
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -24,6 +52,38 @@ async function flushAsyncWork(): Promise<void> {
 }
 
 describe("useQuickOpen", () => {
+  beforeEach(() => {
+    vi.mocked(useSavedSqlStore).mockReturnValue(emptySavedSqlStore() as any);
+    vi.mocked(getSqlFileFolderPaths).mockReturnValue([]);
+  });
+
+  describe("external SQL files", () => {
+    it("reloads when folders change during an in-flight scan", async () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      vi.mocked(getSqlFileFolderPaths).mockReturnValueOnce(["/old"]).mockReturnValue(["/new"]);
+      const oldScan = deferred<Awaited<ReturnType<typeof api.listSqlFilesInFolder>>>();
+      vi.mocked(api.listSqlFilesInFolder).mockImplementation((path) => {
+        if (path === "/old") return oldScan.promise;
+        return Promise.resolve([{ name: "new.sql", path: "/new/new.sql", is_dir: false, children: [] }]);
+      });
+
+      const { filteredItems, loadExternalSqlFiles, setQuery } = useQuickOpen();
+      const initialLoad = loadExternalSqlFiles();
+      expect(api.listSqlFilesInFolder).toHaveBeenCalledWith("/old");
+
+      sqlFileFoldersVersion.value++;
+      await nextTick();
+      oldScan.resolve([{ name: "old.sql", path: "/old/old.sql", is_dir: false, children: [] }]);
+      await initialLoad;
+
+      expect(api.listSqlFilesInFolder).toHaveBeenCalledTimes(2);
+      expect(api.listSqlFilesInFolder).toHaveBeenLastCalledWith("/new");
+      setQuery(".sql");
+      expect(filteredItems.value.map((item) => item.label)).toContain("new.sql");
+      expect(filteredItems.value.map((item) => item.label)).not.toContain("old.sql");
+    });
+  });
+
   describe("fuzzyMatch function", () => {
     it("should return exact substring match with score 1", () => {
       // Mock store with test data
@@ -67,7 +127,7 @@ describe("useQuickOpen", () => {
 
       setQuery("");
 
-      // Empty query should return all items
+      // Empty query should return all items (2 connections + 0 SQL library files)
       expect(filteredItems.value.length).toBe(2);
       filteredItems.value.forEach((item) => {
         expect(item.matchScore).toBe(Infinity);
@@ -593,6 +653,87 @@ describe("useQuickOpen", () => {
       const funcItem = filteredItems.value.find((item) => item.type === "function");
       expect(funcItem).toBeDefined();
       expect(funcItem?.label).toBe("ComputeAge");
+    });
+  });
+
+  describe("SQL library files", () => {
+    function savedSqlStoreWithFiles(files: any[]) {
+      const fileMap = new Map(files.map((f) => [f.id, f]));
+      return {
+        allFiles: files,
+        orphanedFileIds: vi.fn().mockReturnValue(new Set<string>()),
+        getFile: vi.fn().mockImplementation((id: string) => fileMap.get(id)),
+      };
+    }
+
+    it("shows limited SQL library files when no search query", () => {
+      const mockConnStore = {
+        connections: [{ id: "conn1", name: "MyConn", type: "mssql" }],
+        treeNodes: [],
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(mockConnStore as any);
+
+      const files = Array.from({ length: 30 }, (_, i) => ({
+        id: `file${i}`,
+        name: `query_${i}.sql`,
+        connectionId: "conn1",
+        updatedAt: `2024-01-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
+      }));
+      vi.mocked(useSavedSqlStore).mockReturnValue(savedSqlStoreWithFiles(files) as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("");
+
+      // Should show 1 connection + 20 recent SQL library files = 21
+      expect(filteredItems.value.length).toBe(21);
+      const sqlItems = filteredItems.value.filter((item) => item.type === "sql_library_file");
+      expect(sqlItems.length).toBe(20);
+    });
+
+    it("includes all SQL library files when searching", () => {
+      const mockConnStore = {
+        connections: [{ id: "conn1", name: "MyConn", type: "mssql" }],
+        treeNodes: [],
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(mockConnStore as any);
+
+      const files = [
+        { id: "f1", name: "get_users.sql", connectionId: "conn1", updatedAt: "2024-01-01T00:00:00.000Z" },
+        { id: "f2", name: "create_orders.sql", connectionId: "conn1", updatedAt: "2024-01-02T00:00:00.000Z" },
+        { id: "f3", name: "update_inventory.sql", connectionId: "conn1", updatedAt: "2024-01-03T00:00:00.000Z" },
+      ];
+      vi.mocked(useSavedSqlStore).mockReturnValue(savedSqlStoreWithFiles(files) as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("users");
+
+      const sqlItems = filteredItems.value.filter((item) => item.type === "sql_library_file");
+      expect(sqlItems).toHaveLength(1);
+      expect(sqlItems[0].label).toBe("get_users.sql");
+      expect(sqlItems[0].sqlFileId).toBe("f1");
+    });
+
+    it("excludes orphaned SQL library files", () => {
+      const mockConnStore = {
+        connections: [{ id: "conn1", name: "Active", type: "mssql" }],
+        treeNodes: [],
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(mockConnStore as any);
+
+      const files = [
+        { id: "f1", name: "active_query.sql", connectionId: "conn1", updatedAt: "2024-01-01T00:00:00.000Z" },
+        { id: "f2", name: "orphaned_query.sql", connectionId: "deleted_conn", updatedAt: "2024-01-02T00:00:00.000Z" },
+      ];
+      const store = savedSqlStoreWithFiles(files);
+      store.orphanedFileIds = vi.fn().mockReturnValue(new Set(["f2"]));
+      vi.mocked(useSavedSqlStore).mockReturnValue(store as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("query");
+
+      const sqlItems = filteredItems.value.filter((item) => item.type === "sql_library_file");
+      expect(sqlItems).toHaveLength(1);
+      expect(sqlItems[0].label).toBe("active_query.sql");
     });
   });
 

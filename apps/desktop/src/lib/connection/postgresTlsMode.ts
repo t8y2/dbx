@@ -12,7 +12,8 @@ export function postgresTlsModeForForm(value: string | undefined, ssl: boolean |
     case "verify-identity":
       return "verify-full";
     default:
-      // DBX and DBeaver expose TLS as opt-in; an absent mode must remain plaintext.
-      return ssl ? "require" : "disable";
+      // Align with libpq/JDBC: absent mode prefers TLS and can fall back to plaintext.
+      // Legacy ssl=true still maps to require.
+      return ssl ? "require" : "prefer";
   }
 }

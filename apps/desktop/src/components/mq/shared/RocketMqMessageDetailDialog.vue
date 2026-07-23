@@ -153,7 +153,7 @@ const { t } = useI18n();
 .detail-payload {
   margin: 0;
   padding: 12px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background-secondary);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
@@ -165,7 +165,7 @@ const { t } = useI18n();
 
 .panel-error {
   padding: 10px 12px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: color-mix(in srgb, var(--color-error) 12%, transparent);
   color: var(--color-error);
   font-size: 13px;
@@ -173,7 +173,7 @@ const { t } = useI18n();
 
 .panel-success {
   padding: 10px 12px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: color-mix(in srgb, var(--color-success, #22c55e) 12%, transparent);
   color: var(--color-success, #16a34a);
   font-size: 13px;
@@ -196,7 +196,7 @@ const { t } = useI18n();
   flex-direction: column;
   background: var(--color-background);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
 }
 

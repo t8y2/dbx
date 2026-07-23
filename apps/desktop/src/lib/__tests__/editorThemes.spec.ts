@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveEditorTheme } from "@/lib/editor/editorThemes";
+import { buildSqlCompletionThemeRules, resolveEditorTheme } from "@/lib/editor/editorThemes";
 import type { AppThemePalette } from "@/lib/app/appTheme";
 import type { EditorTheme } from "@/stores/settingsStore";
 
@@ -41,5 +41,13 @@ describe("resolveEditorTheme", () => {
         expect(resolveEditorTheme(theme, "light", palette)).toBe(theme);
       }
     }
+  });
+});
+
+describe("SQL completion theme", () => {
+  it("uses the configurable large radius for the popup container", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete"]).toMatchObject({ borderRadius: "var(--dbx-radius-lg)" });
   });
 });

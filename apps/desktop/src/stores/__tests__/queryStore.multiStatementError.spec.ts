@@ -83,6 +83,36 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.result?.columns).toEqual(["Error"]);
   });
 
+  it("opens a later PostgreSQL error result from a mixed result batch", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "postgres-1",
+      name: "PostgreSQL",
+      db_type: "postgres",
+      database: "app",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti.mockResolvedValue([
+      { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1, statement_index: 0 },
+      { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, statement_index: 1 },
+      { columns: ["Error"], execution_error: true, rows: [["relation missing_table does not exist"]], affected_rows: 0, execution_time_ms: 1, statement_index: 2 },
+      { columns: ["after_error"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, statement_index: 3 },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("postgres-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "BEGIN; SELECT 1 AS value; SELECT * FROM missing_table");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.activeResultIndex).toBe(2);
+    expect(tab.result).toMatchObject({
+      columns: ["Error"],
+      execution_error: true,
+      rows: [["relation missing_table does not exist"]],
+    });
+    expect(tab.results).toHaveLength(4);
+  });
+
   it("invalidates only the executing Oracle tab after successful CURRENT_SCHEMA changes", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "oracle-1",
@@ -125,7 +155,10 @@ describe("queryStore multi-statement errors", () => {
 
     store.updateSchema(tabId, undefined);
 
-    expect(store.tabs.find((tab) => tab.id === tabId)?.completionContextVersion).toBe(1);
+    expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({
+      schema: undefined,
+      completionContextVersion: 1,
+    });
   });
 
   it("preserves the selected statement's absolute editor range", async () => {

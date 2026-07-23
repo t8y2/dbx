@@ -79,3 +79,51 @@ export function filterSidebarSearchRootsByConnectionState(nodes: TreeNode[], con
     return node.connectionId ? connectedIds.has(node.connectionId) : true;
   });
 }
+
+export function resolveSidebarFilterGuards(showConnectedConnectionsOnly: boolean, searchQuery: string, hasSearchScopeFilter: boolean) {
+  const isTreeSearchFiltering = !!searchQuery.trim() || hasSearchScopeFilter;
+  return {
+    isTreeSearchFiltering,
+    isRootListPartial: showConnectedConnectionsOnly || isTreeSearchFiltering,
+  };
+}
+
+/**
+ * Produces a display-only connection tree containing connected connections and
+ * the groups that contain them. Connection descendants stay intact because
+ * this filter controls the connection list, not database-object visibility.
+ */
+export function filterSidebarTreeToConnectedConnections(nodes: readonly TreeNode[], connectedIds: ReadonlySet<string>): TreeNode[] {
+  let changed = false;
+  const filtered: TreeNode[] = [];
+
+  for (const node of nodes) {
+    if (node.type === "connection") {
+      if (node.connectionId && connectedIds.has(node.connectionId)) {
+        filtered.push(node);
+      } else {
+        changed = true;
+      }
+      continue;
+    }
+
+    if (node.type !== "connection-group") {
+      filtered.push(node);
+      continue;
+    }
+
+    const children = filterSidebarTreeToConnectedConnections(node.children ?? [], connectedIds);
+    if (children.length === 0) {
+      changed = true;
+      continue;
+    }
+    if (children !== node.children) {
+      changed = true;
+      filtered.push({ ...node, children });
+    } else {
+      filtered.push(node);
+    }
+  }
+
+  return changed ? filtered : (nodes as TreeNode[]);
+}

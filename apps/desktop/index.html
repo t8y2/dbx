@@ -22,10 +22,12 @@
       (() => {
         const root = document.documentElement;
         let mode = null;
+        let cornerStyle = null;
 
         // localStorage can throw when WebView storage is unavailable; keep the existing light fallback.
         try {
           mode = localStorage.getItem("dbx-theme");
+          cornerStyle = localStorage.getItem("dbx-corner-style");
         } catch {}
 
         const followsSystem = mode === "system" || mode === "soft-system";
@@ -40,6 +42,7 @@
         }
 
         root.classList.toggle("dark", dark);
+        root.dataset.cornerStyle = cornerStyle === "none" || cornerStyle === "large" ? cornerStyle : "small";
         root.style.colorScheme = dark ? "dark" : "light";
       })();
     </script>

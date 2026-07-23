@@ -11,6 +11,23 @@ export interface DriverInstallProgressTargetState {
   progress: DriverInstallProgress | null;
 }
 
+export type DriverInstallProgressChannel = "agent" | "jdbc-plugin";
+
+const AGENT_PROGRESS_STEPS = new Set(["driver", "jre", "jre-extract", "all-done"]);
+
+export function driverInstallProgressChannel(progress: DriverInstallProgress): DriverInstallProgressChannel | null {
+  if (progress.step === "jdbc-plugin" || progress.step === "jdbc-plugin-extract") return "jdbc-plugin";
+  if (progress.db_type || AGENT_PROGRESS_STEPS.has(progress.step)) return "agent";
+  // Legacy "done" events have no owner, so the operation promise must clear its own channel.
+  return null;
+}
+
+export function updateDriverInstallProgress(current: DriverInstallProgress | null, incoming: DriverInstallProgress, channel: DriverInstallProgressChannel): DriverInstallProgress | null {
+  if (driverInstallProgressChannel(incoming) !== channel) return current;
+  if (incoming.step === "done" || incoming.step === "all-done") return null;
+  return incoming;
+}
+
 export function driverInstallProgressPercent(progress: DriverInstallProgress | null): number | null {
   if (!progress?.total || progress.total <= 0) return null;
   const percent = Math.round(((progress.downloaded ?? 0) / progress.total) * 100);

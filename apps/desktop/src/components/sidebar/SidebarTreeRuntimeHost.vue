@@ -681,10 +681,10 @@ function runRowClickAction(clickDetail: number) {
   if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
   if (action === "open-data") {
     scheduleOpenData(node);
+  } else if (action === "open-source") {
+    openObjectSourceDialog(false);
   } else if (isDocumentBrowserTreeNode(node.type)) {
     openMongoTreeData(node);
-  } else if (node.type === "procedure" || node.type === "function" || node.type === "trigger" || node.type === "sequence" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
-    openObjectSourceDialog(false);
   } else if (action === "toggle") {
     toggle();
   }

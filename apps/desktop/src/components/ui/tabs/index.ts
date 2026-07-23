@@ -6,7 +6,7 @@ export { default as TabsContent } from "./TabsContent.vue";
 export { default as TabsList } from "./TabsList.vue";
 export { default as TabsTrigger } from "./TabsTrigger.vue";
 
-export const tabsListVariants = cva("rounded-[6px] p-[3px] group-data-horizontal/tabs:h-8 data-[variant=line]:rounded-none group/tabs-list inline-flex w-fit select-none items-center justify-center text-muted-foreground group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col", {
+export const tabsListVariants = cva("rounded-md p-[3px] group-data-horizontal/tabs:h-8 data-[variant=line]:rounded-none group/tabs-list inline-flex w-fit select-none items-center justify-center text-muted-foreground group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col", {
   variants: {
     variant: {
       default: "bg-muted",

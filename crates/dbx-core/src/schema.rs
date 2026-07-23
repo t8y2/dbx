@@ -631,11 +631,14 @@ async fn duckdb_attached_database_names(state: &AppState, connection_id: &str) -
     state.configs.read().await.get(connection_id).map(crate::db::duckdb_sql::config_attached_names).unwrap_or_default()
 }
 
+// ClickHouse 无 schema 概念：schema 参数携带 SQL 中 `库.表` 限定的目标库，
+// database 参数是 tab/连接的当前库。与 mysql_table_metadata_catalog 一致，
+// schema 非空时必须优先，否则跨库查询会在当前库下查不到元数据（字段注释丢失）
 fn clickhouse_metadata_database<'a>(database: &'a str, schema: &'a str) -> &'a str {
-    if database.is_empty() {
-        schema
-    } else {
+    if schema.trim().is_empty() {
         database
+    } else {
+        schema
     }
 }
 
@@ -3379,10 +3382,11 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_metadata_uses_schema_when_database_is_empty() {
+    fn clickhouse_metadata_prefers_schema_qualifier() {
         assert_eq!(clickhouse_metadata_database("", "testdb"), "testdb");
         assert_eq!(clickhouse_metadata_database("testdb", ""), "testdb");
-        assert_eq!(clickhouse_metadata_database("default", "testdb"), "default");
+        // 查询元数据流程：database 是 tab 当前库，schema 是 SQL 限定的真实库
+        assert_eq!(clickhouse_metadata_database("default", "testdb"), "testdb");
     }
 
     #[test]
@@ -5369,9 +5373,17 @@ pub async fn get_table_ddl_core(
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
     }
     if matches!(object_type, Some(db::ObjectSourceKind::View)) {
-        let source =
-            get_object_source_core(state, connection_id, database, schema, table, db::ObjectSourceKind::View, None)
-                .await?;
+        let source = get_object_source_core(
+            state,
+            connection_id,
+            database,
+            schema,
+            table,
+            db::ObjectSourceKind::View,
+            None,
+            None,
+        )
+        .await?;
         let database_type = connection_config(state, connection_id).await.map(|config| config.db_type);
         return Ok(crate::object_source_sql::build_view_ddl_sql(crate::object_source_sql::BuildViewDdlInput {
             database_type,
@@ -5388,6 +5400,7 @@ pub async fn get_table_ddl_core(
             schema,
             table,
             db::ObjectSourceKind::MaterializedView,
+            None,
             None,
         )
         .await?;
@@ -5671,6 +5684,24 @@ pub fn postgres_object_source_sql(
     postgres_object_source_sql_inner(schema, name, kind, signature, true, false)
 }
 
+fn postgres_trigger_object_source_sql(schema: &str, name: &str, relation_name: Option<&str>) -> String {
+    let relation_filter = relation_name
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" AND c.relname = {}", sql_string(value)))
+        .unwrap_or_default();
+    format!(
+        "SELECT pg_catalog.pg_get_triggerdef(t.oid, true) \
+         FROM pg_catalog.pg_trigger t \
+         JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {} AND t.tgname = {} AND NOT t.tgisinternal{} \
+         ORDER BY t.oid LIMIT 1",
+        sql_string(schema),
+        sql_string(name),
+        relation_filter
+    )
+}
+
 fn opengauss_object_source_sql(
     schema: &str,
     name: &str,
@@ -5925,9 +5956,19 @@ pub async fn get_object_source_core(
     name: &str,
     object_type: db::ObjectSourceKind,
     signature: Option<&str>,
+    relation_name: Option<&str>,
 ) -> Result<db::ObjectSource, String> {
     retry_metadata_connection(state, connection_id, Some(database), || {
-        get_object_source_once(state, connection_id, database, schema, name, object_type.clone(), signature)
+        get_object_source_once(
+            state,
+            connection_id,
+            database,
+            schema,
+            name,
+            object_type.clone(),
+            signature,
+            relation_name,
+        )
     })
     .await
 }
@@ -5940,6 +5981,7 @@ async fn get_object_source_once(
     name: &str,
     object_type: db::ObjectSourceKind,
     signature: Option<&str>,
+    relation_name: Option<&str>,
 ) -> Result<db::ObjectSource, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     let db_config = connection_config(state, connection_id).await;
@@ -6011,7 +6053,16 @@ async fn get_object_source_once(
                 }
                 PoolKind::Postgres(pool) => {
                     let unwrap_opengauss_record = db_config.as_ref().is_some_and(is_opengauss_family_config);
-                    postgres_object_source(pool, schema, name, &object_type, signature, unwrap_opengauss_record).await?
+                    postgres_object_source(
+                        pool,
+                        schema,
+                        name,
+                        &object_type,
+                        signature,
+                        relation_name,
+                        unwrap_opengauss_record,
+                    )
+                    .await?
                 }
                 PoolKind::Sqlite(pool) => first_string_cell(
                     db::sqlite::execute_query(pool, &sqlite_object_source_sql(schema, name, &object_type)).await?,
@@ -6058,12 +6109,32 @@ async fn get_object_source_once(
         }
     };
 
+    let editable = if matches!(object_type, db::ObjectSourceKind::Trigger)
+        && db_config.as_ref().is_some_and(|config| {
+            matches!(
+                config.db_type,
+                DatabaseType::Postgres
+                    | DatabaseType::Redshift
+                    | DatabaseType::Gaussdb
+                    | DatabaseType::Kwdb
+                    | DatabaseType::OpenGauss
+                    | DatabaseType::Questdb
+                    | DatabaseType::Kingbase
+                    | DatabaseType::Highgo
+                    | DatabaseType::Vastbase
+            )
+        }) {
+        Some(false)
+    } else {
+        None
+    };
+
     Ok(db::ObjectSource {
         name: name.to_string(),
         object_type,
         schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
         source,
-        editable: None,
+        editable,
     })
 }
 
@@ -6366,9 +6437,12 @@ async fn postgres_object_source(
     name: &str,
     object_type: &db::ObjectSourceKind,
     signature: Option<&str>,
+    relation_name: Option<&str>,
     unwrap_opengauss_record: bool,
 ) -> Result<String, String> {
-    let sql = if unwrap_opengauss_record {
+    let sql = if matches!(object_type, db::ObjectSourceKind::Trigger) {
+        postgres_trigger_object_source_sql(schema, name, relation_name)
+    } else if unwrap_opengauss_record {
         opengauss_object_source_sql(schema, name, object_type, signature)
     } else {
         postgres_object_source_sql(schema, name, object_type, signature)
@@ -6469,6 +6543,17 @@ mod object_source_tests {
             postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function, Some("integer, integer")),
             "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' AND pg_get_function_identity_arguments(p.oid) = 'integer, integer' ORDER BY p.oid LIMIT 1"
         );
+    }
+
+    #[test]
+    fn builds_postgres_object_source_sql_for_table_trigger() {
+        let sql = postgres_trigger_object_source_sql("audit", "trg_orders_update", Some("orders"));
+
+        assert!(sql.contains("pg_get_triggerdef(t.oid, true)"));
+        assert!(sql.contains("n.nspname = 'audit'"));
+        assert!(sql.contains("c.relname = 'orders'"));
+        assert!(sql.contains("t.tgname = 'trg_orders_update'"));
+        assert!(sql.contains("NOT t.tgisinternal"));
     }
 
     #[test]

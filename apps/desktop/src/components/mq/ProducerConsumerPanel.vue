@@ -814,7 +814,7 @@ watch(
   flex: 1;
   height: 32px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;
@@ -830,7 +830,7 @@ watch(
 .btn-secondary {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;
@@ -844,7 +844,7 @@ watch(
 .btn-sm {
   padding: 6px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   cursor: pointer;
@@ -908,7 +908,7 @@ watch(
   min-height: 24px;
   padding: 2px 8px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background-secondary);
   color: var(--color-text-secondary);
   overflow: hidden;
@@ -928,7 +928,7 @@ watch(
   max-width: 320px;
   height: 30px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;

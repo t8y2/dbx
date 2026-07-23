@@ -28,24 +28,23 @@ jobs:
       - name: Copy trusted script
         run: cp .github/scripts/i18n-autofill.mjs "$RUNNER_TEMP/i18n-autofill.mjs"
 
-      - name: Create DBX bot token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ vars.DBX_BOT_APP_ID }}
-          private-key: ${{ secrets.DBX_BOT_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: dbx
-          permission-contents: write
-          permission-issues: write
-          permission-pull-requests: write
+      - name: Verify i18n bot token
+        env:
+          I18N_BOT_TOKEN: ${{ secrets.I18N_BOT_TOKEN }}
+        run: |
+          if [ -z "$I18N_BOT_TOKEN" ]; then
+            echo "::error::Repository secret I18N_BOT_TOKEN is required"
+            exit 1
+          fi
 
       - name: Checkout pull request branch
         uses: actions/checkout@v5
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.sha }}
-          token: ${{ github.event.pull_request.head.repo.full_name == github.repository && steps.app-token.outputs.token || github.token }}
+          # A maintainer user token can write both repository branches and fork
+          # branches whose authors enabled "Allow edits from maintainers".
+          token: ${{ secrets.I18N_BOT_TOKEN }}
           fetch-depth: 0
           allow-unsafe-pr-checkout: true
           # The workflow executes the trusted base-branch script copied above;
@@ -74,8 +73,7 @@ jobs:
       - name: Commit and push translation patch
         id: patch
         env:
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.I18N_BOT_TOKEN }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           if git diff --quiet -- apps/desktop/src/i18n/locales; then
@@ -84,9 +82,9 @@ jobs:
             exit 0
           fi
 
-          BOT_USER_ID="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
-          git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${BOT_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          read -r BOT_LOGIN BOT_USER_ID < <(gh api user --jq '[.login, (.id | tostring)] | @tsv')
+          git config user.name "$BOT_LOGIN"
+          git config user.email "${BOT_USER_ID}+${BOT_LOGIN}@users.noreply.github.com"
           git add apps/desktop/src/i18n/locales
           git commit -m "chore(i18n): autofill new translations"
           if git push origin "HEAD:${PR_HEAD_REF}"; then
@@ -100,7 +98,7 @@ jobs:
       - name: Comment autofill result
         if: steps.patch.outputs.changed == 'true' && steps.patch.outputs.push_failed != 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.I18N_BOT_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SUMMARY_FILE: ${{ runner.temp }}/i18n-summary.json
           BODY_FILE: ${{ runner.temp }}/i18n-autofill-comment.md
@@ -131,7 +129,7 @@ jobs:
       - name: Comment push failure
         if: steps.patch.outputs.changed == 'true' && steps.patch.outputs.push_failed == 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.I18N_BOT_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SUMMARY_FILE: ${{ runner.temp }}/i18n-summary.json
           PATCH_FILE: ${{ runner.temp }}/i18n-autofill.patch

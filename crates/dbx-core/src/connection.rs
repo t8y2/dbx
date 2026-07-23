@@ -2027,7 +2027,63 @@ impl AppState {
         }
 
         let (host, port) = self.connection_host_port(connection_id, config).await?;
-        nacos_config.with_server_endpoint(&host, port)
+        let nacos_config = nacos_config.with_server_endpoint(&host, port)?;
+        if nacos_config.rnacos_console_addr.is_empty() {
+            return Ok(nacos_config);
+        }
+
+        let console_url = reqwest::Url::parse(&nacos_config.rnacos_console_addr)
+            .map_err(|error| format!("r-nacos console address is invalid: {error}"))?;
+        let console_host = console_url
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| "r-nacos console address does not include a host".to_string())?;
+        let console_port = console_url
+            .port_or_known_default()
+            .ok_or_else(|| "r-nacos console address does not include a port".to_string())?;
+        let transport_layers = self.resolved_transport_layers(config).await?;
+        if transport_layers.is_empty() {
+            return Ok(nacos_config);
+        }
+        let console_transport_id = rnacos_console_transport_id(connection_id);
+        let local_port = match db::transport_layer_tunnel::start_transport_layers(
+            &console_transport_id,
+            &transport_layers,
+            console_host,
+            console_port,
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await
+        {
+            Ok(port) => port,
+            Err(error) => {
+                db::transport_layer_tunnel::stop_transport_layers(
+                    &console_transport_id,
+                    transport_layers.len(),
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                    &self.http_tunnels,
+                )
+                .await;
+                return Err(format!("r-nacos console transport failed: {error}"));
+            }
+        };
+        match nacos_config.with_rnacos_console_endpoint("127.0.0.1", local_port) {
+            Ok(nacos_config) => Ok(nacos_config),
+            Err(error) => {
+                db::transport_layer_tunnel::stop_transport_layers(
+                    &console_transport_id,
+                    transport_layers.len(),
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                    &self.http_tunnels,
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 
     async fn remove_stale_connection_pool(&self, pool_key: &str) -> bool {
@@ -2797,6 +2853,14 @@ impl AppState {
             &self.http_tunnels,
         )
         .await;
+        db::transport_layer_tunnel::stop_transport_layers(
+            &rnacos_console_transport_id(connection_id),
+            layer_count,
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await;
         self.tunnels.stop_tunnel(connection_id).await;
         self.proxy_tunnels.stop_tunnel(connection_id).await;
         self.http_tunnels.stop_tunnel(connection_id).await;
@@ -3249,6 +3313,10 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
     }
 }
 
+fn rnacos_console_transport_id(connection_id: &str) -> String {
+    format!("{connection_id}:rnacos-console")
+}
+
 fn parse_mq_admin_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
     let value = config
         .external_config
@@ -3638,10 +3706,10 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
                         if config.ssl {
                             "sslmode=require".to_string()
                         } else {
-                            "sslmode=disable".to_string()
+                            "sslmode=prefer".to_string()
                         }
                     } else {
-                        let sslmode = if config.ssl { "sslmode=require" } else { "sslmode=disable" };
+                        let sslmode = if config.ssl { "sslmode=require" } else { "sslmode=prefer" };
                         format!("{sslmode}&{params}")
                     });
                 }
@@ -4589,11 +4657,11 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=prefer"
         );
         assert_eq!(
             redacted_connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://127.0.0.1:3306/postgres?sslmode=disable"
+            "postgres://127.0.0.1:3306/postgres?sslmode=prefer"
         );
     }
 
@@ -4607,11 +4675,11 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://root:secret@127.0.0.1:26257/defaultdb?sslmode=disable"
+            "postgres://root:secret@127.0.0.1:26257/defaultdb?sslmode=prefer"
         );
         assert_eq!(
             redacted_connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://127.0.0.1:26257/defaultdb?sslmode=disable"
+            "postgres://127.0.0.1:26257/defaultdb?sslmode=prefer"
         );
     }
 
@@ -4639,7 +4707,7 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=prefer"
         );
     }
 
@@ -4681,7 +4749,7 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable&application_name=dbx"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=prefer&application_name=dbx"
         );
     }
 
@@ -5670,6 +5738,7 @@ for line in sys.stdin:
         config.port = 10840;
         config.external_config = Some(serde_json::json!({
             "serverAddr": "http://192.168.2.51:10840",
+            "rnacosConsoleAddr": "http://192.168.2.51:10848",
             "namespace": "public",
             "contextPath": "",
             "auth": { "kind": "none" }
@@ -5691,8 +5760,11 @@ for line in sys.stdin:
 
         assert!(nacos_config.server_addr.starts_with("http://127.0.0.1:"));
         assert_ne!(nacos_config.server_addr, "http://192.168.2.51:10840");
+        assert!(nacos_config.rnacos_console_addr.starts_with("http://127.0.0.1:"));
+        assert_ne!(nacos_config.rnacos_console_addr, "http://192.168.2.51:10848");
         assert!(nacos_config.connect_override.is_none());
         state.proxy_tunnels.stop_tunnel("proxied-nacos:transport:0").await;
+        state.proxy_tunnels.stop_tunnel("proxied-nacos:rnacos-console:transport:0").await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

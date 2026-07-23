@@ -65,6 +65,24 @@ pub async fn save_mcp_global_policy(
     Ok(Json(()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveMaxAgentTurnsRequest {
+    pub max_agent_turns: u32,
+}
+
+pub async fn load_max_agent_turns(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
+    state.app.storage.load_max_agent_turns().await.map(Json).map_err(AppError::from)
+}
+
+pub async fn save_max_agent_turns(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveMaxAgentTurnsRequest>,
+) -> Result<Json<()>, AppError> {
+    state.app.storage.save_max_agent_turns(body.max_agent_turns).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
 pub async fn decrypt_config(Json(body): Json<DecryptConfigRequest>) -> Result<Json<String>, AppError> {
     decrypt_config_payload(&body.payload, &body.passphrase).map(Json).map_err(AppError::from)
 }

@@ -48,6 +48,7 @@ import {
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
+import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import { normalizeAiModelEffortLevels, normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
@@ -65,6 +66,8 @@ import {
   forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
   getAppSupportInfo,
+  loadMaxAgentTurns,
+  saveMaxAgentTurns,
   saveWebdavSyncSecretsPreference,
   saveWebdavSavedPassword,
   saveSnippetSavedToken,
@@ -109,7 +112,7 @@ import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import McpConnectionScopePicker from "@/components/settings/McpConnectionScopePicker.vue";
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
-import { APP_THEME_PALETTES, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
+import { APP_THEME_PALETTES, type AppCornerStyle, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
 import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeTableOpenPageSizeDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -134,7 +137,7 @@ const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
 const tunnelProfileStore = useTunnelProfileStore();
-const { isDark, themeMode, themePalette, setThemeMode, setThemePalette } = useTheme();
+const { isDark, themeMode, themePalette, cornerStyle, setThemeMode, setThemePalette, setCornerStyle } = useTheme();
 
 const appThemePaletteOptions = computed(
   (): Array<{ value: AppThemePalette; label: string; previewColor: string }> =>
@@ -150,6 +153,11 @@ const appThemeModeOptions = computed(() => [
   { value: "light" as AppThemeMode, label: t("toolbar.themeLight"), icon: Sun },
   { value: "dark" as AppThemeMode, label: t("toolbar.themeDark"), icon: Moon },
   { value: "system" as AppThemeMode, label: t("toolbar.themeSystem"), icon: SunMoon },
+]);
+const appCornerStyleOptions = computed(() => [
+  { value: "none" as AppCornerStyle, label: t("settings.cornerStyleNone"), previewRadius: "0px" },
+  { value: "small" as AppCornerStyle, label: t("settings.cornerStyleSmall"), previewRadius: "4px" },
+  { value: "large" as AppCornerStyle, label: t("settings.cornerStyleLarge"), previewRadius: "10px" },
 ]);
 
 const props = defineProps<{
@@ -1954,6 +1962,7 @@ watch(activeSettingsTab, async (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "ai") {
+    void loadMaxAgentTurnsSetting();
     // Await completion so we don't snapshot an empty default when the store
     // is still loading its first payload (init via App.vue is fire-and-forget).
     await promptTemplateStore.ensureLoaded();
@@ -2135,6 +2144,45 @@ async function saveGlobalInstructions() {
 
 function globalInstructionsTooLong(): boolean {
   return promptTemplateCharacterCount(editGlobalInstructions.value) > GLOBAL_INSTRUCTIONS_MAX;
+}
+
+// Agent turn limit for DBX's API-backed agent loop. CLI providers enforce their own limits.
+// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/agent_loop.rs —
+// keep in sync; the backend clamp on save/load is the actual source of truth.
+const editMaxAgentTurns = ref<number | undefined>(undefined);
+const maxAgentTurnsSaving = ref(false);
+const maxAgentTurnsLoaded = ref(false);
+const maxAgentTurnsLoading = ref(false);
+const maxAgentTurnsLoadError = ref("");
+
+async function loadMaxAgentTurnsSetting() {
+  if (maxAgentTurnsLoaded.value || maxAgentTurnsLoading.value) return;
+  maxAgentTurnsLoading.value = true;
+  maxAgentTurnsLoadError.value = "";
+  try {
+    editMaxAgentTurns.value = await loadMaxAgentTurns();
+    maxAgentTurnsLoaded.value = true;
+  } catch (e: any) {
+    maxAgentTurnsLoadError.value = e?.message || String(e);
+    toast(maxAgentTurnsLoadError.value, 5000);
+  } finally {
+    maxAgentTurnsLoading.value = false;
+  }
+}
+
+async function saveMaxAgentTurnsSetting() {
+  if (!maxAgentTurnsLoaded.value) return;
+  const clamped = normalizeMaxAgentTurns(editMaxAgentTurns.value);
+  maxAgentTurnsSaving.value = true;
+  try {
+    await saveMaxAgentTurns(clamped);
+    editMaxAgentTurns.value = clamped;
+    toast(t("ai.maxAgentTurnsSaved"));
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
+  } finally {
+    maxAgentTurnsSaving.value = false;
+  }
 }
 
 // AI Config Delete Confirmation
@@ -3587,22 +3635,43 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
               </div>
 
-              <div class="settings-appearance-group">
-                <Label>{{ t("settings.theme") }}</Label>
-                <div class="settings-appearance-button-row flex flex-wrap gap-2">
-                  <Button
-                    v-for="option in appThemeModeOptions"
-                    :key="option.value"
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    class="settings-choice-button h-8 gap-1.5 rounded-[6px] px-3"
-                    :class="themeMode === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
-                    @click="setThemeMode(option.value)"
-                  >
-                    <component :is="option.icon" class="h-3.5 w-3.5" />
-                    {{ option.label }}
-                  </Button>
+              <div class="settings-appearance-theme-grid">
+                <div class="settings-appearance-group min-w-0">
+                  <Label>{{ t("settings.theme") }}</Label>
+                  <div class="settings-appearance-button-row flex flex-wrap gap-2">
+                    <Button
+                      v-for="option in appThemeModeOptions"
+                      :key="option.value"
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="settings-choice-button h-8 gap-1.5 px-3"
+                      :class="themeMode === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                      @click="setThemeMode(option.value)"
+                    >
+                      <component :is="option.icon" class="h-3.5 w-3.5" />
+                      {{ option.label }}
+                    </Button>
+                  </div>
+                </div>
+
+                <div class="settings-appearance-group min-w-0">
+                  <Label>{{ t("settings.cornerStyle") }}</Label>
+                  <div class="settings-appearance-button-row flex flex-wrap gap-2">
+                    <Button
+                      v-for="option in appCornerStyleOptions"
+                      :key="option.value"
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="settings-choice-button h-8 px-3"
+                      :class="cornerStyle === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                      :style="{ borderRadius: option.previewRadius }"
+                      @click="setCornerStyle(option.value)"
+                    >
+                      {{ option.label }}
+                    </Button>
+                  </div>
                 </div>
               </div>
 
@@ -4036,6 +4105,7 @@ onUnmounted(cleanupPreviewEditor);
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="comment-aligned">{{ t("settings.sidebarObjectInfoModeCommentAligned") }}</SelectItem>
+                    <SelectItem value="comment-right">{{ t("settings.sidebarObjectInfoModeCommentRight") }}</SelectItem>
                     <SelectItem value="comment-inline">{{ t("settings.sidebarObjectInfoModeCommentInline") }}</SelectItem>
                     <SelectItem value="size">{{ t("settings.sidebarObjectInfoModeSize") }}</SelectItem>
                     <SelectItem value="hidden">{{ t("settings.sidebarObjectInfoModeHidden") }}</SelectItem>
@@ -4764,6 +4834,28 @@ onUnmounted(cleanupPreviewEditor);
                   </span>
                   <Button type="button" size="sm" :disabled="!promptTemplateStore.isLoaded || globalInstructionsTooLong() || globalInstructionsSaving" @click="saveGlobalInstructions">
                     {{ globalInstructionsSaving ? t("common.processing") : t("ai.globalInstructionsSave") }}
+                  </Button>
+                </div>
+              </div>
+
+              <!-- Agent Turn Limit (list mode, global) -->
+              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
+                <Separator />
+                <div>
+                  <h3 class="text-sm font-medium">{{ t("ai.maxAgentTurns") }}</h3>
+                  <p class="text-xs text-muted-foreground">{{ t("ai.maxAgentTurnsDescription") }}</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving" />
+                  <span class="text-xs" :class="maxAgentTurnsOutOfRange(editMaxAgentTurns) ? 'text-destructive' : 'text-muted-foreground'">
+                    {{ t("ai.maxAgentTurnsRange", { min: MAX_AGENT_TURNS_MIN, max: MAX_AGENT_TURNS_MAX, default: MAX_AGENT_TURNS_DEFAULT }) }}
+                  </span>
+                  <div class="flex-1"></div>
+                  <Button v-if="maxAgentTurnsLoadError" type="button" size="sm" variant="outline" :disabled="maxAgentTurnsLoading" @click="loadMaxAgentTurnsSetting">
+                    {{ t("common.retry") }}
+                  </Button>
+                  <Button type="button" size="sm" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)" @click="saveMaxAgentTurnsSetting">
+                    {{ maxAgentTurnsSaving ? t("common.processing") : t("common.save") }}
                   </Button>
                 </div>
               </div>
@@ -5790,12 +5882,19 @@ onUnmounted(cleanupPreviewEditor);
   gap: 0.625rem;
 }
 
+.settings-appearance-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
 .settings-option-stack > * + * {
   margin-top: 0.625rem;
 }
 
 @media (max-width: 760px) {
   .settings-appearance-top-grid,
+  .settings-appearance-theme-grid,
   .settings-appearance-choice-grid {
     grid-template-columns: 1fr;
   }

@@ -57,6 +57,12 @@ export function treeItemPaddingLeft(depth: number): string {
   return `${depth * 16 + 8}px`;
 }
 
+export const trailingCommentGapPx = 8;
+
+export function trailingCommentAvailableWidth(containerWidth: number, leadingWidth: number): number {
+  return Math.max(0, Math.floor(containerWidth - leadingWidth - trailingCommentGapPx));
+}
+
 export interface SidebarCommentAlignmentItem {
   id: string;
   depth: number;

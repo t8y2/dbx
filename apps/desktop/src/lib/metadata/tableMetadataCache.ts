@@ -47,6 +47,7 @@ const tableMetadataCache = new MetadataResultCache<TableMetadata>({
 const tableMetadataCoordinator = new MetadataLoadCoordinator((event) => {
   console.debug("[DBX][metadata-load:table-coordinator]", event);
 });
+const tableIndexesLoads = new Map<string, { parts: ReturnType<typeof metadataScopeParts>; promise: Promise<IndexInfo[]>; expiresAt: number }>();
 
 // 失效代数（按 scope key 隔离）：跨越失效边界的旧加载完成后不得写缓存——
 // 结构变更后 force 拉到的新值可能被保存前启动、最后返回的在途加载回填覆盖。
@@ -114,6 +115,26 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, schema = met
   };
 }
 
+export async function loadTableIndexes(request: TableMetadataRequest): Promise<IndexInfo[]> {
+  const scope = tableMetadataScope(request);
+  const scopeKey = metadataScopeKey(scope);
+  const cached = tableIndexesLoads.get(scopeKey);
+  if (!request.force && cached && cached.expiresAt > Date.now()) return cached.promise;
+  if (cached) tableIndexesLoads.delete(scopeKey);
+  while (tableIndexesLoads.size >= TABLE_METADATA_CACHE_MAX_ENTRIES) {
+    const oldestKey = tableIndexesLoads.keys().next().value;
+    if (!oldestKey) break;
+    tableIndexesLoads.delete(oldestKey);
+  }
+  const promise = api.listIndexes(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+  const entry = { parts: metadataScopeParts(scope), promise, expiresAt: Date.now() + TABLE_METADATA_CACHE_TTL_MS };
+  tableIndexesLoads.set(scopeKey, entry);
+  void promise.catch(() => {
+    if (tableIndexesLoads.get(scopeKey) === entry) tableIndexesLoads.delete(scopeKey);
+  });
+  return promise;
+}
+
 export async function loadTableMetadata(request: TableMetadataRequest): Promise<TableMetadataLoadResult> {
   const scope = tableMetadataScope(request);
   const trace = createMetadataLoadTrace(scope);
@@ -138,8 +159,12 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
     metadata = await tableMetadataCoordinator.run(
       scope,
       async () => {
-        const columns = await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
-        const indexes = columns.length > 0 ? await api.listIndexes(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog).catch((): IndexInfo[] => []) : [];
+        // Column discovery can be especially slow on Oracle. Start row-identity
+        // discovery independently so query preflight can reuse it without waiting.
+        const columnsPromise = api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+        const indexesPromise = loadTableIndexes(request).catch((): IndexInfo[] => []);
+        const columns = await columnsPromise;
+        const indexes = columns.length > 0 ? await indexesPromise : [];
         const primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, request.tableType);
         return {
           schema: request.schema || undefined,
@@ -182,6 +207,9 @@ export function invalidateTableMetadataCache(match: MetadataCacheInvalidation): 
     bumpTableMetadataInvalidationStamp(scopeKey);
     tableMetadataCoordinator.clear(scopeKey);
   }
+  for (const [scopeKey, entry] of tableIndexesLoads) {
+    if (matches(entry.parts)) tableIndexesLoads.delete(scopeKey);
+  }
   return tableMetadataCache.invalidate(match);
 }
 
@@ -190,5 +218,6 @@ export function clearTableMetadataCache(): void {
     bumpTableMetadataInvalidationStamp(scopeKey);
   }
   tableMetadataCoordinator.clear();
+  tableIndexesLoads.clear();
   tableMetadataCache.clear();
 }

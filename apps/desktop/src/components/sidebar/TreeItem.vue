@@ -44,7 +44,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
-import { canTreeNodeShowExpander, sidebarTreeNodeComment, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -69,11 +69,21 @@ const labelRef = ref<HTMLElement>();
 
 const rowRef = ref<HTMLElement>();
 
+const trailingCommentLayoutRef = ref<HTMLElement>();
+
+const trailingCommentLeadingRef = ref<HTMLElement>();
+
+const trailingCommentMaxWidth = ref(0);
+
 const labelOverflowing = ref(false);
 
 let labelResizeObserver: ResizeObserver | null = null;
 
+let trailingCommentResizeObserver: ResizeObserver | null = null;
+
 let labelMeasureFrame = 0;
+
+let trailingCommentMeasureFrame = 0;
 
 function cancelLabelOverflowMeasure() {
   if (!labelMeasureFrame) return;
@@ -541,9 +551,60 @@ const isNodeDefaultDatabase = computed(
 );
 
 const trailingComment = computed(() => {
-  if (settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-inline" && settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-aligned") return null;
+  if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
   return sidebarTreeNodeComment(activeNode.value);
 });
+
+function isRightAlignedComment(): boolean {
+  return settingsStore.editorSettings.sidebarObjectInfoMode === "comment-right" && !!trailingComment.value;
+}
+
+function cancelTrailingCommentMeasure() {
+  if (!trailingCommentMeasureFrame) return;
+  window.cancelAnimationFrame(trailingCommentMeasureFrame);
+  trailingCommentMeasureFrame = 0;
+}
+
+function measureTrailingCommentLayout() {
+  const container = trailingCommentLayoutRef.value;
+  const leading = trailingCommentLeadingRef.value;
+  if (!isRightAlignedComment() || !container || !leading) {
+    trailingCommentMaxWidth.value = 0;
+    return;
+  }
+  trailingCommentMaxWidth.value = trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth);
+}
+
+function scheduleTrailingCommentMeasure() {
+  if (typeof window === "undefined") {
+    measureTrailingCommentLayout();
+    return;
+  }
+  cancelTrailingCommentMeasure();
+  trailingCommentMeasureFrame = window.requestAnimationFrame(() => {
+    trailingCommentMeasureFrame = 0;
+    measureTrailingCommentLayout();
+  });
+}
+
+function refreshTrailingCommentMeasurement() {
+  trailingCommentResizeObserver?.disconnect();
+  trailingCommentResizeObserver = null;
+
+  const container = trailingCommentLayoutRef.value;
+  const leading = trailingCommentLeadingRef.value;
+  if (!isRightAlignedComment() || !container || !leading) {
+    trailingCommentMaxWidth.value = 0;
+    return;
+  }
+
+  scheduleTrailingCommentMeasure();
+  if (typeof ResizeObserver !== "undefined") {
+    trailingCommentResizeObserver = new ResizeObserver(scheduleTrailingCommentMeasure);
+    trailingCommentResizeObserver.observe(container);
+    trailingCommentResizeObserver.observe(leading);
+  }
+}
 
 function formattedObjectStorage(): string {
   if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || (activeNode.value.type !== "database" && activeNode.value.type !== "table" && activeNode.value.type !== "materialized_view")) return "";
@@ -561,6 +622,8 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.valu
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 
 const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata() }));
+
+watch(() => [isRightAlignedComment(), visibleLabel(activeNode.value), trailingComment.value, trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 
@@ -868,6 +931,8 @@ watch(
 onBeforeUnmount(() => {
   stopPasteHandlerRegistration();
   handleMouseLeave();
+  trailingCommentResizeObserver?.disconnect();
+  cancelTrailingCommentMeasure();
   finishTableReferenceDrag();
 });
 
@@ -1003,8 +1068,12 @@ function onKeydown(event: KeyboardEvent) {
         <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
         <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
         <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
-        <div :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
-          <div :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLabelWidth ? { width: `${alignedCommentLabelWidth}px` } : undefined">
+        <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
+          <div
+            ref="trailingCommentLeadingRef"
+            :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'"
+            :style="alignedCommentLabelWidth ? { width: `${alignedCommentLabelWidth}px` } : undefined"
+          >
             <input
               v-if="isRenamingGroup"
               ref="renameInputRef"
@@ -1029,7 +1098,15 @@ function onKeydown(event: KeyboardEvent) {
               {{ t("editor.defaultDatabase") }}
             </Badge>
           </div>
-          <span v-if="trailingComment" class="sidebar-object-comment ml-2 min-w-0 flex-1 truncate text-left" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ trailingComment }}</span>
+          <span v-if="trailingComment && !isRightAlignedComment()" class="sidebar-object-comment ml-2 min-w-0 flex-1 truncate text-left" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ trailingComment }}</span>
+          <span v-if="isRightAlignedComment() && trailingCommentMaxWidth > 0" class="min-w-0 flex-1" aria-hidden="true" />
+          <span
+            v-if="isRightAlignedComment() && trailingCommentMaxWidth > 0"
+            class="sidebar-object-comment sidebar-object-comment--right min-w-0 shrink-0 truncate text-left"
+            :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }"
+            :style="{ marginLeft: `${trailingCommentGapPx}px`, maxWidth: `${trailingCommentMaxWidth}px` }"
+            >{{ trailingComment }}</span
+          >
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
@@ -1081,16 +1158,22 @@ function onKeydown(event: KeyboardEvent) {
 <style>
 .sidebar-object-comment {
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1rem;
   opacity: 0.6;
   /* Sidebar rows repaint on hover; avoid heavier font shaping and fallback here. */
   text-rendering: auto;
 }
 
+.sidebar-object-comment--right {
+  width: max-content;
+  max-width: 100%;
+  flex-shrink: 999;
+}
+
 .sidebar-object-comment--windows {
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
   opacity: 1;
 }

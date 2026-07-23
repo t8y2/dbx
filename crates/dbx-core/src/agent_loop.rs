@@ -14,8 +14,21 @@ use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::token_usage::TokenUsage;
 
-/// Maximum number of agent loop turns to prevent infinite loops.
-const MAX_AGENT_TURNS: u32 = 30;
+/// Default number of agent loop turns to prevent infinite loops.
+/// Users can raise the limit in Settings → AI; it is clamped to
+/// [`MIN_MAX_AGENT_TURNS`, `MAX_MAX_AGENT_TURNS`] so it can never be unlimited.
+///
+/// These values are mirrored in apps/desktop/src/components/editor/EditorSettingsDialog.vue
+/// (MAX_AGENT_TURNS_DEFAULT/MIN/MAX) for client-side input validation — this module's
+/// `clamp_max_agent_turns` remains the actual source of truth, applied on every save/load.
+pub const DEFAULT_MAX_AGENT_TURNS: u32 = 30;
+pub const MIN_MAX_AGENT_TURNS: u32 = 5;
+pub const MAX_MAX_AGENT_TURNS: u32 = 500;
+
+/// Clamp a user-provided agent turn limit into the supported range.
+pub fn clamp_max_agent_turns(value: u32) -> u32 {
+    value.clamp(MIN_MAX_AGENT_TURNS, MAX_MAX_AGENT_TURNS)
+}
 const MAX_TOOL_RESULT_CONTEXT_CHARS: usize = 12_000;
 const TOOL_RESULT_HEAD_CHARS: usize = 4_000;
 const TOOL_RESULT_TAIL_CHARS: usize = 4_000;
@@ -66,6 +79,9 @@ pub struct AgentLoopContext {
     pub db_type: DatabaseType,
     pub cli_mcp_server_command: Option<CliAgentCommandSpec>,
     pub sql_permissions: agent_tools::AgentSqlPermissions,
+    /// Turn limit for this run, already clamped by the settings layer.
+    /// Callers that have no user setting should pass [`DEFAULT_MAX_AGENT_TURNS`].
+    pub max_agent_turns: u32,
 }
 
 /// Check if the provider supports function calling / tool use.
@@ -158,7 +174,9 @@ pub async fn run_agent_loop(
     let mut total_usage = TokenUsage::default();
     let mut contract_repair_attempts = 0;
 
-    for turn in 0..MAX_AGENT_TURNS {
+    let max_agent_turns = clamp_max_agent_turns(agent_ctx.max_agent_turns);
+
+    for turn in 0..max_agent_turns {
         // Check for cancellation before each turn
         if cancelled.notified().now_or_never().is_some() {
             loop_exit = LoopExit::Cancelled;
@@ -434,10 +452,10 @@ pub async fn run_agent_loop(
         }
         LoopExit::Exhausted => {
             let message = if final_text.trim().is_empty() {
-                format!("Agent reached the {MAX_AGENT_TURNS}-turn safety limit before producing output. Send Continue to let the agent keep working.")
+                format!("Agent reached the {max_agent_turns}-turn safety limit before producing output. Send Continue to let the agent keep working, or raise the limit in Settings → AI.")
             } else {
                 format!(
-                    "\n\nAgent reached the {MAX_AGENT_TURNS}-turn safety limit before a final answer. The partial output above was preserved; send Continue to let the agent keep working."
+                    "\n\nAgent reached the {max_agent_turns}-turn safety limit before a final answer. The partial output above was preserved; send Continue to let the agent keep working, or raise the limit in Settings → AI."
                 )
             };
             on_event(AgentEvent::TextDelta { delta: message.clone() });
@@ -1170,6 +1188,15 @@ fn summarize_message_content(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_max_agent_turns_enforces_bounds() {
+        assert_eq!(clamp_max_agent_turns(0), MIN_MAX_AGENT_TURNS);
+        assert_eq!(clamp_max_agent_turns(MIN_MAX_AGENT_TURNS), MIN_MAX_AGENT_TURNS);
+        assert_eq!(clamp_max_agent_turns(DEFAULT_MAX_AGENT_TURNS), DEFAULT_MAX_AGENT_TURNS);
+        assert_eq!(clamp_max_agent_turns(200), 200);
+        assert_eq!(clamp_max_agent_turns(u32::MAX), MAX_MAX_AGENT_TURNS);
+    }
 
     fn generate_contract(user_request: &str, mode: &str) -> AiTaskContract {
         AiTaskContract {

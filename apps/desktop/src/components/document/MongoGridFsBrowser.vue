@@ -178,7 +178,7 @@ onMounted(() => {
           </Button>
         </div>
       </div>
-      <div class="mt-3 overflow-hidden rounded-xl border border-border/70 bg-background/80 shadow-xs">
+      <div class="mt-3 overflow-hidden rounded-lg border border-border/70 bg-background/80 shadow-xs">
         <div class="flex flex-col md:flex-row">
           <div class="flex min-w-0 flex-1 items-center gap-1 px-2 py-1.5">
             <Popover v-model:open="filterBuilderOpen">

@@ -20,6 +20,7 @@ pub struct SchemaQuery {
     pub offset: Option<usize>,
     pub object_type: Option<dbx_core::db::ObjectSourceKind>,
     pub signature: Option<String>,
+    pub relation_name: Option<String>,
     pub object_types: Option<String>,
     pub apply_visible_filter: Option<bool>,
     pub client_session_id: Option<String>,
@@ -302,6 +303,7 @@ pub async fn get_object_source(
         name,
         object_type,
         q.signature.as_deref(),
+        q.relation_name.as_deref(),
     )
     .await
     .map_err(AppError::from)?;

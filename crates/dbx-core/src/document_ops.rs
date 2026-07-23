@@ -1,6 +1,6 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::mongo_document_id_params;
-use crate::db::mongo_driver::MongoDocumentResult;
+use crate::db::document_result::DocumentQueryResult;
 use crate::db::{elasticsearch_driver, mongo_driver, vector_driver};
 
 pub use crate::db::vector_driver::CollectionInfo;
@@ -377,7 +377,7 @@ pub async fn find_documents_core(
     filter: Option<&str>,
     projection: Option<&str>,
     sort: Option<&str>,
-) -> Result<MongoDocumentResult, String> {
+) -> Result<DocumentQueryResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
@@ -422,6 +422,24 @@ pub async fn find_documents_core(
             }
         }
         _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
+    }
+}
+
+pub async fn count_elasticsearch_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    filter: Option<&str>,
+) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            elasticsearch_driver::count_documents(&client, index, filter).await
+        }
+        _ => Err("Not an Elasticsearch connection".to_string()),
     }
 }
 

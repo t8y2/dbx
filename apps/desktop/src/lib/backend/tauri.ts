@@ -464,6 +464,14 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
   return invoke("save_mcp_global_policy", { policy });
 }
 
+export async function loadMaxAgentTurns(): Promise<number> {
+  return invoke("load_max_agent_turns");
+}
+
+export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
+  return invoke("save_max_agent_turns", { maxAgentTurns });
+}
+
 export interface OpenTabsStatePayload {
   tabs: unknown[];
   activeTabId: string | null;
@@ -824,8 +832,8 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
   return invoke("completion_assistant_search", { request });
 }
 
-export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string): Promise<ObjectSource> {
-  return invoke("get_object_source", { connectionId, database, schema, name, objectType, signature });
+export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string): Promise<ObjectSource> {
+  return invoke("get_object_source", { connectionId, database, schema, name, objectType, signature, relationName });
 }
 
 export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false): Promise<string[]> {
@@ -1841,13 +1849,17 @@ export async function zookeeperDelete(connectionId: string, key: string): Promis
   return invoke("zookeeper_delete", { connectionId, key });
 }
 
-// --- MongoDB ---
-export interface MongoDocumentResult {
+// --- Document stores ---
+export interface DocumentQueryResult {
   documents: any[];
   raw_documents?: string[];
   extended_documents?: any[];
   total: number;
+  total_is_exact?: boolean;
 }
+
+// Kept for callers that are specifically using MongoDB APIs.
+export type MongoDocumentResult = DocumentQueryResult;
 
 export interface MongoCollectionStatsResult {
   count: unknown;
@@ -1934,8 +1946,12 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
+export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
+}
+
+export async function elasticsearchCountDocuments(connectionId: string, index: string, filter?: string, executionId?: string): Promise<number> {
+  return invoke("elasticsearch_count_documents", { connectionId, index, filter, executionId });
 }
 
 export async function mongoCountDocuments(connectionId: string, database: string, collection: string, filter?: string, mode?: "accurate" | "legacy", executionId?: string): Promise<number> {

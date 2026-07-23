@@ -857,7 +857,36 @@ public final class MongoAgent {
     }
 
     static JsonObject bsonToExtendedJson(Document doc) {
-        return JsonParser.parseString(doc.toJson(EXTENDED_JSON_SETTINGS)).getAsJsonObject();
+        JsonObject relaxed = JsonParser.parseString(doc.toJson(EXTENDED_JSON_SETTINGS)).getAsJsonObject();
+        return preserveUnsafeLongsForJsonClients(doc, relaxed).getAsJsonObject();
+    }
+
+    private static JsonElement preserveUnsafeLongsForJsonClients(Object bsonValue, JsonElement relaxedValue) {
+        if (
+            bsonValue instanceof Long longValue &&
+            (longValue < -JS_MAX_SAFE_INTEGER || longValue > JS_MAX_SAFE_INTEGER)
+        ) {
+            JsonObject wrapper = new JsonObject();
+            wrapper.addProperty("$numberLong", longValue.toString());
+            return wrapper;
+        }
+        if (bsonValue instanceof Document document && relaxedValue.isJsonObject()) {
+            JsonObject object = relaxedValue.getAsJsonObject();
+            for (Map.Entry<String, Object> entry : document.entrySet()) {
+                if (object.has(entry.getKey())) {
+                    object.add(
+                        entry.getKey(),
+                        preserveUnsafeLongsForJsonClients(entry.getValue(), object.get(entry.getKey()))
+                    );
+                }
+            }
+        } else if (bsonValue instanceof List<?> values && relaxedValue.isJsonArray()) {
+            JsonArray array = relaxedValue.getAsJsonArray();
+            for (int index = 0; index < Math.min(values.size(), array.size()); index++) {
+                array.set(index, preserveUnsafeLongsForJsonClients(values.get(index), array.get(index)));
+            }
+        }
+        return relaxedValue;
     }
 
     static Object convertValue(Object value) {

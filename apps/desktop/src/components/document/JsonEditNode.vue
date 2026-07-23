@@ -200,7 +200,7 @@ function confirmRemoveChild() {
   border: 1px solid var(--border);
   border: 1px solid color-mix(in oklab, var(--border) 82%, transparent);
   border-left-width: 3px;
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--muted);
   background: color-mix(in oklab, var(--background) 76%, var(--muted));
 }
@@ -227,7 +227,7 @@ function confirmRemoveChild() {
   width: 100%;
   min-width: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -264,7 +264,7 @@ function confirmRemoveChild() {
   min-height: 42px;
   resize: vertical;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--background);
   padding: 5px 8px;
   font: inherit;

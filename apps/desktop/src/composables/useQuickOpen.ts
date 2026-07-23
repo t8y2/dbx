@@ -2,6 +2,10 @@ import { computed, ref, watch } from "vue";
 import type { ConnectionConfig } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import * as api from "@/lib/backend/api";
+import type { SqlFileEntry } from "@/lib/backend/api";
+import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 
 const REMOTE_SEARCH_DEBOUNCE_MS = 180;
 const REMOTE_SEARCH_MIN_QUERY_LENGTH = 2;
@@ -10,12 +14,14 @@ const REMOTE_SEARCH_CONCURRENCY = 2;
 const REMOTE_SEARCH_RESULTS_PER_REQUEST = 25;
 const REMOTE_SEARCH_MAX_RESULTS = 100;
 const QUICK_OPEN_MAX_RESULTS = 200;
+const INITIAL_SQL_LIBRARY_LIMIT = 20;
+const INITIAL_SQL_FILE_LIMIT = 20;
 
 const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "etcd", "zookeeper", "mq", "nacos"]);
 
 export interface QuickOpenItem {
   id: string;
-  type: "connection" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body";
+  type: "connection" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file";
   label: string;
   description?: string;
   connectionId: string;
@@ -25,6 +31,8 @@ export interface QuickOpenItem {
   tableName?: string; // Kept for backward compatibility
   connectionName?: string;
   searchText: string; // Lowercase text for searching
+  filePath?: string; // For external SQL files
+  sqlFileId?: string; // For saved SQL library files
 }
 
 /**
@@ -73,15 +81,137 @@ interface MatchedItem extends QuickOpenItem {
   matchIndices: number[];
 }
 
+function loadSavedSqlFileFolderPaths(): string[] {
+  return getSqlFileFolderPaths();
+}
+
+function folderNameFromPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.pop() || path;
+}
+
+function collectSqlFileEntries(entries: SqlFileEntry[], results: SqlFileEntry[]): void {
+  for (const entry of entries) {
+    if (entry.is_dir) {
+      collectSqlFileEntries(entry.children, results);
+    } else {
+      results.push(entry);
+    }
+  }
+}
+
 export function useQuickOpen() {
   const connectionStore = useConnectionStore();
+  const savedSqlStore = useSavedSqlStore();
   const searchQuery = ref("");
   const selectedIndex = ref(0);
   const remoteItems = ref<QuickOpenItem[]>([]);
+  const sqlFileItems = ref<QuickOpenItem[]>([]);
   let remoteSearchGeneration = 0;
   let remoteSearchTimer: ReturnType<typeof setTimeout> | undefined;
   let activeRemoteRequests = 0;
   const remoteRequestWaiters: Array<() => void> = [];
+  let sqlFilesLoaded = false;
+  let sqlFilesLoadingPromise: Promise<void> | null = null;
+  let sqlFilesLoadGeneration = 0;
+
+  function getConnectionLabel(connectionId: string): string {
+    const conn = connectionStore.connections.find((c) => c.id === connectionId);
+    return conn?.name || connectionId;
+  }
+
+  const sqlLibraryAllItems = computed<QuickOpenItem[]>(() => {
+    const activeConnectionIds = new Set(connectionStore.connections.map((c) => c.id));
+    const orphanedIds = savedSqlStore.orphanedFileIds(activeConnectionIds);
+    return savedSqlStore.allFiles
+      .filter((file) => !orphanedIds.has(file.id))
+      .map((file) => ({
+        id: `sqllib-${file.id}`,
+        type: "sql_library_file" as const,
+        label: file.name,
+        description: getConnectionLabel(file.connectionId),
+        connectionId: file.connectionId,
+        connectionName: getConnectionLabel(file.connectionId),
+        sqlFileId: file.id,
+        searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
+      }));
+  });
+
+  const sqlLibraryRecentItems = computed<QuickOpenItem[]>(() => {
+    return [...sqlLibraryAllItems.value]
+      .sort((a, b) => {
+        const fileA = savedSqlStore.getFile(a.sqlFileId!);
+        const fileB = savedSqlStore.getFile(b.sqlFileId!);
+        const timeA = fileA?.openedAt || fileA?.updatedAt || "";
+        const timeB = fileB?.openedAt || fileB?.updatedAt || "";
+        return timeB.localeCompare(timeA);
+      })
+      .slice(0, INITIAL_SQL_LIBRARY_LIMIT);
+  });
+
+  async function loadExternalSqlFiles(): Promise<void> {
+    if (sqlFilesLoaded || sqlFilesLoadingPromise) return sqlFilesLoadingPromise ?? undefined;
+    const generation = sqlFilesLoadGeneration;
+    const loadingPromise = (async () => {
+      try {
+        const folderPaths = loadSavedSqlFileFolderPaths();
+        if (folderPaths.length === 0) {
+          if (generation === sqlFilesLoadGeneration) sqlFilesLoaded = true;
+          return;
+        }
+        const allEntries: Array<{ entry: SqlFileEntry; rootFolder: string }> = [];
+        for (const folderPath of folderPaths) {
+          try {
+            const entries = await api.listSqlFilesInFolder(folderPath);
+            const collected: SqlFileEntry[] = [];
+            collectSqlFileEntries(entries, collected);
+            const rootName = folderNameFromPath(folderPath);
+            for (const entry of collected) {
+              allEntries.push({ entry, rootFolder: rootName });
+            }
+          } catch {
+            // Skip folders that fail to load
+          }
+        }
+        // Folder changes invalidate this snapshot; an updated scan runs after cleanup below.
+        if (generation !== sqlFilesLoadGeneration) return;
+        sqlFileItems.value = allEntries.map(({ entry, rootFolder }) => {
+          const parentDir = entry.path.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+          const parentName = folderNameFromPath(parentDir || entry.path);
+          // Show the top-level folder name so users can distinguish files from different directories
+          const description = parentName === rootFolder ? rootFolder : `${rootFolder} / ${parentName}`;
+          return {
+            id: `sqlfile-${entry.path}`,
+            type: "sql_file" as const,
+            label: entry.name,
+            description,
+            connectionId: "",
+            filePath: entry.path,
+            searchText: `${entry.name} ${rootFolder} ${parentName}`,
+          };
+        });
+        sqlFilesLoaded = true;
+      } catch {
+        // ignore errors
+      }
+    })();
+    sqlFilesLoadingPromise = loadingPromise;
+    try {
+      await loadingPromise;
+    } finally {
+      if (sqlFilesLoadingPromise === loadingPromise) sqlFilesLoadingPromise = null;
+    }
+    if (generation !== sqlFilesLoadGeneration) await loadExternalSqlFiles();
+  }
+
+  /**
+   * Limited set of external SQL files for the initial (no-query) view.
+   * Shows files from all configured folders, capped to INITIAL_SQL_FILE_LIMIT.
+   */
+  const sqlFileRecentItems = computed<QuickOpenItem[]>(() => {
+    return sqlFileItems.value.slice(0, INITIAL_SQL_FILE_LIMIT);
+  });
 
   const allItems = computed((): QuickOpenItem[] => {
     const items: QuickOpenItem[] = [];
@@ -405,6 +535,17 @@ export function useQuickOpen() {
     remoteItems.value = groups.flat().slice(0, REMOTE_SEARCH_MAX_RESULTS);
   }
 
+  /**
+   * Reload external SQL files when folder paths or folder contents change.
+   * `sqlFileFoldersVersion` is bumped by SqlFilePanel on add/remove/refresh.
+   */
+  watch(sqlFileFoldersVersion, () => {
+    sqlFilesLoadGeneration++;
+    sqlFilesLoaded = false;
+    sqlFileItems.value = [];
+    void loadExternalSqlFiles();
+  });
+
   watch(
     searchQuery,
     (query) => {
@@ -413,6 +554,12 @@ export function useQuickOpen() {
       remoteItems.value = [];
 
       const normalizedQuery = query.trim();
+
+      // Ensure external SQL files are loaded when the user starts searching
+      if (normalizedQuery.length > 0 && !sqlFilesLoaded && !sqlFilesLoadingPromise) {
+        void loadExternalSqlFiles();
+      }
+
       if (normalizedQuery.length < REMOTE_SEARCH_MIN_QUERY_LENGTH) return;
       const contexts = remoteSearchContexts();
       if (contexts.length === 0) return;
@@ -427,7 +574,8 @@ export function useQuickOpen() {
 
   const filteredItems = computed((): MatchedItem[] => {
     if (!searchQuery.value.trim()) {
-      return allItems.value.map((item) => ({
+      // Show all tree items plus a limited set of recent SQL library files and external SQL files
+      return [...allItems.value, ...sqlLibraryRecentItems.value, ...sqlFileRecentItems.value].map((item) => ({
         ...item,
         matchScore: Infinity,
         matchIndices: [],
@@ -437,7 +585,8 @@ export function useQuickOpen() {
     const matched: MatchedItem[] = [];
 
     const seen = new Set<string>();
-    for (const item of [...allItems.value, ...remoteItems.value]) {
+    // When searching, include ALL SQL library files and external SQL files
+    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value]) {
       const key = quickOpenItemKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -469,6 +618,8 @@ export function useQuickOpen() {
         sequence: 8,
         package: 9,
         "package-body": 10,
+        sql_library_file: 11,
+        sql_file: 12,
       };
       return typeOrder[a.type] - typeOrder[b.type];
     });
@@ -513,5 +664,6 @@ export function useQuickOpen() {
     selectPrevious,
     resetSelection,
     setQuery,
+    loadExternalSqlFiles,
   };
 }

@@ -1,0 +1,23 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/rnacos:v0.8.5
+    container_name: dbx-rnacos-0.8
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-8849}:8848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${RNACOS_GRPC_PORT:-9849}:9848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${RNACOS_CONSOLE_PORT:-10849}:10848"
+    volumes:
+      - data:/io
+    environment:
+      RNACOS_INIT_ADMIN_USERNAME: admin
+      RNACOS_INIT_ADMIN_PASSWORD: "${DB_PASSWORD:-123456}"
+      RNACOS_HTTP_PORT: "8848"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8848; printf \"GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; cat <&3 | grep -q success'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+volumes:
+  data:

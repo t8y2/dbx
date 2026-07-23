@@ -60,6 +60,7 @@ import {
 } from "@/lib/editor/queryEditorTableDrop";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
+import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -119,6 +120,9 @@ const props = defineProps<{
 }>();
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
+const COMPLETION_DEBOUNCE_DELAY_MS = 150;
+const COMPLETION_TAB_RETRY_DELAY_MS = 16;
+const COMPLETION_TAB_MAX_WAIT_MS = COMPLETION_DEBOUNCE_DELAY_MS + COMPLETION_REMOTE_LATENCY_BUDGET_MS + 100;
 // Internal rollback switch: flip to false to route completion, diagnostics, and navigation through the legacy SQL context path.
 const SEMANTIC_SQL_COMPLETION_ENABLED = true;
 
@@ -338,6 +342,7 @@ let codeMirrorRedo: typeof import("@codemirror/commands").redo | null = null;
 let codeMirrorSelectAll: typeof import("@codemirror/commands").selectAll | null = null;
 let codeMirrorInsertNewlineKeepIndent: typeof import("@codemirror/commands").insertNewlineKeepIndent | null = null;
 let codeMirrorToggleLineComment: typeof import("@codemirror/commands").toggleLineComment | null = null;
+let pendingCompletionTabTimer: ReturnType<typeof setTimeout> | null = null;
 let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSemanticDiagnostic[]> | null = null;
 let setPreviewRangeEffect:
   | import("@codemirror/state").StateEffectType<{
@@ -527,7 +532,11 @@ function editorIndentUnit(): string {
 }
 
 function handleTab(view: EditorViewType): boolean {
-  if (codeMirrorCompletionStatus?.(view.state) === "active") return false;
+  if (codeMirrorCompletionStatus?.(view.state)) return false;
+  return performNormalTab(view);
+}
+
+function performNormalTab(view: EditorViewType): boolean {
   const { state, dispatch } = view;
   const sel = state.selection.main;
   if (!sel.empty) return codeMirrorIndentMore?.(view) ?? false;
@@ -1337,12 +1346,48 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
 }
 
 function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
-  if (codeMirrorCompletionStatus?.(view.state) && (codeMirrorAcceptCompletion?.(view) ?? false)) {
-    return true;
-  }
-  // Table/column completions can happen inside a CodeMirror snippet field. When
-  // the completion popup is gone, Tab should continue through the snippet fields.
-  return codeMirrorNextSnippetField?.(view) ?? false;
+  const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
+  if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return true;
+  // Snippet fields keep their normal immediate Tab priority when completion
+  // is pending or still inside CodeMirror's interaction delay.
+  if (codeMirrorNextSnippetField?.(view)) return true;
+  if (completionStatus) return waitForCompletionTab(view);
+  return false;
+}
+
+function clearPendingCompletionTab() {
+  if (pendingCompletionTabTimer === null) return;
+  clearTimeout(pendingCompletionTabTimer);
+  pendingCompletionTabTimer = null;
+}
+
+function waitForCompletionTab(view: EditorViewType): boolean {
+  clearPendingCompletionTab();
+  const initialDoc = view.state.doc;
+  const initialSelection = view.state.selection.main;
+  const startedAt = Date.now();
+
+  const retry = () => {
+    pendingCompletionTabTimer = null;
+    const selection = view.state.selection.main;
+    if (view.state.doc !== initialDoc || selection.anchor !== initialSelection.anchor || selection.head !== initialSelection.head) return;
+
+    const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
+    if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return;
+    if (codeMirrorNextSnippetField?.(view)) return;
+    if (completionStatus && Date.now() - startedAt < COMPLETION_TAB_MAX_WAIT_MS) {
+      pendingCompletionTabTimer = setTimeout(retry, COMPLETION_TAB_RETRY_DELAY_MS);
+      return;
+    }
+
+    // A pending completion may resolve without any applicable option. Preserve
+    // snippet navigation first, then fall back to the editor's normal Tab action.
+    if (codeMirrorNextSnippetField?.(view)) return;
+    performNormalTab(view);
+  };
+
+  pendingCompletionTabTimer = setTimeout(retry, COMPLETION_TAB_RETRY_DELAY_MS);
+  return true;
 }
 
 function wordWrapExtension() {
@@ -2513,7 +2558,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         } catch {
           resolve(localResult);
         }
-      }, 150);
+      }, COMPLETION_DEBOUNCE_DELAY_MS);
     });
   } catch {
     return null;
@@ -3636,6 +3681,11 @@ onMounted(async () => {
       buildResultSourceRangeExtension(),
       Prec.highest(
         keymap.of([
+          ...createQueryEditorSearchKeymap({
+            openSearch,
+            openReplace,
+            isReadOnly: () => !!props.readOnly,
+          }),
           { key: "'", run: handleSqlSingleQuote },
           { key: "Tab", run: handleTab },
           {
@@ -4108,6 +4158,7 @@ function pauseQueryEditorBackgroundWork() {
   flushEditorViewport();
   flushEditorSelection();
   clearTableNavigationHover();
+  clearPendingCompletionTab();
   editorIsActive = false;
   clearScheduledSemanticDiagnostics();
   completionEpoch++;
@@ -4260,6 +4311,7 @@ function openSearch(): boolean {
 }
 
 function openReplace(): boolean {
+  if (props.readOnly) return false;
   return searchPanelRef.value?.openReplace() ?? false;
 }
 
@@ -4370,7 +4422,7 @@ defineExpose({
   margin: 0;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   vertical-align: middle;
   white-space: nowrap;
   transition:
@@ -4417,7 +4469,7 @@ defineExpose({
   margin: 0;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: transparent;
   color: transparent;
   vertical-align: middle;

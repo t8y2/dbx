@@ -102,6 +102,23 @@ pub async fn nacos_rollback_config(
 }
 
 #[tauri::command]
+pub async fn nacos_get_rnacos_console_captcha(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::nacos::NacosRNacosConsoleCaptcha, String> {
+    dbx_core::nacos::service::nacos_get_rnacos_console_captcha_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn nacos_login_rnacos_console(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    captcha: Option<String>,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_login_rnacos_console_core(&state, &connection_id, captcha).await
+}
+
+#[tauri::command]
 pub async fn nacos_list_services(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
-    MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+    MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
@@ -37,6 +37,7 @@ const SECRET_KEYS: &[&str] = &[
     MQ_AUTH_CLIENT_SECRET_KEY,
     MQ_TOKEN_SIGNING_KEY,
     NACOS_AUTH_PASSWORD_KEY,
+    NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
 ];
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
@@ -720,16 +721,25 @@ fn push_nacos_external_config_secrets(secrets: &mut Vec<ConnectionSecretSnapshot
     if config.db_type != DatabaseType::Nacos {
         return;
     }
-    let Some(auth) = config
+    if let Some(auth) = config
         .external_config
         .as_ref()
         .and_then(|external_config| external_config.get("auth"))
         .and_then(serde_json::Value::as_object)
-    else {
-        return;
-    };
-    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
-        push_json_secret(secrets, &config.id, NACOS_AUTH_PASSWORD_KEY, auth, "password");
+    {
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            push_json_secret(secrets, &config.id, NACOS_AUTH_PASSWORD_KEY, auth, "password");
+        }
+    }
+    if let Some(auth) = config
+        .external_config
+        .as_ref()
+        .and_then(|external_config| external_config.get("rnacosConsoleAuth"))
+        .and_then(serde_json::Value::as_object)
+    {
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            push_json_secret(secrets, &config.id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, auth, "password");
+        }
     }
 }
 
@@ -760,17 +770,25 @@ fn scrub_nacos_auth_secrets(config: &mut ConnectionConfig) {
     if config.db_type != DatabaseType::Nacos {
         return;
     }
-    let Some(auth) = config
+    if let Some(auth) = config
         .external_config
         .as_mut()
         .and_then(|external_config| external_config.get_mut("auth"))
         .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") && auth.contains_key("password")
     {
-        scrub_json_secret(auth, "password");
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            scrub_json_secret(auth, "password");
+        }
+    }
+    if let Some(auth) = config
+        .external_config
+        .as_mut()
+        .and_then(|external_config| external_config.get_mut("rnacosConsoleAuth"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            scrub_json_secret(auth, "password");
+        }
     }
 }
 

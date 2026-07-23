@@ -461,6 +461,8 @@ async fn main() {
         .route("/nacos/configs/history/list", post(routes::nacos::list_config_history))
         .route("/nacos/configs/history/get", post(routes::nacos::get_config_history))
         .route("/nacos/configs/history/rollback", post(routes::nacos::rollback_config))
+        .route("/nacos/rnacos-console/captcha", post(routes::nacos::get_rnacos_console_captcha))
+        .route("/nacos/rnacos-console/login", post(routes::nacos::login_rnacos_console))
         .route("/nacos/services/list", post(routes::nacos::list_services))
         .route("/nacos/instances/list", post(routes::nacos::list_instances))
         .route("/nacos/instances/update", post(routes::nacos::update_instance))
@@ -476,6 +478,10 @@ async fn main() {
         .route("/document-store/list-databases", post(routes::document_store::list_databases))
         .route("/document-store/list-collections", post(routes::document_store::list_collections))
         .route("/document-store/find-documents", post(routes::document_store::find_documents))
+        .route(
+            "/document-store/elasticsearch-count-documents",
+            post(routes::document_store::elasticsearch_count_documents),
+        )
         .route("/document-store/list-gridfs-buckets", post(routes::document_store::list_gridfs_buckets))
         .route("/document-store/create-gridfs-bucket", post(routes::document_store::create_gridfs_bucket))
         .route("/document-store/delete-gridfs-bucket", post(routes::document_store::delete_gridfs_bucket))
@@ -602,6 +608,10 @@ async fn main() {
         .route(
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
+        )
+        .route(
+            "/app-settings/max-agent-turns",
+            get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
         )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync

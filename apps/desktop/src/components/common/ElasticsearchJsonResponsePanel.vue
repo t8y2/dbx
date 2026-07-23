@@ -111,7 +111,7 @@ onMounted(() => {
       </Button>
     </header>
     <div class="min-h-0 flex-1 overflow-hidden bg-background p-4">
-      <pre v-show="responseView === 'raw' || !parsedBody.valid" class="m-0 h-full overflow-auto bg-transparent p-0 font-mono text-sm leading-6 whitespace-pre-wrap break-words">{{ body }}</pre>
+      <pre v-show="responseView === 'raw' || !parsedBody.valid" class="m-0 h-full overflow-auto bg-transparent p-0 font-mono text-sm leading-6 whitespace-pre">{{ body }}</pre>
       <div v-if="parsedBody.valid" v-show="responseView === 'json'" class="h-full min-h-0">
         <JsonTree ref="jsonTreeRef" :value="parsedBody.value" :highlight-json="highlightJson" :virtualized="true" class="dbx-editor-font-family text-sm leading-6" />
       </div>

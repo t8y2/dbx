@@ -1202,6 +1202,19 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
   if (!res.ok) throw new Error(await res.text());
 }
 
+export async function loadMaxAgentTurns(): Promise<number> {
+  return get("/api/app-settings/max-agent-turns");
+}
+
+export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/max-agent-turns"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ maxAgentTurns }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
 export interface OpenTabsStatePayload {
   tabs: unknown[];
   activeTabId: string | null;

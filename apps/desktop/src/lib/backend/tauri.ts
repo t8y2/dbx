@@ -464,6 +464,14 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
   return invoke("save_mcp_global_policy", { policy });
 }
 
+export async function loadMaxAgentTurns(): Promise<number> {
+  return invoke("load_max_agent_turns");
+}
+
+export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
+  return invoke("save_max_agent_turns", { maxAgentTurns });
+}
+
 export interface OpenTabsStatePayload {
   tabs: unknown[];
   activeTabId: string | null;

@@ -332,6 +332,8 @@ pub async fn ai_agent_stream(
         .get(&body.connection_id)
         .is_some_and(|config| dbx_core::production_safety::is_production_database(config, &body.database));
 
+    let max_agent_turns =
+        state.app.storage.load_max_agent_turns().await.unwrap_or(dbx_core::agent_loop::DEFAULT_MAX_AGENT_TURNS);
     let agent_ctx = AgentLoopContext {
         state: state.app.clone(),
         connection_id: body.connection_id,
@@ -342,6 +344,7 @@ pub async fn ai_agent_stream(
             allow_writes: !production_database && body.allow_write_sql,
             allow_dangerous: !production_database && body.allow_write_sql,
         },
+        max_agent_turns,
     };
 
     let sid = session_id.clone();

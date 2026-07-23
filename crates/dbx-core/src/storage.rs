@@ -1727,6 +1727,26 @@ impl Storage {
         settings.remove("webdav_sync_secrets_passphrase");
         self.save_app_settings_json(&settings).await
     }
+
+    pub async fn save_max_agent_turns(&self, max_agent_turns: u32) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.insert(
+            "max_agent_turns".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(crate::agent_loop::clamp_max_agent_turns(
+                max_agent_turns,
+            ))),
+        );
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_max_agent_turns(&self) -> Result<u32, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings
+            .get("max_agent_turns")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| crate::agent_loop::clamp_max_agent_turns(value.min(u32::MAX as u64) as u32))
+            .unwrap_or(crate::agent_loop::DEFAULT_MAX_AGENT_TURNS))
+    }
 }
 
 // AI Conversations
@@ -4363,6 +4383,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(storage.load_desktop_settings().await.unwrap().duckdb_worker_max_processes, 8);
+    }
+
+    #[tokio::test]
+    async fn max_agent_turns_defaults_and_persists_clamped() {
+        let path = temp_db_path("max-agent-turns");
+        let storage = Storage::open(&path).await.unwrap();
+
+        assert_eq!(storage.load_max_agent_turns().await.unwrap(), crate::agent_loop::DEFAULT_MAX_AGENT_TURNS);
+
+        storage.save_max_agent_turns(100).await.unwrap();
+        assert_eq!(storage.load_max_agent_turns().await.unwrap(), 100);
+
+        // Out-of-range values are clamped on save so raw DB edits cannot disable the safety limit.
+        storage.save_max_agent_turns(0).await.unwrap();
+        assert_eq!(storage.load_max_agent_turns().await.unwrap(), crate::agent_loop::MIN_MAX_AGENT_TURNS);
+        storage.save_max_agent_turns(u32::MAX).await.unwrap();
+        assert_eq!(storage.load_max_agent_turns().await.unwrap(), crate::agent_loop::MAX_MAX_AGENT_TURNS);
     }
 
     #[tokio::test]

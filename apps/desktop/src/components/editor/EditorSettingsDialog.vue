@@ -64,6 +64,8 @@ import {
   forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
   getAppSupportInfo,
+  loadMaxAgentTurns,
+  saveMaxAgentTurns,
   saveWebdavSyncSecretsPreference,
   saveWebdavSavedPassword,
   saveSnippetSavedToken,
@@ -1957,6 +1959,7 @@ watch(activeSettingsTab, async (tab) => {
     // is still loading its first payload (init via App.vue is fire-and-forget).
     await promptTemplateStore.ensureLoaded();
     editGlobalInstructions.value = promptTemplateStore.globalInstructions;
+    void loadMaxAgentTurnsSetting();
   }
   if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
   if (tab === "appearance") {
@@ -2134,6 +2137,45 @@ async function saveGlobalInstructions() {
 
 function globalInstructionsTooLong(): boolean {
   return promptTemplateCharacterCount(editGlobalInstructions.value) > GLOBAL_INSTRUCTIONS_MAX;
+}
+
+// Agent turn limit (global, applies to all AI providers)
+const MAX_AGENT_TURNS_DEFAULT = 30;
+const MAX_AGENT_TURNS_MIN = 5;
+const MAX_AGENT_TURNS_MAX = 500;
+const editMaxAgentTurns = ref<number | undefined>(undefined);
+const maxAgentTurnsSaving = ref(false);
+const maxAgentTurnsLoaded = ref(false);
+
+async function loadMaxAgentTurnsSetting() {
+  if (maxAgentTurnsLoaded.value) return;
+  try {
+    editMaxAgentTurns.value = await loadMaxAgentTurns();
+    maxAgentTurnsLoaded.value = true;
+  } catch {
+    editMaxAgentTurns.value = MAX_AGENT_TURNS_DEFAULT;
+  }
+}
+
+function maxAgentTurnsOutOfRange(): boolean {
+  const v = editMaxAgentTurns.value;
+  return typeof v === "number" && Number.isFinite(v) && (v < MAX_AGENT_TURNS_MIN || v > MAX_AGENT_TURNS_MAX);
+}
+
+async function saveMaxAgentTurnsSetting() {
+  const raw = editMaxAgentTurns.value;
+  const value = typeof raw === "number" && Number.isFinite(raw) ? Math.round(raw) : MAX_AGENT_TURNS_DEFAULT;
+  const clamped = Math.min(MAX_AGENT_TURNS_MAX, Math.max(MAX_AGENT_TURNS_MIN, value));
+  maxAgentTurnsSaving.value = true;
+  try {
+    await saveMaxAgentTurns(clamped);
+    editMaxAgentTurns.value = clamped;
+    toast(t("ai.maxAgentTurnsSaved"));
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
+  } finally {
+    maxAgentTurnsSaving.value = false;
+  }
 }
 
 // AI Config Delete Confirmation
@@ -4745,6 +4787,25 @@ onUnmounted(cleanupPreviewEditor);
                   </span>
                   <Button type="button" size="sm" :disabled="!promptTemplateStore.isLoaded || globalInstructionsTooLong() || globalInstructionsSaving" @click="saveGlobalInstructions">
                     {{ globalInstructionsSaving ? t("common.processing") : t("ai.globalInstructionsSave") }}
+                  </Button>
+                </div>
+              </div>
+
+              <!-- Agent Turn Limit (list mode, global) -->
+              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
+                <Separator />
+                <div>
+                  <h3 class="text-sm font-medium">{{ t("ai.maxAgentTurns") }}</h3>
+                  <p class="text-xs text-muted-foreground">{{ t("ai.maxAgentTurnsDescription") }}</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" />
+                  <span class="text-xs" :class="maxAgentTurnsOutOfRange() ? 'text-destructive' : 'text-muted-foreground'">
+                    {{ t("ai.maxAgentTurnsRange", { min: MAX_AGENT_TURNS_MIN, max: MAX_AGENT_TURNS_MAX, default: MAX_AGENT_TURNS_DEFAULT }) }}
+                  </span>
+                  <div class="flex-1"></div>
+                  <Button type="button" size="sm" :disabled="maxAgentTurnsSaving || maxAgentTurnsOutOfRange()" @click="saveMaxAgentTurnsSetting">
+                    {{ maxAgentTurnsSaving ? t("common.processing") : t("common.save") }}
                   </Button>
                 </div>
               </div>

@@ -603,6 +603,10 @@ async fn main() {
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
+        .route(
+            "/app-settings/max-agent-turns",
+            get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
+        )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync
         .route("/cloud-sync/webdav/test", post(routes::cloud_sync::webdav_sync_test))

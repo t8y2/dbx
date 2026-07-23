@@ -297,9 +297,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
+      - name: Install zig for glibc-2.31 Linux builds
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        run: cargo install cargo-zigbuild --locked
+
       - name: Build Rust CLI binary
         shell: bash
-        run: cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # 用 zig 作为链接器把 glibc 目标压到 2.31，覆盖 Deepin 23 / Debian 12 /
+            # Ubuntu 22.04 等老 glibc 系统；非 Linux 平台走原生的 cargo build。
+            ZIG_GLIBC=2.31 cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+          else
+            cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+          fi
 
       - name: Stage platform package
         shell: bash
@@ -472,9 +487,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
+      - name: Install zig for glibc-2.31 Linux builds
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        run: cargo install cargo-zigbuild --locked
+
       - name: Build Rust MCP binary
         shell: bash
-        run: cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # 用 zig 作为链接器把 glibc 目标压到 2.31，覆盖 Deepin 23 / Debian 12 /
+            # Ubuntu 22.04 等老 glibc 系统；非 Linux 平台走原生的 cargo build。
+            ZIG_GLIBC=2.31 cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}"
+          else
+            cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
+          fi
 
       - name: Stage platform package
         shell: bash

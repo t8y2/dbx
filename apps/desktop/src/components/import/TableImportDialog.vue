@@ -228,6 +228,7 @@ function startImportElapsedClock() {
 
 function resetState() {
   stopImportElapsedClock();
+  closeDataTypePicker();
   importStartedAt = 0;
   liveElapsedMs.value = 0;
   previewRequestId++;
@@ -378,20 +379,58 @@ function applySuggestedColumnDataTypes(currentPreview = preview.value) {
 const activeDataTypeColumn = ref<string | null>(null);
 const dataTypePickerOpen = ref(false);
 const dataTypePickerStyle = ref<Record<string, string>>({});
+const activeDataTypeOptionIndex = ref(-1);
+const dataTypePickerOptions = computed(() => {
+  const options = dataTypeOptions.value;
+  const sourceColumn = activeDataTypeColumn.value;
+  const currentValue = sourceColumn ? columnDataTypes.value[sourceColumn] : "";
+  return currentValue && !options.includes(currentValue) ? [...options, currentValue] : options;
+});
 
-function openDataTypePicker(sourceColumn: string) {
-  const input = document.querySelector<HTMLElement>(`[data-dt-input][data-column="${sourceColumn}"]`);
-  if (input) {
-    const rect = input.getBoundingClientRect();
-    dataTypePickerStyle.value = {
-      position: "fixed",
-      top: `${rect.bottom + 2}px`,
-      left: `${rect.left}px`,
-      width: `${Math.max(rect.width, 200)}px`,
-    };
-  }
+function closeDataTypePicker() {
+  dataTypePickerOpen.value = false;
+  activeDataTypeColumn.value = null;
+  activeDataTypeOptionIndex.value = -1;
+}
+
+function openDataTypePicker(sourceColumn: string, input: HTMLInputElement) {
+  const rect = input.getBoundingClientRect();
+  dataTypePickerStyle.value = {
+    position: "fixed",
+    top: `${rect.bottom + 2}px`,
+    left: `${rect.left}px`,
+    width: `${Math.max(rect.width, 200)}px`,
+  };
   activeDataTypeColumn.value = sourceColumn;
+  activeDataTypeOptionIndex.value = -1;
   dataTypePickerOpen.value = true;
+}
+
+function selectDataTypeOption(value: string) {
+  const sourceColumn = activeDataTypeColumn.value;
+  if (sourceColumn) updateColumnDataType(sourceColumn, value);
+  closeDataTypePicker();
+}
+
+function handleDataTypePickerKeydown(event: KeyboardEvent, sourceColumn: string, input: HTMLInputElement) {
+  if (!dataTypePickerOpen.value && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    openDataTypePicker(sourceColumn, input);
+  }
+  if (!dataTypePickerOpen.value || !activeDataTypeColumn.value) return;
+  const options = dataTypePickerOptions.value;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeDataTypePicker();
+  } else if (event.key === "ArrowDown" && options.length) {
+    event.preventDefault();
+    activeDataTypeOptionIndex.value = (activeDataTypeOptionIndex.value + 1) % options.length;
+  } else if (event.key === "ArrowUp" && options.length) {
+    event.preventDefault();
+    activeDataTypeOptionIndex.value = activeDataTypeOptionIndex.value <= 0 ? options.length - 1 : activeDataTypeOptionIndex.value - 1;
+  } else if (event.key === "Enter" && activeDataTypeOptionIndex.value >= 0) {
+    event.preventDefault();
+    selectDataTypeOption(options[activeDataTypeOptionIndex.value]);
+  }
 }
 
 async function loadDataTypeOptions() {
@@ -937,6 +976,9 @@ watch(
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
 watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
+watch(wizardStep, (step) => {
+  if (step !== "mapping") closeDataTypePicker();
+});
 watch(targetMode, (mode) => {
   if (mode === "existing") {
     columnDataTypes.value = {};
@@ -1253,11 +1295,17 @@ watch(rawProgressPercent, (percent) => {
                   <div v-if="targetMode === 'create'" class="relative">
                     <input
                       data-dt-input
-                      :data-column="sourceColumn"
                       :value="columnDataTypes[sourceColumn] || ''"
                       :placeholder="t('tableImport.targetDataType')"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      :aria-expanded="activeDataTypeColumn === sourceColumn && dataTypePickerOpen"
+                      aria-controls="table-import-data-type-options"
+                      :aria-activedescendant="activeDataTypeColumn === sourceColumn && activeDataTypeOptionIndex >= 0 ? `table-import-data-type-option-${activeDataTypeOptionIndex}` : undefined"
                       class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
-                      @focus="openDataTypePicker(sourceColumn)"
+                      @focus="(event) => openDataTypePicker(sourceColumn, event.currentTarget as HTMLInputElement)"
+                      @blur="closeDataTypePicker"
+                      @keydown="(event) => handleDataTypePickerKeydown(event, sourceColumn, event.currentTarget as HTMLInputElement)"
                       @input="(e) => updateColumnDataType(sourceColumn, (e.target as HTMLInputElement).value)"
                     />
                   </div>
@@ -1405,35 +1453,20 @@ watch(rawProgressPercent, (percent) => {
 
       <!-- 全局数据类型 popover：仅一个实例，替代每列的 SearchableSelect -->
       <Teleport to="body">
-        <div
-          v-if="activeDataTypeColumn && dataTypePickerOpen"
-          :style="dataTypePickerStyle"
-          class="z-[9999] max-h-48 overflow-auto rounded-md border bg-popover p-0.5 shadow-md"
-          @mouseleave="
-            dataTypePickerOpen = false;
-            activeDataTypeColumn = null;
-          "
-        >
+        <div v-if="activeDataTypeColumn && dataTypePickerOpen" id="table-import-data-type-options" role="listbox" :style="dataTypePickerStyle" class="z-[9999] max-h-48 overflow-auto rounded-md border bg-popover p-0.5 shadow-md">
           <button
-            v-for="opt in dataTypeOptions"
+            v-for="(opt, index) in dataTypePickerOptions"
             :key="opt"
+            :id="`table-import-data-type-option-${index}`"
             type="button"
+            role="option"
+            :aria-selected="opt === (activeDataTypeColumn ? columnDataTypes[activeDataTypeColumn] : '')"
             class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground"
-            :class="{ 'bg-accent/50': opt === (activeDataTypeColumn ? columnDataTypes[activeDataTypeColumn] : '') }"
-            @pointerdown.prevent="activeDataTypeColumn && (updateColumnDataType(activeDataTypeColumn, opt), (dataTypePickerOpen = false), (activeDataTypeColumn = null))"
+            :class="{ 'bg-accent/50': index === activeDataTypeOptionIndex || opt === (activeDataTypeColumn ? columnDataTypes[activeDataTypeColumn] : '') }"
+            @pointerenter="activeDataTypeOptionIndex = index"
+            @pointerdown.prevent="selectDataTypeOption(opt)"
           >
             {{ opt }}
-          </button>
-          <button
-            v-if="activeDataTypeColumn && columnDataTypes[activeDataTypeColumn] && !dataTypeOptions.includes(columnDataTypes[activeDataTypeColumn])"
-            type="button"
-            class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono italic text-primary hover:bg-accent hover:text-accent-foreground"
-            @pointerdown.prevent="
-              dataTypePickerOpen = false;
-              activeDataTypeColumn = null;
-            "
-          >
-            {{ columnDataTypes[activeDataTypeColumn] }}
           </button>
         </div>
       </Teleport>

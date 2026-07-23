@@ -2628,9 +2628,8 @@ function backToDatabasePicker() {
 
 function handleDialogOpenAutoFocus(event: Event) {
   event.preventDefault();
-  if (event.currentTarget instanceof HTMLElement) {
-    event.currentTarget.focus({ preventScroll: true });
-  }
+  if (!(event.currentTarget instanceof HTMLElement)) return;
+  event.currentTarget.querySelector<HTMLElement>("[data-connection-dialog-title]")?.focus({ preventScroll: true });
 }
 
 function handleDialogEscape(event: KeyboardEvent) {
@@ -4354,9 +4353,9 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" tabindex="-1" @interact-outside.prevent @open-auto-focus="handleDialogOpenAutoFocus" @escape-key-down="handleDialogEscape">
+    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @open-auto-focus="handleDialogOpenAutoFocus" @escape-key-down="handleDialogEscape">
       <DialogHeader>
-        <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
+        <DialogTitle data-connection-dialog-title tabindex="-1">{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
 
       <template v-if="dialogStep === 'select'">
@@ -4401,7 +4400,7 @@ function openExternalUrl(url: string) {
           </div>
 
           <div class="min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-4">
-            <nav class="flex shrink-0 gap-1 overflow-x-auto border-b pb-2 sm:w-40 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:pb-0 sm:pr-3" :aria-label="t('connection.databaseCategories')">
+            <nav data-connection-category-nav class="flex shrink-0 gap-1 overflow-x-auto border-b px-0.5 pt-0.5 pb-2.5 sm:w-40 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:py-0.5 sm:pr-3.5" :aria-label="t('connection.databaseCategories')">
               <button
                 v-for="category in dbCategories"
                 :key="category.key"

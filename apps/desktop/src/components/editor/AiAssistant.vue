@@ -1658,6 +1658,7 @@ function clearMessages() {
   conversationId.value = "";
   historyIndex.value = -1;
   draftBeforeHistory.value = "";
+  messageRenderer.value.clear();
 }
 
 async function persistConversation() {
@@ -1688,6 +1689,8 @@ async function setConversationListOpen(open: boolean) {
 
 function selectConversation(conv: AiConversation) {
   conversationId.value = conv.id;
+  // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
+  messageRenderer.value.clear();
   messages.value = conv.messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
@@ -2021,15 +2024,16 @@ async function openExternalUrl(url: string) {
                       <component :is="seg.isSql ? Database : Terminal" class="h-3 w-3 mr-1.5" />
                       <span>{{ seg.lang }}</span>
                       <span class="flex-1" />
-                      <Loader2 v-if="seg.pending" class="h-3 w-3 animate-spin text-zinc-400" />
-                      <div v-else class="flex items-center gap-1.5">
-                        <button v-if="seg.isSql && !isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
+                      <!-- `pending` means the closing fence is still missing, so the code is truncated: never offer to run or apply it. -->
+                      <Loader2 v-if="seg.pending && isGenerating" class="h-3 w-3 animate-spin text-zinc-400" />
+                      <div class="flex items-center gap-1.5">
+                        <button v-if="!seg.pending && seg.isSql && !isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
                           <FlaskConical class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="seg.isSql || isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
+                        <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
                           <Play class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="seg.isSql || isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
+                        <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
                           <Replace class="h-3.5 w-3.5" />
                         </button>
                         <button

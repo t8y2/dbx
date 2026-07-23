@@ -17,6 +17,10 @@ use crate::token_usage::TokenUsage;
 /// Default number of agent loop turns to prevent infinite loops.
 /// Users can raise the limit in Settings → AI; it is clamped to
 /// [`MIN_MAX_AGENT_TURNS`, `MAX_MAX_AGENT_TURNS`] so it can never be unlimited.
+///
+/// These values are mirrored in apps/desktop/src/components/editor/EditorSettingsDialog.vue
+/// (MAX_AGENT_TURNS_DEFAULT/MIN/MAX) for client-side input validation — this module's
+/// `clamp_max_agent_turns` remains the actual source of truth, applied on every save/load.
 pub const DEFAULT_MAX_AGENT_TURNS: u32 = 30;
 pub const MIN_MAX_AGENT_TURNS: u32 = 5;
 pub const MAX_MAX_AGENT_TURNS: u32 = 500;

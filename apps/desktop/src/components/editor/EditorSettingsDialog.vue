@@ -2139,7 +2139,9 @@ function globalInstructionsTooLong(): boolean {
   return promptTemplateCharacterCount(editGlobalInstructions.value) > GLOBAL_INSTRUCTIONS_MAX;
 }
 
-// Agent turn limit (global, applies to all AI providers)
+// Agent turn limit (global, applies to all AI providers).
+// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/agent_loop.rs —
+// keep in sync; the backend clamp on save/load is the actual source of truth.
 const MAX_AGENT_TURNS_DEFAULT = 30;
 const MAX_AGENT_TURNS_MIN = 5;
 const MAX_AGENT_TURNS_MAX = 500;
@@ -2159,7 +2161,7 @@ async function loadMaxAgentTurnsSetting() {
 
 function maxAgentTurnsOutOfRange(): boolean {
   const v = editMaxAgentTurns.value;
-  return typeof v === "number" && Number.isFinite(v) && (v < MAX_AGENT_TURNS_MIN || v > MAX_AGENT_TURNS_MAX);
+  return typeof v === "number" && (v < MAX_AGENT_TURNS_MIN || v > MAX_AGENT_TURNS_MAX);
 }
 
 async function saveMaxAgentTurnsSetting() {

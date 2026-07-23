@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
+
+const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
 describe("maxAgentTurnsOutOfRange", () => {
   it("accepts values within [min, max]", () => {
@@ -13,7 +16,7 @@ describe("maxAgentTurnsOutOfRange", () => {
     expect(maxAgentTurnsOutOfRange(MAX_AGENT_TURNS_MAX + 1)).toBe(true);
   });
 
-  it("treats an empty input (undefined) as in range so the save button isn't force-disabled", () => {
+  it("leaves loading state to the dialog instead of treating it as a range error", () => {
     expect(maxAgentTurnsOutOfRange(undefined)).toBe(false);
   });
 
@@ -21,6 +24,24 @@ describe("maxAgentTurnsOutOfRange", () => {
     // A user can type "1e400" into <input type="number">, which the browser accepts
     // and Number() parses to Infinity. The check must not short-circuit on it.
     expect(maxAgentTurnsOutOfRange(Number.POSITIVE_INFINITY)).toBe(true);
+  });
+});
+
+describe("agent turn limit loading", () => {
+  it("starts loading independently and blocks saves until the persisted value arrives", () => {
+    const aiTabStart = settingsDialogSource.indexOf('if (tab === "ai") {');
+    const aiTabBranch = settingsDialogSource.slice(aiTabStart, settingsDialogSource.indexOf('if (tab === "about"', aiTabStart));
+    expect(aiTabBranch.indexOf("void loadMaxAgentTurnsSetting()")).toBeLessThan(aiTabBranch.indexOf("await promptTemplateStore.ensureLoaded()"));
+    expect(settingsDialogSource).toContain("if (!maxAgentTurnsLoaded.value) return;");
+    expect(settingsDialogSource).toContain(':disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving"');
+    expect(settingsDialogSource).toContain(':disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)"');
+  });
+
+  it("keeps failed loads retryable instead of replacing them with the default", () => {
+    const loadFunction = settingsDialogSource.slice(settingsDialogSource.indexOf("async function loadMaxAgentTurnsSetting()"), settingsDialogSource.indexOf("async function saveMaxAgentTurnsSetting()"));
+    expect(loadFunction).toContain("maxAgentTurnsLoadError.value = e?.message || String(e)");
+    expect(loadFunction).not.toContain("editMaxAgentTurns.value = MAX_AGENT_TURNS_DEFAULT");
+    expect(settingsDialogSource).toContain('v-if="maxAgentTurnsLoadError"');
   });
 });
 

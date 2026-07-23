@@ -1956,11 +1956,11 @@ watch(activeSettingsTab, async (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "ai") {
+    void loadMaxAgentTurnsSetting();
     // Await completion so we don't snapshot an empty default when the store
     // is still loading its first payload (init via App.vue is fire-and-forget).
     await promptTemplateStore.ensureLoaded();
     editGlobalInstructions.value = promptTemplateStore.globalInstructions;
-    void loadMaxAgentTurnsSetting();
   }
   if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
   if (tab === "appearance") {
@@ -2140,24 +2140,32 @@ function globalInstructionsTooLong(): boolean {
   return promptTemplateCharacterCount(editGlobalInstructions.value) > GLOBAL_INSTRUCTIONS_MAX;
 }
 
-// Agent turn limit (global, applies to all AI providers).
+// Agent turn limit for DBX's API-backed agent loop. CLI providers enforce their own limits.
 // Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/agent_loop.rs —
 // keep in sync; the backend clamp on save/load is the actual source of truth.
 const editMaxAgentTurns = ref<number | undefined>(undefined);
 const maxAgentTurnsSaving = ref(false);
 const maxAgentTurnsLoaded = ref(false);
+const maxAgentTurnsLoading = ref(false);
+const maxAgentTurnsLoadError = ref("");
 
 async function loadMaxAgentTurnsSetting() {
-  if (maxAgentTurnsLoaded.value) return;
+  if (maxAgentTurnsLoaded.value || maxAgentTurnsLoading.value) return;
+  maxAgentTurnsLoading.value = true;
+  maxAgentTurnsLoadError.value = "";
   try {
     editMaxAgentTurns.value = await loadMaxAgentTurns();
     maxAgentTurnsLoaded.value = true;
-  } catch {
-    editMaxAgentTurns.value = MAX_AGENT_TURNS_DEFAULT;
+  } catch (e: any) {
+    maxAgentTurnsLoadError.value = e?.message || String(e);
+    toast(maxAgentTurnsLoadError.value, 5000);
+  } finally {
+    maxAgentTurnsLoading.value = false;
   }
 }
 
 async function saveMaxAgentTurnsSetting() {
+  if (!maxAgentTurnsLoaded.value) return;
   const clamped = normalizeMaxAgentTurns(editMaxAgentTurns.value);
   maxAgentTurnsSaving.value = true;
   try {
@@ -4792,12 +4800,15 @@ onUnmounted(cleanupPreviewEditor);
                   <p class="text-xs text-muted-foreground">{{ t("ai.maxAgentTurnsDescription") }}</p>
                 </div>
                 <div class="flex items-center gap-2">
-                  <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" />
+                  <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving" />
                   <span class="text-xs" :class="maxAgentTurnsOutOfRange(editMaxAgentTurns) ? 'text-destructive' : 'text-muted-foreground'">
                     {{ t("ai.maxAgentTurnsRange", { min: MAX_AGENT_TURNS_MIN, max: MAX_AGENT_TURNS_MAX, default: MAX_AGENT_TURNS_DEFAULT }) }}
                   </span>
                   <div class="flex-1"></div>
-                  <Button type="button" size="sm" :disabled="maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)" @click="saveMaxAgentTurnsSetting">
+                  <Button v-if="maxAgentTurnsLoadError" type="button" size="sm" variant="outline" :disabled="maxAgentTurnsLoading" @click="loadMaxAgentTurnsSetting">
+                    {{ t("common.retry") }}
+                  </Button>
+                  <Button type="button" size="sm" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving || maxAgentTurnsOutOfRange(editMaxAgentTurns)" @click="saveMaxAgentTurnsSetting">
                     {{ maxAgentTurnsSaving ? t("common.processing") : t("common.save") }}
                   </Button>
                 </div>

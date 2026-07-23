@@ -1494,7 +1494,7 @@ export default withEnglishFallback({
     globalInstructionsTooLong: "Istruzioni globali troppo lunghe (massimo {max} caratteri)",
     customInstructionsLoadFailed: "Impossibile caricare le istruzioni AI personalizzate. Riprova.",
     maxAgentTurns: "Limite di turni dell'agente",
-    maxAgentTurnsDescription: "Numero massimo di turni di chiamate agli strumenti per esecuzione dell'agente prima di mettere in pausa e chiedere di continuare. Si applica a tutti i provider IA.",
+    maxAgentTurnsDescription: "Numero massimo di turni di chiamate agli strumenti per esecuzione dell'agente API prima di mettere in pausa e chiedere di continuare. I provider CLI usano limiti propri.",
     maxAgentTurnsRange: "{min}–{max}, predefinito {default}",
     maxAgentTurnsSaved: "Limite di turni dell'agente salvato",
     promptTemplates: "Modelli di prompt per scenario",

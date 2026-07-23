@@ -1655,7 +1655,7 @@ export default withEnglishFallback({
     globalInstructionsTooLong: "全局指令过长（最多 {max} 字符）",
     customInstructionsLoadFailed: "自定义 AI 规范加载失败，请稍后重试。",
     maxAgentTurns: "Agent 回合上限",
-    maxAgentTurnsDescription: "单次 Agent 运行的最大工具调用回合数，超过后会暂停并提示继续。对所有 AI 供应商生效。",
+    maxAgentTurnsDescription: "单次 API Agent 运行的最大工具调用回合数，超过后会暂停并提示继续。CLI 供应商使用各自的运行限制。",
     maxAgentTurnsRange: "{min}–{max}，默认 {default}",
     maxAgentTurnsSaved: "Agent 回合上限已保存",
     promptTemplates: "场景 Prompt 模板",

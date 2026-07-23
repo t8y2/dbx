@@ -1533,7 +1533,7 @@ export default withEnglishFallback({
     globalInstructionsTooLong: "グローバル指示が長すぎます（最大{max}文字）",
     customInstructionsLoadFailed: "カスタムAI指示の読み込みに失敗しました。もう一度お試しください。",
     maxAgentTurns: "エージェントターン上限",
-    maxAgentTurnsDescription: "1回のエージェント実行あたりの最大ツール呼び出しターン数。超過すると一時停止し、続行を求めます。すべてのAIプロバイダーに適用されます。",
+    maxAgentTurnsDescription: "1回のAPIエージェント実行あたりの最大ツール呼び出しターン数。超過すると一時停止し、続行を求めます。CLIプロバイダーは独自の実行制限を使用します。",
     maxAgentTurnsRange: "{min}–{max}、デフォルト {default}",
     maxAgentTurnsSaved: "エージェントターン上限を保存しました",
     promptTemplates: "シナリオプロンプトテンプレート",

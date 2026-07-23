@@ -1655,7 +1655,7 @@ export default {
     globalInstructionsTooLong: "Global instructions too long (max {max} characters)",
     customInstructionsLoadFailed: "Failed to load custom AI instructions. Please try again.",
     maxAgentTurns: "Agent Turn Limit",
-    maxAgentTurnsDescription: "Maximum tool-call turns per agent run before it pauses and asks you to continue. Applies to all AI providers.",
+    maxAgentTurnsDescription: "Maximum tool-call turns per API agent run before it pauses and asks you to continue. CLI providers use their own run limits.",
     maxAgentTurnsRange: "{min}–{max}, default {default}",
     maxAgentTurnsSaved: "Agent turn limit saved",
     promptTemplates: "Scenario Prompt Templates",

@@ -4355,7 +4355,7 @@ function openExternalUrl(url: string) {
                   <List class="h-3.5 w-3.5" />
                 </Button>
               </div>
-              <div class="relative w-full sm:w-64">
+              <div class="relative w-full overflow-visible sm:w-64">
                 <Search class="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input v-model="dbSearchQuery" class="h-9 pl-8" :placeholder="t('connection.searchDatabasePlaceholder')" />
               </div>

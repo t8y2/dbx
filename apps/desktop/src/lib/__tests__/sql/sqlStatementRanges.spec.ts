@@ -71,6 +71,15 @@ BEGIN
    SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
 END;`;
 
+const gaussDbNestedProcedure = `CREATE OR REPLACE PROCEDURE public.dbx_issue_4318()
+AS
+BEGIN
+  BEGIN
+    NULL;
+  END;
+  NULL;
+END;`;
+
 const mysqlRoutineFixture = `CREATE PROCEDURE p()
 BEGIN
   SELECT 1;
@@ -208,6 +217,10 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
+  });
+
+  it("keeps nested GaussDB procedure blocks together", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(gaussDbNestedProcedure, "gaussdb"))).toEqual([gaussDbNestedProcedure]);
   });
 
   it("keeps SAP HANA DO blocks together", () => {
@@ -718,6 +731,11 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
     for (const cursor of [indexOf(oracleIssue2405PlSql, "PRE_TRD_DATE"), indexOf(oracleIssue2405PlSql, "SELECT 1 + 2"), indexOf(oracleIssue2405PlSql, "END;")]) {
       expect(statementRangeAtCursor(oracleIssue2405PlSql, cursor, "oracle")?.sql.trim()).toBe(oracleIssue2405PlSql);
     }
+  });
+
+  it("returns the full GaussDB procedure for cursors after a nested block", () => {
+    const outerNull = indexOf(gaussDbNestedProcedure, "NULL;", 2);
+    expect(statementRangeAtCursor(gaussDbNestedProcedure, outerNull, "gaussdb")?.sql.trim()).toBe(gaussDbNestedProcedure);
   });
 
   it("returns the full SAP HANA DO block for cursors inside nested statements", () => {

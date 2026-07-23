@@ -2194,6 +2194,24 @@ const aiTestResult = ref<"" | "success" | "error">("");
 const aiTestError = ref("");
 const aiTestLatency = ref<number | null>(null);
 const aiTestErrorCopied = ref(false);
+const aiTestErrorCategoryKeys: Record<string, string> = {
+  auth: "ai.testErrorAuth",
+  modelNotFound: "ai.testErrorModelNotFound",
+  rateLimit: "ai.testErrorRateLimit",
+  timeout: "ai.testErrorTimeout",
+  tokenLimit: "ai.testErrorTokenLimit",
+  safety: "ai.testErrorSafety",
+  emptyResponse: "ai.testErrorEmptyResponse",
+  network: "ai.testErrorNetwork",
+  unknown: "ai.testErrorUnknown",
+};
+const aiTestErrorPresentation = computed(() => {
+  const match = aiTestError.value.match(/^\[([^\]]+)]\s*(.*)$/s);
+  if (!match) return { summary: "", detail: aiTestError.value };
+  const key = aiTestErrorCategoryKeys[match[1]];
+  return key ? { summary: t(key), detail: match[2] } : { summary: "", detail: aiTestError.value };
+});
+const aiTestErrorDisplay = computed(() => [aiTestErrorPresentation.value.summary, aiTestErrorPresentation.value.detail].filter(Boolean).join(" "));
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
@@ -5559,7 +5577,7 @@ onUnmounted(cleanupPreviewEditor);
               <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
             </template>
             <template v-else>
-              <div class="flex flex-1 items-center gap-2">
+              <div class="flex min-w-0 flex-1 items-center gap-2">
                 <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim()) || (!aiIsCliProvider && !aiEditModel?.trim())" @click="aiTestConn">
                   <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
                   {{ t("connection.test") }}
@@ -5568,8 +5586,11 @@ onUnmounted(cleanupPreviewEditor);
                   <span>{{ t("connection.testSuccess") }}</span>
                   <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
                 </span>
-                <span v-else-if="aiTestResult === 'error'" class="min-w-0 max-w-[360px] flex items-center gap-1.5 text-xs text-destructive">
-                  <span class="select-text truncate" :title="aiTestError">{{ aiTestError }}</span>
+                <span v-else-if="aiTestResult === 'error'" class="flex min-w-0 max-w-lg items-center gap-1.5 text-xs text-destructive">
+                  <span class="min-w-0 select-text leading-4" :title="aiTestErrorDisplay">
+                    <span v-if="aiTestErrorPresentation.summary" class="block font-medium">{{ aiTestErrorPresentation.summary }}</span>
+                    <span class="block truncate text-destructive/80">{{ aiTestErrorPresentation.detail }}</span>
+                  </span>
                   <Button
                     type="button"
                     variant="ghost"

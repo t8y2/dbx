@@ -3479,7 +3479,7 @@ onUnmounted(cleanupPreviewEditor);
                     "
                   >
                     <SelectTrigger class="h-8 w-full">
-                      <SelectValue />
+                      <SelectValue>{{ Math.round(editUiScale * 100) }}%</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem v-for="scale in uiScaleOptions" :key="scale" :value="String(scale)" class="pl-2.5"> {{ Math.round(scale * 100) }}% </SelectItem>

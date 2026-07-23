@@ -58,6 +58,7 @@ import {
   type QueryEditorTableReferenceDropDetail,
   type QueryEditorTableReferencePayload,
 } from "@/lib/editor/queryEditorTableDrop";
+import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
@@ -92,7 +93,7 @@ import { sqlReferenceAnalysisDialectFor } from "@/lib/sql/semantic/dialect";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionReferencedTable, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import type { CompletionAssistantObjectKind, DatabaseType, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
+import type { CompletionAssistantObjectKind, ColumnInfo, DatabaseType, IndexInfo, SqlReferenceAnalysis, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 const props = defineProps<{
   modelValue: string;
@@ -143,6 +144,8 @@ const emit = defineEmits<{
 
 const editorRef = ref<HTMLDivElement>();
 const view = shallowRef<EditorViewType | null>(null);
+const contextMenuOpen = ref(false);
+let contextMenuPointerCleanup: (() => void) | null = null;
 let viewportEmitFrame: number | null = null;
 let viewportRestoreFrame: number | null = null;
 let latestViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
@@ -295,6 +298,7 @@ interface EditorGestureEvent extends Event {
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let codeMirrorPrec: typeof import("@codemirror/state").Prec | null = null;
 let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelection | null = null;
+let hoverCloseEffect: import("@codemirror/state").StateEffect<unknown> | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
@@ -394,6 +398,65 @@ const cachedColumnsByTable = new Map<string, SqlCompletionColumn[]>();
 const cachedInsertValueHintColumnsByTable = new Map<string, string[]>();
 const cachedForeignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
 const loadedColumnsByTable = new Set<string>();
+
+// Hover tooltip cache keyed by "connectionId:database:schema.table"
+const hoverColumnCache = new Map<string, ColumnInfo[]>();
+const hoverIndexCache = new Map<string, IndexInfo[]>();
+const HOVER_CACHE_MAX = 200;
+let hoverSqlHighlighter: SqlHighlighter | null = null;
+
+function hoverCacheEvict<K>(cache: Map<string, K>) {
+  if (cache.size <= HOVER_CACHE_MAX) return;
+  const excess = cache.size - HOVER_CACHE_MAX;
+  let i = 0;
+  for (const key of cache.keys()) {
+    if (i++ >= excess) break;
+    cache.delete(key);
+  }
+}
+
+function formatColumnType(c: ColumnInfo): string {
+  const baseType = c.data_type.replace(/\([^()]*\)$/, "").trim();
+  if (c.character_maximum_length != null && c.numeric_scale == null) return `${baseType}(${c.character_maximum_length})`;
+  if (c.numeric_scale != null && c.numeric_precision != null) return `${baseType}(${c.numeric_precision},${c.numeric_scale})`;
+  return baseType;
+}
+
+function buildHoverTableSql(tableName: string, columns: ColumnInfo[], indexes: IndexInfo[]): string {
+  const lines: string[] = [`create table ${tableName} (`];
+  const nameWidth = Math.max(...columns.map((c) => c.name.length), 4);
+  const typeWidth = Math.max(
+    ...columns.map((c) => {
+      const t = formatColumnType(c);
+      return t.length;
+    }),
+    4,
+  );
+  for (const c of columns) {
+    const type = formatColumnType(c);
+    const namePad = " ".repeat(nameWidth - c.name.length);
+    const typePad = " ".repeat(typeWidth - type.length);
+    const def = `  ${c.name}${namePad}  ${type}${typePad}`;
+    const extras: string[] = [];
+    if (!c.is_nullable) extras.push("not null");
+    if (c.column_default != null) extras.push(`default ${c.column_default}`);
+    if (c.is_primary_key) extras.push("primary key");
+    if (c.extra) extras.push(c.extra);
+    if (c.comment) extras.push(`comment '${c.comment.replace(/'/g, "''")}'`);
+    lines.push(extras.length > 0 ? `${def}  ${extras.join("  ")},` : `${def},`);
+  }
+  lines.push(");");
+  const nonPrimaryIndexes = indexes.filter((idx) => !idx.is_primary);
+  if (nonPrimaryIndexes.length > 0) {
+    lines.push("");
+    for (const idx of nonPrimaryIndexes) {
+      const uniqueKeyword = idx.is_unique ? "unique " : "";
+      lines.push(`create ${uniqueKeyword}index ${idx.name}`);
+      lines.push(`  on ${tableName} (${idx.columns.join(", ")});`);
+    }
+  }
+  return lines.join("\n");
+}
 
 function usesOracleSessionCompletionColumns(schema?: string | null): boolean {
   return shouldUseOracleSessionCompletionColumns({
@@ -1622,7 +1685,7 @@ async function ensureForeignKeysForTables(tables: Array<{ name: string; database
   }
 }
 
-function createHoverDom(title: string, detail: string, rows: string[] = []) {
+function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = []) {
   const dom = document.createElement("div");
   dom.className = "rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md";
 
@@ -1635,6 +1698,24 @@ function createHoverDom(title: string, detail: string, rows: string[] = []) {
   detailNode.className = "mt-1 text-muted-foreground";
   detailNode.textContent = detail;
   dom.appendChild(detailNode);
+
+  if (sqlContent) {
+    const separator = document.createElement("div");
+    separator.className = "mt-2 border-t border-border/60";
+    dom.appendChild(separator);
+
+    const sqlContainer = document.createElement("div");
+    sqlContainer.className = "mt-1.5 max-h-64 overflow-y-auto text-[11px] leading-5 whitespace-pre font-mono";
+
+    if (hoverSqlHighlighter) {
+      sqlContainer.innerHTML = hoverSqlHighlighter(sqlContent, isDark.value ? "dark" : "light");
+    } else {
+      sqlContainer.className += " text-muted-foreground";
+      sqlContainer.textContent = sqlContent;
+    }
+
+    dom.appendChild(sqlContainer);
+  }
 
   for (const row of rows) {
     const rowNode = document.createElement("div");
@@ -1682,7 +1763,7 @@ function createSignatureDom(signature: ReturnType<typeof getSqlFunctionSignature
 }
 
 async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) {
-  if (!props.connectionId || props.database == null) return null;
+  if (!props.connectionId || props.database == null || contextMenuOpen.value) return null;
 
   const sql = currentView.state.doc.toString();
   const range = identifierRangeAt(sql, pos);
@@ -1704,24 +1785,50 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   const qualifiedTableLookup = semanticTarget?.schema ? `${semanticTarget.schema}.${semanticTarget.name}` : identifier;
 
   try {
+    // Use a local variable for hover-specific table lookups to avoid
+    // polluting the shared `cachedTables` used by the completion feature.
+    let hoverTables: SqlCompletionTable[] = [];
     if (cachedTables.length === 0) {
-      cachedTables = usesLocalOnlyCompletionMetadata()
+      hoverTables = usesLocalOnlyCompletionMetadata()
         ? connectionStore.lookupLocalCompletionTables(props.connectionId, props.database, tableLookupName, MAX_COMPLETION_TABLES, props.schema)
         : await connectionStore.listCompletionTables(props.connectionId, props.database, tableLookupName, MAX_COMPLETION_TABLES, props.schema, false, props.schema);
+    } else {
+      hoverTables = cachedTables;
     }
 
-    let table = matchTable(qualifiedTableLookup, cachedTables) ?? matchTable(tableLookupName, cachedTables) ?? matchTable(identifier, cachedTables) ?? matchTable(name, cachedTables);
+    let table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     if (!table && !usesLocalOnlyCompletionMetadata()) {
-      const hoverTables = await connectionStore.listCompletionTables(props.connectionId, props.database, tableLookupName, MAX_COMPLETION_TABLES, semanticTarget?.schema ?? props.schema, false, props.schema);
-      cachedTables = mergeCompletionTables(cachedTables, hoverTables);
+      const remoteHoverTables = await connectionStore.listCompletionTables(props.connectionId, props.database, tableLookupName, MAX_COMPLETION_TABLES, semanticTarget?.schema ?? props.schema, false, props.schema);
+      hoverTables = mergeCompletionTables(hoverTables, remoteHoverTables);
       table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     }
     if (table && !semanticQualifierIsRowSource && (!qualifier || table.schema?.toLowerCase() === qualifier.toLowerCase() || table.name === name)) {
+      const hoverSchema = table.schema ?? props.schema;
+      const hoverCacheKey = `${props.connectionId}:${props.database}:${hoverSchema ? `${hoverSchema}.${table.name}` : table.name}`;
+      let fullColumns: ColumnInfo[] = [];
+      let fullIndexes: IndexInfo[] = [];
+      if (!hoverColumnCache.has(hoverCacheKey)) {
+        try {
+          const [cols, idxs] = await Promise.all([api.getColumns(props.connectionId, props.database, hoverSchema ?? "", table.name, undefined, props.clientSessionId), api.listIndexes(props.connectionId, props.database, hoverSchema ?? "", table.name, undefined)]);
+          fullColumns = cols;
+          fullIndexes = idxs;
+          hoverColumnCache.set(hoverCacheKey, fullColumns);
+          hoverIndexCache.set(hoverCacheKey, fullIndexes);
+          hoverCacheEvict(hoverColumnCache);
+          hoverCacheEvict(hoverIndexCache);
+        } catch {
+          // Fall back to simple hover if metadata fetch fails
+        }
+      } else {
+        fullColumns = hoverColumnCache.get(hoverCacheKey)!;
+        fullIndexes = hoverIndexCache.get(hoverCacheKey) ?? [];
+      }
+      const sqlContent = fullColumns.length > 0 ? buildHoverTableSql(table.name, fullColumns, fullIndexes) : undefined;
       return {
         pos: range.from,
         end: range.to,
         create: () => ({
-          dom: createHoverDom(table.name, sqlObjectHoverDetail(table)),
+          dom: createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent),
         }),
       };
     }
@@ -1747,7 +1854,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
         pos: range.from,
         end: range.to,
         create: () => ({
-          dom: createHoverDom(column.name, column.dataType || "column", [column.schema ? `${column.schema}.${column.table}` : column.table, ...(column.comment?.trim() ? [column.comment.trim()] : [])]),
+          dom: createHoverDom(column.name, column.dataType || "column", undefined, [column.schema ? `${column.schema}.${column.table}` : column.table, ...(column.comment?.trim() ? [column.comment.trim()] : [])]),
         }),
       };
     }
@@ -3145,8 +3252,46 @@ function refreshCompletionCache() {
 onMounted(async () => {
   if (!editorRef.value) return;
 
+  // Reset context menu flag on any left-click (closes the menu)
+  const onGlobalPointerDown = (e: PointerEvent) => {
+    if (contextMenuOpen.value && e.button === 0) {
+      contextMenuOpen.value = false;
+    }
+  };
+  const onGlobalKeydown = (e: KeyboardEvent) => {
+    if (contextMenuOpen.value && e.key === "Escape") {
+      contextMenuOpen.value = false;
+    }
+  };
+  const onEditorScroll = () => {
+    if (contextMenuOpen.value) {
+      contextMenuOpen.value = false;
+    }
+  };
+  document.addEventListener("pointerdown", onGlobalPointerDown);
+  document.addEventListener("keydown", onGlobalKeydown);
+  view.value?.scrollDOM.addEventListener("scroll", onEditorScroll);
+  contextMenuPointerCleanup = () => {
+    document.removeEventListener("pointerdown", onGlobalPointerDown);
+    document.removeEventListener("keydown", onGlobalKeydown);
+    view.value?.scrollDOM.removeEventListener("scroll", onEditorScroll);
+    contextMenuPointerCleanup = null;
+  };
+
+  // Pre-load SQL highlighter for hover tooltips (non-blocking)
+  void (async () => {
+    try {
+      const { createShikiSqlHighlighter } = await import("@/lib/sql/sqlHighlighter");
+      hoverSqlHighlighter = await createShikiSqlHighlighter({
+        appearance: () => (isDark.value ? "dark" : "light"),
+      });
+    } catch {
+      // Highlighter unavailable; hover falls back to plain text
+    }
+  })();
+
   const [
-    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
+    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, closeHoverTooltips, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
     { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
@@ -3159,6 +3304,7 @@ onMounted(async () => {
     keymap,
     rectangularSelection,
   } as typeof import("@codemirror/view");
+  hoverCloseEffect = closeHoverTooltips;
   codeMirrorPrec = Prec;
   codeMirrorEditorSelection = EditorSelection;
   codeMirrorSnippetCompletion = snippetCompletion;
@@ -4142,6 +4288,7 @@ onBeforeUnmount(() => {
   view.value?.scrollDOM.removeEventListener("scroll", scheduleEditorViewportEmit);
   window.removeEventListener("keyup", clearTableNavigationHoverOnModifierRelease);
   window.removeEventListener("blur", clearTableNavigationHover);
+  contextMenuPointerCleanup?.();
   zoomCommitScheduler.dispose();
   view.value?.destroy();
 });
@@ -4271,6 +4418,11 @@ function scrollCursorIntoView() {
   });
 }
 
+function closeHoverOnContextMenu() {
+  if (!view.value || !hoverCloseEffect) return;
+  view.value.dispatch({ effects: hoverCloseEffect });
+}
+
 defineExpose({
   openSearch,
   openReplace,
@@ -4291,7 +4443,11 @@ defineExpose({
         class="h-full w-full overflow-hidden"
         @contextmenu="
           (e: MouseEvent) => {
-            if (view) syncContextMenuStateAtEvent(view, e);
+            if (view) {
+              syncContextMenuStateAtEvent(view, e);
+              closeHoverOnContextMenu();
+            }
+            contextMenuOpen = true;
             onContextMenu(e);
           }
         "

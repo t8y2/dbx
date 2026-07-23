@@ -29,6 +29,8 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 const DESKTOP_TRAY_ID: &str = "main-tray";
 const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
+#[cfg(target_os = "windows")]
+const WEBVIEW2_NO_SANDBOX_ENV: &str = "DBX_WEBVIEW2_NO_SANDBOX";
 #[cfg(target_os = "macos")]
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
 #[cfg(target_os = "macos")]
@@ -117,6 +119,25 @@ fn uses_application_level_icon(target_os: &str) -> bool {
 fn should_show_main_window_after_setup() -> bool {
     true
 }
+
+#[cfg(target_os = "windows")]
+fn configure_webview2_sandbox_compat() {
+    if !matches!(std::env::var(WEBVIEW2_NO_SANDBOX_ENV).as_deref(), Ok("1")) {
+        return;
+    }
+
+    let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+    if !args.split_whitespace().any(|arg| arg == "--no-sandbox") {
+        if !args.is_empty() {
+            args.push(' ');
+        }
+        args.push_str("--no-sandbox");
+    }
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_webview2_sandbox_compat() {}
 
 fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
     should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
@@ -916,6 +937,7 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
+    configure_webview2_sandbox_compat();
     #[cfg(target_os = "linux")]
     apply_linux_webkit_rendering_workarounds();
 

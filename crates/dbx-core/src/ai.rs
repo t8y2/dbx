@@ -872,6 +872,15 @@ pub fn claude_headers(config: &AiConfig) -> Result<HeaderMap, String> {
     Ok(headers)
 }
 
+fn claude_http_model(model: &str) -> &str {
+    let model = model.trim();
+    if model.to_ascii_lowercase().ends_with("[1m]") {
+        model[..model.len() - "[1m]".len()].trim_end()
+    } else {
+        model
+    }
+}
+
 fn normalize_ai_proxy_url(proxy_url: &str) -> String {
     let proxy_url = proxy_url.trim();
     if proxy_url.contains("://") || proxy_url.is_empty() {
@@ -1006,7 +1015,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
 
 pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
     let body = json!({
-        "model": request.config.model,
+        "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
@@ -1454,7 +1463,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     let byte_stream = match config.provider {
         AiProvider::Claude => {
             let body = json!({
-                "model": &model,
+                "model": claude_http_model(&model),
                 "max_tokens": 16,
                 "system": CLAUDE_DEFAULT_SYSTEM,
                 "messages": [{ "role": "user", "content": TEST_PROMPT }],
@@ -1494,7 +1503,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
         }
         AiProvider::Custom if uses_anthropic_messages_api(config) => {
             let body = json!({
-                "model": &model,
+                "model": claude_http_model(&model),
                 "max_tokens": 16,
                 "system": CLAUDE_DEFAULT_SYSTEM,
                 "messages": [{ "role": "user", "content": TEST_PROMPT }],
@@ -1706,7 +1715,7 @@ async fn stream_claude(
     on_chunk: &impl Fn(AiStreamChunk),
 ) -> Result<(), String> {
     let body = json!({
-        "model": request.config.model,
+        "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
@@ -2173,7 +2182,7 @@ async fn stream_claude_with_tools(
     let tool_json: Vec<serde_json::Value> = tools.iter().map(|t| t.to_anthropic_tool()).collect();
 
     let body = json!({
-        "model": request.config.model,
+        "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(4096),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": messages,
@@ -2865,17 +2874,143 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        apply_chat_completion_thinking_toggle, build_ai_http_client, build_responses_input_with_tools, classify_error,
-        claude_headers, claude_system_prompt, drain_next_stream_line, emit_responses_function_call_item,
-        format_transport_error, gemini_text, is_kimi_model, maybe_bearer_headers, measure_first_stream_chunk,
-        openai_response_text, openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
-        resolve_gemini_stream_endpoint, resolve_model_list_endpoint, responses_function_tool,
-        responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
-        set_chat_completion_token_limit, stream_data_payload, stream_openai_with_tools, uses_anthropic_messages_api,
-        validate_config, validate_model_list_config, AiApiStyle, AiAuthMethod, AiCompletionRequest, AiConfig,
-        AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
-        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        apply_chat_completion_thinking_toggle, build_ai_http_client, build_responses_input_with_tools, call_claude,
+        classify_error, claude_headers, claude_system_prompt, drain_next_stream_line,
+        emit_responses_function_call_item, format_transport_error, gemini_text, is_kimi_model, maybe_bearer_headers,
+        measure_first_stream_chunk, openai_response_text, openai_stream_reasoning, openai_stream_text,
+        parse_model_list_response, resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_list_endpoint,
+        responses_function_tool, responses_max_output_tokens, responses_stream_text, responses_text,
+        responses_token_usage, set_chat_completion_token_limit, stream_claude, stream_claude_with_tools,
+        stream_data_payload, stream_openai_with_tools, uses_anthropic_messages_api, validate_config,
+        validate_model_list_config, AiApiStyle, AiAuthMethod, AiCompletionRequest, AiConfig, AiMessage, AiModelInfo,
+        AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
+        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
+
+    struct CapturedJsonRequest {
+        headers: String,
+        body: serde_json::Value,
+    }
+
+    async fn spawn_json_capture_server(
+        response_content_type: &'static str,
+        response_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<CapturedJsonRequest>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while request.len() < header_end + content_length {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before body was complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {response_content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            CapturedJsonRequest { headers, body }
+        });
+
+        (format!("http://{address}/v1/messages"), server)
+    }
+
+    fn claude_http_test_request(endpoint: String) -> AiCompletionRequest {
+        AiCompletionRequest {
+            config: AiConfig {
+                provider: AiProvider::Claude,
+                api_key: "secret".to_string(),
+                auth_method: AiAuthMethod::ApiKey,
+                endpoint,
+                model: "claude-sonnet-4-6[1m]".to_string(),
+                models: Vec::new(),
+                api_style: AiApiStyle::Completions,
+                proxy_enabled: false,
+                proxy_url: String::new(),
+                enable_thinking: true,
+                reasoning_level: AiReasoningLevel::Default,
+                context_window: Some(1_000_000),
+                codex_cli_path: None,
+                codex_cli_env: Default::default(),
+                claude_code_cli_path: None,
+                claude_code_cli_env: Default::default(),
+            },
+            system_prompt: "Be concise.".to_string(),
+            messages: vec![AiMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
+            task_contract: None,
+            max_tokens: Some(64),
+        }
+    }
+
+    fn assert_claude_http_request(captured: CapturedJsonRequest) {
+        assert_eq!(captured.body["model"], "claude-sonnet-4-6");
+        assert!(!captured.headers.to_ascii_lowercase().contains("anthropic-beta:"));
+    }
+
+    #[tokio::test]
+    async fn claude_http_completion_strips_cli_context_suffix_without_beta_header() {
+        let (endpoint, server) =
+            spawn_json_capture_server("application/json", r#"{"content":[{"type":"text","text":"ok"}]}"#).await;
+        let request = claude_http_test_request(endpoint);
+        let client = build_ai_http_client(&request.config, 10).unwrap();
+
+        assert_eq!(call_claude(&client, request).await.unwrap(), "ok");
+        assert_claude_http_request(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn claude_http_stream_strips_cli_context_suffix_without_beta_header() {
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", "data: [DONE]\n\n").await;
+        let request = claude_http_test_request(endpoint);
+        let client = build_ai_http_client(&request.config, 10).unwrap();
+
+        stream_claude(&client, "test", &request, &Notify::new(), &|_| {}).await.unwrap();
+        assert_claude_http_request(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn claude_http_tool_stream_strips_cli_context_suffix_without_beta_header() {
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", "data: [DONE]\n\n").await;
+        let request = claude_http_test_request(endpoint);
+        let client = build_ai_http_client(&request.config, 10).unwrap();
+        let tools = [crate::agent_events::ToolDefinition {
+            name: "get_tables",
+            description: "List tables",
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            read_only: true,
+            parallel_ok: true,
+        }];
+
+        stream_claude_with_tools(&client, "test", &request, &tools, &Notify::new(), &|_| {}).await.unwrap();
+        assert_claude_http_request(server.await.unwrap());
+    }
 
     /// Reproduce the "Unknown tool:" bug: some OpenAI-compatible providers
     /// (e.g. GLM via proxy) re-send the `id` field in every tool-call delta.
@@ -3381,6 +3516,7 @@ mod tests {
         let api_key_headers = claude_headers(&config).unwrap();
         assert_eq!(api_key_headers.get("x-api-key").unwrap(), "secret");
         assert!(api_key_headers.get(AUTHORIZATION).is_none());
+        assert!(api_key_headers.get("anthropic-beta").is_none());
 
         config.auth_method = AiAuthMethod::Bearer;
         let bearer_headers = claude_headers(&config).unwrap();

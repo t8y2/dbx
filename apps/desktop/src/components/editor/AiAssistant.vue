@@ -234,7 +234,9 @@ const MESSAGE_SCROLL_BUTTON_HIDE_THRESHOLD_PX = 48;
 let messageScrollViewport: HTMLElement | null = null;
 let messageTouchStartY: number | null = null;
 let lastMessageScrollTop = 0;
+const STREAM_RENDER_INTERVAL_MS = 33;
 let assistantDeltaFrame: number | null = null;
+let lastAssistantFlushAt = 0;
 let pendingAssistantDelta = "";
 let pendingAssistantReasoning = "";
 let pendingAssistantIndex = -1;
@@ -682,6 +684,7 @@ function changeDatabase(value: string) {
 
 function flushAssistantDeltas() {
   assistantDeltaFrame = null;
+  lastAssistantFlushAt = performance.now();
   const msg = messages.value[pendingAssistantIndex];
   if (!msg) return;
   if (pendingAssistantReasoning) {
@@ -697,12 +700,22 @@ function flushAssistantDeltas() {
   scrollToBottom();
 }
 
+function runAssistantDeltaFrame() {
+  // Markdown is rendered live, so keep the refresh rate under the frame rate:
+  // a repaint every STREAM_RENDER_INTERVAL_MS still reads as continuous typing.
+  if (performance.now() - lastAssistantFlushAt < STREAM_RENDER_INTERVAL_MS) {
+    assistantDeltaFrame = requestAnimationFrame(runAssistantDeltaFrame);
+    return;
+  }
+  flushAssistantDeltas();
+}
+
 function scheduleAssistantDeltaFlush(assistantIdx: number) {
   pendingAssistantIndex = assistantIdx;
   if (assistantDeltaFrame !== null) return;
-  // Providers can emit many tiny chunks. Render once per animation frame so
+  // Providers can emit many tiny chunks. Batch them on an animation frame so
   // Markdown parsing, highlighting, and layout do not run for every token.
-  assistantDeltaFrame = requestAnimationFrame(flushAssistantDeltas);
+  assistantDeltaFrame = requestAnimationFrame(runAssistantDeltaFrame);
 }
 
 function appendAssistantDelta(assistantIdx: number, delta: string) {
@@ -1816,6 +1829,15 @@ const messageRenderer = computed(() => {
   });
 });
 
+/**
+ * Renders Markdown live while the answer streams in. The renderer reuses the
+ * already-finished segments, so a frame only re-parses the growing tail.
+ */
+function renderMessageSegments(msg: ChatMessage) {
+  const streaming = isGenerating.value && msg === messages.value[messages.value.length - 1];
+  return messageRenderer.value.render(msg.content, { streaming });
+}
+
 function onMarkdownClick(event: MouseEvent) {
   handleAiMarkdownLinkClick(event, openExternalUrl);
 }
@@ -1990,8 +2012,7 @@ async function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </div>
-                <div v-if="isGenerating && msg === messages[messages.length - 1]" class="whitespace-pre-wrap break-words leading-relaxed">{{ msg.content }}</div>
-                <template v-else v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
+                <template v-for="(seg, j) in renderMessageSegments(msg)" :key="j">
                   <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal" @click.capture="onMarkdownClick">
                     <div v-html="seg.html" />
                   </div>
@@ -2000,7 +2021,8 @@ async function openExternalUrl(url: string) {
                       <component :is="seg.isSql ? Database : Terminal" class="h-3 w-3 mr-1.5" />
                       <span>{{ seg.lang }}</span>
                       <span class="flex-1" />
-                      <div class="flex items-center gap-1.5">
+                      <Loader2 v-if="seg.pending" class="h-3 w-3 animate-spin text-zinc-400" />
+                      <div v-else class="flex items-center gap-1.5">
                         <button v-if="seg.isSql && !isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
                           <FlaskConical class="h-3.5 w-3.5" />
                         </button>

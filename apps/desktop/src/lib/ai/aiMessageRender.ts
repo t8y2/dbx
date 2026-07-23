@@ -46,10 +46,12 @@ const DEFAULT_MAX_CACHE_CHARS = 400_000;
 const STREAM_BLOCK_MIN_CHARS = 240;
 const BLANK_LINE_RE = /\n{2,}/g;
 const FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-// Labels may escape their closing bracket, so `[a\]b]: url` is a definition too.
-const LINK_REFERENCE_RE = /^ {0,3}\[(?:\\.|[^\]\n\\])+\]:/m;
-// Raw HTML blocks stay open across blank lines, which no block boundary may cut.
-const RAW_HTML_BLOCK_RE = /<!--|<\?|<!\[CDATA\[|<\/?(?:script|style|pre|textarea)\b/i;
+// A label may escape its closing bracket and may wrap onto further lines, and CommonMark
+// caps it at 999 characters, so `[a\]b]: url` and `[a\nb]: url` are both definitions.
+const LINK_REFERENCE_RE = /^ {0,3}\[(?:\\.|[^\]\\]){1,999}\]:/m;
+// Raw HTML blocks stay open across blank lines, which no block boundary may cut:
+// comments, processing instructions, declarations, CDATA and the raw-text elements.
+const RAW_HTML_BLOCK_RE = /<!--|<\?|<!\[CDATA\[|<![A-Za-z]|<\/?(?:script|style|pre|textarea)\b/i;
 const SQL_LANGUAGES = new Map([
   ["sql", "SQL"],
   ["mysql", "MYSQL"],

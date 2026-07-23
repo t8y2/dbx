@@ -217,13 +217,15 @@ describe("splitStreamingTextBlocks", () => {
 
   it("does not split a message that defines link references", () => {
     expect(splitStreamingTextBlocks(`[1]: https://example.com\n\n${long}\n\n见 [文档][1]`)).toHaveLength(1);
-    // The label may escape its closing bracket.
+    // The label may escape its closing bracket or wrap onto the next line.
     expect(splitStreamingTextBlocks(`[a\\]b]: https://example.com\n\n${long}\n\n见 [文档][a\\]b]`)).toHaveLength(1);
+    expect(splitStreamingTextBlocks(`[a\nb]: https://example.com\n\n${long}\n\n见 [文档][a b]`)).toHaveLength(1);
   });
 
   it("does not split a message containing raw HTML blocks", () => {
     expect(splitStreamingTextBlocks(`${long}\n\n<!-- 注释开始\n\n注释结束 -->`)).toHaveLength(1);
     expect(splitStreamingTextBlocks(`${long}\n\n<pre>\n\n还有内容\n</pre>`)).toHaveLength(1);
+    expect(splitStreamingTextBlocks(`<!DOCTYPE html ${long}\n\n# 标题`)).toHaveLength(1);
   });
 
   it("does not split when the next block has not arrived yet", () => {

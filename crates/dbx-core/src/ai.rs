@@ -1116,10 +1116,10 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
+        .map_err(|e| format_transport_error("Gemini", e))?;
 
     let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
     if !status.is_success() {
         return Err(extract_error(&data).unwrap_or_else(|| format!("Gemini API error: {status}")));
     }
@@ -1371,6 +1371,11 @@ async fn categorized_http_error(response: reqwest::Response, provider: &str, api
     format!("[{}] {provider} API error ({diagnostic})", classify_error(&diagnostic))
 }
 
+fn format_transport_error(provider: &str, error: reqwest::Error) -> String {
+    // Request URLs may contain credentials in query parameters, notably Gemini API keys.
+    format!("{provider} request failed: {}", error.without_url())
+}
+
 async fn measure_first_stream_chunk(
     mut byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
     start: std::time::Instant,
@@ -1380,7 +1385,7 @@ async fn measure_first_stream_chunk(
     let mut buf = Vec::new();
     let mut diagnostics = StreamProbeDiagnostics::default();
     while let Some(chunk) = byte_stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
+        let chunk = chunk.map_err(|e| format!("stream read error: {}", e.without_url()))?;
         diagnostics.bytes_received += chunk.len();
         buf.extend_from_slice(&chunk);
 
@@ -1481,7 +1486,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 }))
                 .send()
                 .await
-                .map_err(|e| format!("Gemini request failed: {e}"))?;
+                .map_err(|e| format_transport_error("Gemini", e))?;
             if !res.status().is_success() {
                 return Err(categorized_http_error(res, "Gemini", &config.api_key).await);
             }
@@ -1973,10 +1978,10 @@ async fn stream_gemini(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
+        .map_err(|e| format_transport_error("Gemini", e))?;
 
     if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
         return Err(extract_error(&data).unwrap_or_else(|| "Gemini API error".to_string()));
     }
 
@@ -1987,7 +1992,7 @@ async fn stream_gemini(
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
+                let chunk = chunk.map_err(|e| e.without_url().to_string())?;
                 buf.extend_from_slice(&chunk);
 
                 while let Some(line) = drain_next_stream_line(&mut buf)? {
@@ -2665,10 +2670,10 @@ async fn stream_gemini_with_tools(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
+        .map_err(|e| format_transport_error("Gemini", e))?;
 
     if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
         return Err(extract_error(&data).unwrap_or_else(|| "Gemini API error".to_string()));
     }
 
@@ -2681,7 +2686,7 @@ async fn stream_gemini_with_tools(
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
+                let chunk = chunk.map_err(|e| e.without_url().to_string())?;
                 buf.extend_from_slice(&chunk);
 
                 while let Some(line) = drain_next_stream_line(&mut buf)? {
@@ -2861,14 +2866,15 @@ mod tests {
 
     use super::{
         apply_chat_completion_thinking_toggle, build_ai_http_client, build_responses_input_with_tools, classify_error,
-        claude_headers, claude_system_prompt, drain_next_stream_line, emit_responses_function_call_item, gemini_text,
-        is_kimi_model, maybe_bearer_headers, measure_first_stream_chunk, openai_response_text, openai_stream_reasoning,
-        openai_stream_text, parse_model_list_response, resolve_endpoint, resolve_gemini_stream_endpoint,
-        resolve_model_list_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
-        responses_text, responses_token_usage, set_chat_completion_token_limit, stream_data_payload,
-        stream_openai_with_tools, uses_anthropic_messages_api, validate_config, validate_model_list_config, AiApiStyle,
-        AiAuthMethod, AiCompletionRequest, AiConfig, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel,
-        StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        claude_headers, claude_system_prompt, drain_next_stream_line, emit_responses_function_call_item,
+        format_transport_error, gemini_text, is_kimi_model, maybe_bearer_headers, measure_first_stream_chunk,
+        openai_response_text, openai_stream_reasoning, openai_stream_text, parse_model_list_response, resolve_endpoint,
+        resolve_gemini_stream_endpoint, resolve_model_list_endpoint, responses_function_tool,
+        responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
+        set_chat_completion_token_limit, stream_data_payload, stream_openai_with_tools, uses_anthropic_messages_api,
+        validate_config, validate_model_list_config, AiApiStyle, AiAuthMethod, AiCompletionRequest, AiConfig,
+        AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
+        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     /// Reproduce the "Unknown tool:" bug: some OpenAI-compatible providers
@@ -2964,6 +2970,24 @@ mod tests {
         assert!(error.contains("blockReason=SAFETY"));
         assert!(error.contains("HARM_CATEGORY_DANGEROUS_CONTENT:HIGH:blocked"));
         assert_eq!(classify_error(&error), "safety");
+    }
+
+    #[tokio::test]
+    async fn transport_errors_do_not_expose_request_query_parameters() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let secret = "gemini-secret-key";
+        let error = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/models?key={secret}"))
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(error.url().is_some_and(|url| url.as_str().contains(secret)));
+        let message = format_transport_error("Gemini", error);
+        assert!(!message.contains(secret));
+        assert!(!message.contains("?key="));
     }
 
     #[tokio::test]

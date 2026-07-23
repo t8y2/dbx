@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createAiMessageRenderer, splitStreamingTextBlocks } from "@/lib/ai/aiMessageRender";
+import { formatAiInlineMarkdown } from "@/lib/ai/aiMarkdown";
 
 describe("createAiMessageRenderer", () => {
   it("caches completed short messages", () => {
@@ -108,7 +109,8 @@ describe("createAiMessageRenderer", () => {
 
   it("evicts cached renders once the character budget is exceeded", () => {
     const markdown = vi.fn((text: string) => `<p>${text}</p>`);
-    const renderer = createAiMessageRenderer({ markdown, maxCacheChars: 50 });
+    // Half of the budget goes to the message cache, so two ~90 char entries do not fit together.
+    const renderer = createAiMessageRenderer({ markdown, maxCacheChars: 300 });
     const first = "a".repeat(40);
     const second = "b".repeat(40);
 
@@ -118,6 +120,16 @@ describe("createAiMessageRenderer", () => {
     renderer.render(first);
 
     expect(markdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache an entry that alone exceeds the budget", () => {
+    const markdown = vi.fn((text: string) => `<p>${text}</p>`);
+    const renderer = createAiMessageRenderer({ markdown, maxCacheChars: 10 });
+
+    renderer.render("hello");
+    renderer.render("hello");
+
+    expect(markdown).toHaveBeenCalledTimes(2);
   });
 
   it("drops cached renders on clear", () => {
@@ -164,6 +176,23 @@ describe("splitStreamingTextBlocks", () => {
     }
   });
 
+  it("does not split inside a tilde or annotated fence", () => {
+    // parseAiMessage only extracts plain ``` fences, so these stay in the text segment.
+    expect(splitStreamingTextBlocks(`${long}\n\n~~~sql\nSELECT 1\n\nSELECT 2\n~~~`)).toHaveLength(1);
+    expect(splitStreamingTextBlocks("````\n" + long + "\n\n还有内容\n````")).toHaveLength(1);
+  });
+
+  it("splits again after a fence closes", () => {
+    const blocks = splitStreamingTextBlocks(`~~~sql\nSELECT 1\n\nSELECT 2\n~~~\n\n${long}\n\n结论`);
+
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1]).toBe("结论");
+  });
+
+  it("does not split a message that defines link references", () => {
+    expect(splitStreamingTextBlocks(`[1]: https://example.com\n\n${long}\n\n见 [文档][1]`)).toHaveLength(1);
+  });
+
   it("does not split when the next block has not arrived yet", () => {
     expect(splitStreamingTextBlocks(`${long}\n\n`)).toEqual([`${long}\n\n`]);
   });
@@ -171,5 +200,29 @@ describe("splitStreamingTextBlocks", () => {
   it("preserves the original text when joined", () => {
     const content = `${long}\n\n第二段${long}\n\n第三段`;
     expect(splitStreamingTextBlocks(content).join("")).toBe(content);
+  });
+
+  it("renders the same HTML whether the text is split or not", () => {
+    const pad = "这里是一段较长的说明文字，用来把块撑到切分阈值以上。".repeat(12);
+    const samples = [
+      `${pad}\n\n结论：加索引`,
+      `${pad}\n\n## 小标题\n\n正文内容`,
+      `${pad}\n\n- 列表项一\n- 列表项二`,
+      `${pad}\n\n1. 第一步\n\n2. 第二步`,
+      `${pad}\n\n| a | b |\n| --- | --- |\n| 1 | 2 |`,
+      `${pad}\n\n> 引用内容\n\n> 第二段引用`,
+      `${pad}\n\n~~~sql\nSELECT 1\n\nSELECT 2\n~~~`,
+      `${pad}\n\n    缩进代码\n\n    第二行`,
+      `[1]: https://example.com\n\n${pad}\n\n见 [文档][1]`,
+      `${pad}\n\n**加粗**开头的段落\n\n${pad}\n\n最后一段`,
+      `${pad}\n\n\n\n多个空行分隔\n\n结尾`,
+      `# 标题\n\n${pad}\n\n![图片](https://example.com/a.png)`,
+    ];
+
+    for (const sample of samples) {
+      const blocks = splitStreamingTextBlocks(sample);
+      expect(blocks.join("")).toBe(sample);
+      expect(blocks.map(formatAiInlineMarkdown).join("")).toBe(formatAiInlineMarkdown(sample));
+    }
   });
 });

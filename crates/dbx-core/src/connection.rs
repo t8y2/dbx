@@ -3638,10 +3638,10 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
                         if config.ssl {
                             "sslmode=require".to_string()
                         } else {
-                            "sslmode=disable".to_string()
+                            "sslmode=prefer".to_string()
                         }
                     } else {
-                        let sslmode = if config.ssl { "sslmode=require" } else { "sslmode=disable" };
+                        let sslmode = if config.ssl { "sslmode=require" } else { "sslmode=prefer" };
                         format!("{sslmode}&{params}")
                     });
                 }
@@ -4589,11 +4589,11 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=prefer"
         );
         assert_eq!(
             redacted_connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://127.0.0.1:3306/postgres?sslmode=disable"
+            "postgres://127.0.0.1:3306/postgres?sslmode=prefer"
         );
     }
 
@@ -4607,11 +4607,11 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://root:secret@127.0.0.1:26257/defaultdb?sslmode=disable"
+            "postgres://root:secret@127.0.0.1:26257/defaultdb?sslmode=prefer"
         );
         assert_eq!(
             redacted_connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://127.0.0.1:26257/defaultdb?sslmode=disable"
+            "postgres://127.0.0.1:26257/defaultdb?sslmode=prefer"
         );
     }
 
@@ -4639,7 +4639,7 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=prefer"
         );
     }
 
@@ -4681,7 +4681,7 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable&application_name=dbx"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=prefer&application_name=dbx"
         );
     }
 

@@ -64,6 +64,7 @@ import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
+import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -1757,6 +1758,11 @@ function matchesTableInfoColumn(resultColumn: string, sourceColumn: string | und
 function scrollToTableInfoColumn(columnName: string) {
   const columnIndex = props.result.columns.findIndex((column, index) => matchesTableInfoColumn(column, props.sourceColumns?.[index], columnName));
   scrollToColumnIndex(columnIndex);
+}
+
+function onTableInfoColumnClick(columnName: string) {
+  if (!shouldNavigateFromTableInfoColumnClick(window.getSelection())) return;
+  scrollToTableInfoColumn(columnName);
 }
 function scrollToColumnIndex(columnIndex: number) {
   if (columnIndex < 0 || !displayableColumnIndexes.value.includes(columnIndex)) return;
@@ -6680,7 +6686,7 @@ function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.
 // Table info drawers are tied to a single grid instance. Keeping this state
 // module-global leaks the drawer into other kept-alive tabs.
 const showTableInfo = ref(false);
-const activeTableInfoTab = ref<TableInfoTab>("ddl");
+const activeTableInfoTab = ref<TableInfoTab>(settingsStore.editorSettings.tableInfoActiveTab);
 const ddlContent = ref("");
 const ddlPreRef = ref<HTMLPreElement | null>(null);
 function onDdlKeydown(e: KeyboardEvent) {
@@ -6852,9 +6858,11 @@ async function toggleTableInfo(tab: TableInfoTab = activeTableInfoTab.value) {
 }
 
 async function selectTableInfoTab(tab: TableInfoTab) {
-  const nextTab = tableInfoTabs.value.some((item) => item.id === tab) ? tab : tableInfoTabs.value[0]?.id;
+  const tabSupported = tableInfoTabs.value.some((item) => item.id === tab);
+  const nextTab = tabSupported ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   activeTableInfoTab.value = nextTab;
+  if (tabSupported) settingsStore.updateEditorSettings({ tableInfoActiveTab: tab });
   if (nextTab === "ddl") await fetchDdl();
   else if (nextTab === "indexes") await fetchIndexes();
   else if (nextTab === "foreignKeys") await fetchForeignKeys();
@@ -8562,7 +8570,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           </div>
           <!-- Table Info Drawer -->
           <div v-if="showTableInfo" class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0" :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]" :style="ddlDrawerStyle" @contextmenu="onDrawerContextMenu">
-            <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDdlResizeStart" />
+            <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize" @mousedown.prevent="onDdlResizeStart" />
             <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
@@ -8635,12 +8643,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     role="button"
                     tabindex="0"
                     :title="column.name"
-                    @click="scrollToTableInfoColumn(column.name)"
+                    @click="onTableInfoColumnClick(column.name)"
                     @keydown.enter.prevent="scrollToTableInfoColumn(column.name)"
                     @keydown.space.prevent="scrollToTableInfoColumn(column.name)"
                   >
                     <td class="px-3 py-2 text-muted-foreground w-8">{{ index + 1 }}</td>
-                    <td class="px-3 py-2 font-medium">
+                    <td class="cursor-text select-text px-3 py-2 font-medium">
                       <span class="inline-flex items-center gap-1.5">
                         <KeyRound v-if="column.is_primary_key" class="h-3 w-3 text-amber-500" />
                         {{ column.name }}

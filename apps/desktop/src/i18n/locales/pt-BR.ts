@@ -3628,6 +3628,7 @@ export default withEnglishFallback({
       "Escolha comentários, tamanhos de objetos ou nenhum texto após os nomes. Comentários e tamanhos são mutuamente exclusivos. O tamanho total dos bancos aceita PostgreSQL; os tamanhos das tabelas aceitam MySQL, PostgreSQL, GaussDB, Kingbase, GBase 8a, SQL Server, Oracle, Dameng e ClickHouse.",
     sidebarObjectInfoModeCommentInline: "Comentários (junto ao nome)",
     sidebarObjectInfoModeCommentAligned: "Comentários (alinhar nível)",
+    sidebarObjectInfoModeCommentRight: "Comentários (alinhar à direita)",
     sidebarObjectInfoModeSize: "Tamanho do objeto",
     sidebarObjectInfoModeHidden: "Nenhuma",
     sidebarAllowHorizontalScroll: "Permitir rolagem horizontal da barra lateral",

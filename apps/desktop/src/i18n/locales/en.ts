@@ -3850,6 +3850,7 @@ export default {
       "Choose comments, object sizes, or no supplementary text after names. Comments and sizes are mutually exclusive. Database totals currently support PostgreSQL; table sizes support MySQL, PostgreSQL, GaussDB, Kingbase, GBase 8a, SQL Server, Oracle, Dameng, and ClickHouse.",
     sidebarObjectInfoModeCommentInline: "Comments (after name)",
     sidebarObjectInfoModeCommentAligned: "Comments (align siblings)",
+    sidebarObjectInfoModeCommentRight: "Comments (align right)",
     sidebarObjectInfoModeSize: "Object size",
     sidebarObjectInfoModeHidden: "None",
     sidebarAllowHorizontalScroll: "Allow sidebar horizontal scroll",

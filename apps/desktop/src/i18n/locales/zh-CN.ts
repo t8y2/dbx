@@ -3839,6 +3839,7 @@ export default withEnglishFallback({
     sidebarObjectInfoModeDescription: "选择在名称后显示注释、对象大小或不显示。注释与大小互斥；数据库总大小目前支持 PostgreSQL，表大小支持 MySQL、PostgreSQL、GaussDB、Kingbase、GBase 8a、SQL Server、Oracle、达梦和 ClickHouse。",
     sidebarObjectInfoModeCommentInline: "注释（紧跟名称）",
     sidebarObjectInfoModeCommentAligned: "注释（同级对齐）",
+    sidebarObjectInfoModeCommentRight: "注释（右侧对齐）",
     sidebarObjectInfoModeSize: "对象大小",
     sidebarObjectInfoModeHidden: "不显示",
     sidebarAllowHorizontalScroll: "允许侧边栏横向滚动",

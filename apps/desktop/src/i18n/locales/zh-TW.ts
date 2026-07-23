@@ -3439,6 +3439,7 @@ export default withEnglishFallback({
     sidebarObjectInfoModeDescription: "選擇在名稱後顯示註解、物件大小或不顯示。註解與大小互斥；資料庫總大小目前支援 PostgreSQL，資料表大小支援 MySQL、PostgreSQL、GaussDB、Kingbase、GBase 8a、SQL Server、Oracle、達夢和 ClickHouse。",
     sidebarObjectInfoModeCommentInline: "註解（緊接名稱）",
     sidebarObjectInfoModeCommentAligned: "註解（同層對齊）",
+    sidebarObjectInfoModeCommentRight: "註解（靠右對齊）",
     sidebarObjectInfoModeSize: "物件大小",
     sidebarObjectInfoModeHidden: "不顯示",
     sidebarAllowHorizontalScroll: "允許側邊欄水平捲動",

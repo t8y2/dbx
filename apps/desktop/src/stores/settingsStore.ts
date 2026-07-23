@@ -376,7 +376,7 @@ export interface CustomTheme {
 
 export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [{ id: "default", name: "Custom", colors: { ...DEFAULT_CUSTOM_THEME_COLORS }, ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS } }];
 
-export type SidebarObjectInfoMode = "comment-inline" | "comment-aligned" | "size" | "hidden";
+export type SidebarObjectInfoMode = "comment-inline" | "comment-aligned" | "comment-right" | "size" | "hidden";
 
 export interface EditorSettings {
   fontFamily: string;
@@ -714,7 +714,7 @@ function normalizeConnectionListSortMode(value: unknown): ConnectionListSortMode
 }
 
 function normalizeSidebarObjectInfoMode(value: unknown, legacyCommentLayout?: unknown, legacyHideTableComments?: unknown, legacyShowDatabaseSizes?: unknown): SidebarObjectInfoMode {
-  if (value === "comment-inline" || value === "comment-aligned" || value === "size" || value === "hidden") return value;
+  if (value === "comment-inline" || value === "comment-aligned" || value === "comment-right" || value === "size" || value === "hidden") return value;
   if (legacyCommentLayout === "hidden" || legacyHideTableComments === true) return "hidden";
   if (legacyShowDatabaseSizes === true) return "size";
   if (legacyCommentLayout === "aligned") return "comment-aligned";

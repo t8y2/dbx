@@ -3617,6 +3617,7 @@ export default withEnglishFallback({
       "名前の後にコメント、オブジェクトサイズ、または何も表示しないかを選択します。コメントとサイズは同時に表示されません。データベース全体のサイズは PostgreSQL、テーブルサイズは MySQL、PostgreSQL、GaussDB、Kingbase、GBase 8a、SQL Server、Oracle、Dameng、ClickHouse に対応しています。",
     sidebarObjectInfoModeCommentInline: "コメント（名前の直後）",
     sidebarObjectInfoModeCommentAligned: "コメント（同階層で整列）",
+    sidebarObjectInfoModeCommentRight: "コメント（右揃え）",
     sidebarObjectInfoModeSize: "オブジェクトサイズ",
     sidebarObjectInfoModeHidden: "表示しない",
     sidebarAllowHorizontalScroll: "サイドバーの横スクロールを許可",

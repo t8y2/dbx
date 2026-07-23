@@ -57,6 +57,21 @@ const CROSS_BLOCK_FRAGMENTS = [
 
 const FILLER = "这里是用于把块撑过切分阈值的填充文字，内容本身没有特殊含义。";
 
+describe("splitStreamingTextBlocks link reference definitions", () => {
+  it.each([
+    ["blockquote", "> [ref]: https://example.com"],
+    ["list", "- [ref]: https://example.com"],
+    ["nested list", "- outer\n  - inner\n\n    [ref]: https://example.com"],
+    ["nested mixed containers", "> - > 1. [ref]: https://example.com"],
+  ])("keeps definitions inside %s joined with later references", (_, definition) => {
+    const doc = `${definition}\n\n${FILLER.repeat(8)}\n\nSee [ref].`;
+    const blocks = splitStreamingTextBlocks(doc);
+
+    expect(blocks.map(formatAiInlineMarkdown).join("")).toBe(formatAiInlineMarkdown(doc));
+    expect(blocks).toEqual([doc]);
+  });
+});
+
 function makeRandom(seed: number) {
   let state = seed >>> 0;
   return () => {

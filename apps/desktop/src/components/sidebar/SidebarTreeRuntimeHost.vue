@@ -1285,7 +1285,14 @@ async function copySelectedNames() {
   const connectionTargets = selectedConnectionClipboardTargets(activeNode.value, nodes);
   if (connectionTargets.length > 0) {
     const copiedCount = connectionStore.copyConnectionsToTreeClipboard(connectionTargets.map((node) => node.connectionId));
-    if (copiedCount > 0) toast(t("connection.copied"), 2000);
+    if (copiedCount > 0) {
+      try {
+        await copyToClipboard(connectionTargets.map(copyNameForTreeNode).join("\n"));
+      } catch {
+        /* system clipboard copy is best-effort */
+      }
+      toast(t("connection.copied"), 2000);
+    }
     return;
   }
   updateTreeClipboardForNodes(nodes);
@@ -3504,6 +3511,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     } else {
       items.push({ label: t("contextMenu.closeConnection"), action: disconnectConnection, icon: Unplug });
     }
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     if (currentDatabaseType() === "redis") {
       items.push({ label: t("contextMenu.instanceInfo"), action: openRedisInstanceInfo, icon: Info });

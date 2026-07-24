@@ -149,6 +149,25 @@ class MongoAgentTest {
     }
 
     @Test
+    void collectionTotalUsesEstimatedCountForEmptyFilter() {
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+
+        assertEquals(10_000_000L, MongoAgent.collectionTotal(collection, new Document()));
+        assertEquals(List.of("estimatedDocumentCount"), calls);
+    }
+
+    @Test
+    void collectionTotalUsesExactCountForNonEmptyFilter() {
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+        Document filter = new Document("status", "active");
+
+        assertEquals(42L, MongoAgent.collectionTotal(collection, filter));
+        assertEquals(List.of("countDocuments:{\"status\": \"active\"}"), calls);
+    }
+
+    @Test
     void parsesOptionalDocumentParameters() {
         JsonObject params = new JsonObject();
         params.addProperty("projection", "{\"title\":1,\"_id\":0}");
@@ -669,6 +688,26 @@ class MongoAgentTest {
     }
 
     // ─── helpers ───
+
+    @SuppressWarnings("unchecked")
+    private static MongoCollection<Document> recordingCountCollection(List<String> calls) {
+        return (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("estimatedDocumentCount".equals(method.getName())) {
+                    calls.add("estimatedDocumentCount");
+                    return 10_000_000L;
+                }
+                if ("countDocuments".equals(method.getName())) {
+                    Document filter = (Document) args[0];
+                    calls.add("countDocuments:" + filter.toJson());
+                    return 42L;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
 
     private static void assertRpcModifiedCount(MongoClient client, int id, String updateJson, boolean many) {
         JsonObject params = new JsonObject();

@@ -388,7 +388,7 @@ public final class MongoAgent {
         if (filterDoc == null) {
             filterDoc = new Document();
         }
-        long total = col.countDocuments(filterDoc);
+        long total = collectionTotal(col, filterDoc);
 
         var iterable = col.find(filterDoc).skip((int) skip).limit(limit);
         if (projectionDoc != null) {
@@ -426,7 +426,7 @@ public final class MongoAgent {
         if (filterDoc == null) {
             filterDoc = new Document();
         }
-        long total = col.countDocuments(filterDoc);
+        long total = collectionTotal(col, filterDoc);
 
         var iterable = col.find(filterDoc).skip((int) skip).limit(limit);
         if (projectionDoc != null) {
@@ -444,6 +444,13 @@ public final class MongoAgent {
         result.put("documents", documents);
         result.put("total", total);
         return result;
+    }
+
+    static long collectionTotal(MongoCollection<Document> collection, Document filter) {
+        if (filter.isEmpty()) {
+            return collection.estimatedDocumentCount();
+        }
+        return collection.countDocuments(filter);
     }
 
     private static Object countDocuments(JsonObject params) {

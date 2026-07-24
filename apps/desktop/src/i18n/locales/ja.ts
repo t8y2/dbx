@@ -2208,6 +2208,8 @@ export default withEnglishFallback({
     cancelEdit: "キャンセル",
     sourceSaved: "ソースを保存しました",
     sourceSaveFailed: "ソースの保存に失敗しました: {message}",
+    postgresViewColumnChangeHint:
+      "PostgreSQL では CREATE OR REPLACE VIEW を使用して、既存のビュー列の削除、並べ替え、名前変更、または型変更を行うことはできません。既存列の数、順序、名前、型を維持してください。新しい列は末尾にのみ追加できます。列名の変更には ALTER VIEW ... RENAME COLUMN を使用してください。列を削除する場合は、依存関係を確認してビューを手動で再作成してください。",
     schemaColumn: "スキーマ",
     comment: "コメント",
     loadingSchemas: "スキーマを読み込み中...",

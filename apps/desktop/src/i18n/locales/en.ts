@@ -2324,6 +2324,8 @@ export default {
     cancelEdit: "Cancel",
     sourceSaved: "Source saved",
     sourceSaveFailed: "Failed to save source: {message}",
+    postgresViewColumnChangeHint:
+      "PostgreSQL cannot use CREATE OR REPLACE VIEW to remove, reorder, rename, or change the type of existing view columns. Keep existing column count, order, names, and types unchanged; new columns can only be appended. Use ALTER VIEW ... RENAME COLUMN to rename a column. To remove a column, review dependencies and recreate the view manually.",
     sourceReadOnly: "This source is read-only and cannot be edited.",
     schemaColumn: "Schema",
     comment: "Comment",

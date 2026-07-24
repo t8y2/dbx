@@ -2044,6 +2044,7 @@ export default withEnglishFallback({
     cancelEdit: "取消",
     sourceSaved: "原始碼已儲存",
     sourceSaveFailed: "儲存原始碼失敗：{message}",
+    postgresViewColumnChangeHint: "PostgreSQL 無法透過 CREATE OR REPLACE VIEW 刪除、重新排序、重新命名既有檢視欄位，或修改欄位型別。請保持原欄位的數量、順序、名稱和型別不變；新增欄位只能附加在末尾。重新命名欄位請使用 ALTER VIEW ... RENAME COLUMN；刪除欄位前請檢查相依性並手動重建檢視。",
     sourceReadOnly: "此原始碼為唯讀，不能編輯。",
     schemaColumn: "Schema",
     comment: "註解",

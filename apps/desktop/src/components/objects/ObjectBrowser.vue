@@ -62,7 +62,7 @@ import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, supportsTruncateTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import { useToast } from "@/composables/useToast";
-import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
@@ -2037,9 +2037,9 @@ async function saveSource() {
     sourceEditing.value = false;
     sourceDraft.value = "";
     await openSource(row);
-  } catch (e: any) {
+  } catch (e: unknown) {
     if (sidePanelGuard.isStale(epoch)) return;
-    sourceSaveError.value = e?.message || String(e);
+    sourceSaveError.value = formatObjectSourceSaveError(e, effectiveDatabaseType.value, row.type as ObjectSourceKind, t("objects.postgresViewColumnChangeHint"));
   } finally {
     if (sidePanelGuard.isFresh(epoch)) sourceSaving.value = false;
   }
@@ -2890,7 +2890,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               force-word-wrap
               @save="saveSource"
             />
-            <div v-if="sourceSaveError" class="shrink-0 border-t px-3 py-2 text-xs text-destructive">
+            <div v-if="sourceSaveError" class="shrink-0 whitespace-pre-wrap break-words border-t px-3 py-2 text-xs text-destructive">
               {{ sourceSaveError }}
             </div>
           </div>

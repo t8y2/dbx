@@ -2313,6 +2313,7 @@ export default withEnglishFallback({
     cancelEdit: "取消",
     sourceSaved: "源码已保存",
     sourceSaveFailed: "保存源码失败：{message}",
+    postgresViewColumnChangeHint: "PostgreSQL 无法通过 CREATE OR REPLACE VIEW 删除、重排、重命名已有视图字段，或修改字段类型。请保持原字段的数量、顺序、名称和类型不变；新增字段只能追加在末尾。重命名字段请使用 ALTER VIEW ... RENAME COLUMN；删除字段前请检查依赖并手动重建视图。",
     sourceReadOnly: "该源码为只读，不能编辑。",
     schemaColumn: "Schema",
     comment: "注释",

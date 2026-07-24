@@ -2173,6 +2173,8 @@ export default withEnglishFallback({
     cancelEdit: "Annulla",
     sourceSaved: "Sorgente salvato",
     sourceSaveFailed: "Impossibile salvare il sorgente: {message}",
+    postgresViewColumnChangeHint:
+      "PostgreSQL non consente di usare CREATE OR REPLACE VIEW per eliminare, riordinare, rinominare o cambiare il tipo delle colonne esistenti di una vista. Mantieni invariati il numero, l'ordine, i nomi e i tipi delle colonne esistenti; le nuove colonne possono essere aggiunte solo alla fine. Usa ALTER VIEW ... RENAME COLUMN per rinominare una colonna. Per eliminare una colonna, verifica le dipendenze e ricrea manualmente la vista.",
     schemaColumn: "Schema",
     comment: "Commento",
     loadingSchemas: "Caricamento schemi...",

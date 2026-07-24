@@ -26,7 +26,7 @@ jobs:
         id: bump
         shell: bash
         run: |
-          LEGACY_REPO="https://github.com/t8y2/dbx-agents.git"
+          LEGACY_REPO="https://github.com/sorchk/dbx-agents.git"
           LEGACY_BASE_TAG="v0.2.33"
           PREV_TAG=$(git tag --sort=-creatordate | grep '^agents-v' | sed -n '2p')
           SKIP_BUMP=false

@@ -1,6 +1,6 @@
 services:
   dbx:
-    image: t8y2/dbx
+    image: sorchk/dbx
     ports:
       - "4224:4224"
     environment:

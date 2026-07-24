@@ -17,8 +17,8 @@ additionalProperties:
   crossVersionUpdate: true
   limit: 0
   recommend: 0
-  website: https://github.com/t8y2/dbx
-  github: https://github.com/t8y2/dbx
-  document: https://github.com/t8y2/dbx#readme
+  website: https://github.com/sorchk/dbx
+  github: https://github.com/sorchk/dbx
+  document: https://github.com/sorchk/dbx#readme
   architectures:
     - amd64

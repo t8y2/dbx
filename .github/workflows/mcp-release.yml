@@ -980,7 +980,7 @@ jobs:
           CLI_SHA256: ${{ steps.cli-hash.outputs.sha256 }}
         run: |
           git clone --depth 1 \
-            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/t8y2/homebrew-tap.git" \
+            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/sorchk/homebrew-tap.git" \
             homebrew-tap
           cd homebrew-tap
           mkdir -p Formula
@@ -988,7 +988,7 @@ jobs:
           cat > Formula/dbx-cli.rb <<'RUBY_EOF'
           class DbxCli < Formula
             desc "Command-line interface for DBX database connections, schema, and safe queries"
-            homepage "https://github.com/t8y2/dbx"
+            homepage "https://github.com/sorchk/dbx"
             url "https://registry.npmjs.org/@dbx-app/cli/-/cli-__CLI_VERSION__.tgz"
             sha256 "__CLI_SHA256__"
             license "Apache-2.0"

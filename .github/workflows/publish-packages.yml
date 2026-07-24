@@ -251,7 +251,7 @@ jobs:
           jq '.platforms[]?.url // empty' "$LATEST_JSON"
           jq --arg tag "$TAG" '
             (.platforms[]?.url?) |= (
-              sub("https://github\\.com/t8y2/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/latest/")
+              sub("https://github\\.com/sorchk/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/latest/")
               + "?v=" + $tag
             )
           ' "$LATEST_JSON" > "$LATEST_JSON.tmp"

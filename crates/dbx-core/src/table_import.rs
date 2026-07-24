@@ -3013,11 +3013,13 @@ fn normalize_import_temporal_value(
     db_type: &DatabaseType,
     date_time_format: Option<&str>,
 ) -> serde_json::Value {
-    let oracle_date_time = matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
-        && data_type.is_some_and(|data_type| data_type.trim().eq_ignore_ascii_case("date"));
+    // Kingbase Oracle mode reports DATE metadata while retaining time; PostgreSQL mode truncates it server-side.
+    let date_type_preserves_time =
+        matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Kingbase)
+            && data_type.is_some_and(|data_type| data_type.trim().eq_ignore_ascii_case("date"));
     crate::temporal_format::normalize_temporal_import_value(
         value,
-        if oracle_date_time { Some("datetime") } else { data_type },
+        if date_type_preserves_time { Some("datetime") } else { data_type },
         date_time_format,
     )
 }
@@ -7274,6 +7276,41 @@ mod tests {
         assert_eq!(
             batches[0].sql,
             "INSERT INTO \"APP\".\"events\" (\"created_at\") VALUES\n(TO_DATE('2024-02-25 13:02:15', 'YYYY-MM-DD HH24:MI:SS'))"
+        );
+    }
+
+    #[test]
+    fn import_insert_batches_preserve_kingbase_date_time_components() {
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "created_at".to_string(),
+            target_column: "created_at".to_string(),
+            target_data_type: None,
+        }];
+        let excel_date_time =
+            Data::DateTime(ExcelDateTime::new(45959.686111111, calamine::ExcelDateTimeType::DateTime, false));
+        let imported_value = xlsx_cell_value_with_temporal_kind(&excel_date_time, Some(XlsxTemporalKind::DateTime));
+        assert_eq!(imported_value, serde_json::json!("2025-10-29 16:28:00"));
+        let data = ParsedImportFile {
+            columns: vec!["created_at".to_string()],
+            rows: vec![vec![imported_value]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("created_at".to_string(), "DATE".to_string())],
+            "events",
+            "public",
+            &DatabaseType::Kingbase,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches[0].sql,
+            "INSERT INTO \"public\".\"events\" (\"created_at\") VALUES\n('2025-10-29 16:28:00')"
         );
     }
 

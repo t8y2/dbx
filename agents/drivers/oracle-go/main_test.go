@@ -242,6 +242,36 @@ func TestNormalizeValueKeepsNonBinaryBytesAsText(t *testing.T) {
 	}
 }
 
+func TestNormalizeValueFormatsOracleTimezoneLessDateTimesAsWallClock(t *testing.T) {
+	value := time.Date(2026, time.July, 23, 13, 42, 13, 123456000, time.FixedZone("CST", 8*60*60))
+	tests := []string{
+		"DATE",
+		"TIMESTAMP",
+		"TIMESTAMP(6)",
+		"TimeStampDTY",
+	}
+
+	for _, columnType := range tests {
+		if got := normalizeValue(value, columnType); got != "2026-07-23T13:42:13.123456" {
+			t.Fatalf("normalizeValue time for %q = %#v, want wall-clock value", columnType, got)
+		}
+	}
+}
+
+func TestNormalizeValueKeepsOracleZonedDateTimeOffsets(t *testing.T) {
+	value := time.Date(2026, time.July, 23, 13, 42, 13, 123456000, time.FixedZone("CST", 8*60*60))
+	tests := []string{
+		"TimeStampTZ_DTY",
+		"TIMESTAMP WITH TIME ZONE",
+	}
+
+	for _, columnType := range tests {
+		if got := normalizeValue(value, columnType); got != "2026-07-23T13:42:13.123456+08:00" {
+			t.Fatalf("normalizeValue time for %q = %#v, want RFC3339 offset", columnType, got)
+		}
+	}
+}
+
 func TestNormalizeDDLObjectType(t *testing.T) {
 	tests := map[string]string{
 		"":                  "",
@@ -647,13 +677,16 @@ func TestListDatabasesSQLUsesUserDictionaryInsteadOfObjectDictionary(t *testing.
 	sqlText := strings.ToUpper(oracleListDatabasesSQL)
 
 	if !strings.Contains(sqlText, "ALL_USERS") {
-		t.Fatalf("schema listing should query ALL_USERS, got: %s", oracleListDatabasesSQL)
+		t.Fatalf("database listing should query ALL_USERS, got: %s", oracleListDatabasesSQL)
 	}
 	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_VIEWS") {
-		t.Fatalf("schema listing should not scan object dictionaries, got: %s", oracleListDatabasesSQL)
+		t.Fatalf("database listing should not scan object dictionaries, got: %s", oracleListDatabasesSQL)
 	}
 	if strings.Contains(sqlText, "'DIP'") {
-		t.Fatalf("schema listing should not hide an existing user named DIP, got: %s", oracleListDatabasesSQL)
+		t.Fatalf("database listing should not hide an existing user named DIP, got: %s", oracleListDatabasesSQL)
+	}
+	if !strings.Contains(sqlText, "'SYS','SYSTEM'") || !strings.Contains(sqlText, "USERNAME NOT LIKE 'APEX_%'") {
+		t.Fatalf("database listing should retain system schema filtering, got: %s", oracleListDatabasesSQL)
 	}
 }
 
@@ -662,16 +695,54 @@ func TestListDatabasesSQLCanApplyVisibleSchemaFilter(t *testing.T) {
 	upperSQL := strings.ToUpper(sqlText)
 
 	if !strings.Contains(upperSQL, "ALL_USERS") {
-		t.Fatalf("schema listing should query ALL_USERS, got: %s", sqlText)
+		t.Fatalf("database listing should query ALL_USERS, got: %s", sqlText)
 	}
 	if !strings.Contains(upperSQL, "USERNAME IN (:1,:2)") {
-		t.Fatalf("schema listing should apply visible schema filter, got: %s", sqlText)
+		t.Fatalf("database listing should apply visible schema filter, got: %s", sqlText)
 	}
 	if len(args) != 2 || args[0] != "APP" || args[1] != "REPORTING" {
 		t.Fatalf("visible schema args were not preserved: %#v", args)
 	}
 	if strings.Contains(upperSQL, "ALL_TABLES") || strings.Contains(upperSQL, "ALL_VIEWS") {
-		t.Fatalf("schema listing should not scan object dictionaries, got: %s", sqlText)
+		t.Fatalf("database listing should not scan object dictionaries, got: %s", sqlText)
+	}
+	if !strings.Contains(upperSQL, "'SYS','SYSTEM'") {
+		t.Fatalf("database visible-schema filtering should retain system exclusions, got: %s", sqlText)
+	}
+}
+
+func TestListSchemasSQLIncludesSystemUsersWithoutSynthesizingPublic(t *testing.T) {
+	sqlText := strings.ToUpper(oracleListSchemasSQL)
+
+	if !strings.Contains(sqlText, "FROM ALL_USERS") {
+		t.Fatalf("schema listing should query ALL_USERS, got: %s", oracleListSchemasSQL)
+	}
+	if strings.Contains(sqlText, "NOT IN") || strings.Contains(sqlText, "'SYS'") || strings.Contains(sqlText, "'SYSTEM'") {
+		t.Fatalf("schema listing should not hard-exclude SYS or SYSTEM, got: %s", oracleListSchemasSQL)
+	}
+	if strings.Contains(sqlText, "PUBLIC") || strings.Contains(sqlText, "UNION") {
+		t.Fatalf("schema listing should not synthesize PUBLIC, got: %s", oracleListSchemasSQL)
+	}
+	if !strings.Contains(sqlText, "CURRENT_SCHEMA') THEN 0") || !strings.Contains(sqlText, "SESSION_USER') THEN 1") {
+		t.Fatalf("schema listing should prioritize CURRENT_SCHEMA then SESSION_USER, got: %s", oracleListSchemasSQL)
+	}
+}
+
+func TestListSchemasSQLCanApplyVisibleSchemaFilter(t *testing.T) {
+	sqlText, args := oracleListSchemasSQLWithVisibleSchemas([]string{"SYS", "SYSTEM"})
+	upperSQL := strings.ToUpper(sqlText)
+
+	if !strings.Contains(upperSQL, "USERNAME IN (:1,:2)") {
+		t.Fatalf("schema listing should parameterize visible schemas, got: %s", sqlText)
+	}
+	if len(args) != 2 || args[0] != "SYS" || args[1] != "SYSTEM" {
+		t.Fatalf("visible schema args were not preserved: %#v", args)
+	}
+	if strings.Contains(upperSQL, "NOT IN") || strings.Contains(upperSQL, "'SYS'") || strings.Contains(upperSQL, "'SYSTEM'") {
+		t.Fatalf("visible schema query should not hard-exclude SYS or SYSTEM, got: %s", sqlText)
+	}
+	if !strings.Contains(upperSQL, "CURRENT_SCHEMA') THEN 0") || !strings.Contains(upperSQL, "SESSION_USER') THEN 1") {
+		t.Fatalf("visible schema query should preserve schema ordering, got: %s", sqlText)
 	}
 }
 
@@ -858,6 +929,56 @@ func TestListSessionUserObjectsQueryUsesUserDictionary(t *testing.T) {
 	}
 	if query.Args[0] != "%P%K%G%\\%%" || query.Args[1] != "FUNCTION" || query.Args[2] != "PACKAGE" || query.Args[3] != 25 || query.Args[4] != 0 {
 		t.Fatalf("object constraints args were not normalized: %#v", query.Args)
+	}
+}
+
+func TestOracleListTriggersSQLLoadsSourceWithoutLongColumns(t *testing.T) {
+	sqlText := strings.ToUpper(oracleListTriggersSQL)
+
+	if !strings.Contains(sqlText, "FROM ALL_TRIGGERS") || !strings.Contains(sqlText, "LEFT JOIN ALL_SOURCE") {
+		t.Fatalf("trigger listing should join metadata with line-based source, got: %s", oracleListTriggersSQL)
+	}
+	if !strings.Contains(sqlText, "T.DESCRIPTION") || !strings.Contains(sqlText, "S.TEXT") {
+		t.Fatalf("trigger listing should load the declaration and source text, got: %s", oracleListTriggersSQL)
+	}
+	if strings.Contains(sqlText, "TRIGGER_BODY") {
+		t.Fatalf("trigger listing should avoid Oracle LONG trigger bodies, got: %s", oracleListTriggersSQL)
+	}
+	if !strings.Contains(sqlText, "T.OWNER = :1") || !strings.Contains(sqlText, "T.TABLE_NAME = :2") {
+		t.Fatalf("trigger listing should stay scoped to the selected schema and table, got: %s", oracleListTriggersSQL)
+	}
+}
+
+func TestOracleTriggerBodyStripsDictionaryDeclaration(t *testing.T) {
+	source := "TRIGGER DBX_TRIGGER_4320_AUDIT\n" +
+		"AFTER INSERT OR UPDATE OR DELETE ON DBX_TRIGGER_4320\n" +
+		"FOR EACH ROW\n" +
+		"DECLARE\n" +
+		"  V_EVENT VARCHAR2(10);\n" +
+		"BEGIN\n" +
+		"  V_EVENT := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\n" +
+		"END;\n"
+	description := "DBX_TRIGGER_4320_AUDIT\n" +
+		"AFTER INSERT OR UPDATE OR DELETE ON DBX_TRIGGER_4320\n" +
+		"FOR EACH ROW\n"
+
+	body, ok := oracleTriggerBody(source, description)
+	if !ok {
+		t.Fatal("expected Oracle trigger source to produce a body")
+	}
+	want := "DECLARE\n  V_EVENT VARCHAR2(10);\nBEGIN\n  V_EVENT := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\nEND;"
+	if body != want {
+		t.Fatalf("trigger body = %q, want %q", body, want)
+	}
+}
+
+func TestOracleTriggerBodyFallsBackToVisibleSource(t *testing.T) {
+	body, ok := oracleTriggerBody("TRIGGER APP.AUDIT\nBEGIN\n  NULL;\nEND;\n", "differently formatted declaration")
+	if !ok {
+		t.Fatal("expected differently formatted Oracle source to remain visible")
+	}
+	if body != "TRIGGER APP.AUDIT\nBEGIN\n  NULL;\nEND;" {
+		t.Fatalf("unexpected fallback source: %q", body)
 	}
 }
 
@@ -1083,7 +1204,6 @@ func contains(values []string, target string) bool {
 	return false
 }
 
-
 // -- fake drivers for timeout tests --
 
 func init() {
@@ -1103,7 +1223,7 @@ type oracleDMLConn struct{}
 func (c *oracleDMLConn) Prepare(query string) (driver.Stmt, error) {
 	return nil, errors.New("use ExecContext directly")
 }
-func (c *oracleDMLConn) Close() error { return nil }
+func (c *oracleDMLConn) Close() error              { return nil }
 func (c *oracleDMLConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
 
 var _ driver.ExecerContext = (*oracleDMLConn)(nil)
@@ -1125,13 +1245,13 @@ type oracleFastConn struct{}
 func (c *oracleFastConn) Prepare(query string) (driver.Stmt, error) {
 	return &oracleFastStmt{}, nil
 }
-func (c *oracleFastConn) Close() error { return nil }
+func (c *oracleFastConn) Close() error              { return nil }
 func (c *oracleFastConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
 
 type oracleFastStmt struct{}
 
-func (s *oracleFastStmt) Close() error      { return nil }
-func (s *oracleFastStmt) NumInput() int      { return -1 }
+func (s *oracleFastStmt) Close() error  { return nil }
+func (s *oracleFastStmt) NumInput() int { return -1 }
 func (s *oracleFastStmt) Exec(args []driver.Value) (driver.Result, error) {
 	return driver.ResultNoRows, nil
 }

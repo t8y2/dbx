@@ -2674,7 +2674,7 @@ async fn exec_tx_pg_inner(
     if let Some(s) = schema {
         db::postgres::execute_postgres_infra_statement(
             &client,
-            &format!("SET search_path TO {}", db::postgres::pg_quote_ident(s)),
+            &db::postgres::postgres_set_search_path_sql(s, db::postgres::PostgresSearchPathContext::Transaction),
             budget.recycle_timeout,
             "schema.set",
         )
@@ -3066,9 +3066,15 @@ async fn begin_transaction_session(
             let begin_sql = postgres_transaction_begin_sql(consistent_snapshot);
             conn.execute(begin_sql, &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
             if let Some(schema) = schema {
-                conn.execute(&format!("SET LOCAL search_path TO {}", db::postgres::pg_quote_ident(schema)), &[])
-                    .await
-                    .map_err(|e| format!("SET search_path failed: {e}"))?;
+                conn.execute(
+                    &db::postgres::postgres_set_search_path_sql(
+                        schema,
+                        db::postgres::PostgresSearchPathContext::LocalTransaction,
+                    ),
+                    &[],
+                )
+                .await
+                .map_err(|e| format!("SET search_path failed: {e}"))?;
             }
             TxnConnection::Postgres(Box::new(conn))
         }
@@ -3285,61 +3291,24 @@ where
     let mut conn = connection.lock().await;
     let stream_result = match &mut *conn {
         TxnConnection::Postgres(conn) => {
-            let stmt = conn.prepare_cached(sql).await.map_err(|e| format!("Prepare failed: {e}"));
-            match stmt {
-                Ok(stmt) => {
-                    let column_types: Vec<String> =
-                        stmt.columns().iter().map(|column| column.type_().name().to_string()).collect();
-                    let column_classes = db::postgres::classify_pg_column_types(&column_types);
-                    let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-                    match conn.query_raw(&stmt, params).await {
-                        Ok(stream) => {
-                            tokio::pin!(stream);
-                            let mut batch = Vec::with_capacity(batch_size);
-                            let mut total_rows = 0_u64;
-                            let mut error = None;
-                            while let Some(row_result) = stream.next().await {
-                                match row_result {
-                                    Ok(row) => {
-                                        let values = (0..row.columns().len())
-                                            .map(|index| {
-                                                db::postgres::pg_value_to_json_classified(
-                                                    &row,
-                                                    index,
-                                                    column_classes
-                                                        .get(index)
-                                                        .copied()
-                                                        .unwrap_or(db::postgres::PgColType::Other),
-                                                )
-                                            })
-                                            .collect();
-                                        batch.push(values);
-                                        total_rows += 1;
-                                        if batch.len() >= batch_size {
-                                            if let Err(err) = on_batch(std::mem::take(&mut batch)) {
-                                                error = Some(err);
-                                                break;
-                                            }
-                                            batch = Vec::with_capacity(batch_size);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        error = Some(format!("Query failed: {err}"));
-                                        break;
-                                    }
-                                }
-                            }
-                            if error.is_none() && !batch.is_empty() {
-                                if let Err(err) = on_batch(batch) {
-                                    error = Some(err);
-                                }
-                            }
-                            error.map_or(Ok(total_rows), Err)
-                        }
-                        Err(err) => Err(format!("Query failed: {err}")),
+            let mut batch = Vec::with_capacity(batch_size);
+            let mut total_rows = 0_u64;
+            let result = db::postgres::stream_select_query_inner(conn, sql, None, &mut |item| {
+                if let db::postgres::PostgresQueryStreamItem::Row(row) = item {
+                    batch.push(row);
+                    total_rows += 1;
+                    if batch.len() >= batch_size {
+                        on_batch(std::mem::take(&mut batch))?;
+                        batch = Vec::with_capacity(batch_size);
                     }
                 }
-                Err(err) => Err(err),
+                Ok(())
+            })
+            .await;
+            match result {
+                Ok(_) if !batch.is_empty() => on_batch(batch).map(|_| total_rows),
+                Ok(_) => Ok(total_rows),
+                Err(error) => Err(error),
             }
         }
         TxnConnection::Mysql(conn) => match conn.query_iter(sql).await {
@@ -3462,44 +3431,7 @@ async fn execute_manual_txn_postgres_statement(
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
     if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
-        let start = std::time::Instant::now();
-        let stmt = conn.prepare_cached(sql).await.map_err(|e| format!("Prepare failed: {e}"))?;
-        let columns: Vec<String> = stmt.columns().iter().map(|c| c.name().to_string()).collect();
-        let column_types: Vec<String> = stmt.columns().iter().map(|c| c.type_().name().to_string()).collect();
-        let column_classes = db::postgres::classify_pg_column_types(&column_types);
-        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-        let stream = conn.query_raw(&stmt, params).await.map_err(|e| format!("Query failed: {e}"))?;
-        tokio::pin!(stream);
-        let mut data: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(1024));
-        let mut truncated = false;
-        while let Some(row_result) = stream.next().await {
-            if data.len() >= row_limit {
-                truncated = true;
-                break;
-            }
-            let row = row_result.map_err(|e| format!("Query failed: {e}"))?;
-            let values: Vec<serde_json::Value> = (0..row.columns().len())
-                .map(|i| {
-                    db::postgres::pg_value_to_json_classified(
-                        &row,
-                        i,
-                        column_classes.get(i).copied().unwrap_or(db::postgres::PgColType::Other),
-                    )
-                })
-                .collect();
-            data.push(values);
-        }
-        Ok(db::QueryResult {
-            columns,
-            column_types,
-            column_sortables: vec![],
-            rows: data,
-            affected_rows: 0,
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated,
-            session_id: None,
-            has_more: false,
-        })
+        db::postgres::execute_select_query(conn, sql, std::time::Instant::now(), row_limit).await
     } else {
         let affected = conn.execute(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
         Ok(db::QueryResult {

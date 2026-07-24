@@ -70,6 +70,14 @@ pub(crate) struct ConfigRollbackReq {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct RNacosConsoleLoginReq {
+    connection_id: String,
+    #[serde(default)]
+    captcha: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ServiceListReq {
     connection_id: String,
     query: dbx_core::nacos::NacosServiceQuery,
@@ -201,6 +209,26 @@ pub async fn rollback_config(
     Json(req): Json<ConfigRollbackReq>,
 ) -> Result<Json<()>, AppError> {
     dbx_core::nacos::service::nacos_rollback_config_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn get_rnacos_console_captcha(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ConnReq>,
+) -> Result<Json<dbx_core::nacos::NacosRNacosConsoleCaptcha>, AppError> {
+    let result = dbx_core::nacos::service::nacos_get_rnacos_console_captcha_core(&state.app, &req.connection_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn login_rnacos_console(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RNacosConsoleLoginReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_login_rnacos_console_core(&state.app, &req.connection_id, req.captcha)
         .await
         .map_err(AppError::from)?;
     Ok(Json(()))

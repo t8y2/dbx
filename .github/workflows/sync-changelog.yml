@@ -9,6 +9,9 @@ on:
 jobs:
   sync:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    permissions:
+      # Replacing latest.json uses the release asset write APIs.
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

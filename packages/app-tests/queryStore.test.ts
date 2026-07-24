@@ -3039,7 +3039,7 @@ test("jdbc query pagination uses result sessions without capping max rows to one
     assert.equal(prepareBody.options.useAgentCursor, true);
     assert.equal(executeBody.pageSize, 100);
     assert.equal(executeBody.fetchSize, 100);
-    assert.equal(executeBody.maxRows, undefined);
+    assert.equal(executeBody.maxRows, 100000);
     assert.equal(executeBody.clientSessionId, tabId);
     assert.equal(tab.resultSessionId, "session-1");
     assert.equal(tab.result?.has_more, true);
@@ -3048,6 +3048,71 @@ test("jdbc query pagination uses result sessions without capping max rows to one
     restoreStorage();
   }
 });
+
+for (const pageSize of [1_000, 25_000, 100_000]) {
+  test(`oracle agent pagination keeps ${pageSize} rows within the bounded cursor limit`, async () => {
+    const restoreStorage = installMemoryStorage();
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    const store = useQueryStore();
+    const originalFetch = globalThis.fetch;
+    let executeBody: any;
+
+    settingsStore.updateEditorSettings({ pageSize });
+    connectionStore.addEphemeralConnection(oracleConn("oracle-1"));
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+
+    globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/query/prepare-pagination-plan") {
+        return new Response(
+          JSON.stringify({
+            sqlToExecute: "SELECT * FROM LARGE_TABLE",
+            pageLimit: pageSize,
+            pageOffset: 0,
+            useAgentResultSession: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === "/api/query/execute-multi") {
+        executeBody = JSON.parse(String(init?.body ?? "{}"));
+        return new Response(
+          JSON.stringify([
+            {
+              columns: ["ID"],
+              rows: [],
+              affected_rows: 0,
+              execution_time_ms: 1,
+              truncated: false,
+              has_more: false,
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === "/api/query/analyze-editability") {
+        return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("unexpected request", { status: 500 });
+    });
+
+    try {
+      await store.executeTabSql(tabId, "SELECT * FROM LARGE_TABLE");
+
+      assert.equal(executeBody.pageSize, pageSize);
+      assert.equal(executeBody.fetchSize, pageSize);
+      assert.equal(executeBody.maxRows, 100000);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreStorage();
+    }
+  });
+}
 
 test("mongo aggregate execution uses editor page size when pagination plan has no limit", async () => {
   const restoreStorage = installMemoryStorage();
@@ -4688,6 +4753,153 @@ test("query execution keeps automatically counting total rows in the background"
     restoreStorage();
   }
 });
+
+for (const resultState of [
+  { label: "truncated", result: { truncated: true, has_more: false } },
+  { label: "ambiguous exhaustion", result: {} },
+]) {
+  test(`oracle agent ${resultState.label} short page uses COUNT instead of inferring 10000`, async () => {
+    const restoreStorage = installMemoryStorage();
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    const store = useQueryStore();
+    const originalFetch = globalThis.fetch;
+    let countRequests = 0;
+
+    settingsStore.updateEditorSettings({ pageSize: 100_000, autoCalculateTotalRows: true });
+    connectionStore.addEphemeralConnection(oracleConn("oracle-1"));
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+
+    globalThis.fetch = withConnectionHealthMock(async (input) => {
+      const url = String(input);
+      if (url === "/api/query/prepare-pagination-plan") {
+        return new Response(
+          JSON.stringify({
+            sqlToExecute: "SELECT ID FROM LARGE_TABLE",
+            pageLimit: 100_000,
+            pageOffset: 0,
+            countSql: "SELECT COUNT(*) FROM LARGE_TABLE",
+            useAgentResultSession: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === "/api/query/execute-multi") {
+        return new Response(
+          JSON.stringify([
+            {
+              columns: ["ID"],
+              rows: Array.from({ length: 10_000 }, (_, index) => [index + 1]),
+              affected_rows: 0,
+              execution_time_ms: 1,
+              ...resultState.result,
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === "/api/query/execute") {
+        countRequests += 1;
+        return new Response(JSON.stringify({ columns: ["COUNT(*)"], rows: [[3_357_833]], affected_rows: 0, execution_time_ms: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "/api/query/analyze-editability") {
+        return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("unexpected request", { status: 500 });
+    });
+
+    try {
+      await store.executeTabSql(tabId, "SELECT ID FROM LARGE_TABLE");
+      await waitFor(() => tab.resultTotalRowCount === 3_357_833);
+
+      assert.equal(countRequests, 1);
+      assert.equal(tab.result?.rows.length, 10_000);
+      assert.notEqual(tab.resultTotalRowCount, 10_000);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreStorage();
+    }
+  });
+}
+
+for (const paginationMode of [
+  { label: "agent", useAgentResultSession: true, result: { truncated: false, has_more: false } },
+  { label: "SQL", useAgentResultSession: false, result: {} },
+]) {
+  test(`${paginationMode.label} natural short page still infers the exact total`, async () => {
+    const restoreStorage = installMemoryStorage();
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    const store = useQueryStore();
+    const originalFetch = globalThis.fetch;
+    let countRequests = 0;
+
+    settingsStore.updateEditorSettings({ autoCalculateTotalRows: true });
+    connectionStore.addEphemeralConnection(paginationMode.useAgentResultSession ? oracleConn("conn-1") : conn("conn-1"));
+    const tabId = store.createTab("conn-1", "db", "Query", "query", "public");
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+
+    globalThis.fetch = withConnectionHealthMock(async (input) => {
+      const url = String(input);
+      if (url === "/api/query/prepare-pagination-plan") {
+        return new Response(
+          JSON.stringify({
+            sqlToExecute: "select id from users",
+            pageLimit: 100,
+            pageOffset: 200,
+            countSql: "select count(*) from users",
+            useAgentResultSession: paginationMode.useAgentResultSession,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === "/api/query/execute-multi") {
+        return new Response(
+          JSON.stringify([
+            {
+              columns: ["id"],
+              rows: Array.from({ length: 37 }, (_, index) => [index + 201]),
+              affected_rows: 0,
+              execution_time_ms: 1,
+              ...paginationMode.result,
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === "/api/query/execute") {
+        countRequests += 1;
+        return new Response("unexpected count", { status: 500 });
+      }
+      if (url === "/api/query/analyze-editability") {
+        return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("unexpected request", { status: 500 });
+    });
+
+    try {
+      await store.executeTabSql(tabId, "select id from users", { pagination: { limit: 100, offset: 200 } });
+
+      assert.equal(tab.resultTotalRowCount, 237);
+      assert.equal(tab.resultTotalRowCountLoading, false);
+      assert.equal(countRequests, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreStorage();
+    }
+  });
+}
 
 test("paginated query execution keeps the previous total while refreshing it in the background", async () => {
   const restoreStorage = installMemoryStorage();

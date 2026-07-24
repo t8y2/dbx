@@ -175,18 +175,12 @@ function siblingReleaseAssetUrl(url: string, filename: string): string {
   return separator >= 0 ? `${url.slice(0, separator + 1)}${filename}` : filename;
 }
 
-function githubReleaseAsset(name: string, size: number, tag = "agents-latest"): GitHubReleaseAsset {
-  return {
-    name,
-    size,
-    browser_download_url: `${GITHUB_RELEASE_DOWNLOAD_PREFIX}${tag}/${name}`,
-  };
-}
-
 function registryReleaseAssets(registry: AgentRegistry): GitHubReleaseAsset[] {
   const assets = new Map<string, GitHubReleaseAsset>();
+  let releaseAssetUrl: string | undefined;
   const addArtifact = (artifact: AgentRegistryArtifact | undefined, fallbackName: string) => {
     if (!artifact?.url) return;
+    releaseAssetUrl ??= artifact.url.startsWith(GITHUB_RELEASE_DOWNLOAD_PREFIX) ? artifact.url : undefined;
     const name = releaseAssetName(artifact.url, fallbackName);
     assets.set(name, { name, size: artifact.size || 0, browser_download_url: artifact.url });
   };
@@ -221,9 +215,15 @@ function registryReleaseAssets(registry: AgentRegistry): GitHubReleaseAsset[] {
     }
   }
 
-  for (const platformKey of Object.keys(registry.jres?.["21"]?.platforms ?? {})) {
-    const name = `dbx-agents-offline-${platformKey}.zip`;
-    assets.set(name, githubReleaseAsset(name, 0));
+  if (releaseAssetUrl) {
+    for (const platformKey of Object.keys(registry.jres?.["21"]?.platforms ?? {})) {
+      const name = `dbx-agents-offline-${platformKey}.zip`;
+      assets.set(name, {
+        name,
+        size: 0,
+        browser_download_url: siblingReleaseAssetUrl(releaseAssetUrl, name),
+      });
+    }
   }
 
   return Array.from(assets.values());

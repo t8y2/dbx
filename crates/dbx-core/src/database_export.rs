@@ -1851,6 +1851,7 @@ pub async fn export_database_sql_core(
                 view_name,
                 crate::db::ObjectSourceKind::View,
                 None,
+                None,
             )
             .await
             {
@@ -1901,6 +1902,7 @@ pub async fn export_database_sql_core(
                 proc_name,
                 crate::db::ObjectSourceKind::Procedure,
                 procedure.signature.as_deref(),
+                None,
             )
             .await
             {
@@ -1955,6 +1957,7 @@ pub async fn export_database_sql_core(
                 func_name,
                 crate::db::ObjectSourceKind::Function,
                 function.signature.as_deref(),
+                None,
             )
             .await
             {

@@ -280,6 +280,7 @@ pub async fn get_object_source(
     name: String,
     object_type: db::ObjectSourceKind,
     signature: Option<String>,
+    relation_name: Option<String>,
 ) -> Result<db::ObjectSource, String> {
     dbx_core::schema::get_object_source_core(
         &state,
@@ -289,6 +290,7 @@ pub async fn get_object_source(
         &name,
         object_type,
         signature.as_deref(),
+        relation_name.as_deref(),
     )
     .await
 }

@@ -169,9 +169,18 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
     }
 
     let from_body_start = from_index + "FROM".len();
-    let from_end =
-        first_top_level_keyword_index(&normalized, &["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH"], from_body_start)
-            .unwrap_or(normalized.len());
+    let for_index = find_top_level_keyword(&normalized, "FOR", from_body_start);
+    // Row-locking FOR clauses change concurrency behavior, not the base-row
+    // mapping. Output/read-only FOR modes must stay non-editable.
+    if for_index.is_some_and(|index| !is_row_lock_clause(&normalized[index..])) {
+        return not_editable(QueryEditabilityReason::ComplexSource);
+    }
+    let from_end = first_top_level_keyword_index(
+        &normalized,
+        &["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"],
+        from_body_start,
+    )
+    .unwrap_or(normalized.len());
     let from_body = normalized[from_body_start..from_end].trim();
     if is_external_from_source(from_body) {
         return not_editable(QueryEditabilityReason::ExternalSource);
@@ -581,6 +590,26 @@ fn table_source_terminator_at(text: &str, pos: usize) -> bool {
         .any(|keyword| starts_with_keyword_at(text, pos, keyword))
 }
 
+fn is_row_lock_clause(text: &str) -> bool {
+    if !starts_with_keyword(text, "FOR") {
+        return false;
+    }
+    let mode_start = skip_whitespace(text, "FOR".len());
+    if starts_with_keyword_at(text, mode_start, "UPDATE") || starts_with_keyword_at(text, mode_start, "SHARE") {
+        return true;
+    }
+    if starts_with_keyword_at(text, mode_start, "NO") {
+        let key_start = skip_whitespace(text, mode_start + "NO".len());
+        let update_start = skip_whitespace(text, key_start + "KEY".len());
+        return starts_with_keyword_at(text, key_start, "KEY") && starts_with_keyword_at(text, update_start, "UPDATE");
+    }
+    if starts_with_keyword_at(text, mode_start, "KEY") {
+        let share_start = skip_whitespace(text, mode_start + "KEY".len());
+        return starts_with_keyword_at(text, share_start, "SHARE");
+    }
+    false
+}
+
 fn starts_with_keyword_at(text: &str, pos: usize, keyword: &str) -> bool {
     let start = skip_whitespace(text, pos);
     let Some(candidate) = text.get(start..start + keyword.len()) else {
@@ -886,6 +915,61 @@ mod tests {
         assert_eq!(analysis.table_name, "users");
         assert!(analysis.select_star);
         assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn recognizes_oracle_for_update_clauses_without_treating_for_as_an_alias() {
+        for sql in [
+            "SELECT * FROM employees FOR UPDATE",
+            "SELECT * FROM employees FOR UPDATE NOWAIT",
+            "SELECT * FROM employees FOR UPDATE SKIP LOCKED",
+            "SELECT * FROM employees FOR UPDATE OF salary, department_id WAIT 5",
+            "SELECT * FROM employees WHERE department_id = 10 ORDER BY employee_id FOR UPDATE OF salary NOWAIT",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(result.editable, "{sql}");
+            let analysis = result.analysis.unwrap();
+            assert_eq!(analysis.table_name, "employees", "{sql}");
+            assert_eq!(analysis.table_alias, None, "{sql}");
+            assert!(analysis.select_star, "{sql}");
+        }
+
+        let result = analyze_editable_query_editability(
+            "SELECT e.employee_id, e.salary FROM employees e FOR UPDATE OF e.salary SKIP LOCKED",
+        );
+        assert!(result.editable);
+        assert_eq!(result.analysis.unwrap().table_alias.as_deref(), Some("e"));
+    }
+
+    #[test]
+    fn recognizes_postgres_row_lock_clauses_without_treating_for_as_an_alias() {
+        for sql in [
+            "SELECT * FROM jobs FOR SHARE",
+            "SELECT * FROM jobs FOR NO KEY UPDATE SKIP LOCKED",
+            "SELECT * FROM jobs FOR KEY SHARE NOWAIT",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(result.editable, "{sql}");
+            let analysis = result.analysis.unwrap();
+            assert_eq!(analysis.table_name, "jobs", "{sql}");
+            assert_eq!(analysis.table_alias, None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn keeps_explicit_read_only_and_output_for_clauses_non_editable() {
+        for sql in [
+            "SELECT * FROM employees FOR READ ONLY",
+            "SELECT * FROM employees FOR FETCH ONLY",
+            "SELECT * FROM employees FOR JSON",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(!result.editable, "{sql}");
+            assert_eq!(result.reason, Some(QueryEditabilityReason::ComplexSource), "{sql}");
+        }
     }
 
     #[test]

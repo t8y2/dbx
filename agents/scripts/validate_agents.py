@@ -14,6 +14,7 @@ DEFAULT_AGENT_JRE_KEY = "21"
 NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "rabbitmq"}
 NATIVE_ONLY_AGENT_MODULES = {
     "oracle": "drivers/oracle-go",
+    "kingbase": "drivers/kingbase-go",
     "xugu": "drivers/xugu",
 }
 JDBC_ARCHITECTURE_ALLOWLIST = {

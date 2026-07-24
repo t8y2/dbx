@@ -155,7 +155,10 @@ describe("queryStore multi-statement errors", () => {
 
     store.updateSchema(tabId, undefined);
 
-    expect(store.tabs.find((tab) => tab.id === tabId)?.completionContextVersion).toBe(1);
+    expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({
+      schema: undefined,
+      completionContextVersion: 1,
+    });
   });
 
   it("preserves the selected statement's absolute editor range", async () => {

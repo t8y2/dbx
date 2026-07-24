@@ -12,6 +12,7 @@ import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
@@ -264,6 +265,114 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             }
         }
         return result;
+    }
+
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        return unchecked(() -> {
+            String owner = normalizeSchema(schema);
+            String normalizedType = normalizeObjectSourceType(objectType);
+            String source;
+            SQLException metadataError = null;
+            try {
+                source = queryDbmsMetadataSource(owner, name, normalizedType);
+            } catch (SQLException e) {
+                metadataError = e;
+                source = null;
+            }
+
+            if ((source == null || source.trim().isEmpty()) && supportsDictionarySource(normalizedType)) {
+                try {
+                    // OceanBase versions and tenant privileges differ in DBMS_METADATA coverage.
+                    // Oracle-compatible dictionary views keep schema compare and source editing usable.
+                    source = queryDictionarySource(owner, name, normalizedType);
+                } catch (SQLException fallbackError) {
+                    if (metadataError != null) {
+                        metadataError.addSuppressed(fallbackError);
+                        throw metadataError;
+                    }
+                    throw fallbackError;
+                }
+            }
+            if (metadataError != null && (source == null || source.trim().isEmpty())) {
+                throw metadataError;
+            }
+            return new ObjectSource(name, normalizedType, owner, source == null ? "" : source);
+        });
+    }
+
+    private String queryDbmsMetadataSource(String owner, String name, String objectType) throws SQLException {
+        String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+        try (var stmt = requireConnection().prepareStatement(sql)) {
+            stmt.setString(1, objectType);
+            stmt.setString(2, name);
+            stmt.setString(3, owner);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
+    private String queryDictionarySource(String owner, String name, String objectType) throws SQLException {
+        if ("VIEW".equals(objectType)) {
+            String sql = "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?";
+            try (var stmt = requireConnection().prepareStatement(sql)) {
+                stmt.setString(1, owner);
+                stmt.setString(2, name);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    return rs.next() ? rs.getString(1) : null;
+                }
+            }
+        }
+
+        String sourceType = switch (objectType) {
+            case "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE" -> objectType;
+            case "PACKAGE_BODY" -> "PACKAGE BODY";
+            case "TYPE_BODY" -> "TYPE BODY";
+            default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        };
+        String sql = "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? AND TYPE = ? ORDER BY LINE";
+        StringBuilder source = new StringBuilder();
+        try (var stmt = requireConnection().prepareStatement(sql)) {
+            stmt.setString(1, owner);
+            stmt.setString(2, name);
+            stmt.setString(3, sourceType);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String line = rs.getString(1);
+                    if (line != null) {
+                        source.append(line);
+                    }
+                }
+            }
+        }
+        return editableOracleSource(source.toString());
+    }
+
+    private static String normalizeObjectSourceType(String objectType) {
+        String normalized = objectType == null
+            ? ""
+            : objectType.trim().toUpperCase(Locale.ROOT).replace(' ', '_');
+        return switch (normalized) {
+            case "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE",
+                "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> normalized;
+            default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        };
+    }
+
+    private static boolean supportsDictionarySource(String objectType) {
+        return switch (objectType) {
+            case "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> true;
+            default -> false;
+        };
+    }
+
+    private static String editableOracleSource(String source) {
+        String trimmed = source.trim();
+        if (trimmed.isEmpty() || trimmed.regionMatches(true, 0, "CREATE ", 0, "CREATE ".length())) {
+            return trimmed;
+        }
+        return "CREATE OR REPLACE " + trimmed;
     }
 
     private static String placeholders(int count) {

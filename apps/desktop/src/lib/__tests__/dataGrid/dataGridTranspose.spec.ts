@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { averageTransposeRecordWidth, calculateTransposeRecordWidth, defaultTransposeRecordWidth, minTransposeFieldWidth, transposeFieldWidth, transposeRecordWidthsForDensity, visibleTransposeRecordWindow } from "@/lib/dataGrid/dataGridTranspose";
+import { averageTransposeRecordWidth, calculateTransposeRecordWidth, defaultTransposeRecordWidth, minTransposeFieldWidth, shouldAutoTransposeSingleRow, transposeFieldWidth, transposeRecordWidthsForDensity, visibleTransposeRecordWindow } from "@/lib/dataGrid/dataGridTranspose";
+
+describe("single-row automatic transpose", () => {
+  it("only opens for enabled multi-column results that are not preserving a manual transpose", () => {
+    expect(shouldAutoTransposeSingleRow({ enabled: true, preserveTranspose: false, rowCount: 1, columnCount: 2 })).toBe(true);
+    expect(shouldAutoTransposeSingleRow({ enabled: false, preserveTranspose: false, rowCount: 1, columnCount: 2 })).toBe(false);
+    expect(shouldAutoTransposeSingleRow({ enabled: true, preserveTranspose: true, rowCount: 1, columnCount: 2 })).toBe(false);
+    expect(shouldAutoTransposeSingleRow({ enabled: true, preserveTranspose: false, rowCount: 0, columnCount: 2 })).toBe(false);
+    expect(shouldAutoTransposeSingleRow({ enabled: true, preserveTranspose: false, rowCount: 2, columnCount: 2 })).toBe(false);
+    expect(shouldAutoTransposeSingleRow({ enabled: true, preserveTranspose: false, rowCount: 1, columnCount: 1 })).toBe(false);
+  });
+});
 
 describe("dataGridTranspose density widths", () => {
   it("uses the shared density preset for record and field widths", () => {

@@ -1171,6 +1171,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :allow-insert-rows="activeTab.queryAnalysis?.allowInsert !== false && activeTab.queryAnalysis?.allowInsertDelete !== false"
                 :allow-delete-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
                 context="results"
+                :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
                 :database-type="activeEffectiveDatabaseType"
                 :connection-id="activeTab.connectionId"
                 :database="activeTab.database"

@@ -10,12 +10,31 @@ import {
   nacosConfigFileExtension,
   parseNacosRawBody,
   parseNacosRawQuery,
+  normalizeNacosEndpoint,
+  resolveRNacosOpenApiFallback,
   resolveNacosConfigCopyText,
   sanitizeNacosConfigFileNameSegment,
   summarizeNacosConfigDiff,
 } from "@/lib/nacos/nacosAdmin";
 
 describe("nacosAdmin helpers", () => {
+  it("normalizes Nacos profile URLs without losing proxy prefixes", () => {
+    expect(normalizeNacosEndpoint("https://[2001:db8::1]:9443/gateway/nacos/", { implementation: "nacos", versionMode: "v2" })).toMatchObject({
+      serverAddr: "https://[2001:db8::1]:9443",
+      contextPath: "/gateway/nacos",
+      detectedVersion: "v2",
+    });
+    expect(normalizeNacosEndpoint("https://nacos.example/gateway/next/index.html", { implementation: "nacos", versionMode: "v3" })).toMatchObject({
+      serverAddr: "https://nacos.example",
+      contextPath: "/gateway",
+      detectedVersion: "v3",
+    });
+    expect(normalizeNacosEndpoint("http://rnacos.example:8848/nacos", { implementation: "rnacos" })).toMatchObject({
+      serverAddr: "http://rnacos.example:8848",
+      contextPath: "/nacos",
+    });
+    expect(() => normalizeNacosEndpoint("http://user:secret@nacos.example", { implementation: "nacos" })).toThrow(/embedded credentials/i);
+  });
   it("parses raw query and body text", () => {
     expect(parseNacosRawQuery("?dataId=a&group=DEFAULT_GROUP")).toEqual({ dataId: "a", group: "DEFAULT_GROUP" });
     expect(parseNacosRawQuery("")).toBeUndefined();
@@ -28,6 +47,23 @@ describe("nacosAdmin helpers", () => {
     expect(req).toEqual({ method: "post", path: "/v1/cs/configs", query: { a: "1" }, body: { b: 2 } });
     expect(isNacosRawMutation("GET")).toBe(false);
     expect(isNacosRawMutation("DELETE")).toBe(true);
+  });
+
+  it("redirects r-nacos console settings to the compatible OpenAPI endpoint", () => {
+    expect(resolveRNacosOpenApiFallback("http://rnacos.example:10848", "/rnacos")).toEqual({
+      serverAddr: "http://rnacos.example:8848",
+      contextPath: "/nacos",
+    });
+    expect(resolveRNacosOpenApiFallback("https://rnacos.example/gateway", "rnacos/")).toEqual({
+      serverAddr: "https://rnacos.example/gateway",
+      contextPath: "/nacos",
+    });
+    expect(resolveRNacosOpenApiFallback("http://nacos.example:10848", "/nacos")).toBeNull();
+    expect(resolveRNacosOpenApiFallback("http://rnacos.example:10848", "", { allowConsolePortInference: true })).toEqual({
+      serverAddr: "http://rnacos.example:8848",
+      contextPath: "/nacos",
+    });
+    expect(resolveRNacosOpenApiFallback("http://rnacos.example:8848", "/nacos")).toBeNull();
   });
 
   it("summarizes config diffs", () => {

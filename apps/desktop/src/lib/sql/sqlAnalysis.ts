@@ -132,7 +132,11 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   const havingIndex = findTopLevelKeyword(normalized, "HAVING", fromIndex + 4);
   if (groupIndex >= 0 || havingIndex >= 0) return { editable: false, reason: "aggregation" };
 
-  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH"], fromIndex + 4);
+  const forIndex = findTopLevelKeyword(normalized, "FOR", fromIndex + 4);
+  // Row-locking FOR clauses change concurrency behavior, not the base-row
+  // mapping. Output/read-only FOR modes must stay non-editable.
+  if (forIndex >= 0 && !/^FOR\s+(?:UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(normalized.slice(forIndex))) return { editable: false, reason: "complex-source" };
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + 4);
   const fromBody = normalized.slice(fromIndex + 4, fromEnd < 0 ? normalized.length : fromEnd).trim();
   if (isExternalFromSource(fromBody)) return { editable: false, reason: "external-source" };
   const sources = parseFromSources(fromBody);

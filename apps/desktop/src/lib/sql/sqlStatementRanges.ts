@@ -1669,14 +1669,15 @@ function oraclePlSqlBlockIsComplete(sql: string): boolean {
     if (token.kind !== "word") continue;
 
     if (token.value === "DECLARE") {
-      stack.push("BLOCK");
+      stack.push("DECLARATION");
       continue;
     }
     if (token.value === "BEGIN") {
       if (tokens[index - 1]?.kind === "word" && tokens[index - 1]?.value === "TRANSACTION") continue;
       const previous = previousWordToken(tokens, index);
       if (previous === "END") continue;
-      if (stack[stack.length - 1] !== "BLOCK") stack.push("BLOCK");
+      if (stack[stack.length - 1] === "DECLARATION") stack[stack.length - 1] = "BLOCK";
+      else stack.push("BLOCK");
       continue;
     }
     if (token.value === "IF") {

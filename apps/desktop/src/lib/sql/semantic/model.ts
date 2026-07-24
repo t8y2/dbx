@@ -21,7 +21,7 @@ const TABLE_FUNCTION_NAMES = new Set(["table", "xmltable", "json_table", "the", 
 const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "full", "natural"]);
 const CLAUSE_BOUNDARIES = new Set(["where", "group", "having", "order", "limit", "offset", "union", "intersect", "except", "on", "set", "values", "returning"]);
 const FROM_CLAUSE_BOUNDARIES = new Set([...CLAUSE_BOUNDARIES, "window", "qualify", "fetch", "for", "connect", "start", "model"].filter((item) => item !== "on"));
-const ALIAS_BLACKLIST = new Set([...CLAUSE_BOUNDARIES, "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from", "with"]);
+const ALIAS_BLACKLIST = new Set([...FROM_CLAUSE_BOUNDARIES, "on", "join", "straight_join", "left", "right", "inner", "outer", "cross", "full", "natural", "as", "select", "from", "with"]);
 const TABLE_TARGET_MODIFIERS = new Set(["lateral", "only"]);
 const TABLE_FUNCTION_INTRODUCERS = new Set(["from", "join", "straight_join", "apply"]);
 const TOP_LEVEL_STATEMENT_WORDS = new Set(["select", "insert", "delete", "merge", "create", "alter", "drop", "truncate", "call", "exec", "execute", "grant", "revoke"]);

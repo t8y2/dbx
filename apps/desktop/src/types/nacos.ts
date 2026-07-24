@@ -1,6 +1,7 @@
 export interface NacosCapabilities {
   supportsConfigManagement: boolean;
   supportsConfigHistory?: boolean;
+  historyUnavailableReason?: "historyDisabled" | "consoleUrlMissing" | "consoleCredentialsMissing" | "consoleAuthenticationFailed";
   supportsServiceManagement: boolean;
   supportsInstanceUpdate: boolean;
   supportsRawApi: boolean;
@@ -14,6 +15,11 @@ export interface NacosConnectionInfo {
   auth: string;
   capabilities: NacosCapabilities;
   raw?: unknown;
+}
+
+export interface NacosRNacosConsoleCaptcha {
+  required: boolean;
+  image?: string;
 }
 
 export interface NacosNamespaceInfo {
@@ -43,10 +49,20 @@ export interface NacosAuthConfig {
   password?: string;
 }
 
+export type NacosImplementation = "nacos" | "rnacos";
+export type NacosVersionMode = "auto" | "v2" | "v3";
+export type NacosRNacosConsoleAuth = { kind: "inherit" } | { kind: "usernamePassword"; username: string; password: string };
+
 export interface NacosAdminConfig {
+  implementation?: NacosImplementation;
+  versionMode?: NacosVersionMode;
   serverAddr: string;
   namespace?: string;
   contextPath?: string;
+  rnacosConsoleAddr?: string;
+  /** Undefined keeps the legacy behaviour: history is enabled when a console address exists. */
+  rnacosHistoryEnabled?: boolean;
+  rnacosConsoleAuth?: NacosRNacosConsoleAuth;
   auth?: NacosAuthConfig;
   tlsSkipVerify?: boolean;
   pageSize?: number;

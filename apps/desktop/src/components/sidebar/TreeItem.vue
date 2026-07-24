@@ -45,7 +45,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
-import { canTreeNodeShowExpander, sidebarTreeNodeComment, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -82,7 +82,11 @@ const labelOverflowing = ref(false);
 
 let labelResizeObserver: ResizeObserver | null = null;
 
+let trailingCommentResizeObserver: ResizeObserver | null = null;
+
 let labelMeasureFrame = 0;
+
+let trailingCommentMeasureFrame = 0;
 
 function cancelLabelOverflowMeasure() {
   if (!labelMeasureFrame) return;
@@ -566,7 +570,7 @@ const isNodeDefaultDatabase = computed(
 );
 
 const trailingComment = computed(() => {
-  if (settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-inline" && settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-aligned") return null;
+  if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
   return sidebarTreeNodeComment(activeNode.value);
 });
 
@@ -593,6 +597,10 @@ function resolveFavoriteGroupLabel(): string | null {
   return group?.name ?? null;
 }
 
+function isRightAlignedComment(): boolean {
+  return settingsStore.editorSettings.sidebarObjectInfoMode === "comment-right" && !!trailingComment.value;
+}
+
 function cancelTrailingCommentMeasure() {
   if (!trailingCommentMeasureFrame) return;
   window.cancelAnimationFrame(trailingCommentMeasureFrame);
@@ -615,15 +623,17 @@ function alignedCommentLabelWidth(): number | undefined {
 function measureTrailingCommentLayout() {
   const container = trailingCommentLayoutRef.value;
   const leading = trailingCommentLeadingRef.value;
-  if (!container || !leading) return;
+  if (!isRightAlignedComment() || !container || !leading) {
+    trailingCommentMaxWidth.value = 0;
+    return;
+  }
   // The leading group keeps the complete table name ahead of the comment.
   // Only the width remaining after that name and the fixed gap may be used
   // by the comment; once it reaches zero, the comment is hidden. When the
   // favorites-group label is visible it also has to fit in the same row,
   // so reserve its width plus a small gap on top of the leading group.
   const reservedForLabel = favoriteGroupLabelRef.value ? favoriteGroupLabelRef.value.offsetWidth + trailingCommentGapPx : 0;
-  const available = trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth + reservedForLabel);
-  trailingCommentMaxWidth.value = available;
+  trailingCommentMaxWidth.value = trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth + reservedForLabel);
 }
 
 function scheduleTrailingCommentMeasure() {
@@ -642,7 +652,9 @@ function refreshTrailingCommentMeasurement() {
   trailingCommentResizeObserver?.disconnect();
   trailingCommentResizeObserver = null;
 
-  if (!trailingComment.value || !trailingCommentLayoutRef.value || !trailingCommentLeadingRef.value) {
+  const container = trailingCommentLayoutRef.value;
+  const leading = trailingCommentLeadingRef.value;
+  if (!isRightAlignedComment() || !container || !leading) {
     trailingCommentMaxWidth.value = 0;
     return;
   }
@@ -650,10 +662,8 @@ function refreshTrailingCommentMeasurement() {
   scheduleTrailingCommentMeasure();
   if (typeof ResizeObserver !== "undefined") {
     trailingCommentResizeObserver = new ResizeObserver(scheduleTrailingCommentMeasure);
-    trailingCommentResizeObserver.observe(trailingCommentLayoutRef.value);
-    // The favorites-group label width also feeds the comment's available
-    // width — observe it so a group rename reflows the comment in step.
-    if (favoriteGroupLabelRef.value) trailingCommentResizeObserver.observe(favoriteGroupLabelRef.value);
+    trailingCommentResizeObserver.observe(container);
+    trailingCommentResizeObserver.observe(leading);
   }
 }
 
@@ -1030,6 +1040,8 @@ watch(
 onBeforeUnmount(() => {
   stopPasteHandlerRegistration();
   handleMouseLeave();
+  trailingCommentResizeObserver?.disconnect();
+  cancelTrailingCommentMeasure();
   finishTableReferenceDrag();
 });
 
@@ -1165,8 +1177,12 @@ function onKeydown(event: KeyboardEvent) {
         <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
         <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
         <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
-        <div :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
-          <div :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLabelWidth() ? { width: `${alignedCommentLabelWidth()}px` } : undefined">
+        <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
+          <div
+            ref="trailingCommentLeadingRef"
+            :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'"
+            :style="alignedCommentLabelWidth() ? { width: `${alignedCommentLabelWidth()}px` } : undefined"
+          >
             <input
               v-if="isRenamingGroup"
               ref="renameInputRef"
@@ -1191,10 +1207,11 @@ function onKeydown(event: KeyboardEvent) {
               {{ t("editor.defaultDatabase") }}
             </Badge>
           </div>
-          <span v-if="trailingComment && trailingCommentMaxWidth > 0" class="min-w-0 flex-1" aria-hidden="true" />
+          <span v-if="trailingComment && !isRightAlignedComment()" class="sidebar-object-comment ml-2 min-w-0 flex-1 truncate text-left" :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }">{{ trailingComment }}</span>
+          <span v-if="isRightAlignedComment() && trailingCommentMaxWidth > 0" class="min-w-0 flex-1" aria-hidden="true" />
           <span
-            v-if="trailingComment && trailingCommentMaxWidth > 0"
-            class="sidebar-object-comment min-w-0 shrink-0 truncate text-left"
+            v-if="isRightAlignedComment() && trailingCommentMaxWidth > 0"
+            class="sidebar-object-comment sidebar-object-comment--right min-w-0 shrink-0 truncate text-left"
             :class="{ 'sidebar-object-comment--windows': useWindowsSidebarCommentFont }"
             :style="{ marginLeft: `${trailingCommentGapPx}px`, maxWidth: `${trailingCommentMaxWidth}px` }"
             >{{ trailingComment }}</span
@@ -1251,16 +1268,22 @@ function onKeydown(event: KeyboardEvent) {
 <style>
 .sidebar-object-comment {
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1rem;
   opacity: 0.6;
   /* Sidebar rows repaint on hover; avoid heavier font shaping and fallback here. */
   text-rendering: auto;
 }
 
+.sidebar-object-comment--right {
+  width: max-content;
+  max-width: 100%;
+  flex-shrink: 999;
+}
+
 .sidebar-object-comment--windows {
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
   opacity: 1;
 }

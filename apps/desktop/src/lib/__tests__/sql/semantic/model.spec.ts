@@ -80,6 +80,13 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["b"] }));
   });
 
+  it("does not treat an Oracle FOR UPDATE clause as a table alias", () => {
+    const sql = "SELECT * FROM APP.USERS FOR UPDATE SKIP LOCKED";
+    const model = buildSqlSemanticModel(sql, sql.length, { databaseType: "oracle" });
+
+    expect(model.rowSources).toEqual([expect.objectContaining({ name: "USERS", qualifierParts: ["APP"], alias: undefined })]);
+  });
+
   it("consumes correlation column lists before parsing later comma-separated sources", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT * FROM table_a a(id), table_b b, table_c c WHERE c.|");
     const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" });

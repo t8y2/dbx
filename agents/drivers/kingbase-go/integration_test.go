@@ -54,6 +54,9 @@ func TestKingbaseIntegration(t *testing.T) {
 	})
 
 	mustExecute(t, server, "CREATE TABLE public."+quoteIdentifier(parent)+" (id integer PRIMARY KEY, name varchar(64) NOT NULL)")
+	mustExecute(t, server, "COMMENT ON TABLE public."+quoteIdentifier(parent)+" IS '订单父表'")
+	mustExecute(t, server, "COMMENT ON COLUMN public."+quoteIdentifier(parent)+".id IS '主键编号'")
+	mustExecute(t, server, "COMMENT ON COLUMN public."+quoteIdentifier(parent)+".name IS '客户''名称'")
 	mustExecute(t, server, "CREATE TABLE public."+quoteIdentifier(child)+" (id integer PRIMARY KEY, parent_id integer REFERENCES public."+quoteIdentifier(parent)+"(id))")
 	mustExecute(t, server, "CREATE INDEX "+quoteIdentifier(child+"_parent_idx")+" ON public."+quoteIdentifier(child)+"(parent_id)")
 	mustExecute(t, server, "CREATE VIEW public."+quoteIdentifier(view)+" AS SELECT id, name FROM public."+quoteIdentifier(parent))
@@ -66,6 +69,24 @@ func TestKingbaseIntegration(t *testing.T) {
 	columns, err := server.getColumns("public", child)
 	if err != nil || len(columns) != 2 || !columns[0].IsPrimaryKey {
 		t.Fatalf("get columns failed: columns=%v err=%v", columns, err)
+	}
+	parentColumns, err := server.getColumns("public", parent)
+	if err != nil || len(parentColumns) != 2 || parentColumns[0].Comment == nil || *parentColumns[0].Comment != "主键编号" || parentColumns[1].Comment == nil || *parentColumns[1].Comment != "客户'名称" {
+		t.Fatalf("get commented columns failed: columns=%v err=%v", parentColumns, err)
+	}
+	ddl, err := server.getTableDDL("public", parent)
+	if err != nil {
+		t.Fatalf("get table DDL failed: %v", err)
+	}
+	qualifiedParent := quoteIdentifier("public") + "." + quoteIdentifier(parent)
+	for _, expected := range []string{
+		"COMMENT ON TABLE " + qualifiedParent + " IS '订单父表';",
+		"COMMENT ON COLUMN " + qualifiedParent + "." + quoteIdentifier("id") + " IS '主键编号';",
+		"COMMENT ON COLUMN " + qualifiedParent + "." + quoteIdentifier("name") + " IS '客户''名称';",
+	} {
+		if !strings.Contains(ddl, expected) {
+			t.Fatalf("table DDL missing %q:\n%s", expected, ddl)
+		}
 	}
 	indexes, err := server.listIndexes("public", child)
 	if err != nil || len(indexes) < 2 {

@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { computed, markRaw, onScopeDispose, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { ConnectionConfig, DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, IndexInfo, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
@@ -36,13 +36,13 @@ import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
-import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
+import { getCachedTableMetadata, loadTableIndexes, loadTableMetadata, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
 import { sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
-import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { MAX_RESULT_PAGE_SIZE, normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
@@ -129,6 +129,14 @@ function markQueryResultRowsRaw(result: QueryResult): QueryResult {
 function markQueryResultsRowsRaw(results: QueryResult[]): QueryResult[] {
   for (const result of results) markQueryResultRowsRaw(result);
   return results;
+}
+
+function exactTotalFromIncompletePage(result: QueryResult, pageLimit: number | undefined, pageOffset: number | undefined, useAgentResultSession: boolean | undefined): number | undefined {
+  if (typeof pageLimit !== "number" || result.rows.length >= pageLimit || result.truncated === true) return undefined;
+  // Cursor-backed drivers must explicitly confirm exhaustion; an omitted
+  // has_more value may come from an older driver or an exhausted row cap.
+  if (useAgentResultSession && result.has_more !== false) return undefined;
+  return (pageOffset ?? 0) + result.rows.length;
 }
 
 function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, maxRows: number): QueryResult {
@@ -2420,6 +2428,12 @@ export const useQueryStore = defineStore("query", () => {
     tableMeta: NonNullable<QueryTab["tableMeta"]>;
   };
 
+  type EditableSourceMetadataTarget = {
+    source: EditableQuerySource;
+    analysis: EditableQueryInfo;
+    request: TableMetadataRequest;
+  };
+
   interface EditableQueryExecutionPreparation {
     sql: string;
     metadataSql: string;
@@ -2434,7 +2448,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.tableMeta = patch.tableMeta;
   }
 
-  async function loadEditableQuerySource(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string, traceId?: string, elapsed?: () => string): Promise<LoadedEditableSource> {
+  function resolveEditableSourceMetadataTarget(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string): EditableSourceMetadataTarget {
     // Metadata must resolve in the same namespace as the query execution. An
     // empty query-tab database still executes in the connection's default DB,
     // while database-tree dialects may override it with a qualified source.
@@ -2458,22 +2472,49 @@ export const useQueryStore = defineStore("query", () => {
       tableName: metadataTableName,
     };
     const knownTableType = tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined;
+    return {
+      source: metadataSource,
+      analysis: normalizeOracleLikeQueryAnalysis(dbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
+      request: {
+        connectionId: tab.connectionId!,
+        database: metadataDatabase,
+        schema: metadataSchema,
+        tableName: metadataTableName,
+        tableType: knownTableType,
+        databaseType: dbType,
+        driverProfile: conn?.driver_profile || conn?.db_type,
+        catalog: metadataCatalog,
+      },
+    };
+  }
+
+  function loadedEditableSourceFromMetadata(target: EditableSourceMetadataTarget, metadata: Awaited<ReturnType<typeof loadTableMetadata>>["metadata"]): LoadedEditableSource {
+    return {
+      source: target.source,
+      analysis: target.analysis,
+      tableMeta: {
+        catalog: target.request.catalog,
+        database: target.request.database,
+        schema: target.request.schema || undefined,
+        tableName: target.request.tableName,
+        tableType: metadata.tableType,
+        columns: metadata.columns,
+        primaryKeys: metadata.primaryKeys,
+      },
+    };
+  }
+
+  async function loadEditableQuerySource(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string, traceId?: string, elapsed?: () => string): Promise<LoadedEditableSource> {
+    const target = resolveEditableSourceMetadataTarget(tab, analysis, source, conn, dbType, executionDatabase);
     queryExecutionLog("info", "metadata:table:start", {
       traceId,
-      schema: metadataSchema,
-      table: metadataTableName,
+      schema: target.request.schema,
+      table: target.request.tableName,
       alias: source.alias,
       elapsed: elapsed?.(),
     });
     const loadedMetadata = await loadTableMetadata({
-      connectionId: tab.connectionId,
-      database: metadataDatabase,
-      schema: metadataSchema,
-      tableName: metadataTableName,
-      tableType: knownTableType,
-      databaseType: dbType,
-      driverProfile: conn?.driver_profile || conn?.db_type,
-      catalog: metadataCatalog,
+      ...target.request,
       traceLogger: (event) => queryExecutionLog("debug", "metadata:table-trace", { sourceTraceId: traceId, ...event }),
     });
     const columns = loadedMetadata.metadata.columns;
@@ -2486,19 +2527,7 @@ export const useQueryStore = defineStore("query", () => {
       ageMs: Math.round(loadedMetadata.ageMs),
       elapsed: elapsed?.(),
     });
-    return {
-      source: metadataSource,
-      analysis: normalizeOracleLikeQueryAnalysis(dbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
-      tableMeta: {
-        catalog: metadataCatalog,
-        database: metadataDatabase,
-        schema: metadataSchema || undefined,
-        tableName: metadataTableName,
-        tableType: loadedMetadata.metadata.tableType,
-        columns,
-        primaryKeys,
-      },
-    };
+    return loadedEditableSourceFromMetadata(target, loadedMetadata.metadata);
   }
 
   function missingPrimaryKeysForSource(primaryKeys: string[], analysis: EditableQueryInfo, sourceKey: string): string[] {
@@ -2515,6 +2544,36 @@ export const useQueryStore = defineStore("query", () => {
     return matching?.object_type.trim().toUpperCase() === "TABLE";
   }
 
+  function primaryKeyIndex(indexes: IndexInfo[]): IndexInfo | undefined {
+    return indexes.find((index) => !index.filter && index.columns.length > 0 && index.is_primary);
+  }
+
+  function buildHiddenPrimaryKeyPreparation(sql: string, databaseType: DatabaseType, loaded: LoadedEditableSource, primaryKeys: string[], declaredPrimaryKeys: string[], traceId: string, elapsed: () => string): EditableQueryExecutionPreparation {
+    const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [] };
+    const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(databaseType, loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
+    const missingPrimaryKeys = declaredPrimaryKeys.length === 0 ? primaryKeys : missingPrimaryKeysForSource(primaryKeys, metadataAnalysis, loaded.source.key);
+    if (missingPrimaryKeys.length === 0) return unchanged;
+    const primaryKeySet = new Set(primaryKeys);
+    const hasWritableProjection = metadataAnalysis.selectStar ? loaded.tableMeta.columns.some((column) => !primaryKeySet.has(column.name)) : metadataAnalysis.columns.some((column) => column.sourceName && column.sourceKey === loaded.source.key && !primaryKeySet.has(column.sourceName));
+    if (!hasWritableProjection) return unchanged;
+
+    const rewritten = buildQueryWithHiddenPrimaryKeys({
+      sql,
+      databaseType,
+      primaryKeys: missingPrimaryKeys,
+      existingResultNames: metadataAnalysis.selectStar ? loaded.tableMeta.columns.map((column) => column.name) : metadataAnalysis.columns.map((column) => column.resultName),
+      sourceExpressions: databaseType === "oracle" && missingPrimaryKeys.includes(DBX_ROWID_COLUMN) ? { [DBX_ROWID_COLUMN]: "ROWIDTOCHAR(ROWID)" } : undefined,
+    });
+    if (!rewritten) return unchanged;
+    queryExecutionLog("info", "hidden-primary-keys", {
+      traceId,
+      table: loaded.tableMeta.tableName,
+      keyCount: rewritten.projections.length,
+      elapsed: elapsed(),
+    });
+    return { sql: rewritten.sql, metadataSql: rewritten.sql, hiddenPrimaryKeys: rewritten.projections };
+  }
+
   async function prepareEditableQueryExecution(tab: QueryTab, sql: string, conn: ConnectionConfig | undefined, databaseType: DatabaseType | undefined, executionDatabase: string, traceId: string, elapsed: () => string): Promise<EditableQueryExecutionPreparation> {
     const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [] };
     if (!databaseType || !HIDDEN_QUERY_KEY_DATABASE_TYPES.has(databaseType) || !tab.connectionId) return unchanged;
@@ -2526,38 +2585,36 @@ export const useQueryStore = defineStore("query", () => {
       const sources = editableQuerySources(analysis);
       if (sources.length !== 1 || analysis.distinct) return unchanged;
 
-      const loaded = await loadEditableQuerySource(tab, analysis, sources[0]!, conn, databaseType, executionDatabase, traceId, elapsed);
+      const target = resolveEditableSourceMetadataTarget(tab, analysis, sources[0]!, conn, databaseType, executionDatabase);
+      const cached = getCachedTableMetadata(target.request);
+      let loaded = cached ? loadedEditableSourceFromMetadata(target, cached.metadata) : undefined;
+      if (!cached && databaseType === "oracle") {
+        // Oracle column discovery can be slow. A star projection over a table
+        // with a declared primary key already returns the complete row identity,
+        // so SQL can start while the full metadata needed for editing loads.
+        const fullMetadataPromise = loadTableMetadata({
+          ...target.request,
+          traceLogger: (event) => queryExecutionLog("debug", "metadata:table-trace", { sourceTraceId: traceId, ...event }),
+        });
+        void fullMetadataPromise.catch((error) => queryExecutionLog("warn", "metadata:table-prefetch:failed", { traceId, error, elapsed: elapsed() }));
+        const indexes = await loadTableIndexes(target.request);
+        const projectsAllColumns = target.analysis.selectStar || target.analysis.columns.some((column) => column.star && (!column.sourceKey || column.sourceKey === target.source.key));
+        if (primaryKeyIndex(indexes) && projectsAllColumns) {
+          return unchanged;
+        }
+        loaded = loadedEditableSourceFromMetadata(target, (await fullMetadataPromise).metadata);
+      }
+
+      loaded ??= await loadEditableQuerySource(tab, analysis, sources[0]!, conn, databaseType, executionDatabase, traceId, elapsed);
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
-      const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(databaseType, loaded.analysis, loaded.source, loaded.tableMeta.columns), loaded.source, loaded.tableMeta.columns);
       const declaredPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
       // Oracle base tables without declared keys use the same ROWID identity as
       // table-data tabs. Confirm the object is a base table because selecting
       // ROWID from a view can fail with ORA-01445.
       if (databaseType === "oracle" && declaredPrimaryKeys.length === 0 && !(await oracleRowIdIsSafeForQuery(tab, loaded))) return unchanged;
       const primaryKeys = editablePrimaryKeys(databaseType, loaded.tableMeta.columns, loaded.tableMeta.tableType);
-
-      const missingPrimaryKeys = declaredPrimaryKeys.length === 0 ? primaryKeys : missingPrimaryKeysForSource(primaryKeys, metadataAnalysis, loaded.source.key);
-      if (missingPrimaryKeys.length === 0) return unchanged;
-      const primaryKeySet = new Set(primaryKeys);
-      const hasWritableProjection = metadataAnalysis.selectStar ? loaded.tableMeta.columns.some((column) => !primaryKeySet.has(column.name)) : metadataAnalysis.columns.some((column) => column.sourceName && column.sourceKey === loaded.source.key && !primaryKeySet.has(column.sourceName));
-      if (!hasWritableProjection) return unchanged;
-
-      const rewritten = buildQueryWithHiddenPrimaryKeys({
-        sql,
-        databaseType,
-        primaryKeys: missingPrimaryKeys,
-        existingResultNames: metadataAnalysis.selectStar ? loaded.tableMeta.columns.map((column) => column.name) : metadataAnalysis.columns.map((column) => column.resultName),
-        sourceExpressions: databaseType === "oracle" && missingPrimaryKeys.includes(DBX_ROWID_COLUMN) ? { [DBX_ROWID_COLUMN]: "ROWIDTOCHAR(ROWID)" } : undefined,
-      });
-      if (!rewritten) return unchanged;
-      queryExecutionLog("info", "hidden-primary-keys", {
-        traceId,
-        table: loaded.tableMeta.tableName,
-        keyCount: rewritten.projections.length,
-        elapsed: elapsed(),
-      });
-      return { sql: rewritten.sql, metadataSql: rewritten.sql, hiddenPrimaryKeys: rewritten.projections };
+      return buildHiddenPrimaryKeyPreparation(sql, databaseType, loaded, primaryKeys, declaredPrimaryKeys, traceId, elapsed);
     } catch (error) {
       // Metadata enrichment is optional. Query execution must retain its prior
       // behavior when metadata is unavailable or the SQL cannot be rewritten.
@@ -2765,6 +2822,7 @@ export const useQueryStore = defineStore("query", () => {
     result: QueryResult;
     pageLimit?: number;
     pageOffset?: number;
+    useAgentResultSession?: boolean;
     executionId: string;
     traceId: string;
     elapsed: () => string;
@@ -2775,8 +2833,9 @@ export const useQueryStore = defineStore("query", () => {
       setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
       return;
     }
-    if (typeof options.pageLimit === "number" && resultRowCount < options.pageLimit) {
-      setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, (options.pageOffset ?? 0) + resultRowCount);
+    const exactIncompletePageTotal = exactTotalFromIncompletePage(options.result, options.pageLimit, options.pageOffset, options.useAgentResultSession);
+    if (typeof exactIncompletePageTotal === "number") {
+      setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, exactIncompletePageTotal);
       return;
     }
 
@@ -3412,6 +3471,9 @@ export const useQueryStore = defineStore("query", () => {
           ...(typeof pageLimit === "number"
             ? useAgentResultSession
               ? {
+                  // Agent cursors apply maxRows cumulatively across fetched pages.
+                  // Keep multi-page navigation available without allowing unbounded reads.
+                  maxRows: MAX_RESULT_PAGE_SIZE,
                   fetchSize: pageLimit,
                   pageSize: pageLimit,
                   resultSessionId: options?.pagination?.sessionId,
@@ -3498,7 +3560,7 @@ export const useQueryStore = defineStore("query", () => {
           current.resultTotalRowCount = undefined;
         }
         const resultRowCount = current.result?.rows.length ?? 0;
-        const totalKnownFromIncompletePage = !!current.result && typeof pageLimit === "number" && resultRowCount < pageLimit;
+        const totalKnownFromIncompletePage = !!current.result && typeof exactTotalFromIncompletePage(current.result, pageLimit, pageOffset, useAgentResultSession) === "number";
         const dataCountTarget =
           current.mode === "data"
             ? (() => {
@@ -3545,6 +3607,7 @@ export const useQueryStore = defineStore("query", () => {
             result: current.result,
             pageLimit,
             pageOffset,
+            useAgentResultSession,
             executionId,
             traceId,
             elapsed,

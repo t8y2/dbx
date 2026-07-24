@@ -150,6 +150,7 @@ import type {
   NacosConfigRollbackRequest,
   NacosConfigUpsert,
   NacosConnectionInfo,
+  NacosRNacosConsoleCaptcha,
   NacosInstanceInfo,
   NacosInstanceQuery,
   NacosInstanceUpdate,
@@ -656,8 +657,8 @@ export async function completionAssistantSearch(request: CompletionAssistantRequ
   return post("/api/schema/completion-assistant", request);
 }
 
-export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string): Promise<ObjectSource> {
-  return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature })}`);
+export async function getObjectSource(connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string): Promise<ObjectSource> {
+  return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature, relation_name: relationName })}`);
 }
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
@@ -2107,6 +2108,14 @@ export async function nacosGetConfigHistory(connectionId: string, key: NacosConf
 
 export async function nacosRollbackConfig(connectionId: string, req: NacosConfigRollbackRequest): Promise<void> {
   return post("/api/nacos/configs/history/rollback", { connectionId, req });
+}
+
+export async function nacosGetRNacosConsoleCaptcha(connectionId: string): Promise<NacosRNacosConsoleCaptcha> {
+  return post("/api/nacos/rnacos-console/captcha", { connectionId });
+}
+
+export async function nacosLoginRNacosConsole(connectionId: string, captcha?: string): Promise<void> {
+  return post("/api/nacos/rnacos-console/login", { connectionId, captcha });
 }
 
 export async function nacosListServices(connectionId: string, query: NacosServiceQuery): Promise<NacosServiceList> {

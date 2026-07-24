@@ -550,9 +550,7 @@ async function toggle() {
       // pre-attached before the user had ever opened the database, so we
       // cannot rely on the placeholder's own expansion to have done it.
       if (node.connectionId && node.database !== undefined) {
-        const parentId = node.type === "favorites"
-          ? favoritesNodeParentId(node)
-          : `${node.connectionId}:${node.database}`;
+        const parentId = node.type === "favorites" ? favoritesNodeParentId(node) : `${node.connectionId}:${node.database}`;
         if (parentId && !connectionStore.isTreeNodeChildrenLoaded(parentId)) {
           // `loadFavoritesParentContent` resolves the same path a normal
           // database/schema expansion would (loadTables / loadSchemas /
@@ -768,10 +766,10 @@ function runRowClickAction(clickDetail: number) {
   if (!shouldRunTreeNodeRowAction(action, clickDetail)) return;
   if (action === "open-data") {
     scheduleOpenData(node);
+  } else if (action === "open-source") {
+    openObjectSourceDialog(false);
   } else if (isDocumentBrowserTreeNode(node.type)) {
     openMongoTreeData(node);
-  } else if (node.type === "procedure" || node.type === "function" || node.type === "trigger" || node.type === "sequence" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
-    openObjectSourceDialog(false);
   } else if (action === "toggle") {
     toggle();
   }

@@ -36,6 +36,46 @@ test("keeps the legacy analyzer API for editable SELECT queries", () => {
   assert.deepEqual(analysis.columns, []);
 });
 
+test("recognizes Oracle FOR UPDATE variants without treating FOR as an alias", () => {
+  for (const sql of [
+    "SELECT * FROM employees FOR UPDATE",
+    "SELECT * FROM employees FOR UPDATE NOWAIT",
+    "SELECT * FROM employees FOR UPDATE SKIP LOCKED",
+    "SELECT * FROM employees FOR UPDATE OF salary, department_id WAIT 5",
+    "SELECT * FROM employees WHERE department_id = 10 ORDER BY employee_id FOR UPDATE OF salary NOWAIT",
+  ]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.equal(result.analysis.tableName, "employees", sql);
+    assert.equal(result.analysis.tableAlias, undefined, sql);
+    assert.equal(result.analysis.selectStar, true, sql);
+  }
+
+  const aliased = analyzeEditableQueryEditability("SELECT e.employee_id, e.salary FROM employees e FOR UPDATE OF e.salary SKIP LOCKED");
+  assert.equal(aliased.editable, true);
+  assert.equal(aliased.analysis.tableAlias, "e");
+});
+
+test("keeps explicit read-only and output FOR clauses non-editable", () => {
+  for (const sql of ["SELECT * FROM employees FOR READ ONLY", "SELECT * FROM employees FOR FETCH ONLY", "SELECT * FROM employees FOR JSON"]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, false, sql);
+    assert.equal(result.reason, "complex-source", sql);
+  }
+});
+
+test("recognizes PostgreSQL row-lock FOR variants", () => {
+  for (const sql of ["SELECT * FROM jobs FOR SHARE", "SELECT * FROM jobs FOR NO KEY UPDATE SKIP LOCKED", "SELECT * FROM jobs FOR KEY SHARE NOWAIT"]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.equal(result.analysis.tableName, "jobs", sql);
+    assert.equal(result.analysis.tableAlias, undefined, sql);
+  }
+});
+
 test("maps joined query source columns for column-level editing", () => {
   const result = analyzeEditableQueryEditability("select u.id as user_id, u.name, o.total from users u join orders o on o.user_id = u.id");
 

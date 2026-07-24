@@ -3244,6 +3244,115 @@ fn builds_mysql_trigger_changes() {
 }
 
 #[test]
+fn builds_oracle_multi_event_row_trigger_change() {
+    let mut existing = trigger(
+        "DBX_TRIGGER_4320_AUDIT",
+        "AFTER EACH ROW",
+        "INSERT OR UPDATE OR DELETE",
+        "DECLARE\n  v_event VARCHAR2(10);\nBEGIN\n  v_event := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\nEND;",
+    );
+    existing.original = Some(TriggerInfo {
+        name: "DBX_TRIGGER_4320_AUDIT".to_string(),
+        event: "INSERT OR UPDATE OR DELETE".to_string(),
+        timing: "AFTER EACH ROW".to_string(),
+        statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "DBX_TRIGGER_4320".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE OR REPLACE TRIGGER \"APP\".\"DBX_TRIGGER_4320_AUDIT\" AFTER INSERT OR UPDATE OR DELETE ON \"APP\".\"DBX_TRIGGER_4320\"\nFOR EACH ROW\nDECLARE\n  v_event VARCHAR2(10);\nBEGIN\n  v_event := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\nEND;",
+        ]
+    );
+}
+
+#[test]
+fn builds_oracle_statement_trigger_without_row_clause() {
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "ORDERS".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![trigger("ORDERS_AUDIT", "BEFORE STATEMENT", "UPDATE OF STATUS", "BEGIN\n  NULL;\nEND;\n/")],
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE OR REPLACE TRIGGER \"APP\".\"ORDERS_AUDIT\" BEFORE UPDATE OF STATUS ON \"APP\".\"ORDERS\"\nBEGIN\n  NULL;\nEND;",
+        ]
+    );
+}
+
+#[test]
+fn renaming_oracle_trigger_drops_old_name_before_create() {
+    let mut existing = trigger("ORDERS_AUDIT_V2", "AFTER EACH ROW", "INSERT", "BEGIN\n  NULL;\nEND;");
+    existing.original = Some(TriggerInfo {
+        name: "ORDERS_AUDIT".to_string(),
+        event: "INSERT".to_string(),
+        timing: "AFTER EACH ROW".to_string(),
+        statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "ORDERS".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "DROP TRIGGER \"APP\".\"ORDERS_AUDIT\";",
+            "CREATE OR REPLACE TRIGGER \"APP\".\"ORDERS_AUDIT_V2\" AFTER INSERT ON \"APP\".\"ORDERS\"\nFOR EACH ROW\nBEGIN\n  NULL;\nEND;",
+        ]
+    );
+}
+
+#[test]
+fn rejects_unsupported_oracle_compound_trigger_shape() {
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "ORDERS".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![trigger("ORDERS_CT", "COMPOUND", "UPDATE", "BEGIN\n  NULL;\nEND;")],
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Unsupported Oracle trigger timing \"COMPOUND\"."]);
+}
+
+#[test]
 fn mysql_varchar_default_is_quoted() {
     let mut col = column("name");
     col.data_type = "varchar(255)".to_string();

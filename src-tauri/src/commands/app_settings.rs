@@ -8,7 +8,8 @@ use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
 use crate::{
-    apply_debug_log_level, apply_desktop_settings, hide_main_window_for_close, request_app_close, CloseBehaviorState,
+    apply_debug_log_level, apply_desktop_settings, hide_main_window_for_close, refresh_native_menus, request_app_close,
+    AppLocaleState, CloseBehaviorState,
 };
 
 const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
@@ -55,6 +56,12 @@ pub async fn save_desktop_settings(
 #[tauri::command]
 pub async fn load_max_agent_turns(state: State<'_, Arc<AppState>>) -> Result<u32, String> {
     state.storage.load_max_agent_turns().await
+}
+
+#[tauri::command]
+pub fn set_app_locale(app: AppHandle, locale_state: State<'_, AppLocaleState>, locale: String) -> Result<(), String> {
+    locale_state.set(locale);
+    refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"))
 }
 
 #[tauri::command]

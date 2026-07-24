@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -21,6 +22,8 @@ var registerExpressionFallbackDriver sync.Once
 var expressionFallbackState atomic.Pointer[fallbackDriverState]
 var registerModeDetectionDriver sync.Once
 var modeDetectionState atomic.Pointer[modeDetectionDriverState]
+var registerMetadataDriver sync.Once
+var metadataState atomic.Pointer[metadataDriverState]
 
 type fakeDriverState struct {
 	queryArgs int
@@ -60,6 +63,18 @@ type modeDetectionDriver struct{}
 
 type modeDetectionConn struct {
 	state *modeDetectionDriverState
+}
+
+type metadataDriverState struct {
+	mu      sync.Mutex
+	queries []string
+	query   func(string) (driver.Rows, error)
+}
+
+type metadataDriver struct{}
+
+type metadataConn struct {
+	state *metadataDriverState
 }
 
 type valueRows struct {
@@ -140,8 +155,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	}
 	if strings.Contains(query, "pg_get_expr(") {
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"id", "integer", false, "nextval('orders_id_seq'::regclass)", nil, int64(32), int64(0), nil}},
+			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
+			rows:    [][]driver.Value{{"id", "integer", false, nil, nil, int64(32), int64(0), nil, "d"}},
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
@@ -188,6 +203,23 @@ func (connection *modeDetectionConn) QueryContext(_ context.Context, query strin
 	}
 }
 
+func (metadataDriver) Open(string) (driver.Conn, error) {
+	return &metadataConn{state: metadataState.Load()}, nil
+}
+
+func (*metadataConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+
+func (*metadataConn) Close() error { return nil }
+
+func (*metadataConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (connection *metadataConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	connection.state.mu.Lock()
+	connection.state.queries = append(connection.state.queries, query)
+	connection.state.mu.Unlock()
+	return connection.state.query(query)
+}
+
 func (rows *valueRows) Columns() []string { return rows.columns }
 
 func (*valueRows) Close() error { return nil }
@@ -220,6 +252,19 @@ func openModeDetectionDB(t *testing.T, state *modeDetectionDriverState) *sql.DB 
 	registerModeDetectionDriver.Do(func() { sql.Register("kingbase-mode-detection-test", modeDetectionDriver{}) })
 	modeDetectionState.Store(state)
 	db, err := sql.Open("kingbase-mode-detection-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func openMetadataDB(t *testing.T, state *metadataDriverState) *sql.DB {
+	t.Helper()
+	registerMetadataDriver.Do(func() { sql.Register("kingbase-metadata-test", metadataDriver{}) })
+	metadataState.Store(state)
+	db, err := sql.Open("kingbase-metadata-test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +364,106 @@ func TestMetadataNormalizationHelpers(t *testing.T) {
 	}
 }
 
+func TestListDatabasesFallsBackToPostgresCatalog(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "sys_catalog.sys_database"):
+			return nil, errors.New("sys catalog unavailable")
+		case strings.Contains(query, "pg_catalog.pg_database"):
+			return &valueRows{columns: []string{"datname"}, rows: [][]driver.Value{{"app"}, {"test"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.params.Database = "configured"
+
+	databases, err := server.listDatabases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(databases) != 2 || databases[0].Name != "app" || databases[1].Name != "test" {
+		t.Fatalf("unexpected databases: %#v", databases)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 2 || !strings.Contains(state.queries[0], "sys_catalog.sys_database") || !strings.Contains(state.queries[1], "pg_catalog.pg_database") {
+		t.Fatalf("catalog fallback order changed: %v", state.queries)
+	}
+}
+
+func TestListTablesPreservesKingbaseObjectTypesAndComments(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "FROM sys_catalog.sys_class c") || !strings.Contains(query, "c.relkind IN ('r','p','v','m','f')") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"relname", "relkind", "comment"},
+			rows: [][]driver.Value{
+				{"orders", "TABLE", "orders table"},
+				{"sales_view", "VIEW", nil},
+				{"sales_cache", "MATERIALIZED_VIEW", "cached sales"},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	tables, err := server.listTables("public", metadataListConstraints{Filter: "sales", ObjectTypes: []string{"VIEW", "MATERIALIZED_VIEW"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 2 || tables[0].TableType != "VIEW" || tables[1].TableType != "MATERIALIZED_VIEW" {
+		t.Fatalf("unexpected tables: %#v", tables)
+	}
+	if tables[1].Comment == nil || *tables[1].Comment != "cached sales" {
+		t.Fatalf("materialized view comment was lost: %#v", tables[1])
+	}
+}
+
+func TestListTriggersUsesCompatibilityCatalogAndDecodesTiming(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "FROM pg_catalog.pg_trigger") || !strings.Contains(query, "NOT tg.tgisinternal") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"tgname", "event", "tgtype"},
+			rows:    [][]driver.Value{{"orders_before", "INSERT,UPDATE", int64(2)}, {"orders_instead", "DELETE", int64(64)}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.postgresCatalog = true
+
+	triggers, err := server.listTriggers("public", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(triggers) != 2 || triggers[0].Timing != "BEFORE" || triggers[1].Timing != "INSTEAD OF" {
+		t.Fatalf("unexpected triggers: %#v", triggers)
+	}
+}
+
+func TestRoutineSourceUsesKingbaseCatalogFunction(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "SELECT sys_get_functiondef(p.oid)") || !strings.Contains(query, "FROM sys_catalog.sys_proc") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{columns: []string{"source"}, rows: [][]driver.Value{{"CREATE FUNCTION public.format_name() RETURNS text AS $$ SELECT 'x'; $$"}}}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	source, err := server.getObjectSource("public", "format_name", "FUNCTION")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(source["source"].(string), "CREATE FUNCTION public.format_name()") {
+		t.Fatalf("unexpected routine source: %#v", source)
+	}
+}
+
 func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
 	state := &fallbackDriverState{}
@@ -337,7 +482,7 @@ func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(columns) != 1 || columns[0].ColumnDefault == nil || *columns[0].ColumnDefault != "nextval('orders_id_seq'::regclass)" {
+		if len(columns) != 1 || columns[0].Extra == nil || *columns[0].Extra != "GENERATED BY DEFAULT AS IDENTITY" {
 			t.Fatalf("unexpected columns: %#v", columns)
 		}
 	}
@@ -355,9 +500,111 @@ func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 			!strings.Contains(query, "col_description(a.attrelid, a.attnum)") {
 			t.Fatalf("catalog columns must use PostgreSQL column comments: %s", query)
 		}
+		if strings.Contains(query, "pg_get_expr(") && !strings.Contains(query, "a.attidentity") {
+			t.Fatalf("catalog columns must include identity metadata: %s", query)
+		}
 	}
 	if sysCalls != 1 || pgCalls != 2 {
 		t.Fatalf("fallback choice was not cached: sys=%d pg=%d queries=%v", sysCalls, pgCalls, state.queries)
+	}
+}
+
+func TestKingbaseIdentityClausesAreExposedAndRendered(t *testing.T) {
+	tests := []struct {
+		name     string
+		code     string
+		expected string
+	}{
+		{name: "always", code: "a", expected: "GENERATED ALWAYS AS IDENTITY"},
+		{name: "by default", code: "d", expected: "GENERATED BY DEFAULT AS IDENTITY"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			extra := kingbaseIdentityClause(test.code)
+			if extra == nil || *extra != test.expected {
+				t.Fatalf("unexpected identity clause for %q: %#v", test.code, extra)
+			}
+			definition := columnDDLDefinition(columnInfo{Name: "id", DataType: "integer", IsNullable: false, Extra: extra})
+			expected := `"id" integer ` + test.expected + " NOT NULL"
+			if definition != expected {
+				t.Fatalf("unexpected column DDL: %s", definition)
+			}
+			payload, err := json.Marshal(columnInfo{Name: "id", DataType: "integer", Extra: extra})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(payload), `"extra":"`+test.expected+`"`) {
+				t.Fatalf("identity clause missing from protocol payload: %s", payload)
+			}
+		})
+	}
+}
+
+func TestTableDDLIncludesCatalogIdentityClause(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	expressionFallbackState.Store(&fallbackDriverState{})
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+
+	ddl, err := server.getTableDDL("public", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ddl, `"id" integer GENERATED BY DEFAULT AS IDENTITY NOT NULL`) {
+		t.Fatalf("identity clause missing from table DDL: %s", ddl)
+	}
+	if !strings.Contains(ddl, `COMMENT ON TABLE "public"."orders" IS 'orders table';`) {
+		t.Fatalf("table comment missing from table DDL: %s", ddl)
+	}
+}
+
+func TestRenderTableDDLIncludesEscapedComments(t *testing.T) {
+	primaryComment := "主键'编号"
+	emptyComment := "  "
+	tableComment := "订单'表"
+	ddl := renderTableDDL(
+		`app"schema`,
+		`order"items`,
+		[]columnInfo{
+			{Name: `id"value`, DataType: "integer", IsNullable: false, IsPrimaryKey: true, Comment: &primaryComment},
+			{Name: "note", DataType: "text", IsNullable: true, Comment: &emptyComment},
+		},
+		&tableComment,
+	)
+
+	expected := []string{
+		`CREATE TABLE "app""schema"."order""items"`,
+		`COMMENT ON TABLE "app""schema"."order""items" IS '订单''表';`,
+		`COMMENT ON COLUMN "app""schema"."order""items"."id""value" IS '主键''编号';`,
+	}
+	for _, fragment := range expected {
+		if !strings.Contains(ddl, fragment) {
+			t.Fatalf("table DDL missing %q:\n%s", fragment, ddl)
+		}
+	}
+	if strings.Contains(ddl, `COMMENT ON COLUMN "app""schema"."order""items"."note"`) {
+		t.Fatalf("blank column comment must be omitted:\n%s", ddl)
+	}
+}
+
+func TestColumnDDLDefinitionPreservesCompatibilityExtras(t *testing.T) {
+	identity := "IDENTITY(1,1)"
+	defaultValue := "0"
+	if definition := columnDDLDefinition(columnInfo{Name: "id", DataType: "integer", IsNullable: false, Extra: &identity}); definition != `"id" integer IDENTITY(1,1) NOT NULL` {
+		t.Fatalf("unexpected SQL Server-compatible DDL: %s", definition)
+	}
+	if definition := columnDDLDefinition(columnInfo{Name: "count", DataType: "integer", IsNullable: true, ColumnDefault: &defaultValue}); definition != `"count" integer DEFAULT 0` {
+		t.Fatalf("unexpected regular column DDL: %s", definition)
+	}
+	if extra := kingbaseIdentityClause(""); extra != nil {
+		t.Fatalf("non-identity column must not expose an extra clause: %#v", extra)
 	}
 }
 
@@ -381,6 +628,9 @@ func TestMySQLCompatColumnsUsePostgresColumnComments(t *testing.T) {
 	}
 	if len(columns) != 1 || columns[0].Comment == nil || *columns[0].Comment != "primary key" {
 		t.Fatalf("unexpected columns: %#v", columns)
+	}
+	if columns[0].Extra != nil {
+		t.Fatalf("MySQL-compatible metadata must not infer PostgreSQL identity: %#v", columns[0].Extra)
 	}
 
 	state.mu.Lock()

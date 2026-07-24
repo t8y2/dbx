@@ -1577,6 +1577,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :database="sidebarObjectSourceTarget.node.database!"
       :schema="sidebarObjectSourceTarget.node.schema"
       :name="sidebarObjectSourceTarget.node.objectName || sidebarObjectSourceTarget.node.label"
+      :relation-name="sidebarObjectSourceTarget.node.tableName"
       :signature="sidebarObjectSourceTarget.node.signature"
       :object-type="sidebarObjectSourceType"
       :database-type="sidebarObjectSourceDatabaseType"

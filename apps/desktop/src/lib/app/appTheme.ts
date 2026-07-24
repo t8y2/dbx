@@ -48,8 +48,8 @@ export function normalizeAppThemePalette(value: string | null): AppThemePalette 
 }
 
 export function normalizeAppCornerStyle(value: string | null): AppCornerStyle {
-  if (value === "none" || value === "large") return value;
-  return "small";
+  if (value === "none" || value === "small") return value;
+  return "large";
 }
 
 export function getAppThemePaletteClass(palette: AppThemePalette): string | null {

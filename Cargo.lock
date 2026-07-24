@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.65"
+version = "0.5.66"
 dependencies = [
  "anyhow",
  "axum",
@@ -1841,6 +1841,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sys-locale",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
@@ -1863,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.41"
+version = "0.4.42"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1878,6 +1879,7 @@ dependencies = [
 name = "dbx-core"
 version = "0.1.0"
 dependencies = [
+ "aes 0.8.4",
  "aes-gcm 0.10.3",
  "anyhow",
  "argon2",
@@ -1885,6 +1887,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "calamine",
+ "cbc 0.1.2",
  "chrono",
  "csv",
  "deadpool-postgres",
@@ -1933,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.41"
+version = "0.4.42"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1950,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.65"
+version = "0.5.66"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -7869,6 +7872,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

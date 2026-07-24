@@ -1796,6 +1796,11 @@ impl AppState {
         if transport_layers.is_empty() {
             return Ok((config.host.clone(), config.port));
         }
+        if config.uses_oracle_tns() {
+            // A TNS descriptor may contain several failover addresses, so rewriting it
+            // through one local tunnel endpoint would silently break Oracle Net routing.
+            return Err("Oracle TNS connections cannot be combined with SSH, proxy, or HTTP tunnel layers. Remove the transport layer or use Service Name/SID mode.".to_string());
+        }
 
         let (remote_host, remote_port) = connection_remote_endpoint(config);
         let local_port = db::transport_layer_tunnel::start_transport_layers(
@@ -2027,7 +2032,63 @@ impl AppState {
         }
 
         let (host, port) = self.connection_host_port(connection_id, config).await?;
-        nacos_config.with_server_endpoint(&host, port)
+        let nacos_config = nacos_config.with_server_endpoint(&host, port)?;
+        if nacos_config.rnacos_console_addr.is_empty() {
+            return Ok(nacos_config);
+        }
+
+        let console_url = reqwest::Url::parse(&nacos_config.rnacos_console_addr)
+            .map_err(|error| format!("r-nacos console address is invalid: {error}"))?;
+        let console_host = console_url
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| "r-nacos console address does not include a host".to_string())?;
+        let console_port = console_url
+            .port_or_known_default()
+            .ok_or_else(|| "r-nacos console address does not include a port".to_string())?;
+        let transport_layers = self.resolved_transport_layers(config).await?;
+        if transport_layers.is_empty() {
+            return Ok(nacos_config);
+        }
+        let console_transport_id = rnacos_console_transport_id(connection_id);
+        let local_port = match db::transport_layer_tunnel::start_transport_layers(
+            &console_transport_id,
+            &transport_layers,
+            console_host,
+            console_port,
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await
+        {
+            Ok(port) => port,
+            Err(error) => {
+                db::transport_layer_tunnel::stop_transport_layers(
+                    &console_transport_id,
+                    transport_layers.len(),
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                    &self.http_tunnels,
+                )
+                .await;
+                return Err(format!("r-nacos console transport failed: {error}"));
+            }
+        };
+        match nacos_config.with_rnacos_console_endpoint("127.0.0.1", local_port) {
+            Ok(nacos_config) => Ok(nacos_config),
+            Err(error) => {
+                db::transport_layer_tunnel::stop_transport_layers(
+                    &console_transport_id,
+                    transport_layers.len(),
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                    &self.http_tunnels,
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 
     async fn remove_stale_connection_pool(&self, pool_key: &str) -> bool {
@@ -2797,6 +2858,14 @@ impl AppState {
             &self.http_tunnels,
         )
         .await;
+        db::transport_layer_tunnel::stop_transport_layers(
+            &rnacos_console_transport_id(connection_id),
+            layer_count,
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await;
         self.tunnels.stop_tunnel(connection_id).await;
         self.proxy_tunnels.stop_tunnel(connection_id).await;
         self.http_tunnels.stop_tunnel(connection_id).await;
@@ -3247,6 +3316,10 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
     } else {
         (config.host.clone(), config.port)
     }
+}
+
+fn rnacos_console_transport_id(connection_id: &str) -> String {
+    format!("{connection_id}:rnacos-console")
 }
 
 fn parse_mq_admin_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
@@ -5480,6 +5553,20 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn oracle_tns_connection_rejects_transport_layers() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("DBX_FAILOVER"));
+        config.db_type = DatabaseType::Oracle;
+        config.oracle_connection_type = Some("tns".to_string());
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_layer("tns-tunnel", ""))];
+
+        let error = state.connection_host_port("oracle-tns", &config).await.unwrap_err();
+        assert!(error.contains("cannot be combined with SSH, proxy, or HTTP tunnel"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn resolved_transport_layers_substitutes_shared_profiles() {
         let (state, dir) = test_app_state().await;
 
@@ -5670,6 +5757,7 @@ for line in sys.stdin:
         config.port = 10840;
         config.external_config = Some(serde_json::json!({
             "serverAddr": "http://192.168.2.51:10840",
+            "rnacosConsoleAddr": "http://192.168.2.51:10848",
             "namespace": "public",
             "contextPath": "",
             "auth": { "kind": "none" }
@@ -5691,8 +5779,11 @@ for line in sys.stdin:
 
         assert!(nacos_config.server_addr.starts_with("http://127.0.0.1:"));
         assert_ne!(nacos_config.server_addr, "http://192.168.2.51:10840");
+        assert!(nacos_config.rnacos_console_addr.starts_with("http://127.0.0.1:"));
+        assert_ne!(nacos_config.rnacos_console_addr, "http://192.168.2.51:10848");
         assert!(nacos_config.connect_override.is_none());
         state.proxy_tunnels.stop_tunnel("proxied-nacos:transport:0").await;
+        state.proxy_tunnels.stop_tunnel("proxied-nacos:rnacos-console:transport:0").await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

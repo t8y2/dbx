@@ -11,7 +11,6 @@ goldendb	native-pushdown	java-sql	Uses information_schema with type, filter, sta
 h2	native-pushdown	java-sql	Uses INFORMATION_SCHEMA with type, filter, stable order, and LIMIT/OFFSET.
 hive	intentional-fallback	java-sql	Uses Hive metadata paths where stable server-side fuzzy paging is not portable, common constraints filter locally.
 informix	native-pushdown	java-sql	Uses systables/sysprocedures with type, filter, stable order, and SKIP/FIRST.
-kingbase	native-pushdown	java-sql	Uses sys_catalog/information_schema with type, filter, stable order, and LIMIT/OFFSET for both compatibility modes.
 kingbase-go	shared-fallback	native-go	Uses sys_catalog/information_schema for compatibility-aware metadata, then applies stable filtering and paging in the native agent.
 kylin	intentional-fallback	java-jdbc-metadata	Uses JDBC metadata from Kylin driver; no portable server-side paging API, common constraints filter locally.
 neo4j	intentional-fallback	java-graph-metadata	Uses JDBC metadata with Cypher fallback; label discovery cannot guarantee relational-style filtered paging, common constraints filter locally.

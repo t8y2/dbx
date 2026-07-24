@@ -461,6 +461,8 @@ async fn main() {
         .route("/nacos/configs/history/list", post(routes::nacos::list_config_history))
         .route("/nacos/configs/history/get", post(routes::nacos::get_config_history))
         .route("/nacos/configs/history/rollback", post(routes::nacos::rollback_config))
+        .route("/nacos/rnacos-console/captcha", post(routes::nacos::get_rnacos_console_captcha))
+        .route("/nacos/rnacos-console/login", post(routes::nacos::login_rnacos_console))
         .route("/nacos/services/list", post(routes::nacos::list_services))
         .route("/nacos/instances/list", post(routes::nacos::list_instances))
         .route("/nacos/instances/update", post(routes::nacos::update_instance))

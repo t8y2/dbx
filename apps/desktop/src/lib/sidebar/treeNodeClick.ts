@@ -1,7 +1,7 @@
 import type { ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
 
-export type TreeNodeRowAction = "open-data" | "toggle" | "none";
+export type TreeNodeRowAction = "open-data" | "open-source" | "toggle" | "none";
 export type TreeNodeRowDoubleClickAction = "open-data" | "activate-data" | "open-object-browser" | "open-object-browser-and-expand" | "open-source" | "open-saved-sql" | "toggle" | "none";
 export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
@@ -36,6 +36,7 @@ export function isDocumentBrowserTreeNode(type: TreeNodeType): boolean {
 export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single"): TreeNodeRowAction {
   if (activation === "double") return "none";
   if (dataNodeTypes.has(type)) return "open-data";
+  if (sourceNodeTypes.has(type)) return "open-source";
   if (toggleLeafNodeTypes.has(type)) return "toggle";
   if (canExpand) return "toggle";
   return "none";

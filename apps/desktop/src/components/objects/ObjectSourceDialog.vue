@@ -22,6 +22,7 @@ const props = withDefaults(
     database: string;
     schema?: string;
     name: string;
+    relationName?: string;
     signature?: string;
     objectType: ObjectSourceKind;
     databaseType?: DatabaseType;
@@ -59,7 +60,7 @@ const canEdit = computed(() => sourceEditable.value && props.objectType !== "SEQ
 const title = computed(() => `${editing.value ? t("contextMenu.editView") : t("contextMenu.viewSource")} - ${props.name}`);
 
 watch(
-  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.signature, props.objectType, props.initialEditing] as const,
+  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.relationName, props.signature, props.objectType, props.initialEditing] as const,
   () => {
     if (props.open) void loadSource();
   },
@@ -79,7 +80,7 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   try {
     if (!props.databaseType) throw new Error("Connection type is unavailable.");
     const schema = props.schema || props.database;
-    const result = await api.getObjectSource(props.connectionId, props.database, schema, props.name, props.objectType, props.signature);
+    const result = await api.getObjectSource(props.connectionId, props.database, schema, props.name, props.objectType, props.signature, props.relationName);
     const editableAllowed = result.editable !== false;
     const editable = await buildEditableObjectSource({
       databaseType: props.databaseType,

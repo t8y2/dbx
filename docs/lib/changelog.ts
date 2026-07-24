@@ -1,4 +1,5 @@
 import { requestJson } from "@/lib/httpJson";
+import { isAppReleaseTag } from "@/lib/releaseTags";
 
 export type ChangelogItem = {
   title: string;
@@ -119,7 +120,8 @@ export async function fetchGitHubChangelog(): Promise<ChangelogData> {
     return {
       updatedAt: new Date().toISOString(),
       releases: releases
-        .filter((release) => !release.draft && !release.prerelease && !release.tag_name.startsWith("agents-"))
+        // GitHub contains separate app, agent, and package release streams.
+        .filter((release) => !release.draft && !release.prerelease && isAppReleaseTag(release.tag_name))
         .map((release) => ({
           tag: release.tag_name,
           name: release.name || release.tag_name,

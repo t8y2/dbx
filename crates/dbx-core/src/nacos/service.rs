@@ -8,7 +8,9 @@ pub async fn nacos_test_connection_core(state: &AppState, conn_id: &str) -> Resu
         return Err("Connection is not a Nacos admin connection".to_string());
     }
     let admin_config = state.nacos_admin_config_for_connection(conn_id, &cfg).await?;
-    let admin = state.nacos_registry.build_transient_config(admin_config).await?;
+    // Keep this probe on the connection's shared adapter so an r-nacos console
+    // session verified for configuration history can also expose its version.
+    let admin = state.nacos_registry.get_or_build_config(conn_id, admin_config).await?;
     admin.test_connection().await
 }
 
@@ -93,6 +95,23 @@ pub async fn nacos_rollback_config_core(
     ensure_connection_writable(state, conn_id, "Rollback Nacos config").await?;
     let admin = get_admin(state, conn_id).await?;
     admin.rollback_config(req).await
+}
+
+pub async fn nacos_get_rnacos_console_captcha_core(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<NacosRNacosConsoleCaptcha, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.get_rnacos_console_captcha().await
+}
+
+pub async fn nacos_login_rnacos_console_core(
+    state: &AppState,
+    conn_id: &str,
+    captcha: Option<String>,
+) -> Result<(), String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.login_rnacos_console(captcha).await
 }
 
 pub async fn nacos_list_services_core(

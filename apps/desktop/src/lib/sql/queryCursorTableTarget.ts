@@ -2,6 +2,7 @@ import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureS
 import { extractIdentifierPartsAt, isSqlKeyword, sqlObjectNavigationTarget, type SqlObjectNavigationTarget, type SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
 import type { ActiveTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import type { DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
 export interface QueryCursorTableCandidate {
@@ -53,7 +54,9 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
 }
 
 export function queryTableCandidateAtSqlPosition(input: QueryTableCandidateAtPositionInput): QueryCursorTableCandidate | null {
-  const parts = extractQualifiedIdentifierPartsAt(input.sql, input.position).map((part) => part.value);
+  const dialect = sqlSemanticDialectFor({ databaseType: input.databaseType });
+  // View-data SQL quotes resolved names, so fold only unquoted input exactly as the database does before quoting it again.
+  const parts = extractQualifiedIdentifierPartsAt(input.sql, input.position).map((part) => dialect.normalizeIdentifier(part.value, part.quoted));
   if (parts.length === 0) return null;
 
   const tableName = parts[parts.length - 1];

@@ -11,6 +11,7 @@ import {
   resolveQueryContextCandidateDatabase,
   resolveQueryContextObjectTarget,
 } from "../../apps/desktop/src/lib/sql/queryCursorTableTarget.ts";
+import { qualifiedTableName } from "../../apps/desktop/src/lib/table/tableSelectSql.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function queryTab(sql: string, head: number, schema = "public"): QueryTab {
@@ -94,6 +95,52 @@ test("builds three-part candidates at an explicit context-menu position", () => 
     database: "warehouse",
     schema: "reporting",
     tableName: "Daily Sales",
+  });
+});
+
+test("folds unquoted Oracle-compatible identifiers before view-data quoting", () => {
+  for (const databaseType of ["oracle", "dameng"] as const) {
+    const sql = "select * from app.order_items";
+    const candidate = queryTableCandidateAtSqlPosition({ connectionId: "conn-1", database: "service", databaseType, sql, position: sql.indexOf("order") });
+
+    assert.deepEqual(candidate, {
+      connectionId: "conn-1",
+      database: "service",
+      schema: "APP",
+      tableName: "ORDER_ITEMS",
+    });
+    assert.equal(qualifiedTableName({ databaseType, schema: candidate?.schema, tableName: candidate?.tableName ?? "" }), '"APP"."ORDER_ITEMS"');
+  }
+});
+
+test("preserves explicitly quoted Oracle-compatible identifier case", () => {
+  const sql = 'select * from "App"."Order_Items"';
+  const candidate = queryTableCandidateAtSqlPosition({ connectionId: "conn-1", database: "service", databaseType: "oracle", sql, position: sql.indexOf("Order") });
+
+  assert.deepEqual(candidate, {
+    connectionId: "conn-1",
+    database: "service",
+    schema: "App",
+    tableName: "Order_Items",
+  });
+  assert.equal(qualifiedTableName({ databaseType: "oracle", schema: candidate?.schema, tableName: candidate?.tableName ?? "" }), '"App"."Order_Items"');
+});
+
+test("folds PostgreSQL unquoted identifiers without changing quoted names", () => {
+  const unquotedSql = "select * from Reporting.Users";
+  const quotedSql = 'select * from "Reporting"."Users"';
+
+  assert.deepEqual(queryTableCandidateAtSqlPosition({ connectionId: "conn-1", database: "app", databaseType: "postgres", sql: unquotedSql, position: unquotedSql.indexOf("Users") }), {
+    connectionId: "conn-1",
+    database: "app",
+    schema: "reporting",
+    tableName: "users",
+  });
+  assert.deepEqual(queryTableCandidateAtSqlPosition({ connectionId: "conn-1", database: "app", databaseType: "postgres", sql: quotedSql, position: quotedSql.indexOf("Users") }), {
+    connectionId: "conn-1",
+    database: "app",
+    schema: "Reporting",
+    tableName: "Users",
   });
 });
 

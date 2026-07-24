@@ -262,6 +262,11 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
     if config.db_type != DatabaseType::Oracle {
         return Vec::new();
     }
+    if config.oracle_connection_type.as_deref() == Some("tns") {
+        // TNS owns its complete address/failover descriptor; host-based retries would
+        // replace the configured alias with unrelated Service Name/SID URLs.
+        return Vec::new();
+    }
     if config.connection_string.as_deref().is_some_and(|value| !value.trim().is_empty()) {
         return Vec::new();
     }
@@ -802,6 +807,20 @@ mod tests {
         cfg.oracle_connection_type = Some("service_name".to_string());
         let service = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCL");
         assert_eq!(service["connection_string"], "jdbc:oracle:thin:@//oracle.example.com:1521/ORCL");
+    }
+
+    #[test]
+    fn oracle_tns_does_not_retry_with_host_based_descriptors() {
+        let mut cfg = config(DatabaseType::Oracle, Some("DBX_FAILOVER"));
+        cfg.oracle_connection_type = Some("tns".to_string());
+        cfg.connection_string =
+            Some("jdbc:oracle:thin:@DBX_FAILOVER?TNS_ADMIN=%2Fopt%2Foracle%2Fnetwork%2Fadmin".to_string());
+
+        assert!(oracle_alternate_connect_configs(
+            &cfg,
+            "ORA-12514: listener does not currently know of service requested"
+        )
+        .is_empty());
     }
 
     #[test]

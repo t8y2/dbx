@@ -810,6 +810,11 @@ impl ConnectionConfig {
         !self.effective_transport_layers().is_empty()
     }
 
+    pub fn uses_oracle_tns(&self) -> bool {
+        self.db_type == DatabaseType::Oracle
+            && self.oracle_connection_type.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("tns"))
+    }
+
     pub fn has_effective_ssh_tunnels(&self) -> bool {
         self.effective_transport_layers().iter().any(|layer| matches!(layer, TransportLayerConfig::Ssh(_)))
     }

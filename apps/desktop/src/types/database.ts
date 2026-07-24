@@ -140,7 +140,7 @@ export interface ConnectionConfig {
   client_cert_path?: string;
   client_key_path?: string;
   sysdba?: boolean;
-  oracle_connection_type?: "service_name" | "sid";
+  oracle_connection_type?: "service_name" | "sid" | "tns";
   connection_string?: string;
   jdbc_driver_class?: string;
   jdbc_driver_paths?: string[];
@@ -791,6 +791,7 @@ export interface TableStructureEditorDraft {
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
+  triggersLoaded?: boolean;
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   initialized: boolean;
 }

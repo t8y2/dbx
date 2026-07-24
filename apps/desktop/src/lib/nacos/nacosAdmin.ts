@@ -1,4 +1,4 @@
-import type { NacosConfigHistoryItem, NacosConfigItem, NacosInstanceInfo, NacosRawRequest, NacosServiceInfo } from "@/types/nacos";
+import type { NacosConfigHistoryItem, NacosConfigItem, NacosImplementation, NacosInstanceInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
 import { diffChars, diffLines } from "diff";
 
 export type NacosRawTemplateKey = "serverState" | "namespaceList" | "configDetail" | "serviceList" | "instanceList";
@@ -36,6 +36,103 @@ export const NACOS_RAW_TEMPLATES: NacosRawTemplate[] = [
     body: "",
   },
 ];
+
+export interface RNacosOpenApiFallback {
+  serverAddr: string;
+  contextPath: string;
+}
+
+export interface RNacosOpenApiFallbackOptions {
+  /** Treat the well-known r-nacos console port as a candidate after the original connection fails. */
+  allowConsolePortInference?: boolean;
+}
+
+export interface NacosEndpointNormalization {
+  serverAddr: string;
+  contextPath: string;
+  detectedImplementation?: NacosImplementation;
+  detectedVersion?: Exclude<NacosVersionMode, "auto">;
+  warnings: string[];
+}
+
+export interface NacosEndpointNormalizationOptions {
+  implementation?: NacosImplementation;
+  versionMode?: NacosVersionMode;
+  contextPath?: string;
+}
+
+/**
+ * Splits a pasted browser/API URL into the persisted origin and API context.
+ * We only strip documented Nacos 3 UI routes; every other prefix remains an
+ * explicit context path so reverse proxies are not silently broken.
+ */
+export function normalizeNacosEndpoint(input: string, options: NacosEndpointNormalizationOptions = {}): NacosEndpointNormalization {
+  let url: URL;
+  try {
+    url = new URL(input.trim());
+  } catch {
+    throw new Error("Nacos address must be a valid absolute URL");
+  }
+  if (url.username || url.password) throw new Error("Nacos address must not contain embedded credentials");
+
+  const rawPath = url.pathname.replace(/\/+$/, "");
+  const implementation = options.implementation;
+  const versionMode = options.versionMode || "auto";
+  const warnings: string[] = [];
+  const hasRNacosSuffix = /\/rnacos$/i.test(rawPath);
+  const hasNacosSuffix = /\/nacos$/i.test(rawPath);
+  const hasNacos3UiSuffix = /\/(?:next(?:\/index\.html)?|index\.html)$/i.test(rawPath);
+  const detectedImplementation: NacosImplementation | undefined = implementation || (hasRNacosSuffix || url.port === "10848" ? "rnacos" : "nacos");
+  const detectedVersion: Exclude<NacosVersionMode, "auto"> | undefined = detectedImplementation === "rnacos" ? undefined : versionMode === "auto" ? (hasNacos3UiSuffix ? "v3" : hasNacosSuffix ? "v2" : undefined) : versionMode;
+  let contextPath = rawPath;
+
+  if (detectedImplementation === "rnacos") {
+    if (hasRNacosSuffix || url.port === "10848") warnings.push("This looks like an r-nacos console URL; use the compatible API address as the primary endpoint.");
+    contextPath = hasNacosSuffix ? rawPath : options.contextPath?.trim() || "/nacos";
+  } else if (detectedVersion === "v3" || hasNacos3UiSuffix) {
+    contextPath = rawPath.replace(/\/(?:next(?:\/index\.html)?|index\.html)$/i, "");
+    if (hasNacos3UiSuffix) warnings.push("The Nacos 3 console route was removed from the API context.");
+  } else if (!contextPath) {
+    contextPath = options.contextPath?.trim() || (detectedVersion === "v2" ? "/nacos" : "");
+  }
+  url.pathname = "/";
+  url.search = "";
+  url.hash = "";
+  return {
+    serverAddr: url.toString().replace(/\/$/, ""),
+    contextPath: contextPath ? `/${contextPath.replace(/^\/+|\/+$/g, "")}` : "",
+    detectedImplementation,
+    detectedVersion,
+    warnings,
+  };
+}
+
+/**
+ * r-nacos exposes its Nacos-compatible OpenAPI on the service port (8848) at
+ * `/nacos`; `/rnacos` on 10848 is the separate web console and rejects these
+ * OpenAPI POST requests. Port-only detection is deliberately opt-in: 10848
+ * may also be a legitimate user mapping for a normal Nacos OpenAPI, so callers
+ * must only use that weaker signal as a tested fallback candidate.
+ */
+export function resolveRNacosOpenApiFallback(serverAddr: string, contextPath: string, options: RNacosOpenApiFallbackOptions = {}): RNacosOpenApiFallback | null {
+  const normalizedContextPath = `/${contextPath.trim().replace(/^\/+|\/+$/g, "")}`.replace(/\/$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(serverAddr.trim());
+  } catch {
+    return null;
+  }
+
+  const explicitRNacosContext = normalizedContextPath === "/rnacos";
+  const inferredRNacosConsolePort = options.allowConsolePortInference === true && parsed.port === "10848";
+  if (!explicitRNacosContext && !inferredRNacosConsolePort) return null;
+  if (parsed.port === "10848") parsed.port = "8848";
+
+  return {
+    serverAddr: parsed.toString().replace(/\/$/, ""),
+    contextPath: "/nacos",
+  };
+}
 
 export function parseNacosRawQuery(text: string): Record<string, string> | undefined {
   const trimmed = text.trim().replace(/^\?/, "");

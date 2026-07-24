@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alignedSidebarCommentLabelWidths, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { alignedSidebarCommentLabelWidths, trailingCommentAvailableWidth, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 
 describe("sidebar tree item layout", () => {
   it("keeps a table row constrained when it displays a comment", () => {
@@ -23,5 +23,12 @@ describe("sidebar tree item layout", () => {
     expect(widths.get("short")).toBe(136);
     expect(widths.has("long")).toBe(false);
     expect(widths.get("view")).toBe(72);
+  });
+
+  it("limits right-aligned comments to the space after the complete name and gap", () => {
+    expect(trailingCommentAvailableWidth(260, 100)).toBe(152);
+    expect(trailingCommentAvailableWidth(108, 100)).toBe(0);
+    expect(trailingCommentAvailableWidth(100, 100)).toBe(0);
+    expect(trailingCommentAvailableWidth(99, 100)).toBe(0);
   });
 });

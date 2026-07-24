@@ -63,6 +63,17 @@ ORDER BY CASE
   WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
   ELSE 2
 END, username`
+
+// Oracle schemas are users, so expose every user visible through ALL_USERS; system filtering remains database-picker behavior.
+const oracleListSchemasSQL = `
+SELECT username AS owner
+FROM all_users
+WHERE username IS NOT NULL
+ORDER BY CASE
+  WHEN username = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') THEN 0
+  WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
+  ELSE 2
+END, username`
 const oracleListTablesBaseSQL = `
 SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
 FROM (
@@ -138,6 +149,22 @@ const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   ELSE 5
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
+const oracleListTriggersSQL = `
+SELECT t.TRIGGER_NAME,
+       t.TRIGGERING_EVENT,
+       t.TRIGGER_TYPE,
+       t.DESCRIPTION,
+       s.LINE,
+       s.TEXT
+FROM ALL_TRIGGERS t
+LEFT JOIN ALL_SOURCE s
+  ON s.OWNER = t.OWNER
+ AND s.NAME = t.TRIGGER_NAME
+ AND s.TYPE = 'TRIGGER'
+WHERE t.OWNER = :1
+  AND t.TABLE_NAME = :2
+  AND t.BASE_OBJECT_TYPE IN ('TABLE', 'VIEW')
+ORDER BY t.TRIGGER_NAME, s.LINE`
 
 type request struct {
 	ID     json.RawMessage            `json:"id"`
@@ -341,9 +368,10 @@ type foreignKeyInfo struct {
 }
 
 type triggerInfo struct {
-	Name   string `json:"name"`
-	Event  string `json:"event"`
-	Timing string `json:"timing"`
+	Name      string  `json:"name"`
+	Event     string  `json:"event"`
+	Timing    string  `json:"timing"`
+	Statement *string `json:"statement,omitempty"`
 }
 
 type server struct {
@@ -795,10 +823,12 @@ func openDB(params connectParams) (*sql.DB, error) {
 }
 
 func openDBWithStringConverter(params connectParams, stringConverter converters.IStringConverter) (*sql.DB, error) {
-	dsn := buildDSN(params)
+	dsn, err := buildDSNForConnect(params)
+	if err != nil {
+		return nil, err
+	}
 	var db *sql.DB
 	if stringConverter == nil {
-		var err error
 		db, err = sql.Open("oracle", dsn)
 		if err != nil {
 			return nil, err
@@ -1062,13 +1092,44 @@ func (s *server) listSchemas(visibleSchemas []string) ([]string, error) {
 	if visibleSchemas != nil && len(visibleSchemas) == 0 {
 		return []string{}, nil
 	}
-	databases, err := s.listDatabasesFiltered(visibleSchemas)
+	sqlText, args := oracleListSchemasSQLWithVisibleSchemas(visibleSchemas)
+	rows, err := s.queryRows(sqlText, args)
 	if err != nil {
+		if isOraclePGALimitError(err) {
+			databases, fallbackErr := s.currentSchemaDatabase()
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			result := make([]string, 0, len(databases))
+			for _, database := range databases {
+				result = append(result, database.Name)
+			}
+			return emptyIfNil(result), nil
+		}
 		return nil, err
 	}
-	result := make([]string, 0, len(databases))
-	for _, database := range databases {
-		result = append(result, database.Name)
+	defer s.closeRows(rows)
+	var result []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		result = append(result, name)
+	}
+	if err := rows.Err(); err != nil {
+		if isOraclePGALimitError(err) {
+			databases, fallbackErr := s.currentSchemaDatabase()
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			result = result[:0]
+			for _, database := range databases {
+				result = append(result, database.Name)
+			}
+			return emptyIfNil(result), nil
+		}
+		return nil, err
 	}
 	return emptyIfNil(result), nil
 }
@@ -1104,8 +1165,16 @@ func (s *server) listDatabasesFiltered(visibleSchemas []string) ([]databaseInfo,
 }
 
 func oracleListDatabasesSQLWithVisibleSchemas(visibleSchemas []string) (string, []any) {
+	return oracleListSQLWithVisibleSchemas(oracleListDatabasesSQL, visibleSchemas)
+}
+
+func oracleListSchemasSQLWithVisibleSchemas(visibleSchemas []string) (string, []any) {
+	return oracleListSQLWithVisibleSchemas(oracleListSchemasSQL, visibleSchemas)
+}
+
+func oracleListSQLWithVisibleSchemas(baseSQL string, visibleSchemas []string) (string, []any) {
 	if len(visibleSchemas) == 0 {
-		return oracleListDatabasesSQL, nil
+		return baseSQL, nil
 	}
 	placeholders := make([]string, 0, len(visibleSchemas))
 	args := make([]any, 0, len(visibleSchemas))
@@ -1114,7 +1183,7 @@ func oracleListDatabasesSQLWithVisibleSchemas(visibleSchemas []string) (string, 
 		args = append(args, schema)
 	}
 	sqlText := strings.Replace(
-		oracleListDatabasesSQL,
+		baseSQL,
 		"\nORDER BY CASE",
 		"\n  AND username IN ("+strings.Join(placeholders, ",")+")\nORDER BY CASE",
 		1,
@@ -1958,24 +2027,76 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 		return nil, err
 	}
 	table = strings.ToUpper(strings.TrimSpace(table))
-	rows, err := s.queryRows(`
-SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE
-FROM ALL_TRIGGERS
-WHERE OWNER = :1 AND TABLE_NAME = :2
-ORDER BY TRIGGER_NAME`, []any{schema, table})
+	rows, err := s.queryRows(oracleListTriggersSQL, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
 	defer s.closeRows(rows)
 	var result []triggerInfo
+	var currentName string
+	var currentDescription string
+	var source strings.Builder
+	flush := func() {
+		if len(result) == 0 || currentName == "" {
+			return
+		}
+		if body, ok := oracleTriggerBody(source.String(), currentDescription); ok {
+			result[len(result)-1].Statement = &body
+		}
+	}
 	for rows.Next() {
-		var item triggerInfo
-		if err := rows.Scan(&item.Name, &item.Event, &item.Timing); err != nil {
+		var name, event, timing string
+		var description, lineText sql.NullString
+		var line sql.NullInt64
+		if err := rows.Scan(&name, &event, &timing, &description, &line, &lineText); err != nil {
 			return nil, err
 		}
-		result = append(result, item)
+		if name != currentName {
+			flush()
+			currentName = name
+			currentDescription = description.String
+			source.Reset()
+			result = append(result, triggerInfo{Name: name, Event: event, Timing: timing})
+		}
+		if line.Valid && lineText.Valid {
+			source.WriteString(lineText.String)
+		}
 	}
+	flush()
 	return emptyIfNil(result), rows.Err()
+}
+
+func oracleTriggerBody(source, description string) (string, bool) {
+	source = strings.ReplaceAll(source, "\r\n", "\n")
+	description = strings.ReplaceAll(description, "\r\n", "\n")
+	if strings.TrimSpace(source) == "" {
+		return "", false
+	}
+
+	sourceLines := strings.Split(source, "\n")
+	descriptionLines := strings.Split(strings.TrimSpace(description), "\n")
+	for len(descriptionLines) > 0 && strings.TrimSpace(descriptionLines[len(descriptionLines)-1]) == "" {
+		descriptionLines = descriptionLines[:len(descriptionLines)-1]
+	}
+	if len(descriptionLines) > 0 && len(sourceLines) >= len(descriptionLines) {
+		matches := true
+		for index, descriptionLine := range descriptionLines {
+			sourceLine := strings.TrimSpace(sourceLines[index])
+			if index == 0 && len(sourceLine) >= len("TRIGGER") && strings.EqualFold(sourceLine[:len("TRIGGER")], "TRIGGER") {
+				sourceLine = strings.TrimSpace(sourceLine[len("TRIGGER"):])
+			}
+			if !strings.EqualFold(sourceLine, strings.TrimSpace(descriptionLine)) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return strings.TrimSpace(strings.Join(sourceLines[len(descriptionLines):], "\n")), true
+		}
+	}
+
+	// ALL_SOURCE is still more useful than an empty editor if a database version formats DESCRIPTION differently.
+	return strings.TrimSpace(source), true
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
@@ -3628,6 +3749,10 @@ func normalizeValue(value any, columnTypeName string) any {
 		}
 		return string(v)
 	case time.Time:
+		// Oracle DATE and plain TIMESTAMP are wall-clock values; adding an offset makes clients shift them.
+		if isOracleTimezoneLessDateTime(columnTypeName) {
+			return v.Format("2006-01-02T15:04:05.999999999")
+		}
 		return v.Format(time.RFC3339Nano)
 	case int64, float64, bool, string:
 		return v
@@ -3636,6 +3761,14 @@ func normalizeValue(value any, columnTypeName string) any {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func isOracleTimezoneLessDateTime(columnTypeName string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
+	if normalized == "DATE" || normalized == "TIMESTAMPDTY" || normalized == "TIMESTAMP" {
+		return true
+	}
+	return strings.HasPrefix(normalized, "TIMESTAMP(") && strings.HasSuffix(normalized, ")")
 }
 
 func isOracleBinaryColumnType(columnTypeName string) bool {

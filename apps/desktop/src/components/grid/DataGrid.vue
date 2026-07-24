@@ -8,6 +8,7 @@ import {
   Upload,
   Trash2,
   ChevronDown,
+  ChevronUp,
   ChevronLeft,
   ChevronRight,
   Search,
@@ -64,6 +65,8 @@ import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
+import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
+import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -100,6 +103,7 @@ import {
   nextTransposeState,
   nextTransposeStateForRecordCount,
   restoreDataGridAfterTranspose,
+  shouldAutoTransposeSingleRow,
   transposeRecordIndexesForMode,
   transposeRecordWidthsForDensity,
   transposeFieldWidth,
@@ -266,6 +270,7 @@ interface DataGridProps {
   executionDatabase?: string;
   schema?: string;
   context?: "results" | "table-data";
+  autoTransposeSingleRow?: boolean;
   sourceColumns?: Array<string | undefined>;
   initialWhereInput?: string;
   initialOrderByInput?: string;
@@ -305,8 +310,10 @@ interface DataGridProps {
 }
 
 const props = withDefaults(defineProps<DataGridProps>(), {
-  // Vue casts absent Boolean props to false unless the default is explicitly
-  // undefined; omitted row-action limits must keep normal table-data editing.
+  // Vue casts absent Boolean props to false unless a default is explicit.
+  // Regular grids have exact totals; document stores opt into lower-bound totals.
+  totalRowCountIsExact: true,
+  // Omitted row-action limits must keep normal table-data editing.
   allowInsertRows: undefined,
   allowDeleteRows: undefined,
 });
@@ -386,6 +393,18 @@ watch(
           loading: props.loading,
         });
       });
+    });
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.result,
+  (result) => {
+    if (!shouldAutoTransposeSingleRow({ enabled: !!props.autoTransposeSingleRow, preserveTranspose: preserveTransposeOnNextResult.value, rowCount: result.rows.length, columnCount: result.columns.length })) return;
+    nextTick(() => {
+      if (props.result !== result || !props.autoTransposeSingleRow || result.rows.length !== 1 || result.columns.length <= 1) return;
+      applyTransposeState({ showTranspose: true, transposeRowIndex: 0 });
     });
   },
   { immediate: true },
@@ -1757,6 +1776,11 @@ function matchesTableInfoColumn(resultColumn: string, sourceColumn: string | und
 function scrollToTableInfoColumn(columnName: string) {
   const columnIndex = props.result.columns.findIndex((column, index) => matchesTableInfoColumn(column, props.sourceColumns?.[index], columnName));
   scrollToColumnIndex(columnIndex);
+}
+
+function onTableInfoColumnClick(columnName: string) {
+  if (!shouldNavigateFromTableInfoColumnClick(window.getSelection())) return;
+  scrollToTableInfoColumn(columnName);
 }
 function scrollToColumnIndex(columnIndex: number) {
   if (columnIndex < 0 || !displayableColumnIndexes.value.includes(columnIndex)) return;
@@ -6680,9 +6704,60 @@ function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.
 // Table info drawers are tied to a single grid instance. Keeping this state
 // module-global leaks the drawer into other kept-alive tabs.
 const showTableInfo = ref(false);
-const activeTableInfoTab = ref<TableInfoTab>("ddl");
+const activeTableInfoTab = ref<TableInfoTab>(settingsStore.editorSettings.tableInfoActiveTab);
 const ddlContent = ref("");
 const ddlPreRef = ref<HTMLPreElement | null>(null);
+const ddlSearchMatchCount = ref(0);
+const ddlSearchMatchIndex = ref(0);
+
+function scrollDdlSearchMatchIntoView(match: HTMLElement) {
+  const pre = ddlPreRef.value;
+  if (!pre) return;
+
+  const preRect = pre.getBoundingClientRect();
+  const matchRect = match.getBoundingClientRect();
+  pre.scrollTop += matchRect.top - preRect.top - (pre.clientHeight - matchRect.height) / 2;
+  pre.scrollLeft += matchRect.left - preRect.left - (pre.clientWidth - matchRect.width) / 2;
+}
+
+function syncDdlSearchMatches(scrollToActive = false) {
+  const pre = ddlPreRef.value;
+  if (!pre || activeTableInfoTab.value !== "ddl" || !searchQuery.value) {
+    ddlSearchMatchCount.value = 0;
+    ddlSearchMatchIndex.value = 0;
+    return;
+  }
+
+  const matches = Array.from(pre.querySelectorAll<HTMLElement>("mark.ddl-search-match"));
+  ddlSearchMatchCount.value = matches.length;
+  if (matches.length === 0) {
+    ddlSearchMatchIndex.value = 0;
+    return;
+  }
+
+  ddlSearchMatchIndex.value = Math.min(ddlSearchMatchIndex.value, matches.length - 1);
+  matches.forEach((match, index) => match.classList.toggle("ddl-search-match-active", index === ddlSearchMatchIndex.value));
+  const activeMatch = matches[ddlSearchMatchIndex.value];
+  if (scrollToActive && activeMatch) scrollDdlSearchMatchIntoView(activeMatch);
+}
+
+function navigateDdlSearch(delta: -1 | 1) {
+  const count = ddlSearchMatchCount.value;
+  if (count === 0) return;
+  ddlSearchMatchIndex.value = (ddlSearchMatchIndex.value + delta + count) % count;
+  syncDdlSearchMatches(true);
+}
+
+function onTableInfoSearchKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    searchQuery.value = "";
+    return;
+  }
+  if (e.key !== "Enter" || activeTableInfoTab.value !== "ddl") return;
+  e.preventDefault();
+  navigateDdlSearch(e.shiftKey ? -1 : 1);
+}
+
 function onDdlKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key === "a") {
     e.preventDefault();
@@ -6738,11 +6813,16 @@ watch(activeTableInfoTab, () => {
 });
 
 watch([activeTableInfoTab, ddlLoading], ([tab, loading]) => {
-  if (tab === "ddl" && !loading) {
-    void nextTick(() => {
-      ddlPreRef.value?.focus();
-    });
+  if (tab !== "ddl") return;
+  if (loading) {
+    ddlSearchMatchCount.value = 0;
+    ddlSearchMatchIndex.value = 0;
+    return;
   }
+  void nextTick(() => {
+    ddlPreRef.value?.focus();
+    syncDdlSearchMatches(true);
+  });
 });
 
 watch(
@@ -6842,19 +6922,24 @@ const tableInfoTabListStyle = computed(() => ({
   gridTemplateColumns: `repeat(${tableInfoTabs.value.length}, minmax(0, 1fr))`,
 }));
 
-async function toggleTableInfo(tab: TableInfoTab = activeTableInfoTab.value) {
-  if (showTableInfo.value && activeTableInfoTab.value === tab) {
+async function toggleTableInfo(tab?: TableInfoTab) {
+  // Kept-alive grids retain local state, so only a closed drawer should refresh
+  // from the shared preference; an open drawer keeps its current working tab.
+  const nextTab = tableInfoTabForDrawerToggle(showTableInfo.value, activeTableInfoTab.value, settingsStore.editorSettings.tableInfoActiveTab, tab);
+  if (showTableInfo.value && activeTableInfoTab.value === nextTab) {
     showTableInfo.value = false;
     return;
   }
   showTableInfo.value = true;
-  await selectTableInfoTab(tab);
+  await selectTableInfoTab(nextTab);
 }
 
 async function selectTableInfoTab(tab: TableInfoTab) {
-  const nextTab = tableInfoTabs.value.some((item) => item.id === tab) ? tab : tableInfoTabs.value[0]?.id;
+  const tabSupported = tableInfoTabs.value.some((item) => item.id === tab);
+  const nextTab = tabSupported ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   activeTableInfoTab.value = nextTab;
+  if (tabSupported) settingsStore.updateEditorSettings({ tableInfoActiveTab: tab });
   if (nextTab === "ddl") await fetchDdl();
   else if (nextTab === "indexes") await fetchIndexes();
   else if (nextTab === "foreignKeys") await fetchForeignKeys();
@@ -7204,9 +7289,19 @@ const filteredDdlContent = computed(() => {
   const regex = new RegExp(`(${escaped})`, "gi");
   // Match only text between > and < (text nodes), then replace the search term within those spans
   return html.replace(/>([^<]*)</g, (_, text) => {
-    return `>${text.replace(regex, "<mark>$1</mark>")}<`;
+    return `>${text.replace(regex, '<mark class="ddl-search-match">$1</mark>')}<`;
   });
 });
+
+watch(
+  [filteredDdlContent, searchQuery],
+  async () => {
+    ddlSearchMatchIndex.value = 0;
+    await nextTick();
+    syncDdlSearchMatches(true);
+  },
+  { flush: "post" },
+);
 
 defineExpose({
   useTransaction,
@@ -8562,7 +8657,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           </div>
           <!-- Table Info Drawer -->
           <div v-if="showTableInfo" class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0" :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]" :style="ddlDrawerStyle" @contextmenu="onDrawerContextMenu">
-            <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDdlResizeStart" />
+            <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize" @mousedown.prevent="onDdlResizeStart" />
             <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
@@ -8604,12 +8699,25 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </div>
 
             <div class="px-2 py-1.5 border-b shrink-0 bg-background">
-              <div class="relative">
-                <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-                <input v-model="searchQuery" :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="searchQuery = ''" />
-                <button v-if="searchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchQuery = ''">
-                  <X class="w-3 h-3" />
-                </button>
+              <div class="flex min-w-0 items-center gap-1">
+                <div class="relative min-w-0 flex-1">
+                  <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+                  <input v-model="searchQuery" :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown="onTableInfoSearchKeydown" />
+                  <button v-if="searchQuery" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchQuery = ''">
+                    <X class="w-3 h-3" />
+                  </button>
+                </div>
+                <template v-if="activeTableInfoTab === 'ddl'">
+                  <span class="w-9 shrink-0 text-center text-[11px] tabular-nums text-muted-foreground">
+                    {{ searchQuery ? (ddlSearchMatchCount > 0 ? `${ddlSearchMatchIndex + 1}/${ddlSearchMatchCount}` : "0") : "" }}
+                  </span>
+                  <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('editor.search.prevMatch')" :aria-label="t('editor.search.prevMatch')" :disabled="ddlSearchMatchCount === 0" @click="navigateDdlSearch(-1)">
+                    <ChevronUp class="h-3.5 w-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('editor.search.nextMatch')" :aria-label="t('editor.search.nextMatch')" :disabled="ddlSearchMatchCount === 0" @click="navigateDdlSearch(1)">
+                    <ChevronDown class="h-3.5 w-3.5" />
+                  </Button>
+                </template>
               </div>
             </div>
 
@@ -8635,12 +8743,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     role="button"
                     tabindex="0"
                     :title="column.name"
-                    @click="scrollToTableInfoColumn(column.name)"
+                    @click="onTableInfoColumnClick(column.name)"
                     @keydown.enter.prevent="scrollToTableInfoColumn(column.name)"
                     @keydown.space.prevent="scrollToTableInfoColumn(column.name)"
                   >
                     <td class="px-3 py-2 text-muted-foreground w-8">{{ index + 1 }}</td>
-                    <td class="px-3 py-2 font-medium">
+                    <td class="cursor-text select-text px-3 py-2 font-medium">
                       <span class="inline-flex items-center gap-1.5">
                         <KeyRound v-if="column.is_primary_key" class="h-3 w-3 text-amber-500" />
                         {{ column.name }}
@@ -9712,5 +9820,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 .ddl-code :deep(.ddl-str) {
   color: rgb(213 111 44);
   color: oklch(0.65 0.15 50);
+}
+
+.ddl-code :deep(.ddl-search-match) {
+  border-radius: 2px;
+  background: var(--data-grid-cell-search-bg);
+  color: inherit;
+  padding: 0;
+}
+
+.ddl-code :deep(.ddl-search-match-active) {
+  background: var(--data-grid-cell-current-search-bg);
+  outline: 1px solid var(--data-grid-cell-current-search-border);
 }
 </style>

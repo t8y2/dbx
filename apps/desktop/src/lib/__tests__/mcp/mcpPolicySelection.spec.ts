@@ -118,7 +118,9 @@ describe("MCP policy settings state", () => {
     expect(tabsStart).toBeGreaterThan(-1);
     expect(tabsEnd).toBeGreaterThan(tabsStart);
     expect(tabsSource).toContain("overflow-x-auto");
+    expect(tabsSource).toContain("min-w-0");
     expect(tabsSource).toContain("max-w-full");
+    expect(tabsSource).toContain("overscroll-x-contain");
     expect(tabsSource).not.toContain("flex-wrap");
     expect(tabsSource).not.toContain("grid-cols-");
     expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(8);

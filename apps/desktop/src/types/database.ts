@@ -219,11 +219,14 @@ export interface SshTunnelConfig {
    * back to key > password > agent based on which fields are non-empty,
    * independent of this selector (see `db/ssh_tunnel.rs`).
    *
+   * `"key+password"` tries private key auth first and falls back to
+   * password auth if the key is rejected.
+   *
    * `"agent"` is a legacy value: it's no longer offered as a dropdown
    * choice for new connections, but is preserved and displayed read-only
    * for connections that already have `use_ssh_agent` configured.
    */
-  auth_method?: "password" | "key" | "agent" | "none";
+  auth_method?: "password" | "key" | "key+password" | "agent" | "none";
   /**
    * When set, this layer references a shared tunnel profile; the profile's
    * configuration replaces this layer's fields at connect time (only `id`

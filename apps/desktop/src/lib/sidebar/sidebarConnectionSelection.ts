@@ -40,11 +40,7 @@ export function selectedConnectionClipboardNodes(selectedNodes: TreeNode[]): Con
   return selectedNodes;
 }
 
-export function copySelectedConnectionsToClipboards(
-  selectedNodes: TreeNode[],
-  copyConnectionsToTreeClipboard: (connectionIds: string[]) => number,
-  copyToSystemClipboard: (text: string) => Promise<void>,
-): number {
+export function copySelectedConnectionsToClipboards(selectedNodes: TreeNode[], copyConnectionsToTreeClipboard: (connectionIds: string[]) => number, copyToSystemClipboard: (text: string) => Promise<void>): number {
   const connectionNodes = selectedConnectionClipboardNodes(selectedNodes);
   if (connectionNodes.length === 0) return 0;
 

@@ -483,12 +483,14 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to CNB Registry
-        if: ${{ secrets.CNB_TOKEN != '' }}
+        if: ${{ env.CNB_TOKEN != '' }}
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.CNB_REGISTRY }}
           username: cnb
-          password: ${{ secrets.CNB_TOKEN }}
+          password: ${{ env.CNB_TOKEN }}
 
       - name: Build and push Docker Hub by digest
         id: build-dockerhub
@@ -512,6 +514,8 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.platform }}
 
       - name: Export digests
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           mkdir -p /tmp/digests/dockerhub /tmp/digests/cnb
           dockerhub_digest="${{ steps.build-dockerhub.outputs.digest }}"
@@ -566,18 +570,22 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to CNB Registry
-        if: ${{ secrets.CNB_TOKEN != '' }}
+        if: ${{ env.CNB_TOKEN != '' }}
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.CNB_REGISTRY }}
           username: cnb
-          password: ${{ secrets.CNB_TOKEN }}
+          password: ${{ env.CNB_TOKEN }}
 
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create manifest list and push
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           docker buildx imagetools create \
             -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:${{ steps.version.outputs.version }} \

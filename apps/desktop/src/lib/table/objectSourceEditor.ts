@@ -20,7 +20,9 @@ const postgresLikeViewTypes = new Set<DatabaseType>(["postgres", "redshift", "ga
 const mysqlLikeRoutineRenameTypes = new Set<DatabaseType>(["mysql", "goldendb"]);
 const oracleLikeRoutineRenameTypes = new Set<DatabaseType>(["oracle", "dameng"]);
 
-const postgresViewColumnChangeErrorPatterns = [/\b42P16\b/i, /cannot drop columns? from view/i, /cannot change name of view column/i, /cannot change data type of view column/i, /ビューからは列を削除できません/, /(?:无法|不能)从视图中删除列/];
+// SQLSTATE 42P16 covers unrelated invalid table definitions, so only match the
+// confirmed PostgreSQL view-column errors and their localized equivalents.
+const postgresViewColumnChangeErrorPatterns = [/cannot drop columns? from view/i, /cannot change name of view column/i, /cannot change data type of view column/i, /ビューからは列を削除できません/, /(?:无法|不能)从视图中删除列/];
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;

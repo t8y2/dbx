@@ -222,7 +222,8 @@ describe("connectionStore metadata loading", () => {
     expect(result).toBe("done");
     expect(listTables).toHaveBeenCalledWith(connection.id, "app", "public", undefined, 1001, 0);
     expect(listObjects).toHaveBeenCalled();
-    expect(schemaNode.children?.map((node) => node.label)).toEqual(["users"]);
+    const tableLabels = schemaNode.children?.filter((node) => node.type !== "favorites").map((node) => node.label) ?? [];
+    expect(tableLabels).toEqual(["users"]);
   });
 
   it("bypasses Oracle object-group caches created before DIP visibility was fixed", async () => {
@@ -536,10 +537,10 @@ describe("connectionStore metadata loading", () => {
       },
     ];
 
-    const storedSchema = store.treeNodes[0].children?.[0].children?.[0];
+    const storedSchema = store.treeNodes[0].children?.[0].children?.find((node) => node.id === schemaNode.id);
     await store.loadSchemas(connection.id, "app", { force: true });
 
-    const refreshedSchema = store.treeNodes[0].children?.[0].children?.[0];
+    const refreshedSchema = store.treeNodes[0].children?.[0].children?.find((node) => node.id === schemaNode.id);
     expect(refreshedSchema).toBe(storedSchema);
     expect(refreshedSchema?.isExpanded).toBe(true);
     expect(refreshedSchema?.isLoading).toBe(true);

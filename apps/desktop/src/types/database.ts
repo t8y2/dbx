@@ -654,6 +654,8 @@ export type TreeNodeType =
   | "group-partitions"
   | "group-extensions"
   | "extension"
+  | "favorites"
+  | "favorites-group"
   | "object-browser"
   | "user-admin"
   | "dameng-job-admin"
@@ -693,6 +695,34 @@ export interface SidebarLayout {
   order: SidebarOrderEntry[];
 }
 
+/** A user-defined collection of favorited items. Scoped to one database so the
+ *  sidebar can show "工作 / 临时" sections under each connection. */
+export interface FavoriteGroup {
+  id: string;
+  connectionId: string;
+  database: string;
+  name: string;
+  order: number;
+  collapsed: boolean;
+}
+
+/** One favorited table/view. Identity is the favorite key (separate prefix
+ *  from pin keys) so favorites and pin state stay independent. */
+export interface FavoriteItem {
+  key: string;
+  groupId: string;
+  note: string;
+  order: number;
+  createdAt: number;
+}
+
+/** Single source of truth for favorites. Persisted as one JSON document so
+ *  groups and items update atomically. */
+export interface FavoritesState {
+  groups: FavoriteGroup[];
+  items: FavoriteItem[];
+}
+
 export interface TreeNode {
   id: string;
   label: string;
@@ -725,6 +755,13 @@ export interface TreeNode {
   totalKeyCount?: number;
   partitionParentSchema?: string;
   partitionParentName?: string;
+  /** Set on favorited-clone nodes that share an id namespace with the source
+   *  table/view. The original (non-favorited) id is preserved here so the
+   *  favorite key remains stable even though the cloned node carries a
+   *  unique tree id. Without this, expanding a favorites-group subnode and
+   *  the original tables group at the same time would push two rows with
+   *  the same id into the virtual scroller, blanking the sibling rows. */
+  favoritedFromId?: string;
   hiddenChildren?: TreeNode[];
   tableSearchParentId?: string;
   savedSqlId?: string;

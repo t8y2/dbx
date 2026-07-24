@@ -605,6 +605,12 @@ async fn main() {
             "/app-settings/pinned-tree-node-ids",
             get(routes::app_settings::load_pinned_tree_node_ids).post(routes::app_settings::save_pinned_tree_node_ids),
         )
+        // Favorites state
+        .route(
+            "/app-settings/favorites-state",
+            get(routes::app_settings::load_favorites_state).post(routes::app_settings::save_favorites_state),
+        )
+        // MCP policy
         .route(
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),

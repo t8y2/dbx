@@ -615,6 +615,8 @@ export default withEnglishFallback({
     rocketmqSecretKey: "Secret Key",
     rocketmqAclAuth: "ACL",
     jdbcMissingRuntimeDependencyHint: "El controlador JDBC actual carece de dependencias de ejecución. Utilice las coordenadas Maven en 'Administración de controladores' para instalar, o importe el controlador y todos los JAR de dependencia de una vez.",
+    showSystemSchemas: "Mostrar Schema del sistema",
+    showSystemSchemasHint: "Mostrar el Schema integrado/de metadatos para la conexión actual en la barra lateral y el selector de Schema.",
   },
   editor: {
     pressToExecute: "Presiona {mod}+Enter para ejecutar",

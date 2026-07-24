@@ -613,6 +613,8 @@ export default withEnglishFallback({
     rocketmqSecretKey: "Secret Key",
     rocketmqAclAuth: "ACL",
     jdbcMissingRuntimeDependencyHint: "目前 JDBC 驅動缺少執行依賴。請在「驅動管理」中使用 Maven 座標安裝，或一次匯入驅動及全部依賴 JAR。",
+    showSystemSchemas: "顯示系統 Schema",
+    showSystemSchemasHint: "為目前連線在側邊欄和 Schema 選擇器中顯示內建/中繼資料 Schema。",
   },
   editor: {
     pressToExecute: "按 {mod}+Enter 執行查詢",

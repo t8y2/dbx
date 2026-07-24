@@ -613,6 +613,8 @@ export default withEnglishFallback({
     rocketmqSecretKey: "Secret Key",
     rocketmqAclAuth: "ACL",
     jdbcMissingRuntimeDependencyHint: "Il driver JDBC corrente manca di dipendenze runtime. Installare utilizzando le coordinate Maven in 'Gestione driver', o importare il driver e tutti i JAR delle dipendenze in una volta.",
+    showSystemSchemas: "Mostra Schema di sistema",
+    showSystemSchemasHint: "Mostra lo Schema built-in/di metadati nella barra laterale e nel selettore Schema per la connessione corrente.",
   },
   editor: {
     pressToExecute: "Premi {mod}+Enter per eseguire",

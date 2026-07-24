@@ -613,6 +613,8 @@ export default withEnglishFallback({
     rocketmqSecretKey: "Secret Key",
     rocketmqAclAuth: "ACL",
     jdbcMissingRuntimeDependencyHint: "現在のJDBCドライバーには実行依存関係が不足しています。「ドライバ管理」でMaven座標を使用してインストールするか、ドライバーとすべての依存JARを一度にインポートしてください。",
+    showSystemSchemas: "システムスキーマを表示",
+    showSystemSchemasHint: "現在の接続で、サイドバーとスキーマセレクターに組み込み/メタデータスキーマを表示します。",
   },
   editor: {
     pressToExecute: "{mod}+Enter で実行",

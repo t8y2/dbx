@@ -28,6 +28,7 @@ var kingbaseDataTypes = []string{
 }
 
 type kingbaseMode struct {
+	compatibilityMode string
 	postgresCatalog   bool
 	mysqlCompat       bool
 	sqlServerIdentity bool
@@ -108,13 +109,17 @@ type triggerInfo struct {
 }
 
 func detectKingbaseMode(db *sql.DB, configuredMySQL bool) kingbaseMode {
-	mode := kingbaseMode{mysqlCompat: configuredMySQL}
 	if configuredMySQL {
-		return mode
+		return kingbaseMode{compatibilityMode: "mysql", mysqlCompat: true}
 	}
+	mode := kingbaseMode{compatibilityMode: detectDatabaseMode(db)}
 	mode.postgresCatalog = !catalogExists(db, "sys_catalog.sys_namespace") && catalogExists(db, "pg_catalog.pg_namespace")
 	if !mode.postgresCatalog {
-		mode.mysqlCompat = detectMySQLCompatMode(db)
+		if mode.compatibilityMode != "" {
+			mode.mysqlCompat = mode.compatibilityMode == "mysql"
+		} else {
+			mode.mysqlCompat = supportsBacktickIdentifiers(db)
+		}
 		mode.sqlServerIdentity = !mode.mysqlCompat && catalogExists(db, "sys.identity_columns")
 	}
 	return mode
@@ -131,20 +136,25 @@ func catalogExists(db *sql.DB, catalog string) bool {
 }
 
 func detectMySQLCompatMode(db *sql.DB) bool {
+	if databaseMode := detectDatabaseMode(db); databaseMode != "" {
+		return databaseMode == "mysql"
+	}
+	return supportsBacktickIdentifiers(db)
+}
+
+func detectDatabaseMode(db *sql.DB) string {
 	var databaseMode string
 	switch err := db.QueryRow("SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'").Scan(&databaseMode); {
 	case err == nil:
 		// Treat database_mode as authoritative when the server exposes it. This
 		// avoids misclassifying Oracle-compatible servers that also publish
 		// sql_mode for MySQL syntax toggles such as ANSI_QUOTES.
-		return strings.EqualFold(strings.TrimSpace(databaseMode), "mysql")
+		return strings.ToLower(strings.TrimSpace(databaseMode))
 	case errors.Is(err, sql.ErrNoRows):
-		// Older Kingbase versions may not expose database_mode. Probe the syntax
-		// directly because non-MySQL modes can still expose a sql_mode setting.
+		return ""
 	default:
-		// Ignore metadata errors and fall back to the syntax probe below.
+		return ""
 	}
-	return supportsBacktickIdentifiers(db)
 }
 
 func supportsBacktickIdentifiers(db *sql.DB) bool {
@@ -173,7 +183,8 @@ func (s *server) connectionInfo() (map[string]any, error) {
 	}
 	return map[string]any{
 		"database": database, "username": username, "version": version, "schema": schema,
-		"mysql_compat_mode": s.mode.mysqlCompat, "identifierQuote": s.identifierQuote(),
+		"compatibilityMode": s.mode.compatibilityMode, "mysql_compat_mode": s.mode.mysqlCompat,
+		"identifierQuote": s.identifierQuote(),
 	}, nil
 }
 

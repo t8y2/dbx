@@ -740,26 +740,46 @@ func TestDetectMySQLCompatModeAcceptsExplicitMySQLMode(t *testing.T) {
 	}
 }
 
+func TestDetectKingbaseModeReportsDatabaseMode(t *testing.T) {
+	for _, databaseMode := range []string{"oracle", "postgresql"} {
+		t.Run(databaseMode, func(t *testing.T) {
+			db := openModeDetectionDB(t, &modeDetectionDriverState{databaseMode: &databaseMode})
+
+			mode := detectKingbaseMode(db, false)
+
+			if mode.compatibilityMode != databaseMode {
+				t.Fatalf("unexpected compatibility mode: %q", mode.compatibilityMode)
+			}
+		})
+	}
+}
+
 func TestConnectionInfoReportsCompatibilityIdentifierQuote(t *testing.T) {
 	for _, testCase := range []struct {
-		name        string
-		mysqlCompat bool
-		expected    string
+		name              string
+		compatibilityMode string
+		mysqlCompat       bool
+		expectedQuote     string
 	}{
-		{name: "postgres compatible", expected: `"`},
-		{name: "mysql compatible", mysqlCompat: true, expected: "`"},
+		{name: "postgres compatible", compatibilityMode: "postgresql", expectedQuote: `"`},
+		{name: "oracle compatible", compatibilityMode: "oracle", expectedQuote: `"`},
+		{name: "mysql compatible", compatibilityMode: "mysql", mysqlCompat: true, expectedQuote: "`"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			db := openModeDetectionDB(t, &modeDetectionDriverState{})
 			server := newServer()
 			server.db = db
+			server.mode.compatibilityMode = testCase.compatibilityMode
 			server.mode.mysqlCompat = testCase.mysqlCompat
 
 			info, err := server.connectionInfo()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if info["identifierQuote"] != testCase.expected {
+			if info["compatibilityMode"] != testCase.compatibilityMode {
+				t.Fatalf("unexpected compatibility mode: %#v", info["compatibilityMode"])
+			}
+			if info["identifierQuote"] != testCase.expectedQuote {
 				t.Fatalf("unexpected identifier quote: %#v", info["identifierQuote"])
 			}
 		})

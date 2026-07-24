@@ -2895,7 +2895,7 @@ fn build_import_insert_batch_from_rows_with_format(
         );
     }
     let plan = compile_import_plan(columns, mappings, target_column_types)?;
-    build_import_insert_batch_with_plan(rows, &plan, table, schema, db_type, date_time_format)
+    build_import_insert_batch_with_plan(rows, &plan, table, schema, db_type, false, date_time_format)
 }
 
 fn build_import_insert_batch_with_plan(
@@ -2904,12 +2904,13 @@ fn build_import_insert_batch_with_plan(
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
 ) -> Result<Option<ImportSqlBatch>, String> {
     if rows.is_empty() {
         return Ok(None);
     }
-    let mapped_rows = map_import_rows_with_plan(rows, plan, db_type, date_time_format);
+    let mapped_rows = map_import_rows_with_plan(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
     let sql = generate_insert_typed(&plan.target_columns, &plan.column_types, &mapped_rows, table, schema, db_type);
     Ok((!sql.trim().is_empty()).then_some(ImportSqlBatch { sql, row_count: rows.len() }))
 }
@@ -2920,12 +2921,13 @@ fn build_import_insert_batches_with_plan(
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
 ) -> Vec<ImportSqlBatch> {
     if rows.is_empty() {
         return Vec::new();
     }
-    let mapped_rows = map_import_rows_with_plan(rows, plan, db_type, date_time_format);
+    let mapped_rows = map_import_rows_with_plan(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
     generate_insert_typed_sql_batches(
         &plan.target_columns,
         &plan.column_types,
@@ -2944,6 +2946,7 @@ fn map_import_rows_with_plan(
     rows: &[Vec<serde_json::Value>],
     plan: &CompiledImportPlan,
     db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
 ) -> Vec<Vec<serde_json::Value>> {
     rows.iter()
@@ -2957,6 +2960,7 @@ fn map_import_rows_with_plan(
                         &value,
                         plan.column_types.get(target_index).and_then(|data_type| data_type.as_deref()),
                         db_type,
+                        kingbase_oracle_mode,
                         date_time_format,
                     )
                 })
@@ -2975,10 +2979,19 @@ fn build_import_execution_batches(
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
     if let Some(plan) = plan {
-        return Ok(build_import_insert_batches_with_plan(rows, plan, table, schema, db_type, date_time_format));
+        return Ok(build_import_insert_batches_with_plan(
+            rows,
+            plan,
+            table,
+            schema,
+            db_type,
+            kingbase_oracle_mode,
+            date_time_format,
+        ));
     }
     if *db_type == DatabaseType::CloudflareD1 {
         return crate::db::cloudflare_d1::build_import_insert_batches(
@@ -2992,7 +3005,15 @@ fn build_import_execution_batches(
         );
     }
     let plan = compile_import_plan(columns, mappings, target_column_types)?;
-    Ok(build_import_insert_batches_with_plan(rows, &plan, table, schema, db_type, date_time_format))
+    Ok(build_import_insert_batches_with_plan(
+        rows,
+        &plan,
+        table,
+        schema,
+        db_type,
+        kingbase_oracle_mode,
+        date_time_format,
+    ))
 }
 
 fn effective_import_batch_size(db_type: &DatabaseType, requested: usize) -> usize {
@@ -3011,12 +3032,12 @@ fn normalize_import_temporal_value(
     value: &serde_json::Value,
     data_type: Option<&str>,
     db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
 ) -> serde_json::Value {
-    // Kingbase Oracle mode reports DATE metadata while retaining time; PostgreSQL mode truncates it server-side.
-    let date_type_preserves_time =
-        matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Kingbase)
-            && data_type.is_some_and(|data_type| data_type.trim().eq_ignore_ascii_case("date"));
+    let date_type_preserves_time = (matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+        || (*db_type == DatabaseType::Kingbase && kingbase_oracle_mode))
+        && data_type.is_some_and(|data_type| data_type.trim().eq_ignore_ascii_case("date"));
     crate::temporal_format::normalize_temporal_import_value(
         value,
         if date_type_preserves_time { Some("datetime") } else { data_type },
@@ -3089,9 +3110,10 @@ fn normalize_import_value(
     value: &serde_json::Value,
     data_type: Option<&str>,
     db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
 ) -> serde_json::Value {
-    normalize_import_temporal_value(value, data_type, db_type, date_time_format)
+    normalize_import_temporal_value(value, data_type, db_type, kingbase_oracle_mode, date_time_format)
 }
 
 pub fn build_import_insert_batches(
@@ -3110,6 +3132,7 @@ pub fn build_import_insert_batches(
         table,
         schema,
         db_type,
+        false,
         batch_size,
         None,
     )
@@ -3123,6 +3146,7 @@ fn build_import_insert_batches_with_format(
     table: &str,
     schema: &str,
     db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
     batch_size: usize,
     date_time_format: Option<&str>,
 ) -> Result<Vec<ImportSqlBatch>, String> {
@@ -3141,7 +3165,15 @@ fn build_import_insert_batches_with_format(
     let batch_size = effective_import_batch_size(db_type, batch_size);
     let mut batches = Vec::new();
     for rows in data.rows.chunks(batch_size) {
-        batches.extend(build_import_insert_batches_with_plan(rows, &plan, table, schema, db_type, date_time_format));
+        batches.extend(build_import_insert_batches_with_plan(
+            rows,
+            &plan,
+            table,
+            schema,
+            db_type,
+            kingbase_oracle_mode,
+            date_time_format,
+        ));
     }
     Ok(batches)
 }
@@ -3555,7 +3587,7 @@ fn build_postgres_copy_text_batch(
     schema: &str,
     date_time_format: Option<&str>,
 ) -> Result<(String, Vec<u8>), String> {
-    let mapped_rows = map_import_rows_with_plan(rows, plan, &DatabaseType::Postgres, date_time_format);
+    let mapped_rows = map_import_rows_with_plan(rows, plan, &DatabaseType::Postgres, false, date_time_format);
     let mut data = String::new();
     for row in mapped_rows {
         for (index, value) in row.iter().enumerate() {
@@ -3725,6 +3757,7 @@ async fn execute_import_rows_batch(
     mode: &TableImportMode,
     pending_truncate: bool,
     allow_postgres_copy: bool,
+    kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
     db_write_ms: &mut u128,
     statement_count: &mut usize,
@@ -3760,6 +3793,7 @@ async fn execute_import_rows_batch(
         table,
         schema,
         db_type,
+        kingbase_oracle_mode,
         date_time_format,
     )
     .map_err(ImportRowsBatchError::before_write)?;
@@ -4039,6 +4073,26 @@ pub async fn preview_table_import_file_core(file_path: &str) -> Result<TableImpo
     .await
 }
 
+async fn kingbase_oracle_compatibility_mode(state: &AppState, pool_key: &str, db_type: &DatabaseType) -> bool {
+    if *db_type != DatabaseType::Kingbase {
+        return false;
+    }
+    let client = {
+        let connections = state.connections.read().await;
+        match connections.get(pool_key) {
+            Some(PoolKind::Agent(client)) => client.clone(),
+            _ => return false,
+        }
+    };
+    let mut agent = client.lock().await;
+    agent
+        .connection_info(Some(crate::db::connection_timeout()))
+        .await
+        .ok()
+        .and_then(|info| info.compatibility_mode)
+        .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("oracle"))
+}
+
 /// Core import logic. Returns (rows_imported, total_rows).
 /// `progress_callback` is invoked for progress updates.
 pub async fn import_table_file_core<F>(
@@ -4056,6 +4110,7 @@ where
     let mut db_write_ms = 0u128;
     let mut statement_count = 0usize;
     let batch_size = if request.batch_size == 0 { DEFAULT_BATCH_SIZE } else { request.batch_size };
+    let kingbase_oracle_mode = kingbase_oracle_compatibility_mode(state, pool_key, db_type).await;
     let source_format = match effective_source_format(&request.file_path, request.source_format) {
         Ok(format) => format,
         Err(error) => {
@@ -4388,6 +4443,7 @@ where
                         &request.mode,
                         pending_truncate,
                         allow_postgres_copy,
+                        kingbase_oracle_mode,
                         request.date_time_format.as_deref(),
                         &mut db_write_ms,
                         &mut statement_count,
@@ -4688,6 +4744,7 @@ where
                         &request.mode,
                         pending_truncate,
                         allow_postgres_copy,
+                        kingbase_oracle_mode,
                         request.date_time_format.as_deref(),
                         &mut db_write_ms,
                         &mut statement_count,
@@ -4903,6 +4960,7 @@ where
             &request.mode,
             pending_truncate,
             allow_postgres_copy,
+            kingbase_oracle_mode,
             request.date_time_format.as_deref(),
             &mut db_write_ms,
             &mut statement_count,
@@ -7279,8 +7337,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn import_insert_batches_preserve_kingbase_date_time_components() {
+    fn kingbase_date_import_sql(oracle_mode: bool) -> String {
         let mappings = vec![TableImportColumnMapping {
             source_column: "created_at".to_string(),
             target_column: "created_at".to_string(),
@@ -7297,20 +7354,35 @@ mod tests {
             effective_encoding: None,
         };
 
-        let batches = build_import_insert_batches(
+        let batches = build_import_insert_batches_with_format(
             &data,
             &mappings,
             &[("created_at".to_string(), "DATE".to_string())],
             "events",
             "public",
             &DatabaseType::Kingbase,
+            oracle_mode,
             500,
+            None,
         )
         .unwrap();
 
+        batches[0].sql.clone()
+    }
+
+    #[test]
+    fn import_insert_batches_preserve_kingbase_oracle_date_time_components() {
         assert_eq!(
-            batches[0].sql,
+            kingbase_date_import_sql(true),
             "INSERT INTO \"public\".\"events\" (\"created_at\") VALUES\n('2025-10-29 16:28:00')"
+        );
+    }
+
+    #[test]
+    fn import_insert_batches_normalize_kingbase_postgres_date() {
+        assert_eq!(
+            kingbase_date_import_sql(false),
+            "INSERT INTO \"public\".\"events\" (\"created_at\") VALUES\n('2025-10-29')"
         );
     }
 

@@ -673,7 +673,16 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 		return "", err
 	}
 	tableComment, _ := s.getTableComment(effective, table)
-	return renderTableDDL(effective, table, columns, tableComment), nil
+	ddl := renderTableDDL(effective, table, columns, tableComment)
+	ddl, err = s.appendTableIndexDDL(effective, table, ddl)
+	if err != nil {
+		return "", err
+	}
+	ddl, err = s.appendTableTriggerDDL(effective, table, ddl)
+	if err != nil {
+		return "", err
+	}
+	return ddl, nil
 }
 
 func renderTableDDL(schema, table string, columns []columnInfo, tableComment *string) string {
@@ -700,6 +709,118 @@ func renderTableDDL(schema, table string, columns []columnInfo, tableComment *st
 		ddl += "\nCOMMENT ON COLUMN " + qualifiedTable + "." + quoteIdentifier(column.Name) + " IS " + quoteLiteral(*column.Comment) + ";"
 	}
 	return ddl
+}
+
+func (s *server) appendTableIndexDDL(schema, table, ddl string) (string, error) {
+	definitions, err := s.listIndexDefinitions(schema, table)
+	if err != nil {
+		return "", err
+	}
+	return appendDDLStatements(ddl, definitions), nil
+}
+
+func (s *server) appendTableTriggerDDL(schema, table, ddl string) (string, error) {
+	definitions, err := s.listTriggerDefinitions(schema, table)
+	if err != nil {
+		return "", err
+	}
+	return appendDDLStatements(ddl, definitions), nil
+}
+
+func (s *server) listIndexDefinitions(schema, table string) ([]string, error) {
+	effective, err := s.effectiveSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	query := fmt.Sprintf(`SELECT i.relname, pg_get_indexdef(ix.indexrelid, 0, true), obj_description(i.oid)
+FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
+JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+WHERE n.nspname = %s AND t.relname = %s AND NOT ix.indisprimary ORDER BY i.relname`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var name string
+		var definition string
+		var comment sql.NullString
+		if err := rows.Scan(&name, &definition, &comment); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(definition) != "" {
+			result = append(result, definition)
+		}
+		if comment.Valid && strings.TrimSpace(comment.String) != "" {
+			result = append(result, "COMMENT ON INDEX "+quoteIdentifier(effective)+"."+quoteIdentifier(name)+" IS "+quoteLiteral(comment.String))
+		}
+	}
+	return result, rows.Err()
+}
+
+func (s *server) listTriggerDefinitions(schema, table string) ([]string, error) {
+	effective, err := s.effectiveSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	query := fmt.Sprintf(`SELECT pg_get_triggerdef(tg.oid, true)
+FROM %s.%s_trigger tg JOIN %s.%s_class c ON c.oid = tg.tgrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = %s AND c.relname = %s AND NOT tg.tgisinternal ORDER BY tg.tgname`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var definition string
+		if err := rows.Scan(&definition); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(definition) != "" {
+			result = append(result, definition)
+		}
+	}
+	return result, rows.Err()
+}
+
+func appendDDLStatements(ddl string, statements []string) string {
+	for _, statement := range statements {
+		ddl = appendDDLStatement(ddl, statement)
+	}
+	return ddl
+}
+
+func appendDDLStatement(ddl, statement string) string {
+	ddl = strings.TrimRight(ddl, "\r\n\t ")
+	statement = ensureStatementTerminator(statement)
+	if statement == "" {
+		return ddl
+	}
+	if ddl == "" {
+		return statement
+	}
+	if !strings.HasSuffix(ddl, ";") {
+		ddl += ";"
+	}
+	return ddl + "\n\n" + statement
+}
+
+func ensureStatementTerminator(statement string) string {
+	trimmed := strings.TrimSpace(statement)
+	if trimmed == "" || strings.HasSuffix(trimmed, ";") {
+		return trimmed
+	}
+	return trimmed + ";"
 }
 
 func columnDDLDefinition(column columnInfo) string {

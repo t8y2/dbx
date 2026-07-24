@@ -75,6 +75,7 @@ import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseSchemaQualifier, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { usesLocalOnlyEditorCompletionMetadata, usesOnDemandOnlyEditorColumnMetadata } from "@/lib/metadata/completionMetadataPolicy";
+import { loadTableMetadata, type TableMetadataLoadResult } from "@/lib/metadata/tableMetadataCache";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -399,21 +400,9 @@ const cachedInsertValueHintColumnsByTable = new Map<string, string[]>();
 const cachedForeignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
 const loadedColumnsByTable = new Set<string>();
 
-// Hover tooltip cache keyed by "connectionId:database:schema.table"
-const hoverColumnCache = new Map<string, ColumnInfo[]>();
-const hoverIndexCache = new Map<string, IndexInfo[]>();
-const HOVER_CACHE_MAX = 200;
+// Hover tooltip uses the shared table metadata cache (loadTableMetadata)
+// which provides TTL, invalidation, and in-flight deduplication.
 let hoverSqlHighlighter: SqlHighlighter | null = null;
-
-function hoverCacheEvict<K>(cache: Map<string, K>) {
-  if (cache.size <= HOVER_CACHE_MAX) return;
-  const excess = cache.size - HOVER_CACHE_MAX;
-  let i = 0;
-  for (const key of cache.keys()) {
-    if (i++ >= excess) break;
-    cache.delete(key);
-  }
-}
 
 function formatColumnType(c: ColumnInfo): string {
   const baseType = c.data_type.replace(/\([^()]*\)$/, "").trim();
@@ -1803,25 +1792,24 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     }
     if (table && !semanticQualifierIsRowSource && (!qualifier || table.schema?.toLowerCase() === qualifier.toLowerCase() || table.name === name)) {
-      const hoverSchema = table.schema ?? props.schema;
-      const hoverCacheKey = `${props.connectionId}:${props.database}:${hoverSchema ? `${hoverSchema}.${table.name}` : table.name}`;
+      // Use semantic target's database/schema when available so qualified
+      // references like other_db.public.orders resolve to the correct database.
+      const hoverDatabase: string = semanticTarget?.database ?? props.database ?? "";
+      const hoverSchema = semanticTarget?.schema ?? table.schema ?? props.schema;
       let fullColumns: ColumnInfo[] = [];
       let fullIndexes: IndexInfo[] = [];
-      if (!hoverColumnCache.has(hoverCacheKey)) {
-        try {
-          const [cols, idxs] = await Promise.all([api.getColumns(props.connectionId, props.database, hoverSchema ?? "", table.name, undefined, props.clientSessionId), api.listIndexes(props.connectionId, props.database, hoverSchema ?? "", table.name, undefined)]);
-          fullColumns = cols;
-          fullIndexes = idxs;
-          hoverColumnCache.set(hoverCacheKey, fullColumns);
-          hoverIndexCache.set(hoverCacheKey, fullIndexes);
-          hoverCacheEvict(hoverColumnCache);
-          hoverCacheEvict(hoverIndexCache);
-        } catch {
-          // Fall back to simple hover if metadata fetch fails
-        }
-      } else {
-        fullColumns = hoverColumnCache.get(hoverCacheKey)!;
-        fullIndexes = hoverIndexCache.get(hoverCacheKey) ?? [];
+      try {
+        const result: TableMetadataLoadResult = await loadTableMetadata({
+          connectionId: props.connectionId,
+          database: hoverDatabase,
+          schema: hoverSchema,
+          tableName: table.name,
+          databaseType: props.databaseType ?? "",
+        });
+        fullColumns = result.metadata.columns;
+        fullIndexes = result.metadata.indexes;
+      } catch {
+        // Fall back to simple hover if metadata fetch fails
       }
       const sqlContent = fullColumns.length > 0 ? buildHoverTableSql(table.name, fullColumns, fullIndexes) : undefined;
       return {
@@ -3252,7 +3240,7 @@ function refreshCompletionCache() {
 onMounted(async () => {
   if (!editorRef.value) return;
 
-  // Reset context menu flag on any left-click (closes the menu)
+  // Reset context menu flag on left-click or Escape (global, independent of EditorView)
   const onGlobalPointerDown = (e: PointerEvent) => {
     if (contextMenuOpen.value && e.button === 0) {
       contextMenuOpen.value = false;
@@ -3263,20 +3251,8 @@ onMounted(async () => {
       contextMenuOpen.value = false;
     }
   };
-  const onEditorScroll = () => {
-    if (contextMenuOpen.value) {
-      contextMenuOpen.value = false;
-    }
-  };
   document.addEventListener("pointerdown", onGlobalPointerDown);
   document.addEventListener("keydown", onGlobalKeydown);
-  view.value?.scrollDOM.addEventListener("scroll", onEditorScroll);
-  contextMenuPointerCleanup = () => {
-    document.removeEventListener("pointerdown", onGlobalPointerDown);
-    document.removeEventListener("keydown", onGlobalKeydown);
-    view.value?.scrollDOM.removeEventListener("scroll", onEditorScroll);
-    contextMenuPointerCleanup = null;
-  };
 
   // Pre-load SQL highlighter for hover tooltips (non-blocking)
   void (async () => {
@@ -4032,6 +4008,22 @@ onMounted(async () => {
   view.value.scrollDOM.addEventListener("scroll", scheduleEditorViewportEmit, {
     passive: true,
   });
+
+  // Register context-menu scroll listener on the actual EditorView scrollDOM
+  // (deferred until after creation so view.value is non-null).
+  const onEditorScroll = () => {
+    if (contextMenuOpen.value) {
+      contextMenuOpen.value = false;
+    }
+  };
+  view.value.scrollDOM.addEventListener("scroll", onEditorScroll);
+  contextMenuPointerCleanup = () => {
+    document.removeEventListener("pointerdown", onGlobalPointerDown);
+    document.removeEventListener("keydown", onGlobalKeydown);
+    view.value?.scrollDOM.removeEventListener("scroll", onEditorScroll);
+    contextMenuPointerCleanup = null;
+  };
+
   restoreEditorViewport();
   syncContextMenuState(view.value);
   syncEditorFontCssVars(liveFontSize.value, initialSettings.fontFamily);

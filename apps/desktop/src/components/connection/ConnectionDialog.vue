@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { ObjectDirective } from "vue";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
@@ -2746,11 +2747,11 @@ function backToDatabasePicker() {
   resetTestState();
 }
 
-function handleDialogOpenAutoFocus(event: Event) {
-  event.preventDefault();
-  if (!(event.currentTarget instanceof HTMLElement)) return;
-  event.currentTarget.querySelector<HTMLElement>("[data-connection-dialog-title]")?.focus({ preventScroll: true });
-}
+const vConnectionDialogAutoFocus: ObjectDirective<HTMLInputElement> = {
+  mounted(input) {
+    input.focus({ preventScroll: true });
+  },
+};
 
 function handleDialogEscape(event: KeyboardEvent) {
   if (dialogStep.value !== "config" || editingId.value) return;
@@ -4509,9 +4510,9 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @open-auto-focus="handleDialogOpenAutoFocus" @escape-key-down="handleDialogEscape">
+    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape">
       <DialogHeader>
-        <DialogTitle data-connection-dialog-title tabindex="-1">{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
+        <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
 
       <template v-if="dialogStep === 'select'">
@@ -4546,7 +4547,7 @@ function openExternalUrl(url: string) {
               </div>
               <div class="relative w-full sm:w-64">
                 <Search class="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input v-model="dbSearchQuery" class="h-9 pl-8" :placeholder="t('connection.searchDatabasePlaceholder')" />
+                <Input v-model="dbSearchQuery" v-connection-dialog-auto-focus class="h-9 pl-8" :placeholder="t('connection.searchDatabasePlaceholder')" />
               </div>
             </div>
             <Button data-jdbc-connection-entry type="button" variant="outline" class="h-9 shrink-0 gap-2" @click="goToConnectionStep('jdbc')">
@@ -4662,7 +4663,7 @@ function openExternalUrl(url: string) {
 
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.name") }}</Label>
-                  <Input v-model="form.name" class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
+                  <Input v-model="form.name" v-connection-dialog-auto-focus class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">

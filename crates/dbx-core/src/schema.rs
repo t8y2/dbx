@@ -1533,27 +1533,82 @@ fn oracle_table_comments_from_query_result(result: db::QueryResult) -> HashMap<S
 }
 
 fn oracle_columns_sql(schema: &str, table: &str) -> String {
+    let owner = oracle_columns_owner_filter(schema);
     format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
+        "WITH synonym_chain AS ( \
+           SELECT CONNECT_BY_ROOT s.OWNER AS root_owner, \
+                  s.TABLE_OWNER AS resolved_owner, \
+                  s.TABLE_NAME AS resolved_table, \
+                  LEVEL AS synonym_depth \
+           FROM ALL_SYNONYMS s \
+           START WITH s.SYNONYM_NAME = {table} \
+             AND s.OWNER IN ({owner}, 'PUBLIC') \
+             AND s.DB_LINK IS NULL \
+           CONNECT BY NOCYCLE \
+             PRIOR s.TABLE_OWNER = s.OWNER \
+             AND PRIOR s.TABLE_NAME = s.SYNONYM_NAME \
+             AND s.DB_LINK IS NULL \
+         ), \
+         resolved_object AS ( \
+           SELECT resolved_owner, resolved_table \
+           FROM ( \
+             SELECT resolved_owner, resolved_table, resolution_priority, synonym_depth \
+             FROM ( \
+               SELECT o.OWNER AS resolved_owner, o.OBJECT_NAME AS resolved_table, \
+                      0 AS resolution_priority, 0 AS synonym_depth \
+               FROM ALL_OBJECTS o \
+               WHERE o.OWNER = {owner} \
+                 AND o.OBJECT_NAME = {table} \
+                 AND o.OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW') \
+               UNION ALL \
+               SELECT sc.resolved_owner, sc.resolved_table, \
+                      CASE WHEN sc.root_owner = {owner} THEN 1 ELSE 2 END AS resolution_priority, \
+                      sc.synonym_depth \
+               FROM synonym_chain sc \
+               JOIN ALL_OBJECTS o \
+                 ON o.OWNER = sc.resolved_owner \
+                AND o.OBJECT_NAME = sc.resolved_table \
+                AND o.OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW') \
+             ) \
+             ORDER BY resolution_priority, synonym_depth \
+           ) \
+           WHERE ROWNUM = 1 \
+         ) \
+         SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
          c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, c.COLUMN_ID, \
-         CASE WHEN cc.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
-         cm.COMMENTS \
-         FROM ALL_TAB_COLUMNS c \
-         LEFT JOIN ( \
-           SELECT cols.OWNER, cols.TABLE_NAME, cols.COLUMN_NAME \
+         CASE WHEN EXISTS ( \
+           SELECT 1 \
            FROM ALL_CONS_COLUMNS cols \
            JOIN ALL_CONSTRAINTS con \
-             ON con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME \
-            AND con.OWNER = cols.OWNER \
+             ON con.OWNER = cols.OWNER \
+            AND con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME \
             AND con.CONSTRAINT_TYPE = 'P' \
-         ) cc ON cc.OWNER = c.OWNER AND cc.TABLE_NAME = c.TABLE_NAME AND cc.COLUMN_NAME = c.COLUMN_NAME \
-         LEFT JOIN ALL_COL_COMMENTS cm \
-           ON cm.OWNER = c.OWNER AND cm.TABLE_NAME = c.TABLE_NAME AND cm.COLUMN_NAME = c.COLUMN_NAME \
-         WHERE c.OWNER = {} AND c.TABLE_NAME = {} \
+           WHERE cols.OWNER = c.OWNER \
+             AND cols.TABLE_NAME = c.TABLE_NAME \
+             AND cols.COLUMN_NAME = c.COLUMN_NAME \
+         ) THEN 1 ELSE 0 END AS IS_PK, \
+         ( \
+           SELECT cm.COMMENTS \
+           FROM ALL_COL_COMMENTS cm \
+           WHERE cm.OWNER = c.OWNER \
+             AND cm.TABLE_NAME = c.TABLE_NAME \
+             AND cm.COLUMN_NAME = c.COLUMN_NAME \
+         ) AS COMMENTS \
+         FROM ALL_TAB_COLUMNS c \
+         JOIN resolved_object ro \
+           ON ro.resolved_owner = c.OWNER AND ro.resolved_table = c.TABLE_NAME \
          ORDER BY c.COLUMN_ID",
-        oracle_owner_filter(schema),
-        sql_string(table),
+        table = sql_string(table),
     )
+}
+
+fn oracle_columns_owner_filter(schema: &str) -> String {
+    let schema = schema.trim();
+    if schema.is_empty() {
+        "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')".to_string()
+    } else {
+        sql_string(&schema.to_uppercase())
+    }
 }
 
 fn oracle_column_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
@@ -1648,6 +1703,16 @@ async fn external_driver_oracle_columns_via_sql(
         )
         .await?;
     Ok(deduplicate_column_infos(oracle_columns_from_query_result(result)))
+}
+
+fn should_query_oracle_columns_via_sql_first(
+    db_type: &DatabaseType,
+    schema: &str,
+    client_session_id: Option<&str>,
+) -> bool {
+    *db_type == DatabaseType::Oracle
+        && schema.trim().is_empty()
+        && client_session_id.is_some_and(|session_id| !session_id.trim().is_empty())
 }
 
 fn oracle_object_statistics_sql(schema: &str) -> String {
@@ -2789,8 +2854,8 @@ mod tests {
         oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
         oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_from_query_result,
         oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, table_name_filter_matches,
-        visible_schema_filter, TableNameFilter,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        should_query_oracle_columns_via_sql_first, table_name_filter_matches, visible_schema_filter, TableNameFilter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -3676,8 +3741,62 @@ mod tests {
 
         assert!(sql.contains("ALL_TAB_COLUMNS"));
         assert!(sql.contains("ALL_COL_COMMENTS"));
-        assert!(sql.contains("c.OWNER = 'DBX_TEST'"));
-        assert!(sql.contains("c.TABLE_NAME = 'test'"));
+        assert!(sql.contains("o.OWNER = 'DBX_TEST'"));
+        assert!(sql.contains("o.OBJECT_NAME = 'test'"));
+        assert!(sql.contains("cols.OWNER = c.OWNER"));
+        assert!(sql.contains("cols.TABLE_NAME = c.TABLE_NAME"));
+        assert!(sql.contains("cm.OWNER = c.OWNER"));
+    }
+
+    #[test]
+    fn oracle_columns_sql_resolves_private_and_public_synonyms_in_oracle_precedence_order() {
+        let sql = oracle_columns_sql("", "ORDERS_ALIAS");
+
+        assert!(sql.contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"));
+        assert!(sql.contains("FROM ALL_SYNONYMS s"));
+        assert!(sql.contains("s.OWNER IN (SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'), 'PUBLIC')"));
+        assert!(sql.contains("CASE WHEN sc.root_owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') THEN 1 ELSE 2 END"));
+        assert!(sql.contains("s.DB_LINK IS NULL"));
+        assert!(sql.contains("ORDER BY resolution_priority, synonym_depth"));
+        assert!(sql.contains("WHERE ROWNUM = 1"));
+    }
+
+    #[test]
+    fn oracle_columns_sql_follows_two_level_synonyms_without_cycles() {
+        let sql = oracle_columns_sql("DBX_TEST", "ORDERS_ALIAS");
+
+        assert!(sql.contains("SELECT CONNECT_BY_ROOT s.OWNER AS root_owner"));
+        assert!(sql.contains("LEVEL AS synonym_depth"));
+        assert!(sql.contains("CONNECT BY NOCYCLE"));
+        assert!(sql.contains("PRIOR s.TABLE_OWNER = s.OWNER"));
+        assert!(sql.contains("PRIOR s.TABLE_NAME = s.SYNONYM_NAME"));
+        assert!(sql.contains("JOIN ALL_OBJECTS o"));
+        assert!(sql.contains("o.OWNER = sc.resolved_owner"));
+        assert!(sql.contains("o.OBJECT_NAME = sc.resolved_table"));
+    }
+
+    #[test]
+    fn oracle_columns_sql_preserves_quoted_case_synonym_names_and_excludes_database_links() {
+        let sql = oracle_columns_sql("DBX_TEST", "Order Alias");
+
+        assert!(sql.contains("s.SYNONYM_NAME = 'Order Alias'"));
+        assert!(sql.contains("o.OBJECT_NAME = 'Order Alias'"));
+        assert!(!sql.contains("ORDER ALIAS"));
+        assert_eq!(sql.matches("s.DB_LINK IS NULL").count(), 2);
+    }
+
+    #[test]
+    fn oracle_session_completion_queries_synonym_aware_columns_sql_first() {
+        assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", Some("tab-1")));
+        assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "   ", Some("tab-1")));
+    }
+
+    #[test]
+    fn oracle_columns_sql_first_is_limited_to_current_schema_editor_sessions() {
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "DBX_TEST", Some("tab-1")));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", None));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", Some("  ")));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Postgres, "", Some("tab-1")));
     }
 
     #[test]
@@ -4784,6 +4903,32 @@ pub async fn get_columns_core_for_session(
                 if uses_presto_like_information_schema_tables(&config.db_type) {
                     return external_driver_presto_like_columns(session, config.as_ref(), database, schema, table).await;
                 }
+                let query_oracle_columns_first =
+                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, client_session_id);
+                if query_oracle_columns_first {
+                    match external_driver_oracle_columns_via_sql(
+                        session.clone(),
+                        config.as_ref(),
+                        database,
+                        schema,
+                        table,
+                    )
+                    .await
+                    {
+                        Ok(columns) if !columns.is_empty() => return Ok(columns),
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][external-driver:get_columns:oracle-primary-sql-failed] connection_id={} database={} schema={} table={} error={}",
+                                connection_id,
+                                database,
+                                schema,
+                                table,
+                                error
+                            );
+                        }
+                    }
+                }
                 let columns = session
                     .invoke_with_timeout::<Vec<db::ColumnInfo>>(
                         "getColumns",
@@ -4796,7 +4941,7 @@ pub async fn get_columns_core_for_session(
                         agent_metadata_timeout(Some(config.as_ref())),
                     )
                     .await?;
-                if columns.is_empty() && config.db_type == DatabaseType::Oracle {
+                if columns.is_empty() && config.db_type == DatabaseType::Oracle && !query_oracle_columns_first {
                     match external_driver_oracle_columns_via_sql(
                         session.clone(),
                         config.as_ref(),
@@ -4872,6 +5017,34 @@ pub async fn get_columns_core_for_session(
                 let fallback_config = db_config.clone();
                 drop(connections);
                 let mut client = client.lock().await;
+                let oracle_sql_config = fallback_config.as_ref().filter(|config| {
+                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, client_session_id)
+                });
+                let query_oracle_columns_first = oracle_sql_config.is_some();
+                if let Some(config) = oracle_sql_config {
+                    match oracle_columns_via_sql(
+                        database,
+                        schema,
+                        table,
+                        &mut client,
+                        agent_metadata_timeout(Some(config)),
+                    )
+                    .await
+                    {
+                        Ok(columns) if !columns.is_empty() => return Ok(columns),
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][agent:get_columns:oracle-primary-sql-failed] connection_id={} database={} schema={} table={} error={}",
+                                connection_id,
+                                database,
+                                schema,
+                                table,
+                                error
+                            );
+                        }
+                    }
+                }
                 match client
                     .get_columns::<Vec<db::ColumnInfo>>(
                         database,
@@ -4884,7 +5057,7 @@ pub async fn get_columns_core_for_session(
                     Ok(columns) if !columns.is_empty() => return Ok(deduplicate_column_infos(columns)),
                     Ok(columns) => {
                         if let Some(config) = fallback_config.as_ref() {
-                            if config.db_type == DatabaseType::Oracle {
+                            if config.db_type == DatabaseType::Oracle && !query_oracle_columns_first {
                                 match oracle_columns_via_sql(
                                     database,
                                     schema,

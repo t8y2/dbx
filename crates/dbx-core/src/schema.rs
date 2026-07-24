@@ -6921,6 +6921,30 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_table_ddl_appends_trigger_definitions() {
+        let ddl = append_postgres_trigger_definitions(
+            render_postgres_table_ddl("public", "users", &[column("id", "integer")], &[], &[], None),
+            &[r#"CREATE TRIGGER users_set_updated_at BEFORE UPDATE ON "public"."users" FOR EACH ROW EXECUTE FUNCTION set_updated_at()"#
+                .to_string()],
+        );
+
+        assert!(ddl.contains("CREATE TABLE \"public\".\"users\""));
+        assert!(ddl.contains(
+            "\n\nCREATE TRIGGER users_set_updated_at BEFORE UPDATE ON \"public\".\"users\" FOR EACH ROW EXECUTE FUNCTION set_updated_at();"
+        ));
+    }
+
+    #[test]
+    fn postgres_table_ddl_does_not_duplicate_trigger_statement_terminators() {
+        let ddl = append_postgres_trigger_definitions(
+            render_postgres_table_ddl("public", "users", &[column("id", "integer")], &[], &[], None),
+            &[r#"CREATE TRIGGER users_audit AFTER INSERT ON "public"."users" FOR EACH ROW EXECUTE FUNCTION audit_user();"#.to_string()],
+        );
+
+        assert!(!ddl.contains("audit_user();;"), "ddl: {ddl}");
+    }
+
+    #[test]
     fn sqlserver_table_ddl_includes_column_comments() {
         let mut display_name = column("display]name", "nvarchar(100)");
         display_name.comment = Some("User's display name".to_string());
@@ -7060,23 +7084,44 @@ pub fn opengauss_table_ddl_sql(schema: &str, table: &str) -> String {
 }
 
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (columns, indexes, fkeys, table_comment, partition_key) = tokio::try_join!(
+    let (columns, indexes, fkeys, table_comment, partition_key, trigger_definitions) = tokio::try_join!(
         db::postgres::get_columns(pool, schema, table),
         db::postgres::list_indexes(pool, schema, table),
         db::postgres::list_foreign_keys(pool, schema, table),
         async { db::postgres::get_table_comment(pool, schema, table).await },
         db::postgres::get_table_partition_key(pool, schema, table),
+        db::postgres::list_trigger_definitions(pool, schema, table),
     )?;
 
-    Ok(render_postgres_table_ddl_with_partition_key(
-        schema,
-        table,
-        &columns,
-        &indexes,
-        &fkeys,
-        table_comment.as_deref(),
-        partition_key.as_deref(),
+    Ok(append_postgres_trigger_definitions(
+        render_postgres_table_ddl_with_partition_key(
+            schema,
+            table,
+            &columns,
+            &indexes,
+            &fkeys,
+            table_comment.as_deref(),
+            partition_key.as_deref(),
+        ),
+        &trigger_definitions,
     ))
+}
+
+fn append_postgres_trigger_definitions(mut ddl: String, trigger_definitions: &[String]) -> String {
+    for definition in
+        trigger_definitions.iter().map(|definition| definition.trim()).filter(|definition| !definition.is_empty())
+    {
+        ddl = ddl.trim_end().to_string();
+        if !ddl.ends_with(';') {
+            ddl.push(';');
+        }
+        ddl.push_str("\n\n");
+        ddl.push_str(definition);
+        if !definition.ends_with(';') {
+            ddl.push(';');
+        }
+    }
+    ddl
 }
 
 pub fn render_postgres_table_ddl(

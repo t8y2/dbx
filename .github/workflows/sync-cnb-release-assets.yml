@@ -25,7 +25,7 @@ jobs:
           TAG_NAME: ${{ inputs.tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_USERNAME: ${{ github.repository_owner }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           CNB_USERNAME: cnb
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |

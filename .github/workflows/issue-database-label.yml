@@ -27,4 +27,4 @@ jobs:
       - name: Triage issue labels and title
         run: node .github/scripts/label-issue-database.mjs
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}

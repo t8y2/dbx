@@ -524,6 +524,69 @@ test("parseMongoAggregateCommand accepts an empty pipeline", () => {
   });
 });
 
+test("parseMongoAggregateCommand accepts Mongo Shell trailing commas", () => {
+  const command = parseMongoAggregateCommand(`db.AdressInfo.aggregate([
+    {
+      $match: {
+        IsDelete: 0,
+        DataSource: { $ne: 'XC' },
+        TypeName: 1,
+      },
+    },
+    {
+      $project: {
+        MainId: '$_id',
+        labels: ['primary', 'backup',],
+      },
+    },
+    { $out: 'IBMBiititle' },
+  ], {
+    allowDiskUse: true,
+  })`);
+
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.pipeline), [
+    {
+      $match: {
+        IsDelete: 0,
+        DataSource: { $ne: "XC" },
+        TypeName: 1,
+      },
+    },
+    {
+      $project: {
+        MainId: "$_id",
+        labels: ["primary", "backup"],
+      },
+    },
+    { $out: "IBMBiititle" },
+  ]);
+  assert.deepEqual(JSON.parse(command.options ?? "null"), { allowDiskUse: true });
+});
+
+test("parseMongoAggregateCommand preserves trailing-comma text inside strings", () => {
+  const command = parseMongoAggregateCommand(`db.logs.aggregate([
+    {
+      $project: {
+        objectText: "literal,}",
+        arrayText: "literal,]",
+        escapedQuote: "literal\\",]",
+      },
+    },
+  ])`);
+
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.pipeline), [
+    {
+      $project: {
+        objectText: "literal,}",
+        arrayText: "literal,]",
+        escapedQuote: 'literal",]',
+      },
+    },
+  ]);
+});
+
 test("parseMongoAggregateCommand ignores comments inside aggregate pipelines", () => {
   const command = parseMongoAggregateCommand(`
     db.cash.aggregate([

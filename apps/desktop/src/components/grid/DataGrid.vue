@@ -308,8 +308,10 @@ interface DataGridProps {
 }
 
 const props = withDefaults(defineProps<DataGridProps>(), {
-  // Vue casts absent Boolean props to false unless the default is explicitly
-  // undefined; omitted row-action limits must keep normal table-data editing.
+  // Vue casts absent Boolean props to false unless a default is explicit.
+  // Regular grids have exact totals; document stores opt into lower-bound totals.
+  totalRowCountIsExact: true,
+  // Omitted row-action limits must keep normal table-data editing.
   allowInsertRows: undefined,
   allowDeleteRows: undefined,
 });

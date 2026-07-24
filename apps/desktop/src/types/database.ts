@@ -127,6 +127,7 @@ export interface ConnectionConfig {
   database?: string;
   visible_databases?: string[];
   visible_schemas?: Record<string, string[]>;
+  show_system_schemas?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
   init_script?: string;
   color?: string;

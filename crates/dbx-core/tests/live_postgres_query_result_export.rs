@@ -65,6 +65,7 @@ fn live_postgres_config(
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        show_system_schemas: false,
         database_info: None,
     }
 }

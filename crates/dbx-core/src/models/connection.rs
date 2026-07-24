@@ -90,6 +90,8 @@ pub struct ConnectionConfig {
     pub visible_databases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_system_schemas: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -552,6 +554,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
+    pub show_system_schemas: bool,
+    #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
     pub init_script: Option<String>,
@@ -640,6 +644,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             database: data.database,
             visible_databases: data.visible_databases,
             visible_schemas: data.visible_schemas,
+            show_system_schemas: data.show_system_schemas,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -2058,6 +2063,7 @@ mod tests {
             database: database.map(str::to_string),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

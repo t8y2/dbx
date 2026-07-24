@@ -568,6 +568,8 @@ export default {
     keepaliveInterval: "Keepalive Interval (seconds)",
     readOnly: "Read Only",
     readOnlyHint: "Block all write operations (INSERT, UPDATE, DELETE, etc.)",
+    showSystemSchemas: "Show System Schemas",
+    showSystemSchemasHint: "Show built-in and metadata schemas in the sidebar and schema pickers for this connection.",
     readOnlyBadge: "Read-only",
     proxy: "Proxy",
     proxyEnable: "Connect database through proxy",

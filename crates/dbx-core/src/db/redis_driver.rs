@@ -3924,7 +3924,10 @@ mod tests {
         assert_eq!(classify_command("GETEX"), RedisCommandSafety::Write);
         assert_eq!(classify_command("XREADGROUP"), RedisCommandSafety::Write);
         assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
-        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.DEL"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.FORGET"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.CLEAR"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("KEYS"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("flushall"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("eval"), RedisCommandSafety::Blocked);

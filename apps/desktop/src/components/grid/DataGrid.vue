@@ -133,7 +133,7 @@ import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOpti
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
-import { canGoNextDataGridPage, hasCompleteLocalDataGridResult } from "@/lib/dataGrid/dataGridPagination";
+import { canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, dataGridSearchMatchKey, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
@@ -2393,7 +2393,13 @@ const displayedTotalRowCount = computed(() => serverKnownTotalRowCount.value ?? 
 const totalRowCountIsExact = computed(() => props.totalRowCountIsExact !== false);
 // A backend can expose an exact display total while deliberately restricting
 // offset pagination to a smaller safe range.
-const paginationTotalRowCount = computed(() => props.paginationTotalRowCount ?? serverKnownTotalRowCount.value);
+const paginationTotalRowCount = computed(() =>
+  resolveDataGridPaginationTotal({
+    paginationTotalRowCount: props.paginationTotalRowCount,
+    serverKnownTotalRowCount: serverKnownTotalRowCount.value,
+    totalRowCountIsExact: totalRowCountIsExact.value,
+  }),
+);
 // Only a server-confirmed total drives pagination — an inferred total means
 // rows exist that we never fetched, so navigation must stay inside rows.length.
 const hasKnownPaginationTotalRowCount = computed(() => typeof paginationTotalRowCount.value === "number" && paginationTotalRowCount.value >= 0);

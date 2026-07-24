@@ -28,6 +28,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.BeforeAll;
@@ -153,7 +154,10 @@ class MongoAgentTest {
         List<String> calls = new ArrayList<>();
         MongoCollection<Document> collection = recordingCountCollection(calls);
 
-        assertEquals(10_000_000L, MongoAgent.collectionTotal(collection, new Document()));
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(collection, new Document());
+
+        assertEquals(10_000_000L, total.value());
+        assertFalse(total.exact());
         assertEquals(List.of("estimatedDocumentCount"), calls);
     }
 
@@ -163,8 +167,33 @@ class MongoAgentTest {
         MongoCollection<Document> collection = recordingCountCollection(calls);
         Document filter = new Document("status", "active");
 
-        assertEquals(42L, MongoAgent.collectionTotal(collection, filter));
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(collection, filter);
+
+        assertEquals(42L, total.value());
+        assertTrue(total.exact());
         assertEquals(List.of("countDocuments:{\"status\": \"active\"}"), calls);
+    }
+
+    @Test
+    void estimatedDocumentQueryResultMarksTotalAsInexact() {
+        Map<String, Object> result = MongoAgent.documentQueryResult(
+            List.of(new Document("_id", 1)),
+            new MongoAgent.CollectionTotal(10_000_000L, false)
+        );
+
+        assertEquals(10_000_000L, result.get("total"));
+        assertEquals(false, result.get("total_is_exact"));
+    }
+
+    @Test
+    void exactDocumentQueryResultKeepsExistingWireShape() {
+        Map<String, Object> result = MongoAgent.documentQueryResult(
+            List.of(new Document("_id", 1)),
+            new MongoAgent.CollectionTotal(42L, true)
+        );
+
+        assertEquals(42L, result.get("total"));
+        assertFalse(result.containsKey("total_is_exact"));
     }
 
     @Test

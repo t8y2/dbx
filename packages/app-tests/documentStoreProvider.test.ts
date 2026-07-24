@@ -39,11 +39,12 @@ test("providers build store-specific query previews", () => {
   const mongo = documentStoreProviderFor("mongodb");
   const elasticsearch = documentStoreProviderFor("elasticsearch");
 
-  assert.equal(mongo.documentsLabel({ total: 7, t }), "mongo.documents:7");
+  assert.equal(mongo.documentsLabel({ total: 7, totalIsExact: true, t }), "mongo.documents:7");
+  assert.equal(mongo.documentsLabel({ total: 7, totalIsExact: false, t }), "≈mongo.documents:7");
   assert.equal(mongo.queryPreview({ collection: "orders", filterJson: '{"city":"长治"}', sortJson: '{"createdAt":-1}', skip: 20, limit: 10 }), 'db.getCollection("orders").find({"city":"长治"}).sort({"createdAt":-1}).skip(20).limit(10)');
   assert.equal(mongo.queryPreview({ collection: "order-events", filterJson: '{"city":"长治"}', sortJson: undefined, skip: 0, limit: 100 }), 'db.getCollection("order-events").find({"city":"长治"}).skip(0).limit(100)');
   assert.equal(mongo.queryPreview({ collection: "orders", filterJson: '{"snowflake":{"$numberLong":"9007199254740993"}}', sortJson: undefined, skip: 0, limit: 100 }), 'db.getCollection("orders").find({"snowflake":NumberLong("9007199254740993")}).skip(0).limit(100)');
-  assert.equal(elasticsearch.documentsLabel({ total: 7, t }), "Documents");
+  assert.equal(elasticsearch.documentsLabel({ total: 7, totalIsExact: false, t }), "Documents");
   assert.equal(elasticsearch.filterInputLabel, "filter");
   assert.equal(
     elasticsearch.queryPreview({ collection: "orders", filterJson: '{"city":"长治"}', sortJson: '{"createdAt":-1}', skip: 20, limit: 10 }),

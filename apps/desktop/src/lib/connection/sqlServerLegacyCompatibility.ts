@@ -32,22 +32,31 @@ export function setSqlServerNativeEncryptionDisabled(params: string | undefined,
 }
 
 function isSqlServerLegacyCompatibilitySetting(params: string | undefined): boolean {
-  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
-  if (!normalized) return false;
-  const parsed = new URLSearchParams(normalized);
-  for (const [key, value] of parsed.entries()) {
-    if (key.trim().toLowerCase() === "sqlserverencryption" && SQLSERVER_ENCRYPTION_DISABLED_VALUES.has(value.trim().toLowerCase())) return true;
-  }
-  return false;
+  return (params || "")
+    .trim()
+    .replace(/^\?/, "")
+    .split(/[&;]/)
+    .some((part) => {
+      const separatorIndex = part.indexOf("=");
+      if (separatorIndex < 0) return false;
+      const key = part.slice(0, separatorIndex).trim().toLowerCase();
+      const value = part
+        .slice(separatorIndex + 1)
+        .trim()
+        .toLowerCase();
+      return key === "sqlserverencryption" && SQLSERVER_ENCRYPTION_DISABLED_VALUES.has(value);
+    });
 }
 
 function removeSqlServerLegacyCompatibilitySetting(params: string | undefined): string {
-  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
-  const parsed = new URLSearchParams(normalized);
-  for (const key of Array.from(parsed.keys())) {
-    if (key.trim().toLowerCase() === "sqlserverencryption") parsed.delete(key);
-  }
-  return parsed.toString();
+  // Preserve raw JDBC values because the legacy agent does not URL-decode properties.
+  return (params || "")
+    .trim()
+    .replace(/^\?/, "")
+    .split(/[&;]/)
+    .map((part) => part.trim())
+    .filter((part) => part && !isSqlServerLegacyCompatibilitySetting(part))
+    .join("&");
 }
 
 export function sqlServerUsesLegacyCompatibility(config: Pick<ConnectionConfig, "db_type" | "driver_profile">): boolean {

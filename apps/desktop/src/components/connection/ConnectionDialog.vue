@@ -250,6 +250,7 @@ const defaultForm = (): ConnectionForm => ({
   external_config: undefined,
   init_script: undefined,
   read_only: false,
+  show_system_schemas: false,
   is_production: false,
   production_databases: [],
   visible_databases: undefined,
@@ -1908,6 +1909,7 @@ watch(
         attached_databases: config.attached_databases || [],
         init_script: config.init_script,
         read_only: config.read_only || false,
+        show_system_schemas: config.show_system_schemas || false,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
         visible_databases: config.visible_databases,
@@ -3249,6 +3251,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else {
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
+  if (!config.show_system_schemas) config.show_system_schemas = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
   return config as ConnectionConfig;
@@ -6298,6 +6301,13 @@ function openExternalUrl(url: string) {
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.read_only" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
+                  </label>
+                </div>
+                <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
                   </label>
                 </div>
                 <div class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">

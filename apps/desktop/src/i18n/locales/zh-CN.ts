@@ -570,6 +570,8 @@ export default withEnglishFallback({
     keepaliveInterval: "保持连接间隔（秒）",
     readOnly: "只读模式",
     readOnlyHint: "阻止所有写操作（INSERT、UPDATE、DELETE 等）",
+    showSystemSchemas: "显示系统 Schema",
+    showSystemSchemasHint: "为当前连接在侧边栏和 Schema 选择器中显示内置/元数据 Schema。",
     readOnlyBadge: "只读",
     proxy: "代理",
     proxyEnable: "通过代理连接数据库",

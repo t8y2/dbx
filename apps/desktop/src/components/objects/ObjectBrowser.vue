@@ -82,6 +82,7 @@ import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutio
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import {
   buildObjectBrowserRows,
   countObjectBrowserRowsByFilter,
@@ -394,6 +395,13 @@ watch(objectFilter, () => {
   }
   scrollObjectsToTop();
 });
+watch(
+  () => props.connection.show_system_schemas,
+  (value, oldValue) => {
+    if (value === oldValue) return;
+    void reload();
+  },
+);
 
 const showCheckboxColumn = computed(() => settingsStore.editorSettings.objectBrowserShowCheckbox || selectedTableCount.value > 0);
 
@@ -2053,8 +2061,14 @@ async function loadSchemas() {
   }
   loadingSchemas.value = true;
   try {
-    const names = await api.listSchemas(props.connection.id, props.database);
+    const names = filterSchemaNamesForConnection(await api.listSchemas(props.connection.id, props.database), props.connection, props.database, {
+      showSystemSchemas: props.connection.show_system_schemas === true,
+    });
     schemas.value = names;
+    if (names.length === 0) {
+      selectedSchema.value = undefined;
+      return;
+    }
     if (!selectedSchema.value || !names.includes(selectedSchema.value)) {
       selectedSchema.value = names.includes("public") ? "public" : names[0];
     }
@@ -2069,6 +2083,7 @@ async function loadObjects() {
   error.value = "";
   rows.value = [];
   try {
+    if (needsSchema.value && !selectedSchema.value) return;
     const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
     const objects: ObjectInfo[] = await api.listObjects(props.connection.id, props.database, schema, undefined, undefined, undefined, undefined, props.catalog);
     if (id !== loadId) return;

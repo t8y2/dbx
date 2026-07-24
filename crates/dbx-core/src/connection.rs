@@ -3965,12 +3965,13 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_legacy_url_param_does_not_force_agent_driver() {
+    fn sqlserver_legacy_url_param_requires_canonicalization_before_agent_driver_selection() {
         let mut config = mysql_config(Some("master"));
         config.db_type = DatabaseType::SqlServer;
-        config.url_params = Some("applicationName=dbx;encrypt=false".to_string());
+        config.url_params = Some("applicationName=dbx;sqlserverEncryption=disabled".to_string());
 
         assert!(!sqlserver_uses_legacy_driver(&config));
+        assert!(sqlserver_uses_legacy_driver(&config.canonicalized()));
     }
 
     #[test]

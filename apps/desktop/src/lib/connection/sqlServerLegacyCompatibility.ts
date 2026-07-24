@@ -31,6 +31,25 @@ export function setSqlServerNativeEncryptionDisabled(params: string | undefined,
   return parsed.toString();
 }
 
+function isSqlServerLegacyCompatibilitySetting(params: string | undefined): boolean {
+  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
+  if (!normalized) return false;
+  const parsed = new URLSearchParams(normalized);
+  for (const [key, value] of parsed.entries()) {
+    if (key.trim().toLowerCase() === "sqlserverencryption" && SQLSERVER_ENCRYPTION_DISABLED_VALUES.has(value.trim().toLowerCase())) return true;
+  }
+  return false;
+}
+
+function removeSqlServerLegacyCompatibilitySetting(params: string | undefined): string {
+  const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
+  const parsed = new URLSearchParams(normalized);
+  for (const key of Array.from(parsed.keys())) {
+    if (key.trim().toLowerCase() === "sqlserverencryption") parsed.delete(key);
+  }
+  return parsed.toString();
+}
+
 export function sqlServerUsesLegacyCompatibility(config: Pick<ConnectionConfig, "db_type" | "driver_profile">): boolean {
   return config.db_type === "sqlserver" && config.driver_profile === SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY;
 }
@@ -38,6 +57,12 @@ export function sqlServerUsesLegacyCompatibility(config: Pick<ConnectionConfig, 
 export function setSqlServerLegacyCompatibilityConfig(config: Pick<ConnectionConfig, "driver_label" | "driver_profile">, enabled: boolean): void {
   config.driver_profile = enabled ? SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY : SQLSERVER_NATIVE_DRIVER_PROFILE;
   config.driver_label = enabled ? SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_LABEL : SQLSERVER_NATIVE_DRIVER_LABEL;
+}
+
+export function migrateSqlServerLegacyCompatibilityConfig(config: Pick<ConnectionConfig, "db_type" | "driver_label" | "driver_profile" | "url_params">): void {
+  if (config.db_type !== "sqlserver" || !isSqlServerLegacyCompatibilitySetting(config.url_params)) return;
+  setSqlServerLegacyCompatibilityConfig(config, true);
+  config.url_params = removeSqlServerLegacyCompatibilitySetting(config.url_params);
 }
 
 export function requiresSqlServerLegacyCompatibilityComponent(config: ConnectionConfig): boolean {

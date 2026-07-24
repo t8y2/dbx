@@ -892,6 +892,13 @@ impl ConnectionConfig {
 
     pub fn canonicalized(&self) -> Self {
         let mut config = self.clone();
+        if config.db_type == DatabaseType::SqlServer
+            && sqlserver_legacy_compatibility_param(config.url_params.as_deref())
+        {
+            config.driver_profile = Some("sqlserver-legacy".to_string());
+            config.driver_label = Some("SQL Server legacy compatibility component".to_string());
+            config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
+        }
         if config.db_type == DatabaseType::Mysql
             && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("tdengine"))
         {
@@ -1382,6 +1389,31 @@ fn redis_url_params_enable_insecure(params: Option<&str>) -> bool {
         matches!(key.to_ascii_lowercase().as_str(), "insecure" | "tls_insecure" | "accept_invalid_certs")
             && matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "insecure")
     })
+}
+
+fn sqlserver_legacy_compatibility_param(params: Option<&str>) -> bool {
+    params.unwrap_or("").trim().trim_start_matches('?').split(['&', ';']).any(|part| {
+        let Some((key, value)) = part.split_once('=') else {
+            return false;
+        };
+        let disabled =
+            matches!(value.trim().to_ascii_lowercase().as_str(), "disabled" | "disable" | "false" | "0" | "off" | "no");
+        key.trim().eq_ignore_ascii_case("sqlserverEncryption") && disabled
+    })
+}
+
+fn without_sqlserver_legacy_compatibility_param(params: Option<&str>) -> Option<String> {
+    let retained = params
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('?')
+        .split(['&', ';'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .filter(|part| !sqlserver_legacy_compatibility_param(Some(part)))
+        .collect::<Vec<_>>()
+        .join("&");
+    (!retained.is_empty()).then_some(retained)
 }
 
 fn url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
@@ -2489,6 +2521,36 @@ mod tests {
         assert_eq!(canonical.driver_profile.as_deref(), Some("tdengine"));
         assert_eq!(canonical.driver_label.as_deref(), Some("TDengine"));
         assert!(!canonical.needs_bare_mysql());
+    }
+
+    #[test]
+    fn historical_sqlserver_legacy_setting_is_canonicalized_to_driver_profile() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_string());
+        config.driver_label = Some("SQL Server".to_string());
+        config.url_params = Some("applicationName=dbx;sqlserverEncryption=disabled".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver-legacy"));
+        assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server legacy compatibility component"));
+        assert_eq!(canonical.url_params.as_deref(), Some("applicationName=dbx"));
+    }
+
+    #[test]
+    fn sqlserver_auto_profile_without_historical_setting_stays_native() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_string());
+        config.driver_label = Some("SQL Server".to_string());
+        config.url_params = Some("applicationName=dbx&encrypt=false".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver"));
+        assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server"));
+        assert_eq!(canonical.url_params.as_deref(), Some("applicationName=dbx&encrypt=false"));
     }
 
     #[test]

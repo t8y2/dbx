@@ -110,14 +110,16 @@ describe("MCP policy settings state", () => {
     expect(settingsDialogSource).toContain("onMcpExecutionModeKeydown($event, 'safe_write')");
   });
 
-  it("keeps MCP client config tabs wrapping without squeezed labels", () => {
+  it("keeps MCP client config tabs on a single scrollable row", () => {
     const tabsStart = settingsDialogSource.indexOf('<Tabs v-model="mcpConfigTab"');
     const tabsEnd = settingsDialogSource.indexOf("</TabsList>", tabsStart);
     const tabsSource = settingsDialogSource.slice(tabsStart, tabsEnd);
 
     expect(tabsStart).toBeGreaterThan(-1);
     expect(tabsEnd).toBeGreaterThan(tabsStart);
-    expect(tabsSource).toContain("flex-wrap");
+    expect(tabsSource).toContain("overflow-x-auto");
+    expect(tabsSource).toContain("max-w-full");
+    expect(tabsSource).not.toContain("flex-wrap");
     expect(tabsSource).not.toContain("grid-cols-");
     expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(8);
     expect(tabsSource).not.toContain("min-w-0 px-");

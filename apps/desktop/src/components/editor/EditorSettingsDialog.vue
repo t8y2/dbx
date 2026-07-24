@@ -5395,7 +5395,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="space-y-2">
                 <Label>{{ t("settings.mcpConfig") }}</Label>
                 <Tabs v-model="mcpConfigTab" class="space-y-3">
-                  <TabsList class="flex h-auto w-full min-w-0 flex-wrap items-center justify-start gap-1 overflow-visible group-data-horizontal/tabs:h-auto">
+                  <TabsList class="h-8 w-full max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden">
                     <TabsTrigger value="claude" class="h-8 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
                     <TabsTrigger value="cursor" class="h-8 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
                     <TabsTrigger value="trae" class="h-8 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>

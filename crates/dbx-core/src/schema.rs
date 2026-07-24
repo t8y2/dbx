@@ -88,9 +88,7 @@ fn sql_like_pattern_matches_case_insensitive(pattern: &str, value: &str) -> bool
                 }
             }
             LikeToken::One => {
-                for value_index in 1..=value_chars.len() {
-                    current[value_index] = previous[value_index - 1];
-                }
+                current[1..].copy_from_slice(&previous[..value_chars.len()]);
             }
             LikeToken::Literal(literal) => {
                 for value_index in 1..=value_chars.len() {

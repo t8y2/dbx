@@ -730,7 +730,9 @@ async fn verify_pool_connection_with_setup_fallback(
             let Some(fallback_mode) = mysql_group_concat_setup_fallback_mode(setup_mode, &err) else {
                 return Err(err);
             };
-            log::info!("MySQL server rejected group_concat_max_len setup syntax; retrying with {fallback_mode:?} mode");
+            log::info!(
+                "MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode"
+            );
             let fallback_pool = create_pool(
                 url,
                 ca_cert_path,
@@ -758,7 +760,14 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     let sphinxql_setup_query_rejected = lower.contains("sphinxql")
         && lower.contains("only 0 and 1 could be used as boolean values")
         && lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'"));
-    if (lower.contains("group_concat_max_len") && setup_query_rejected) || sphinxql_setup_query_rejected {
+    // Some MySQL gateways omit the variable name and report session-variable
+    // changes as a forbidden global-variable operation.
+    let gateway_session_variable_rejected =
+        lower.contains("error 10192 (hy000)") && lower.contains("set global variables is forbidden");
+    if (lower.contains("group_concat_max_len") && setup_query_rejected)
+        || sphinxql_setup_query_rejected
+        || gateway_session_variable_rejected
+    {
         return Some(MySqlSetupMode::Compatible);
     }
 
@@ -4859,6 +4868,27 @@ mod tests {
             mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
             Some(MySqlSetupMode::Compatible)
         );
+    }
+
+    #[test]
+    fn mysql_gateway_forbidden_global_variables_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR 10192 (HY000): SET GLOBAL VARIABLES is forbidden'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_gateway_setup_retry_requires_exact_error_code_and_message() {
+        for error in [
+            "Server error: ERROR 10192 (HY000): operation is forbidden",
+            "Server error: ERROR 1227 (42000): SET GLOBAL VARIABLES is forbidden",
+            "Server error: ERROR 101920 (HY000): SET GLOBAL VARIABLES is forbidden",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
+        }
     }
 
     #[test]

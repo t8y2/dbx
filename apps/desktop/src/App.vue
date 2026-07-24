@@ -2384,6 +2384,7 @@ onUnmounted(() => {
           :show-danger-dialog="showDangerDialog"
           :danger-sql="dangerSql"
           :suppress-danger-confirm="suppressDangerConfirm"
+          :active-database-type="activeConnection?.db_type"
           :show-sql-parameter-dialog="showSqlParameterDialog"
           :sql-parameter-source-sql="sqlParameterSourceSql"
           :sql-parameter-names="sqlParameterNames"

@@ -135,6 +135,13 @@ export function useSqlExecution(deps: {
           toast(t("redis.blockedCommand", { command: firstRedisCommandToken(cmd) }), 5000);
           return;
         }
+        if (safety === "confirm") {
+          dangerSql.value = sql;
+          pendingDangerSql.value = sql;
+          pendingSourceOffset.value = sourceOffset;
+          showDangerDialog.value = true;
+          return;
+        }
       }
     }
     const productionAssessment = assessProductionSql(sql, deps.activeConnection.value, deps.activeTab.value?.database);
@@ -256,7 +263,9 @@ export function useSqlExecution(deps: {
 
   async function onDangerConfirm() {
     const resolved = pendingDangerSql.value ? { sql: pendingDangerSql.value, sourceOffset: pendingSourceOffset.value } : await resolvedExecutableSql();
-    if (suppressDangerConfirm.value) {
+    // Don't disable SQL danger confirmation for Redis confirm commands
+    const isRedisConfirm = deps.activeConnection.value?.db_type === "redis" && classifyRedisCommandSafety(resolved.sql) === "confirm";
+    if (suppressDangerConfirm.value && !isRedisConfirm) {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;

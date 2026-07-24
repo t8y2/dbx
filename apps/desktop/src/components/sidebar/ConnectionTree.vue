@@ -11,7 +11,7 @@ import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSid
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { connectionPasteTargetGroupId, selectedConnectionClipboardNodes, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
+import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -1304,11 +1304,10 @@ function requestSelectedConnectionEdit(): boolean {
 function copySelectedSidebarNames(): boolean {
   const nodes = selectedSidebarNodesInVisibleOrder();
   if (nodes.length === 0) return false;
-  const connectionNodes = selectedConnectionClipboardNodes(nodes);
-  if (connectionNodes.length > 0) {
-    const copiedCount = store.copyConnectionsToTreeClipboard(connectionNodes.map((node) => node.connectionId));
-    if (copiedCount > 0) toast(t("connection.copied"), 2000);
-    return copiedCount > 0;
+  const copiedCount = copySelectedConnectionsToClipboards(nodes, (connectionIds) => store.copyConnectionsToTreeClipboard(connectionIds), copyToClipboard);
+  if (copiedCount > 0) {
+    toast(t("connection.copied"), 2000);
+    return true;
   }
   const tableNodes = nodes.filter((node) => node.type === "table" && !!node.connectionId && !!node.database);
   store.treeClipboard =

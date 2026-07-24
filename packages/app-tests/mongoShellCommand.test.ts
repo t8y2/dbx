@@ -344,6 +344,16 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand unwraps EJSON.deserialize values", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.products.updateOne({_id: ObjectId("507f1f77bcf86cd799439011")}, {$set: {price: EJSON.deserialize({"$numberDecimal":"12.34"}), payload: EJSON.deserialize({"$binary":{"base64":"AQI=","subType":"00"}})}})'), {
+    kind: "update",
+    collection: "products",
+    filter: '{"_id": {"$oid":"507f1f77bcf86cd799439011"}}',
+    update: '{"$set": {"price": {"$numberDecimal":"12.34"}, "payload": {"$binary":{"base64":"AQI=","subType":"00"}}}}',
+    many: false,
+  });
+});
+
 test("parseMongoWriteCommand accepts legacy insert commands", () => {
   assert.deepEqual(
     parseMongoWriteCommand(`db.getCollection("accounting_reconciliations").insert({

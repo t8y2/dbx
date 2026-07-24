@@ -9,10 +9,11 @@ export function normalizeJsonArgument(value: string): string | null {
   if (!trimmed) return "{}";
   const withoutComments = stripMongoJsonComments(trimmed).trim();
   if (!withoutComments) return "{}";
+  const withoutEjsonDeserialize = replaceMongoEjsonDeserialize(withoutComments);
   // Rewrite mongo shell constructors that are not valid JSON into extended JSON
   // (mongo_driver::json_value_to_bson): ObjectId / NumberLong / ISODate / new Date.
-  const withExtendedJson = replaceMongoShellConstructors(withoutComments);
-  const preprocessed = removeTrailingCommas(quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson)));
+  const withExtendedJson = replaceMongoShellConstructors(withoutEjsonDeserialize);
+  const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
   try {
     JSON.parse(preprocessed);
     return preprocessed;
@@ -319,6 +320,48 @@ function shouldQuoteObjectKey(source: string, index: number): boolean {
   return source[after] === ":";
 }
 
+function replaceMongoEjsonDeserialize(source: string): string {
+  const callPattern = /^EJSON\s*\.\s*deserialize\s*\(/;
+  let result = "";
+  let index = 0;
+  while (index < source.length) {
+    const quote = source[index];
+    if (quote === '"' || quote === "'") {
+      const start = index++;
+      while (index < source.length) {
+        if (source[index] === "\\") index += 2;
+        else if (source[index] === quote) {
+          index++;
+          break;
+        } else index++;
+      }
+      result += source.slice(start, index);
+      continue;
+    }
+
+    const match = source.slice(index).match(callPattern);
+    if (!match) {
+      result += source[index++]!;
+      continue;
+    }
+    const openIndex = index + match[0].lastIndexOf("(");
+    const closeIndex = findMatchingParen(source, openIndex);
+    if (closeIndex < 0) {
+      result += source[index++]!;
+      continue;
+    }
+    const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+    if (args.length !== 1 || !args[0]?.trim()) {
+      result += source.slice(index, closeIndex + 1);
+      index = closeIndex + 1;
+      continue;
+    }
+    result += args[0].trim();
+    index = closeIndex + 1;
+  }
+  return result;
+}
+
 function replaceMongoShellConstructors(source: string): string {
   const constructor = /^(ObjectId|NumberLong|ISODate)\s*\(\s*["']([^"']+)["']\s*\)|^(ObjectId|NumberLong)\s*\(\s*(-?\d+)\s*\)|^(?:new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/;
   let result = "";
@@ -397,5 +440,6 @@ function convertSingleQuotedStrings(source: string): string {
     }
   }
 
-  return quote === "'" ? source : result + source.slice(copiedUntil);
+  const converted = quote === "'" ? source : result + source.slice(copiedUntil);
+  return removeTrailingCommas(converted);
 }

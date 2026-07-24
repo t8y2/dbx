@@ -41,6 +41,7 @@ import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNodeComment } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -56,6 +57,7 @@ const pointerInsideTree = ref(false);
 const treeScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
 const plainTreeScrollerRef = ref<HTMLElement | null>(null);
 const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
+const sidebarHorizontalScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarContextMenuRef = ref<{ close: () => void } | null>(null);
 const sidebarContextMenuItems = ref<ContextMenuItem[]>([]);
 const sidebarContextMenuTarget = ref<SidebarActionTarget | null>(null);
@@ -448,26 +450,31 @@ const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryS
 // component, tracking scroll offset to find the topmost visible database-level
 // ancestor. The overlay reuses <TreeItem>, so collapse/expand comes for free.
 const stickyScrollTop = ref(0);
-const sidebarScrollMetrics = ref({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 });
+const sidebarScrollMetrics = ref({ scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 });
 const isScrollingSidebar = ref(false);
 const isDraggingSidebarScrollbar = ref(false);
+const isDraggingSidebarHorizontalScrollbar = ref(false);
 let sidebarScrollbarResizeObserver: ResizeObserver | null = null;
 let sidebarScrollbarAnimationFrame = 0;
 let sidebarScrollbarDragOffset = 0;
+let sidebarHorizontalScrollbarDragOffset = 0;
 let sidebarScrollingTimer = 0;
 
 function updateSidebarScrollMetrics() {
   const scroller = currentTreeScroller();
   if (!scroller) {
-    sidebarScrollMetrics.value = { scrollTop: 0, clientHeight: 0, scrollHeight: 0 };
+    sidebarScrollMetrics.value = { scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 };
     return;
   }
 
   if (useVirtualTree.value) stickyScrollTop.value = scroller.scrollTop;
   sidebarScrollMetrics.value = {
     scrollTop: scroller.scrollTop,
+    scrollLeft: scroller.scrollLeft,
     clientHeight: scroller.clientHeight,
+    clientWidth: scroller.clientWidth,
     scrollHeight: scroller.scrollHeight,
+    scrollWidth: scroller.scrollWidth,
   };
 }
 
@@ -562,19 +569,29 @@ watch(flatNodes, () => {
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
 
 const hasSidebarVerticalOverflow = computed(() => sidebarScrollMetrics.value.scrollHeight > sidebarScrollMetrics.value.clientHeight + 1);
+const hasSidebarHorizontalOverflow = computed(() => settingsStore.editorSettings.sidebarAllowHorizontalScroll && sidebarScrollMetrics.value.scrollWidth > sidebarScrollMetrics.value.clientWidth + 1);
+
+watch(
+  () => settingsStore.editorSettings.sidebarAllowHorizontalScroll,
+  (enabled) =>
+    void nextTick(() => {
+      const scroller = currentTreeScroller();
+      if (!enabled && scroller) scroller.scrollLeft = 0;
+      scheduleSidebarScrollMetricsUpdate();
+    }),
+  { flush: "post" },
+);
 
 function sidebarScrollbarGeometry() {
   const { scrollTop, clientHeight, scrollHeight } = sidebarScrollMetrics.value;
   const trackHeight = sidebarScrollbarTrackRef.value?.clientHeight ?? Math.max(0, clientHeight - 8);
-  if (trackHeight <= 0 || scrollHeight <= clientHeight) {
-    return { thumbTop: 0, thumbHeight: 0, maxThumbTop: 0, maxScrollTop: 0 };
-  }
-
-  const thumbHeight = Math.max(24, Math.min(trackHeight, (clientHeight / scrollHeight) * trackHeight));
-  const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
-  const maxScrollTop = Math.max(1, scrollHeight - clientHeight);
-  const thumbTop = Math.min(maxThumbTop, Math.max(0, (scrollTop / maxScrollTop) * maxThumbTop));
-  return { thumbTop, thumbHeight, maxThumbTop, maxScrollTop };
+  const { thumbOffset, thumbSize, maxThumbOffset, maxScrollOffset } = calculateSidebarScrollbarGeometry({
+    scrollOffset: scrollTop,
+    viewportSize: clientHeight,
+    contentSize: scrollHeight,
+    trackSize: trackHeight,
+  });
+  return { thumbTop: thumbOffset, thumbHeight: thumbSize, maxThumbTop: maxThumbOffset, maxScrollTop: maxScrollOffset };
 }
 
 const sidebarScrollbarThumbStyle = computed<CSSProperties>(() => {
@@ -636,6 +653,79 @@ function onSidebarScrollbarThumbPointerDown(event: PointerEvent) {
   window.addEventListener("pointermove", onSidebarScrollbarPointerMove);
   window.addEventListener("pointerup", stopSidebarScrollbarDrag);
   window.addEventListener("pointercancel", stopSidebarScrollbarDrag);
+}
+
+function sidebarHorizontalScrollbarGeometry() {
+  const { scrollLeft, clientWidth, scrollWidth } = sidebarScrollMetrics.value;
+  const trackWidth = sidebarHorizontalScrollbarTrackRef.value?.clientWidth ?? clientWidth;
+  const { thumbOffset, thumbSize, maxThumbOffset, maxScrollOffset } = calculateSidebarScrollbarGeometry({
+    scrollOffset: scrollLeft,
+    viewportSize: clientWidth,
+    contentSize: scrollWidth,
+    trackSize: trackWidth,
+  });
+  return { thumbLeft: thumbOffset, thumbWidth: thumbSize, maxThumbLeft: maxThumbOffset, maxScrollLeft: maxScrollOffset };
+}
+
+const sidebarHorizontalScrollbarThumbStyle = computed<CSSProperties>(() => {
+  const { thumbLeft, thumbWidth } = sidebarHorizontalScrollbarGeometry();
+  return {
+    width: `${thumbWidth}px`,
+    transform: `translateX(${thumbLeft}px)`,
+  };
+});
+
+function setSidebarHorizontalScrollFromPointer(clientX: number, offset: number) {
+  const scroller = currentTreeScroller();
+  const track = sidebarHorizontalScrollbarTrackRef.value;
+  if (!scroller || !track) return;
+
+  const rect = track.getBoundingClientRect();
+  const { maxThumbLeft, maxScrollLeft } = sidebarHorizontalScrollbarGeometry();
+  if (maxThumbLeft <= 0) return;
+
+  const thumbLeft = Math.min(maxThumbLeft, Math.max(0, clientX - rect.left - offset));
+  scroller.scrollLeft = (thumbLeft / maxThumbLeft) * maxScrollLeft;
+  updateSidebarScrollMetrics();
+}
+
+function stopSidebarHorizontalScrollbarDrag() {
+  isDraggingSidebarHorizontalScrollbar.value = false;
+  window.removeEventListener("pointermove", onSidebarHorizontalScrollbarPointerMove);
+  window.removeEventListener("pointerup", stopSidebarHorizontalScrollbarDrag);
+  window.removeEventListener("pointercancel", stopSidebarHorizontalScrollbarDrag);
+}
+
+function onSidebarHorizontalScrollbarPointerMove(event: PointerEvent) {
+  event.preventDefault();
+  setSidebarHorizontalScrollFromPointer(event.clientX, sidebarHorizontalScrollbarDragOffset);
+}
+
+function onSidebarHorizontalScrollbarTrackPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const { thumbWidth } = sidebarHorizontalScrollbarGeometry();
+  sidebarHorizontalScrollbarDragOffset = thumbWidth / 2;
+  setSidebarHorizontalScrollFromPointer(event.clientX, sidebarHorizontalScrollbarDragOffset);
+  isDraggingSidebarHorizontalScrollbar.value = true;
+  window.addEventListener("pointermove", onSidebarHorizontalScrollbarPointerMove);
+  window.addEventListener("pointerup", stopSidebarHorizontalScrollbarDrag);
+  window.addEventListener("pointercancel", stopSidebarHorizontalScrollbarDrag);
+}
+
+function onSidebarHorizontalScrollbarThumbPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const track = sidebarHorizontalScrollbarTrackRef.value;
+  if (!track) return;
+
+  const rect = track.getBoundingClientRect();
+  const { thumbLeft } = sidebarHorizontalScrollbarGeometry();
+  sidebarHorizontalScrollbarDragOffset = event.clientX - rect.left - thumbLeft;
+  isDraggingSidebarHorizontalScrollbar.value = true;
+  window.addEventListener("pointermove", onSidebarHorizontalScrollbarPointerMove);
+  window.addEventListener("pointerup", stopSidebarHorizontalScrollbarDrag);
+  window.addEventListener("pointercancel", stopSidebarHorizontalScrollbarDrag);
 }
 
 const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
@@ -1374,6 +1464,7 @@ onUnmounted(() => {
   tableSearchFocusRestoreTokens.clear();
   latestTableSearchInteractionParentId = null;
   stopSidebarScrollbarDrag();
+  stopSidebarHorizontalScrollbarDrag();
   sidebarScrollbarResizeObserver?.disconnect();
   window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);
   window.clearTimeout(sidebarScrollingTimer);
@@ -1474,7 +1565,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       </div>
     </div>
     <CustomContextMenu ref="sidebarContextMenuRef" :items="sidebarContextMenuItems" v-slot="contextMenuSlot">
-      <div v-if="flatNodes.length > 0 && useVirtualTree" class="connection-tree-scroll-shell relative min-h-0 flex-1">
+      <div v-if="flatNodes.length > 0 && useVirtualTree" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
         <RecycleScroller
           ref="treeScrollerRef"
           class="sidebar-tree connection-tree-scroller h-full overflow-y-auto"
@@ -1506,11 +1597,26 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
         <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
           <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)" @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)" />
         </div>
-        <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+        <div
+          v-if="hasSidebarVerticalOverflow"
+          ref="sidebarScrollbarTrackRef"
+          class="sidebar-tree-scrollbar"
+          :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar, 'sidebar-tree-scrollbar--with-horizontal': hasSidebarHorizontalOverflow }"
+          @pointerdown="onSidebarScrollbarTrackPointerDown"
+        >
           <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
         </div>
+        <div
+          v-if="hasSidebarHorizontalOverflow"
+          ref="sidebarHorizontalScrollbarTrackRef"
+          class="sidebar-tree-horizontal-scrollbar"
+          :class="{ 'sidebar-tree-horizontal-scrollbar--with-vertical': hasSidebarVerticalOverflow, 'sidebar-tree-horizontal-scrollbar--dragging': isDraggingSidebarHorizontalScrollbar }"
+          @pointerdown="onSidebarHorizontalScrollbarTrackPointerDown"
+        >
+          <div class="sidebar-tree-horizontal-scrollbar__thumb" :style="sidebarHorizontalScrollbarThumbStyle" @pointerdown.stop="onSidebarHorizontalScrollbarThumbPointerDown" />
+        </div>
       </div>
-      <div v-else-if="flatNodes.length > 0" class="connection-tree-scroll-shell relative min-h-0 flex-1">
+      <div v-else-if="flatNodes.length > 0" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
         <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
           <TreeItem
             v-for="item in flatNodes"
@@ -1526,8 +1632,23 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             @group-created="startRenamingCreatedGroup"
           />
         </div>
-        <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+        <div
+          v-if="hasSidebarVerticalOverflow"
+          ref="sidebarScrollbarTrackRef"
+          class="sidebar-tree-scrollbar"
+          :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar, 'sidebar-tree-scrollbar--with-horizontal': hasSidebarHorizontalOverflow }"
+          @pointerdown="onSidebarScrollbarTrackPointerDown"
+        >
           <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
+        </div>
+        <div
+          v-if="hasSidebarHorizontalOverflow"
+          ref="sidebarHorizontalScrollbarTrackRef"
+          class="sidebar-tree-horizontal-scrollbar"
+          :class="{ 'sidebar-tree-horizontal-scrollbar--with-vertical': hasSidebarVerticalOverflow, 'sidebar-tree-horizontal-scrollbar--dragging': isDraggingSidebarHorizontalScrollbar }"
+          @pointerdown="onSidebarHorizontalScrollbarTrackPointerDown"
+        >
+          <div class="sidebar-tree-horizontal-scrollbar__thumb" :style="sidebarHorizontalScrollbarThumbStyle" @pointerdown.stop="onSidebarHorizontalScrollbarThumbPointerDown" />
         </div>
       </div>
     </CustomContextMenu>
@@ -1640,6 +1761,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   width: max-content;
 }
 
+.connection-tree-scroll-shell--horizontal-overflow .connection-tree-scroller {
+  height: calc(100% - 10px);
+}
+
 .sidebar-tree-scrollbar {
   position: absolute;
   top: 0;
@@ -1650,6 +1775,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   cursor: default;
   opacity: 0;
   transition: opacity 120ms ease;
+}
+
+.sidebar-tree-scrollbar--with-horizontal {
+  bottom: 10px;
 }
 
 .sidebar-tree-scrollbar--scrolling,
@@ -1676,5 +1805,41 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   right: 1px;
   width: 8px;
   background: color-mix(in oklch, var(--foreground) 48%, transparent);
+}
+
+.sidebar-tree-horizontal-scrollbar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 10;
+  height: 10px;
+  cursor: default;
+  background: color-mix(in oklch, var(--muted) 45%, transparent);
+}
+
+.sidebar-tree-horizontal-scrollbar--with-vertical {
+  right: 10px;
+}
+
+.sidebar-tree-horizontal-scrollbar__thumb {
+  position: absolute;
+  bottom: 2px;
+  left: 0;
+  height: 6px;
+  min-width: 24px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 34%, transparent);
+  transition:
+    background-color 120ms ease,
+    height 120ms ease,
+    bottom 120ms ease;
+}
+
+.sidebar-tree-horizontal-scrollbar:hover .sidebar-tree-horizontal-scrollbar__thumb,
+.sidebar-tree-horizontal-scrollbar--dragging .sidebar-tree-horizontal-scrollbar__thumb {
+  bottom: 1px;
+  height: 8px;
+  background: color-mix(in oklch, var(--foreground) 50%, transparent);
 }
 </style>

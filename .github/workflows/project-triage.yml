@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PROJECT_TOKEN: ${{ secrets.PROJECT_AUTOMATION_TOKEN }}
-      PROJECT_OWNER: t8y2
+      PROJECT_OWNER: sorchk
       PROJECT_NUMBER: "1"
     steps:
       - uses: actions/checkout@v5

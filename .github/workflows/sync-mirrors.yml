@@ -51,7 +51,7 @@ jobs:
           ATOMGIT_TOKEN: ${{ secrets.ATOMGIT_TOKEN }}
         run: |
           set -euo pipefail
-          git remote add atomgit "https://t8y2:${ATOMGIT_TOKEN}@atomgit.com/t8y2/dbx.git"
+          git remote add atomgit "https://sorchk:${ATOMGIT_TOKEN}@atomgit.com/sorchk/dbx.git"
           git push atomgit --all --force
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             git push atomgit ":refs/tags/${GITHUB_REF_NAME}" || true

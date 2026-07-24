@@ -18,7 +18,7 @@ permissions:
 env:
   APP_NAME: dbx
   PRODUCT_NAME: DBX
-  REPO_OWNER: t8y2
+  REPO_OWNER: sorchk
 
 jobs:
   publish:
@@ -251,7 +251,7 @@ jobs:
           jq '.platforms[]?.url // empty' "$LATEST_JSON"
           jq --arg tag "$TAG" '
             (.platforms[]?.url?) |= (
-              sub("https://github\\.com/sorchk/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/latest/")
+              sub("https://github\\.com/sorchk/dbx/releases/download/" + $tag + "/"; "https://github.com/sorchk/dbx/releases/latest/download/")
               + "?v=" + $tag
             )
           ' "$LATEST_JSON" > "$LATEST_JSON.tmp"

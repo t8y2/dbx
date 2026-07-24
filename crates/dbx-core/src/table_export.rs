@@ -294,6 +294,7 @@ async fn execute_external_driver_export_page(
     primary_keys: &[String],
     active_batch_size: usize,
     result_session_id: Option<String>,
+    cancel_token: CancellationToken,
 ) -> Result<QueryResult, String> {
     let sql = table_cursor_sql(request, db_type, col_names, primary_keys);
     let max_rows = request.row_limit.unwrap_or(i32::MAX as usize).min(i32::MAX as usize).max(1);
@@ -304,7 +305,7 @@ async fn execute_external_driver_export_page(
         &request.database,
         &sql,
         request.schema.as_deref(),
-        None,
+        Some(cancel_token),
         QueryExecutionOptions {
             max_rows: Some(max_rows),
             fetch_size: Some(active_batch_size),
@@ -323,6 +324,7 @@ async fn execute_table_export_count(
     pool_key: &str,
     request: &TableExportRequest,
     sql: &str,
+    cancel_token: CancellationToken,
 ) -> Result<QueryResult, String> {
     if table_export_cursor_kind(state, pool_key).await != Some(TableExportCursorKind::ExternalDriver) {
         return execute_read_on_pool(state, pool_key, sql).await;
@@ -335,7 +337,7 @@ async fn execute_table_export_count(
         &request.database,
         sql,
         request.schema.as_deref(),
-        None,
+        Some(cancel_token),
         QueryExecutionOptions {
             max_rows: Some(1),
             fetch_size: Some(1),
@@ -362,6 +364,7 @@ async fn fetch_table_export_batch(
     cursor_session: &mut Option<TableExportCursorSession>,
     table_read_attempted: &mut bool,
     table_read_completed: &mut bool,
+    cancel_token: CancellationToken,
 ) -> Result<QueryResult, String> {
     if *table_read_completed {
         return Ok(QueryResult {
@@ -425,6 +428,7 @@ async fn fetch_table_export_batch(
                     primary_keys,
                     active_batch_size,
                     None,
+                    cancel_token.clone(),
                 )
                 .await?;
                 if result.has_more {
@@ -479,6 +483,7 @@ async fn fetch_table_export_batch(
                     primary_keys,
                     active_batch_size,
                     Some(session_id.clone()),
+                    cancel_token.clone(),
                 )
                 .await
                 {
@@ -493,7 +498,11 @@ async fn fetch_table_export_batch(
                         Ok(result)
                     }
                     Err(error) => {
-                        close_table_export_cursor_if_open(state, pool_key, request, cursor_session).await;
+                        if cancel_token.is_cancelled() {
+                            cursor_session.take();
+                        } else {
+                            close_table_export_cursor_if_open(state, pool_key, request, cursor_session).await;
+                        }
                         Err(error)
                     }
                 }
@@ -653,12 +662,10 @@ async fn try_export_native_table_stream(
     row_limit: Option<usize>,
     batch_size: usize,
     on_progress: &impl Fn(TableExportProgress),
+    cancelled: Arc<AtomicBool>,
+    cancel_token: CancellationToken,
 ) -> Result<bool, String> {
     let sql = table_cursor_sql(request, db_type, col_names, primary_keys);
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel_token = CancellationToken::new();
-    let cancel_watcher =
-        tokio::spawn(start_export_cancel_watcher(request.export_id.clone(), cancelled.clone(), cancel_token.clone()));
     let mut rows_exported = 0_u64;
     let progress_interval = batch_size.max(1) as u64;
 
@@ -976,8 +983,6 @@ async fn try_export_native_table_stream(
         _ => Ok(false),
     };
 
-    cancel_watcher.abort();
-
     match stream_result {
         Ok(false) => Ok(false),
         Ok(true) => {
@@ -1029,16 +1034,42 @@ pub async fn export_table_data_core(
     request: &TableExportRequest,
     on_progress: impl Fn(TableExportProgress),
 ) -> Result<(), String> {
-    let result = export_table_data_core_inner(state, request, &on_progress).await;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_token = CancellationToken::new();
+    let cancel_watcher =
+        tokio::spawn(start_export_cancel_watcher(request.export_id.clone(), cancelled.clone(), cancel_token.clone()));
+    let last_rows_exported = std::sync::atomic::AtomicU64::new(0);
+    let tracked_progress = |progress: TableExportProgress| {
+        last_rows_exported.store(progress.rows_exported, Ordering::SeqCst);
+        on_progress(progress);
+    };
+    let result =
+        export_table_data_core_inner(state, request, &tracked_progress, cancelled.clone(), cancel_token.clone()).await;
+    cancel_watcher.abort();
     let client_session_id = table_export_client_session_id(&request.export_id);
     let _ = state.close_client_session_pool(&request.connection_id, Some(&request.database), &client_session_id).await;
-    result
+    match result {
+        Err(error) if cancelled.load(Ordering::SeqCst) || error == crate::query::canceled_error() => {
+            on_progress(TableExportProgress {
+                export_id: request.export_id.clone(),
+                table_name: request.table_name.clone(),
+                rows_exported: last_rows_exported.load(Ordering::SeqCst),
+                total_rows: None,
+                status: ExportStatus::Cancelled,
+                error_message: Some("Export cancelled".to_string()),
+            });
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 async fn export_table_data_core_inner(
     state: &AppState,
     request: &TableExportRequest,
     on_progress: &impl Fn(TableExportProgress),
+    cancelled: Arc<AtomicBool>,
+    cancel_token: CancellationToken,
 ) -> Result<(), String> {
     // 1. Get database type
     let db_type = state
@@ -1114,7 +1145,7 @@ async fn export_table_data_core_inner(
             &db_type,
             request.where_input.as_deref(),
         );
-        match execute_table_export_count(state, &pool_key, request, &count_query).await {
+        match execute_table_export_count(state, &pool_key, request, &count_query, cancel_token.clone()).await {
             Ok(result) => result
                 .rows
                 .first()
@@ -1152,6 +1183,8 @@ async fn export_table_data_core_inner(
         row_limit,
         request.batch_size.unwrap_or(DEFAULT_BATCH_SIZE).max(1),
         &on_progress,
+        cancelled,
+        cancel_token.clone(),
     )
     .await?
     {
@@ -1211,6 +1244,7 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    cancel_token.clone(),
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -1298,6 +1332,7 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    cancel_token.clone(),
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -1391,6 +1426,7 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    cancel_token.clone(),
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -1483,6 +1519,7 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    cancel_token.clone(),
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -1564,6 +1601,7 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    cancel_token.clone(),
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -1644,6 +1682,7 @@ async fn export_table_data_core_inner(
                     &mut cursor_session,
                     &mut table_read_attempted,
                     &mut table_read_completed,
+                    cancel_token.clone(),
                 )
                 .await?;
                 let row_count = result.rows.len();
@@ -1804,8 +1843,9 @@ mod tests {
         let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert(config.id.clone(), config.clone());
+        let export_id = format!("export-{}", uuid::Uuid::new_v4());
         let pool_key =
-            format!("{}:session:{}", config.id, table_export_client_session_id("export-1").replace(':', "_"));
+            format!("{}:session:{}", config.id, table_export_client_session_id(&export_id).replace(':', "_"));
         state.connections.write().await.insert(
             pool_key,
             PoolKind::ExternalDriver { driver_id: "jdbc".to_string(), config: Arc::new(config), session },
@@ -1813,7 +1853,7 @@ mod tests {
 
         let output = dir.join("export.csv");
         let request = TableExportRequest {
-            export_id: "export-1".to_string(),
+            export_id,
             connection_id: "conn-1".to_string(),
             database: "PUBLIC".to_string(),
             schema: Some("PUBLIC".to_string()),
@@ -1846,6 +1886,20 @@ mod tests {
         .await;
         let events = progress.lock().unwrap().clone();
         result.map(|_| events)
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_external_driver_call(calls: &std::path::Path, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if std::fs::read_to_string(calls).unwrap_or_default().lines().any(|line| line == expected) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for plugin call: {expected}"));
     }
 
     #[cfg(unix)]
@@ -2195,6 +2249,80 @@ mod tests {
         );
         assert!(fixture.state.connections.read().await.is_empty());
 
+        cleanup_external_driver_export_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_table_export_cancels_blocked_execute() {
+        let fixture = external_driver_export_fixture(
+            r#"  case "$line" in
+    *'"method":"executeQueryPage"'*)
+      echo executeQueryPage >> "$CALLS"
+      sleep 30
+      ;;
+  esac"#,
+            2,
+            None,
+            true,
+        )
+        .await;
+
+        let export = run_external_driver_export(&fixture);
+        let cancel = async {
+            wait_for_external_driver_call(&fixture.calls, "executeQueryPage").await;
+            set_export_cancelled(&fixture.request.export_id).await;
+            tokio::time::Instant::now()
+        };
+        let (result, cancel_requested_at) =
+            tokio::time::timeout(Duration::from_secs(7), async { tokio::join!(export, cancel) })
+                .await
+                .expect("blocked JDBC execute should be interrupted promptly");
+        let progress = result.expect("cancelled JDBC export should complete without an error");
+
+        assert!(cancel_requested_at.elapsed() < Duration::from_secs(2));
+        assert!(matches!(progress.last().map(|event| &event.status), Some(ExportStatus::Cancelled)));
+        assert!(fixture.state.connections.read().await.is_empty());
+        clear_export_cancelled(&fixture.request.export_id).await;
+        cleanup_external_driver_export_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_table_export_cancels_blocked_fetch() {
+        let fixture = external_driver_export_fixture(
+            r#"  case "$line" in
+    *'"method":"executeQueryPage"'*)
+      echo executeQueryPage >> "$CALLS"
+      printf '{"id":%s,"result":{"columns":["id","name"],"rows":[[1,"Ada"],[2,"Grace"]],"affected_rows":0,"execution_time_ms":1,"session_id":"cursor-1","has_more":true}}\n' "$id"
+      ;;
+    *'"method":"fetchQueryPage"'*)
+      echo fetchQueryPage >> "$CALLS"
+      sleep 30
+      ;;
+  esac"#,
+            2,
+            None,
+            true,
+        )
+        .await;
+
+        let export = run_external_driver_export(&fixture);
+        let cancel = async {
+            wait_for_external_driver_call(&fixture.calls, "fetchQueryPage").await;
+            set_export_cancelled(&fixture.request.export_id).await;
+            tokio::time::Instant::now()
+        };
+        let (result, cancel_requested_at) =
+            tokio::time::timeout(Duration::from_secs(7), async { tokio::join!(export, cancel) })
+                .await
+                .expect("blocked JDBC fetch should be interrupted promptly");
+        let progress = result.expect("cancelled JDBC export should complete without an error");
+
+        assert!(cancel_requested_at.elapsed() < Duration::from_secs(2));
+        assert!(matches!(progress.last().map(|event| &event.status), Some(ExportStatus::Cancelled)));
+        assert!(fixture.state.connections.read().await.is_empty());
+        clear_export_cancelled(&fixture.request.export_id).await;
         cleanup_external_driver_export_fixture(fixture);
     }
 

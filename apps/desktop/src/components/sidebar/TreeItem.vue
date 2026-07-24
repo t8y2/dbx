@@ -714,8 +714,8 @@ const tableSearchStyle = computed(() => {
   return {
     paddingLeft: paddingLeft.value,
     "--tree-table-search-row-bg": rowBackgroundColor,
-    "--tree-table-search-input-bg": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.05 : 0.03) : "hsl(var(--background) / 0.56)",
-    "--tree-table-search-border": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.12 : 0.08) : "hsl(var(--border) / 0.36)",
+    "--tree-table-search-input-bg": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.05 : 0.03) : "color-mix(in srgb, var(--background) 56%, transparent)",
+    "--tree-table-search-border": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.12 : 0.08) : "color-mix(in srgb, var(--border) 36%, transparent)",
   };
 });
 
@@ -1339,33 +1339,29 @@ function onKeydown(event: KeyboardEvent) {
 /* Multi-selection treats every selected row as equal; keep focus neutral. */
 .tree-item-active--selection-set:focus {
   background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
-  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.14);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 14%, transparent);
 }
 :root.dark .tree-item-active--selection-set:focus {
   background-color: var(--tree-connection-active-bg, rgb(36 36 36)) !important;
-  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.18);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent);
 }
 
-/* Locate highlight: instant amber, then fade on removal */
+/* Locate highlight: instant warning tint, then fade on removal */
 .tree-item-highlight {
-  background-color: rgb(253 225 167) !important;
-  background-color: oklch(0.92 0.08 85) !important;
+  background-color: var(--warning-bg) !important;
   transition: background-color 0.28s ease-out;
 }
 
 :root.dark .tree-item-highlight {
-  background-color: rgb(110 67 0) !important;
-  background-color: oklch(0.42 0.12 80) !important;
+  background-color: var(--warning-bg) !important;
   transition: background-color 0.28s ease-out;
 }
 
 .tree-item-connection-tint.tree-item-highlight::before {
-  background-color: rgb(253 225 167) !important;
-  background-color: oklch(0.92 0.08 85) !important;
+  background-color: var(--warning-bg) !important;
 }
 
 :root.dark .tree-item-connection-tint.tree-item-highlight::before {
-  background-color: rgb(110 67 0) !important;
-  background-color: oklch(0.42 0.12 80) !important;
+  background-color: var(--warning-bg) !important;
 }
 </style>

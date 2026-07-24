@@ -1811,8 +1811,8 @@ watch(driverStoreTab, (tab) => {
 
 <style>
 .driver-store-focus-highlight {
-  background-color: hsl(var(--primary) / 0.08);
-  box-shadow: inset 0 0 0 1.5px hsl(var(--primary) / 0.45);
+  background-color: color-mix(in srgb, var(--primary) 8%, transparent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--primary) 45%, transparent);
   border-radius: var(--dbx-radius-fixed-6);
 }
 

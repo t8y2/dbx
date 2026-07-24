@@ -392,10 +392,10 @@ const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
 const uiScaleOptions = [0.75, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2, 1.25, 1.5, 1.75];
 const fontSearchTriggerClass =
-  "h-8 w-full max-w-none justify-between gap-1.5 rounded-[6px] border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-transparent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
-const appearanceFontSearchTriggerClass = `${fontSearchTriggerClass} gap-0 pl-2 pr-1.5`;
+  "h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
+const appearanceFontSearchTriggerClass = fontSearchTriggerClass;
 const fontSearchTriggerIconClass = "size-4 text-muted-foreground";
-const appearanceFontSearchTriggerIconClass = "size-2.5 text-muted-foreground";
+const appearanceFontSearchTriggerIconClass = "size-4 text-muted-foreground";
 const disconnectTabHandlingModeDescriptionKey = computed(() => {
   switch (editDisconnectTabHandlingMode.value) {
     case "close-tabs":
@@ -3630,8 +3630,8 @@ onUnmounted(cleanupPreviewEditor);
                     allow-custom
                     :display-name="displayFontFamily"
                     :normalize-custom="normalizeCustomFontFamilyInput"
-                    trigger-variant="outline"
-                    trigger-class="h-9 w-full max-w-none justify-between"
+                    :trigger-class="appearanceFontSearchTriggerClass"
+                    :trigger-icon-class="appearanceFontSearchTriggerIconClass"
                     content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
                     @update:model-value="onTableFontFamilyChange"
                     @update:open="(open: boolean) => open && loadSystemFontOptions()"
@@ -3657,16 +3657,7 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="settings-appearance-group min-w-0">
                   <Label>{{ t("settings.theme") }}</Label>
                   <div class="settings-appearance-button-row flex flex-wrap gap-2">
-                    <Button
-                      v-for="option in appThemeModeOptions"
-                      :key="option.value"
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      class="settings-choice-button h-8 gap-1.5 px-3"
-                      :class="themeMode === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
-                      @click="setThemeMode(option.value)"
-                    >
+                    <Button v-for="option in appThemeModeOptions" :key="option.value" type="button" variant="outline" size="sm" class="settings-choice-button h-8 gap-1.5 px-3" :class="themeMode === option.value ? 'dbx-choice-selected' : 'text-foreground'" @click="setThemeMode(option.value)">
                       <component :is="option.icon" class="h-3.5 w-3.5" />
                       {{ option.label }}
                     </Button>
@@ -3683,7 +3674,7 @@ onUnmounted(cleanupPreviewEditor);
                       variant="outline"
                       size="sm"
                       class="settings-choice-button h-8 px-3"
-                      :class="cornerStyle === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                      :class="cornerStyle === option.value ? 'dbx-choice-selected' : 'text-foreground'"
                       :style="{ borderRadius: option.previewRadius }"
                       @click="setCornerStyle(option.value)"
                     >
@@ -3698,7 +3689,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="settings-appearance-group">
                 <Label>{{ t("settings.appLayout") }}</Label>
                 <div class="settings-appearance-choice-grid">
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editAppLayout === 'separated' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('separated')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editAppLayout === 'separated' ? 'dbx-choice-selected' : ''" @click="setAppLayout('separated')">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger as-child>
@@ -3713,7 +3704,7 @@ onUnmounted(cleanupPreviewEditor);
                       </Tooltip>
                     </TooltipProvider>
                   </Button>
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editAppLayout === 'classic' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('classic')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editAppLayout === 'classic' ? 'dbx-choice-selected' : ''" @click="setAppLayout('classic')">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger as-child>
@@ -3736,13 +3727,13 @@ onUnmounted(cleanupPreviewEditor);
               <div class="settings-appearance-group">
                 <Label>{{ t("settings.tabLayout") }}</Label>
                 <div class="settings-appearance-choice-grid">
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'scroll' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setTabLayout('scroll')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'scroll' ? 'dbx-choice-selected' : ''" @click="setTabLayout('scroll')">
                     <div class="w-full min-w-0 text-left">
                       <div class="text-sm font-medium">{{ t("settings.tabLayoutScroll") }}</div>
                       <div class="text-xs text-muted-foreground">{{ t("settings.tabLayoutScrollDescription") }}</div>
                     </div>
                   </Button>
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'wrap' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setTabLayout('wrap')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'wrap' ? 'dbx-choice-selected' : ''" @click="setTabLayout('wrap')">
                     <div class="w-full min-w-0 text-left">
                       <div class="text-sm font-medium">{{ t("settings.tabLayoutWrap") }}</div>
                       <div class="text-xs text-muted-foreground">{{ t("settings.tabLayoutWrapDescription") }}</div>
@@ -3755,7 +3746,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="settings-appearance-group">
                 <Label>{{ t("settings.iconTheme") }}</Label>
                 <div class="settings-appearance-choice-grid">
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('default')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'dbx-choice-selected' : ''" @click="setIconTheme('default')">
                     <div class="flex items-center gap-3 text-left w-full min-w-0">
                       <img src="/icon-preview-default.png" alt="DBX" class="h-12 w-12 shrink-0" />
                       <TooltipProvider>
@@ -3773,7 +3764,7 @@ onUnmounted(cleanupPreviewEditor);
                       </TooltipProvider>
                     </div>
                   </Button>
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('black')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'dbx-choice-selected' : ''" @click="setIconTheme('black')">
                     <div class="flex items-center gap-3 text-left w-full min-w-0">
                       <img src="/icon-preview-black.png" alt="DBX" class="h-12 w-12 shrink-0" />
                       <TooltipProvider>
@@ -3991,7 +3982,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarActivation") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarActivation('single')">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('single')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.sidebarActivationSingle") }}</div>
                       <div class="text-xs text-muted-foreground">
@@ -3999,7 +3990,7 @@ onUnmounted(cleanupPreviewEditor);
                       </div>
                     </div>
                   </Button>
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarActivation('double')">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('double')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.sidebarActivationDouble") }}</div>
                       <div class="text-xs text-muted-foreground">
@@ -4021,7 +4012,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarObjectDisplay") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'grouped' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarObjectDisplay('grouped')">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'grouped' ? 'dbx-choice-selected' : ''" @click="setSidebarObjectDisplay('grouped')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
                         <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplayGrouped") }}</div>
@@ -4038,7 +4029,7 @@ onUnmounted(cleanupPreviewEditor);
                       </div>
                     </div>
                   </Button>
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'simple' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarObjectDisplay('simple')">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'simple' ? 'dbx-choice-selected' : ''" @click="setSidebarObjectDisplay('simple')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
                         <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplaySimple") }}</div>
@@ -5171,9 +5162,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">API</Label>
                   <div class="col-span-2 flex gap-2">
-                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }" @click="aiSelectApiStyle('completions')">/chat/completions</Button>
-                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }" @click="aiSelectApiStyle('responses')">/responses</Button>
-                    <Button v-if="aiSupportsAnthropicApiStyle" size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'anthropic-messages' }" @click="aiSelectApiStyle('anthropic-messages')">/messages</Button>
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'completions' }" @click="aiSelectApiStyle('completions')">/chat/completions</Button>
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'responses' }" @click="aiSelectApiStyle('responses')">/responses</Button>
+                    <Button v-if="aiSupportsAnthropicApiStyle" size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'anthropic-messages' }" @click="aiSelectApiStyle('anthropic-messages')">/messages</Button>
                   </div>
                 </div>
 
@@ -5320,7 +5311,7 @@ onUnmounted(cleanupPreviewEditor);
                       :tabindex="mcpExecutionMode === 'read_only' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
-                      :class="mcpExecutionMode === 'read_only' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      :class="mcpExecutionMode === 'read_only' ? 'dbx-choice-selected' : ''"
                       @click="onMcpExecutionModeChange('read_only')"
                       @keydown="onMcpExecutionModeKeydown($event, 'read_only')"
                     >
@@ -5335,7 +5326,7 @@ onUnmounted(cleanupPreviewEditor);
                       :tabindex="mcpExecutionMode === 'safe_write' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
-                      :class="mcpExecutionMode === 'safe_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      :class="mcpExecutionMode === 'safe_write' ? 'dbx-choice-selected' : ''"
                       @click="onMcpExecutionModeChange('safe_write')"
                       @keydown="onMcpExecutionModeKeydown($event, 'safe_write')"
                     >
@@ -5351,7 +5342,7 @@ onUnmounted(cleanupPreviewEditor);
                       :tabindex="mcpExecutionMode === 'high_risk_write' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
-                      :class="mcpExecutionMode === 'high_risk_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      :class="mcpExecutionMode === 'high_risk_write' ? 'dbx-choice-selected' : ''"
                       @click="onMcpExecutionModeChange('high_risk_write')"
                       @keydown="onMcpExecutionModeKeydown($event, 'high_risk_write')"
                     >
@@ -5856,34 +5847,6 @@ onUnmounted(cleanupPreviewEditor);
   }
 }
 
-.settings-category-button--active {
-  background-color: rgb(23, 23, 23) !important;
-  color: rgb(255, 255, 255) !important;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-}
-
-.settings-choice-button {
-  color: rgb(23, 23, 23);
-}
-
-.settings-choice-button--selected {
-  border-color: rgb(96, 165, 250) !important;
-  background-color: rgba(59, 130, 246, 0.1) !important;
-  color: rgb(29, 78, 216) !important;
-  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.45) !important;
-}
-
-.settings-choice-button--selected svg {
-  color: currentColor !important;
-}
-
-.settings-choice-card--selected {
-  border-color: rgb(96, 165, 250) !important;
-  background-color: rgba(59, 130, 246, 0.04) !important;
-  color: rgb(23, 23, 23) !important;
-  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45) !important;
-}
-
 .settings-appearance-top-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5927,28 +5890,5 @@ onUnmounted(cleanupPreviewEditor);
   .settings-appearance-choice-grid {
     grid-template-columns: 1fr;
   }
-}
-
-.dark .settings-category-button--active {
-  background-color: rgb(245, 245, 245) !important;
-  color: rgb(23, 23, 23) !important;
-}
-
-.dark .settings-choice-button {
-  color: rgb(245, 245, 245);
-}
-
-.dark .settings-choice-button--selected {
-  border-color: rgb(147, 197, 253) !important;
-  background-color: rgba(96, 165, 250, 0.18) !important;
-  color: rgb(191, 219, 254) !important;
-  box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.5) !important;
-}
-
-.dark .settings-choice-card--selected {
-  border-color: rgb(147, 197, 253) !important;
-  background-color: rgba(96, 165, 250, 0.12) !important;
-  color: rgb(245, 245, 245) !important;
-  box-shadow: 0 0 0 2px rgba(147, 197, 253, 0.45) !important;
 }
 </style>

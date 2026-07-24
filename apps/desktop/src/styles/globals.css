@@ -68,8 +68,19 @@
   /* Aliases for legacy MQ panel styles (used across components/mq/*). */
   --color-error: var(--destructive);
   --color-error-bg: color-mix(in srgb, var(--destructive) 10%, transparent);
+  --color-error-alpha: var(--color-error-bg);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-success-alpha: var(--success-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-alpha: var(--warning-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-info-alpha: var(--info-bg);
   --color-hover: var(--accent);
   --color-background-secondary: var(--muted);
+  --color-text: var(--foreground);
   --color-text-secondary: var(--muted-foreground);
   --color-text-tertiary: color-mix(in srgb, var(--muted-foreground) 70%, transparent);
   --color-border-light: color-mix(in srgb, var(--border) 60%, transparent);
@@ -136,6 +147,21 @@
   --sidebar-accent-foreground: rgb(23 23 23);
   --sidebar-border: rgb(229 229 229);
   --sidebar-ring: rgb(161 161 161);
+  --success: rgb(22 163 74);
+  --success-foreground: rgb(240 253 244);
+  --success-bg: color-mix(in srgb, var(--success) 12%, transparent);
+  --warning: rgb(217 119 6);
+  --warning-foreground: rgb(255 251 235);
+  --warning-bg: color-mix(in srgb, var(--warning) 14%, transparent);
+  --info: rgb(37 99 235);
+  --info-foreground: rgb(239 246 255);
+  --info-bg: color-mix(in srgb, var(--info) 12%, transparent);
+  --dbx-chrome: rgb(245 245 245);
+  --dbx-chrome-muted: rgb(240 240 240);
+  --dbx-content: rgb(255 255 255);
+  --dbx-editor-toolbar: rgb(250 250 250);
+  --dbx-gutter: rgb(243 243 243);
+  --dbx-sidebar-header: rgb(250 250 250);
   --dbx-window-top-border: rgb(0 0 0 / 0.35);
   --dbx-viewport-height: 100vh;
 }
@@ -178,6 +204,62 @@
   border-radius: var(--dbx-radius-fixed-6);
 }
 
+/* Shared control / selection chrome — theme-token driven */
+.dbx-control-chrome:not(.border-0):not(.border-transparent) {
+  border-color: var(--input);
+  background-color: var(--background);
+  box-shadow: none;
+}
+
+.dbx-control-chrome:not(.border-0):not(.border-transparent):hover {
+  background-color: color-mix(in srgb, var(--muted) 55%, var(--background));
+}
+
+.dbx-control-chrome:not(.border-0):not(.border-transparent):focus-visible,
+.dbx-control-chrome:not(.border-0):not(.border-transparent)[data-state="open"],
+.dbx-control-chrome:not(.border-0):not(.border-transparent)[aria-expanded="true"] {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent);
+}
+
+.dark .dbx-control-chrome:not(.border-0):not(.border-transparent) {
+  border-color: var(--input);
+  background-color: color-mix(in srgb, var(--input) 30%, transparent);
+}
+
+.dark .dbx-control-chrome:not(.border-0):not(.border-transparent):hover {
+  background-color: color-mix(in srgb, var(--input) 50%, transparent);
+}
+
+.dark .dbx-control-chrome:not(.border-0):not(.border-transparent):focus-visible,
+.dark .dbx-control-chrome:not(.border-0):not(.border-transparent)[data-state="open"],
+.dark .dbx-control-chrome:not(.border-0):not(.border-transparent)[aria-expanded="true"] {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 40%, transparent);
+}
+
+.dbx-choice-selected {
+  border-color: color-mix(in srgb, var(--primary) 40%, transparent) !important;
+  background-color: color-mix(in srgb, var(--primary) 10%, transparent) !important;
+  color: var(--primary) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent) !important;
+}
+
+.dbx-choice-selected svg {
+  color: currentColor !important;
+}
+
+.dbx-tile-selected {
+  border-color: var(--primary) !important;
+  background-color: color-mix(in srgb, var(--primary) 10%, transparent) !important;
+  color: var(--foreground) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 28%, transparent);
+}
+
+.dbx-tile-selected:hover {
+  background-color: color-mix(in srgb, var(--primary) 14%, transparent) !important;
+}
+
 @supports (height: 100dvh) {
   :root {
     --dbx-viewport-height: min(100vh, 100dvh);
@@ -211,12 +293,27 @@
   --chart-5: rgb(38 38 38);
   --sidebar: rgb(25 25 28);
   --sidebar-foreground: rgb(208 208 213);
-  --sidebar-primary: rgb(20 71 230);
-  --sidebar-primary-foreground: rgb(234 235 239);
+  --sidebar-primary: rgb(208 208 214);
+  --sidebar-primary-foreground: rgb(19 20 22);
   --sidebar-accent: rgb(44 44 48);
   --sidebar-accent-foreground: rgb(221 221 226);
   --sidebar-border: rgb(110 110 114 / 0.28);
   --sidebar-ring: rgb(133 134 139);
+  --success: rgb(74 222 128);
+  --success-foreground: rgb(20 30 24);
+  --success-bg: color-mix(in srgb, var(--success) 16%, transparent);
+  --warning: rgb(251 191 36);
+  --warning-foreground: rgb(40 32 12);
+  --warning-bg: color-mix(in srgb, var(--warning) 16%, transparent);
+  --info: rgb(96 165 250);
+  --info-foreground: rgb(18 28 46);
+  --info-bg: color-mix(in srgb, var(--info) 16%, transparent);
+  --dbx-chrome: rgb(27 27 30);
+  --dbx-chrome-muted: rgb(32 32 36);
+  --dbx-content: rgb(19 20 22);
+  --dbx-editor-toolbar: rgb(25 25 28);
+  --dbx-gutter: rgb(23 23 25);
+  --dbx-sidebar-header: rgb(25 25 28);
   --dbx-window-top-border: rgb(255 255 255 / 0.18);
 }
 
@@ -1215,6 +1312,21 @@ html.theme-claude.dark {
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
+    --success: oklch(0.62 0.17 150);
+    --success-foreground: oklch(0.97 0.02 150);
+    --success-bg: color-mix(in oklch, var(--success) 12%, transparent);
+    --warning: oklch(0.7 0.15 70);
+    --warning-foreground: oklch(0.98 0.02 85);
+    --warning-bg: color-mix(in oklch, var(--warning) 14%, transparent);
+    --info: oklch(0.55 0.18 250);
+    --info-foreground: oklch(0.97 0.02 250);
+    --info-bg: color-mix(in oklch, var(--info) 12%, transparent);
+    --dbx-chrome: oklch(0.97 0 0);
+    --dbx-chrome-muted: oklch(0.95 0 0);
+    --dbx-content: oklch(1 0 0);
+    --dbx-editor-toolbar: oklch(0.985 0 0);
+    --dbx-gutter: oklch(0.965 0 0);
+    --dbx-sidebar-header: oklch(0.985 0 0);
   }
 
   .dark {
@@ -1243,12 +1355,27 @@ html.theme-claude.dark {
     --chart-5: oklch(0.269 0 0);
     --sidebar: oklch(0.215 0.005 285);
     --sidebar-foreground: oklch(0.86 0.006 285);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.94 0.006 285);
+    --sidebar-primary: oklch(0.86 0.008 285);
+    --sidebar-primary-foreground: oklch(0.19 0.004 285);
     --sidebar-accent: oklch(0.295 0.006 285);
     --sidebar-accent-foreground: oklch(0.9 0.006 285);
     --sidebar-border: oklch(0.54 0.006 285 / 28%);
     --sidebar-ring: oklch(0.62 0.008 285);
+    --success: oklch(0.78 0.16 150);
+    --success-foreground: oklch(0.22 0.03 150);
+    --success-bg: color-mix(in oklch, var(--success) 16%, transparent);
+    --warning: oklch(0.82 0.15 85);
+    --warning-foreground: oklch(0.28 0.05 85);
+    --warning-bg: color-mix(in oklch, var(--warning) 16%, transparent);
+    --info: oklch(0.75 0.12 250);
+    --info-foreground: oklch(0.25 0.04 250);
+    --info-bg: color-mix(in oklch, var(--info) 16%, transparent);
+    --dbx-chrome: oklch(0.225 0.005 285);
+    --dbx-chrome-muted: oklch(0.25 0.006 285);
+    --dbx-content: oklch(0.19 0.004 285);
+    --dbx-editor-toolbar: oklch(0.215 0.005 285);
+    --dbx-gutter: oklch(0.205 0.004 285);
+    --dbx-sidebar-header: oklch(0.215 0.005 285);
   }
 
   html.theme-soft {
@@ -1899,46 +2026,40 @@ body.dbx-table-reference-dragging * {
   cursor: row-resize;
 }
 .splitpanes__splitter:hover {
-  background: rgb(39 132 213) !important;
-  background: oklch(0.6 0.15 250) !important;
+  background: var(--ring) !important;
 }
 
 /* Panel resize handles */
 .app-panel-gutter {
-  background: rgb(243 243 243);
-  background: oklch(0.965 0 0);
-}
-.dark .app-panel-gutter {
-  background: rgb(23 23 25);
-  background: oklch(0.205 0.004 285);
-}
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-panel-gutter {
   background: var(--dbx-gutter);
 }
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-toolbar,
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-tab-bar {
+.dark .app-panel-gutter {
+  background: var(--dbx-gutter);
+}
+.app-toolbar,
+.app-tab-bar {
   border-color: var(--border);
   background: var(--dbx-chrome);
 }
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-sidebar-panel {
+.app-sidebar-panel {
   color: var(--sidebar-foreground);
   background: var(--sidebar);
 }
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-layout-classic > .app-sidebar-panel {
+.app-layout-classic > .app-sidebar-panel {
   border-right: 1px solid var(--sidebar-border);
 }
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-sidebar-toolbar,
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .connection-tree-search,
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .sticky-database-header {
+.app-sidebar-toolbar,
+.connection-tree-search,
+.sticky-database-header {
   border-color: var(--sidebar-border);
   background: var(--dbx-sidebar-header);
 }
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-editor-toolbar {
+.app-editor-toolbar {
   border-color: var(--border);
   background: var(--dbx-editor-toolbar);
 }
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-layout-classic > .min-w-0,
-:is(.theme-soft, .theme-graphite, .theme-cobalt, .theme-sage, .theme-amber, .theme-blush, .theme-vscode, .theme-idea, .theme-xcode, .theme-jetbrains, .theme-cursor, .theme-claude) .app-layout-classic > .flex-1 {
+.app-layout-classic > .min-w-0,
+.app-layout-classic > .flex-1 {
   background: var(--dbx-content);
 }
 html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false"] {
@@ -1957,8 +2078,7 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
 }
 .app-layout-classic .panel-resize-handle:hover,
 .app-layout-classic .panel-resize-handle:active {
-  background: rgb(39 132 213);
-  background: oklch(0.6 0.15 250);
+  background: var(--ring);
 }
 
 .panel-resize-handle {

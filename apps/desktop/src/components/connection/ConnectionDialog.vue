@@ -4707,7 +4707,7 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option group flex min-h-24 flex-col items-center justify-center gap-2 rounded-[4px] border bg-background/70 p-3 text-center transition hover:border-primary/40 hover:bg-muted/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'connection-db-picker-option--selected shadow-sm' : 'border-border'"
+                    :class="selectedType === opt.value ? 'dbx-tile-selected shadow-sm' : 'border-border'"
                     :aria-pressed="selectedType === opt.value"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
@@ -4725,7 +4725,7 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option flex items-center gap-3 rounded-[4px] border bg-background px-3 py-2 text-left transition hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'connection-db-picker-option--selected' : 'border-border'"
+                    :class="selectedType === opt.value ? 'dbx-tile-selected' : 'border-border'"
                     :aria-pressed="selectedType === opt.value"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
@@ -7132,30 +7132,8 @@ function openExternalUrl(url: string) {
   color: var(--foreground);
 }
 
-.connection-db-picker-option--selected {
-  border-color: rgb(23, 23, 23);
-  background-color: rgba(23, 23, 23, 0.08);
-  box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.24);
-  color: rgb(10, 10, 10);
-}
-
-.connection-db-picker-option--selected:hover {
-  background-color: rgba(23, 23, 23, 0.12);
-}
-
 .connection-config-step :is([data-slot="input"], [data-slot="select-trigger"], [data-slot="tabs-list"], [data-slot="tabs-trigger"], textarea) {
   border-radius: var(--dbx-radius-fixed-4, 4px);
-}
-
-.dark .connection-db-picker-option--selected {
-  border-color: rgb(208, 208, 214);
-  background-color: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
-  color: rgb(221, 221, 226);
-}
-
-.dark .connection-db-picker-option--selected:hover {
-  background-color: rgba(255, 255, 255, 0.12);
 }
 
 .connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {

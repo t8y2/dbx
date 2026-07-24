@@ -2424,24 +2424,24 @@ async function openExternalUrl(url: string) {
   font-weight: 600;
 }
 .ai-markdown :deep(a) {
-  color: hsl(var(--primary));
+  color: var(--primary);
   text-decoration: underline;
 }
 .ai-markdown :deep(blockquote) {
-  border-left: 2px solid hsl(var(--muted-foreground) / 0.3);
+  border-left: 2px solid color-mix(in srgb, var(--muted-foreground) 30%, transparent);
   padding-left: 0.75em;
   margin: 0.3em 0;
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
 }
 .ai-markdown :deep(code) {
   border-radius: 0.25rem;
-  background: hsl(var(--muted));
+  background: var(--muted);
   padding: 0.125rem 0.375rem;
   font-size: 11px;
   font-family: ui-monospace, monospace;
 }
 .ai-markdown :deep(pre) {
-  background: hsl(var(--muted));
+  background: var(--muted);
   border-radius: 0.375rem;
   padding: 0.5em 0.75em;
   margin: 0.3em 0;
@@ -2464,7 +2464,7 @@ async function openExternalUrl(url: string) {
   max-width: 100%;
   margin: 0.3em 0;
   border-radius: 0.375rem;
-  border: 1px solid hsl(var(--border));
+  border: 1px solid var(--border);
 }
 .ai-markdown :deep(.ai-markdown-table-wrap table) {
   border: none;
@@ -2472,14 +2472,14 @@ async function openExternalUrl(url: string) {
 }
 .ai-markdown :deep(th),
 .ai-markdown :deep(td) {
-  border: 1px solid hsl(var(--border));
+  border: 1px solid var(--border);
   padding: 0.25em 0.5em;
   text-align: left;
   white-space: nowrap;
 }
 .ai-markdown :deep(th) {
   font-weight: 600;
-  background: hsl(var(--muted));
+  background: var(--muted);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -2496,11 +2496,11 @@ async function openExternalUrl(url: string) {
   height: 4px;
   width: 100%;
   cursor: ns-resize;
-  background-color: hsl(var(--border));
+  background-color: var(--border);
   transition: background-color 0.15s ease;
 }
 
 .resize-handle:hover {
-  background-color: hsl(var(--foreground) / 0.2);
+  background-color: color-mix(in srgb, var(--foreground) 20%, transparent);
 }
 </style>

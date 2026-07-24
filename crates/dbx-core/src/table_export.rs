@@ -455,7 +455,7 @@ async fn fetch_table_export_batch(
                 match client.fetch_table_read_page::<QueryResult>(&session_id, active_batch_size).await {
                     Ok(result) => {
                         *cursor_session =
-                            result.session_id.clone().or_else(|| Some(session_id)).map(TableExportCursorSession::Agent);
+                            result.session_id.clone().or(Some(session_id)).map(TableExportCursorSession::Agent);
                         if !result.has_more {
                             *cursor_session = None;
                             *table_read_completed = true;

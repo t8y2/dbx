@@ -944,6 +944,7 @@ jobs:
 
   publish-homebrew-formula:
     name: Publish Homebrew formula
+    if: false  # sorchk/dbx fork does not publish Homebrew; skip until re-enabled.
     runs-on: ubuntu-latest
     needs: [prepare, publish-cli, publish-mcp-server]
     steps:

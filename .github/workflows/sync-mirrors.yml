@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   sync-cnb:
+    if: false  # sorchk/dbx fork does not push to CNB mirror; skip.
     name: Sync to CNB
     runs-on: ubuntu-latest
     steps:
@@ -38,6 +39,7 @@ jobs:
           git push cnb --tags --force
 
   sync-atomgit:
+    if: false  # sorchk/dbx fork does not push to AtomGit mirror; skip.
     name: Sync to AtomGit
     runs-on: ubuntu-latest
     steps:
@@ -59,6 +61,7 @@ jobs:
           git push atomgit --tags --force
 
   sync-gitee:
+    if: false  # sorchk/dbx fork does not push to Gitee mirror; skip.
     name: Sync to Gitee
     runs-on: ubuntu-latest
     steps:

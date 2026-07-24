@@ -16,6 +16,7 @@ env:
 
 jobs:
   sync-release-to-cnb:
+    if: false  # sorchk/dbx fork does not push release assets to CNB; skip.
     name: Sync release to CNB
     runs-on: ubuntu-latest
     steps:

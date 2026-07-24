@@ -22,6 +22,7 @@ env:
 
 jobs:
   publish:
+    if: false  # sorchk/dbx fork does not publish to Homebrew / Scoop / R2; skip.
     name: Publish to Homebrew & Scoop
     runs-on: ubuntu-latest
     steps:
@@ -366,6 +367,7 @@ jobs:
           CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
 
   promote-release:
+    if: false  # depends on publish (Homebrew/Scoop/R2) which is skipped.
     name: Promote to Release
     needs: [publish, upload-r2]
     runs-on: ubuntu-latest
@@ -405,7 +407,7 @@ jobs:
   notify-qq:
     name: QQ Notify
     needs: [promote-release]
-    if: ${{ inputs.notify }}
+    if: false  # sorchk/dbx fork does not notify QQ; skip.
     runs-on: ubuntu-latest
     steps:
       - name: Build message

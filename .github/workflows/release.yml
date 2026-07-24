@@ -15,6 +15,7 @@ env:
 
 jobs:
   nix-packaging:
+    if: false  # sorchk/dbx fork does not publish Nix packages; skip.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
@@ -26,6 +27,7 @@ jobs:
         run: nix build .#dbx-desktop --no-link --print-build-logs
 
   bump-jdbc-plugin-version:
+    if: false  # sorchk/dbx fork does not auto-bump JDBC plugin version; skip.
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.bump.outputs.changed }}
@@ -356,6 +358,7 @@ jobs:
           done
 
   jdbc-plugin:
+    if: false  # depends on bump-jdbc-plugin-version which is skipped.
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
     steps:

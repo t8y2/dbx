@@ -119,9 +119,10 @@ function removeSelected() {
 function updateSshAuthMethod(value: unknown) {
   const profile = selectedSsh.value;
   if (!profile) return;
-  profile.auth_method = value === "key" ? "key" : value === "none" ? "none" : "password";
-  if (profile.auth_method !== "password") profile.password = "";
-  if (profile.auth_method !== "key") {
+  profile.auth_method =
+    value === "key" ? "key" : value === "key+password" ? "key+password" : value === "none" ? "none" : "password";
+  if (profile.auth_method !== "password" && profile.auth_method !== "key+password") profile.password = "";
+  if (profile.auth_method !== "key" && profile.auth_method !== "key+password") {
     profile.key_path = "";
     profile.key_passphrase = "";
   }
@@ -229,19 +230,20 @@ async function testSelected() {
             <SelectContent>
               <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
               <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+              <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
               <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <div v-if="!selectedSsh.auth_method || selectedSsh.auth_method === 'password'" class="grid grid-cols-4 items-center gap-4">
+        <div v-if="!selectedSsh.auth_method || selectedSsh.auth_method === 'password' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshPassword") }}</Label>
           <PasswordInput v-model="selectedSsh.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" />
         </div>
-        <div v-if="selectedSsh.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
+        <div v-if="selectedSsh.auth_method === 'key' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshKeyPath") }}</Label>
           <Input v-model="selectedSsh.key_path" class="col-span-3" placeholder="~/.ssh/id_rsa" />
         </div>
-        <div v-if="selectedSsh.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
+        <div v-if="selectedSsh.auth_method === 'key' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshKeyPassphrase") }}</Label>
           <PasswordInput v-model="selectedSsh.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" />
         </div>

@@ -340,6 +340,18 @@ function visibleLabel(node: TreeNode): string {
   return withValidity(displayLabel(node));
 }
 
+function hasActiveTableNameFilter(node: TreeNode): boolean {
+  if (node.type !== "group-tables" || !node.connectionId || !node.database) return false;
+  const filter = connectionStore.tableNameFilterForScope({
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    nodeKind: node.type,
+    catalog: node.catalog,
+  });
+  return !!filter && (filter.includePatterns.length > 0 || filter.excludePatterns.length > 0);
+}
+
 type DetailTooltipRow = {
   label: string;
   value: string;
@@ -1092,7 +1104,7 @@ function onKeydown(event: KeyboardEvent) {
                 node.objectCount != null
               "
               class="text-muted-foreground text-[10px] shrink-0"
-              >{{ node.objectCount }}</span
+              >{{ node.objectCount }}<span v-if="hasActiveTableNameFilter(node)"> · {{ t("tree.tableNameFilterActive") }}</span></span
             >
             <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
               {{ t("editor.defaultDatabase") }}

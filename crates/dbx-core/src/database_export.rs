@@ -1269,6 +1269,7 @@ pub async fn export_database_sql_core(
         None,
         None,
         None,
+        None,
     )
     .await?;
     // 4. Create file

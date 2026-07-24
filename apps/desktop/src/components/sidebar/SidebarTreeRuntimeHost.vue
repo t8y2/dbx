@@ -314,6 +314,7 @@ const emit = defineEmits<{
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
   "open-visible-schemas": [node: TreeNode];
+  "open-table-name-filters": [node: TreeNode];
   "open-danger-dialog": [request: SidebarDangerDialogRequest];
   "open-dialog-controller": [controller: Record<string, any> | null];
   "open-install-extension": [node: TreeNode];
@@ -4106,6 +4107,13 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
         action: loadAllObjectGroupChildren,
         icon: ChevronsDown,
         disabled: node.isLoading,
+      });
+    }
+    if (node.type === "group-tables") {
+      items.push({
+        label: t("contextMenu.tableNameFilters"),
+        action: () => emit("open-table-name-filters", node),
+        icon: ListFilter,
       });
     }
     if (node.type !== "group-partitions") {

@@ -22,6 +22,7 @@ pub struct SchemaQuery {
     pub signature: Option<String>,
     pub relation_name: Option<String>,
     pub object_types: Option<String>,
+    pub table_name_filter: Option<String>,
     pub apply_visible_filter: Option<bool>,
     pub client_session_id: Option<String>,
 }
@@ -170,6 +171,10 @@ pub async fn list_tables(
     let object_types = q.object_types.as_ref().map(|value| {
         value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).collect::<Vec<_>>()
     });
+    let table_name_filter = q
+        .table_name_filter
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<dbx_core::schema::TableNameFilter>(value).ok());
     let result = if let Some(catalog) = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await {
         dbx_core::schema::list_doris_catalog_tables_core(
             &state.app,
@@ -180,6 +185,7 @@ pub async fn list_tables(
             q.limit,
             q.offset,
             object_types.as_deref(),
+            table_name_filter.as_ref(),
         )
         .await
         .map_err(AppError::from)?
@@ -193,6 +199,7 @@ pub async fn list_tables(
             q.limit,
             q.offset,
             object_types.as_deref(),
+            table_name_filter.as_ref(),
         )
         .await
         .map_err(AppError::from)?
@@ -219,6 +226,7 @@ pub async fn list_objects(
             q.limit,
             q.offset,
             object_types.as_deref(),
+            None,
         )
         .await
         .map_err(AppError::from)?;

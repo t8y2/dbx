@@ -16,6 +16,7 @@ import type {
   ObjectStatistics,
   SchemaInfo,
   SidebarLayout,
+  TableNameFilter,
   TableInfo,
   TreeNode,
   TunnelProfile,
@@ -103,6 +104,7 @@ import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseN
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
+const SIDEBAR_TABLE_NAME_FILTERS_STORAGE_KEY = "dbx-sidebar-table-name-filters";
 const CONNECTION_HEALTH_CHECK_TTL_MS = 2000;
 const CONNECTION_HEALTH_CHECK_TIMEOUT_MS = 5000;
 const METADATA_LOAD_MIN_TIMEOUT_MS = 15_000;
@@ -117,6 +119,40 @@ const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
 const XUGU_TABLE_CHILD_METADATA_AGENT_VERSION = "0.1.23";
 const SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE = "Connection attempt was superseded by a newer attempt";
+
+function normalizeTableNameFilter(filter: Partial<TableNameFilter> | undefined | null): TableNameFilter {
+  const normalizePatterns = (patterns: unknown): string[] => (Array.isArray(patterns) ? patterns.map((pattern) => (typeof pattern === "string" ? pattern.trim() : "")).filter(Boolean) : []);
+  return {
+    includePatterns: normalizePatterns(filter?.includePatterns),
+    excludePatterns: normalizePatterns(filter?.excludePatterns),
+  };
+}
+
+function tableNameFilterIsEmpty(filter: TableNameFilter | undefined | null): boolean {
+  return !filter || (filter.includePatterns.length === 0 && filter.excludePatterns.length === 0);
+}
+
+function loadSidebarTableNameFilters(): Record<string, TableNameFilter> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SIDEBAR_TABLE_NAME_FILTERS_STORAGE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const result: Record<string, TableNameFilter> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const filter = normalizeTableNameFilter(value as Partial<TableNameFilter>);
+      if (!tableNameFilterIsEmpty(filter)) result[key] = filter;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function saveSidebarTableNameFilters(filters: Record<string, TableNameFilter>) {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(SIDEBAR_TABLE_NAME_FILTERS_STORAGE_KEY, JSON.stringify(filters));
+}
+
 function sidebarObjectGroupPageSize(): number {
   const settingsStore = useSettingsStore();
   const size = settingsStore.desktopSettings.sidebar_table_page_size;
@@ -219,6 +255,8 @@ interface LoadTreeOptions {
   searchFilter?: string;
   sidebarTableSearchParentId?: string;
   expectedSidebarTableSearchQuery?: string;
+  tableNameFilterScopeKey?: string;
+  expectedTableNameFilterRevision?: number;
 }
 
 interface PersistedTreeChildrenLoadResult {
@@ -290,6 +328,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const schemaListCache = ref<Record<string, string[]>>({});
   const sidebarSearchQuery = ref("");
   const sidebarTableSearchQueries = ref<Record<string, string>>({});
+  const sidebarTableNameFilters = ref<Record<string, TableNameFilter>>(loadSidebarTableNameFilters());
+  const sidebarTableNameFilterRevisions = new Map<string, number>();
   const completionTableIndex = new Map<string, { touched: number; tables: SqlCompletionTable[] }>();
   const completionObjectIndex = new Map<string, { touched: number; objects: SqlCompletionObject[] }>();
   const completionColumnIndex = new Map<string, { touched: number; columns: SqlCompletionColumn[] }>();
@@ -1161,6 +1201,68 @@ export const useConnectionStore = defineStore("connection", () => {
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
 
+  function tableNameFilterScopeKey(parts: { connectionId?: string | null; database?: string | null; schema?: string | null; nodeKind?: string | null; catalog?: string | null }): string {
+    return schemaCacheKey(parts.connectionId || "", parts.catalog || "", parts.database || "", parts.schema || "", parts.nodeKind || "group-tables");
+  }
+
+  function tableNameFilterForScope(parts: { connectionId?: string | null; database?: string | null; schema?: string | null; nodeKind?: string | null; catalog?: string | null }): TableNameFilter | undefined {
+    return sidebarTableNameFilters.value[tableNameFilterScopeKey(parts)];
+  }
+
+  function activeTableNameFilterForScope(parts: { connectionId?: string | null; database?: string | null; schema?: string | null; nodeKind?: string | null; catalog?: string | null }): TableNameFilter | undefined {
+    const filter = tableNameFilterForScope(parts);
+    return tableNameFilterIsEmpty(filter) ? undefined : filter;
+  }
+
+  function tableNameFilterMetadataExtra(filter: TableNameFilter | undefined): MetadataScopeInput["extra"] {
+    return filter
+      ? {
+          tableNameFilterInclude: filter.includePatterns,
+          tableNameFilterExclude: filter.excludePatterns,
+        }
+      : undefined;
+  }
+
+  function setSidebarTableNameFilter(scopeKey: string, filter: TableNameFilter) {
+    const normalized = normalizeTableNameFilter(filter);
+    const next = { ...sidebarTableNameFilters.value };
+    if (tableNameFilterIsEmpty(normalized)) delete next[scopeKey];
+    else next[scopeKey] = normalized;
+    sidebarTableNameFilters.value = next;
+    saveSidebarTableNameFilters(next);
+    const revision = (sidebarTableNameFilterRevisions.get(scopeKey) ?? 0) + 1;
+    sidebarTableNameFilterRevisions.set(scopeKey, revision);
+    return revision;
+  }
+
+  function removeSidebarTableNameFiltersForConnections(connectionIds: Iterable<string>) {
+    const encodedPrefixes = [...connectionIds].map((connectionId) => `${encodeURIComponent(connectionId)}:`);
+    if (encodedPrefixes.length === 0) return;
+    let changed = false;
+    const next = { ...sidebarTableNameFilters.value };
+    for (const key of Object.keys(next)) {
+      if (!encodedPrefixes.some((prefix) => key.startsWith(prefix))) continue;
+      delete next[key];
+      sidebarTableNameFilterRevisions.delete(key);
+      changed = true;
+    }
+    if (!changed) return;
+    sidebarTableNameFilters.value = next;
+    saveSidebarTableNameFilters(next);
+  }
+
+  function tableNameFilterRevisionMatches(options?: LoadTreeOptions): boolean {
+    if (!options?.tableNameFilterScopeKey) return true;
+    return (sidebarTableNameFilterRevisions.get(options.tableNameFilterScopeKey) ?? 0) === options.expectedTableNameFilterRevision;
+  }
+
+  function listTablesWithOptionalTableNameFilter(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: DatabaseObjectTreeKind[], catalog?: string, tableNameFilter?: TableNameFilter) {
+    if (tableNameFilter) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter);
+    if (catalog) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog);
+    if (objectTypes) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes);
+    return api.listTables(connectionId, database, schema, filter, limit, offset);
+  }
+
   function metadataListDriverProfile(connectionId?: string): string | undefined {
     return connectionId ? metadataDriverProfile(getConfig(connectionId)) : undefined;
   }
@@ -1324,6 +1426,13 @@ export const useConnectionStore = defineStore("connection", () => {
       return { children: [], objectCount: 0, hasMore: false, nextOffset: options.offset };
     }
     const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
+    const tableNameFilter = activeTableNameFilterForScope({
+      connectionId: options.node.connectionId,
+      database: options.node.database,
+      schema: options.effectiveSchema ?? options.querySchema,
+      nodeKind: options.node.type,
+      catalog: options.node.catalog,
+    });
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const fetchOffset = searchFilter ? undefined : options.offset;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -1338,8 +1447,9 @@ export const useConnectionStore = defineStore("connection", () => {
         limit: fetchLimit,
         offset: fetchOffset,
         sidebarDisplayMode: "grouped",
+        extra: tableNameFilterMetadataExtra(tableNameFilter),
       }),
-      () => api.listTables(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes),
+      () => listTablesWithOptionalTableNameFilter(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes, options.node.catalog, tableNameFilter),
       { force: options.force },
     );
     const hasMore = searchFilter ? false : tables.length > options.pageSize;
@@ -1426,6 +1536,12 @@ export const useConnectionStore = defineStore("connection", () => {
     force?: boolean;
   }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number; loadMoreParent?: TableTreeLoadMoreParent }> {
     const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
+    const tableNameFilter = activeTableNameFilterForScope({
+      connectionId: options.connectionId,
+      database: options.database,
+      schema: options.effectiveSchema ?? options.querySchema,
+      nodeKind: "simple-tables",
+    });
     const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
     const fetchOffset = searchFilter ? undefined : options.offset;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -1439,8 +1555,9 @@ export const useConnectionStore = defineStore("connection", () => {
         limit: fetchLimit,
         offset: fetchOffset,
         sidebarDisplayMode: "simple",
+        extra: tableNameFilterMetadataExtra(tableNameFilter),
       }),
-      () => api.listTables(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset),
+      () => listTablesWithOptionalTableNameFilter(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset, undefined, undefined, tableNameFilter),
       { force: options.force },
     );
     const hasMore = searchFilter ? false : tables.length > options.pageSize;
@@ -1824,6 +1941,7 @@ export const useConnectionStore = defineStore("connection", () => {
       pinnedTreeNodeIds.value = prunePinnedTreeNodeIdsForConnection(pinnedTreeNodeIds.value, id);
     }
     persistPinnedTreeNodeIds();
+    removeSidebarTableNameFiltersForConnections(removedIds);
     for (const id of removedIds) {
       clearConnectionError(id);
       connectionErrorRevisions.delete(id);
@@ -3272,8 +3390,14 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (useCachedChildren(node, options)) return;
           const searchFilter = activeTreeLoadSearchFilter(options);
+          const tableNameFilter = activeTableNameFilterForScope({
+            connectionId,
+            database,
+            nodeKind: "simple-tables",
+            catalog,
+          });
           const cacheKey = schemaCacheKey(connectionId, `doris-catalog:${catalog}`, database, "objects-simple-v4");
-          if (!options?.force && !searchFilter) {
+          if (!options?.force && !searchFilter && !tableNameFilter) {
             const cached = await loadPersistedTreeChildren(node, cacheKey);
             if (cached.hit) {
               if (cached.isStale) refreshStaleTreeNode(node);
@@ -3283,7 +3407,7 @@ export const useConnectionStore = defineStore("connection", () => {
           const pageSize = sidebarObjectGroupPageSize();
           const fetchLimit = searchFilter ? pageSize : pageSize + 1;
           const fetchOffset = searchFilter ? undefined : 0;
-          const tables = await withMetadataLoadTimeout(connectionId, api.listTables(connectionId, database, "", searchFilter, fetchLimit, fetchOffset, objectTypesForScope, catalog), "tables");
+          const tables = await withMetadataLoadTimeout(connectionId, listTablesWithOptionalTableNameFilter(connectionId, database, "", searchFilter, fetchLimit, fetchOffset, objectTypesForScope, catalog, tableNameFilter), "tables");
           const hasMore = searchFilter ? false : tables.length > pageSize;
           const pageTables = hasMore ? tables.slice(0, pageSize) : tables;
           indexCompletionTables(connectionId, database, undefined, tableInfosToCompletionTables(pageTables, undefined), catalog);
@@ -3302,7 +3426,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (!canApplyTreeMetadataResult(node)) return;
           node.objectCount = children.filter((child) => child.type !== "load-more").length;
           setChildren(node, children);
-          if (!searchFilter && !options?.sidebarTableSearchParentId) {
+          if (!searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
           }
           node.isExpanded = true;
@@ -3347,8 +3471,17 @@ export const useConnectionStore = defineStore("connection", () => {
           const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
           const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v5" : "objects-grouped-v6");
           const searchFilter = activeTreeLoadSearchFilter(options);
+          const config = getConfig(connectionId);
+          const querySchema = connectionObjectTreeQuerySchema(config, database, schema);
+          const effectiveSchema = connectionObjectTreeNodeSchema(config, database, schema);
+          const tableNameFilter = activeTableNameFilterForScope({
+            connectionId,
+            database,
+            schema: effectiveSchema ?? querySchema,
+            nodeKind: simpleObjectDisplay ? "simple-tables" : "group-tables",
+          });
           const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
-          if (!options?.force && !searchFilter) {
+          if (!options?.force && !searchFilter && !tableNameFilter) {
             const cached = await loadPersistedTreeChildren(node, cacheKey);
             if (cached.hit) {
               if (cached.isStale) refreshStaleTreeNode(node);
@@ -3356,9 +3489,6 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
-          const config = getConfig(connectionId);
-          const querySchema = connectionObjectTreeQuerySchema(config, database, schema);
-          const effectiveSchema = connectionObjectTreeNodeSchema(config, database, schema);
           const nonTableObjectTypes = simpleObjectDisplay ? supportedSidebarObjectTypes(config).filter((objectType) => objectType !== "TABLE") : [];
           let children: TreeNode[];
           let nextObjectCount: number | undefined;
@@ -3394,7 +3524,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (!canApplyTreeMetadataResult(node)) return;
           if (nextObjectCount !== undefined) node.objectCount = nextObjectCount;
           setChildren(node, children);
-          if (!searchFilter && !isSidebarTableSearch) {
+          if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
           }
           node.isExpanded = true;
@@ -3456,8 +3586,15 @@ export const useConnectionStore = defineStore("connection", () => {
           const effectiveSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
           const cacheKey = objectGroupCacheKey(node);
           const searchFilter = activeTreeLoadSearchFilter(options);
+          const tableNameFilter = activeTableNameFilterForScope({
+            connectionId: node.connectionId,
+            database: node.database,
+            schema: effectiveSchema ?? querySchema,
+            nodeKind: node.type,
+            catalog: node.catalog,
+          });
           const isSidebarTableSearch = !!options?.sidebarTableSearchParentId;
-          if (!options?.force && !searchFilter) {
+          if (!options?.force && !searchFilter && !tableNameFilter) {
             const cached = await loadPersistedTreeChildren(node, cacheKey);
             if (cached.hit) {
               if (cached.isStale) refreshStaleTreeNode(node);
@@ -3499,10 +3636,11 @@ export const useConnectionStore = defineStore("connection", () => {
             nextObjectCount = page.objectCount;
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
+          if (!tableNameFilterRevisionMatches(options)) return;
           if (!canApplyTreeMetadataResult(node)) return;
           node.objectCount = nextObjectCount;
           setChildren(node, children);
-          if (!searchFilter && !isSidebarTableSearch) {
+          if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
           }
           node.isExpanded = true;
@@ -4327,6 +4465,20 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     await loadTreeNodeChildren(node, { force: true });
     await restoreExpandedChildren(node, expandedIds, { force: true });
+  }
+
+  async function refreshTreeNodeForTableNameFilter(node: TreeNode, scopeKey: string, revision: number) {
+    invalidateMetadataCachesForNode(node);
+    if (objectTypesForGroupNode(node.type)) {
+      clearLoadedChildrenCache(node.id);
+      await loadObjectGroupChildren(node, {
+        force: true,
+        tableNameFilterScopeKey: scopeKey,
+        expectedTableNameFilterRevision: revision,
+      });
+      return;
+    }
+    await refreshTreeNode(node);
   }
 
   async function refreshDatabaseTreeNode(connectionId: string, database: string) {
@@ -5894,6 +6046,11 @@ export const useConnectionStore = defineStore("connection", () => {
     databaseExportSource,
     sidebarSearchQuery,
     sidebarTableSearchQueries,
+    sidebarTableNameFilters,
+    tableNameFilterScopeKey,
+    tableNameFilterForScope,
+    setSidebarTableNameFilter,
+    refreshTreeNodeForTableNameFilter,
     setSidebarTableSearchQuery,
     refreshSidebarTableSearch,
     createConnectionGroup(name: string, parentGroupId?: string | null) {

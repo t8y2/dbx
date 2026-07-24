@@ -780,6 +780,11 @@ export interface TreeNode {
   };
 }
 
+export interface TableNameFilter {
+  includePatterns: string[];
+  excludePatterns: string[];
+}
+
 export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
 
 export interface TableStructureEditorTarget {

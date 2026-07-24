@@ -161,7 +161,7 @@ describe("connectionStore metadata loading", () => {
   });
 
   it("renders simple-mode table children without waiting for supplemental objects", async () => {
-    const tables: TableInfo[] = [{ name: "users", table_type: "TABLE", comment: null }];
+    const tables: TableInfo[] = [{ name: "users", table_type: "BASE TABLE", comment: null }];
     const listTables = vi.fn().mockResolvedValue(tables);
     const listObjects = vi.fn(() => new Promise(() => undefined));
 
@@ -302,6 +302,105 @@ describe("connectionStore metadata loading", () => {
     expect(loadSchemaCache).toHaveBeenCalledWith("oracle-1:XE:DIP:group-views:objects-v6");
     expect(listTables).toHaveBeenCalledWith(connection.id, "XE", "DIP", undefined, 201, 0, ["VIEW"]);
     expect(storedViewGroup?.children?.map((node) => node.label)).toEqual(["V_ONE", "V_THREE", "V_TWO"]);
+  });
+
+  it("ignores stale table filter refreshes that finish out of order", async () => {
+    let resolveFirst!: (tables: TableInfo[]) => void;
+    let resolveSecond!: (tables: TableInfo[]) => void;
+    let firstStarted!: () => void;
+    let secondStarted!: () => void;
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const secondStartedPromise = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    const listTables = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<TableInfo[]>((resolve) => {
+            resolveFirst = resolve;
+            firstStarted();
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<TableInfo[]>((resolve) => {
+            resolveSecond = resolve;
+            secondStarted();
+          }),
+      );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    const tableGroup: TreeNode = {
+      id: "pg-1:app:public:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      schema: "public",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "pg-1:app:public",
+            label: "public",
+            type: "schema",
+            connectionId: connection.id,
+            database: "app",
+            schema: "public",
+            isExpanded: true,
+            children: [tableGroup],
+          },
+        ],
+      },
+    ];
+    const scopeKey = store.tableNameFilterScopeKey({
+      connectionId: connection.id,
+      database: "app",
+      schema: "public",
+      nodeKind: "group-tables",
+    });
+    const currentTableGroup = () => store.treeNodes[0].children?.[0].children?.[0] as TreeNode;
+
+    const firstRevision = store.setSidebarTableNameFilter(scopeKey, { includePatterns: ["old_%"], excludePatterns: [] });
+    const firstRefresh = store.refreshTreeNodeForTableNameFilter(currentTableGroup(), scopeKey, firstRevision);
+    await firstStartedPromise;
+    const secondRevision = store.setSidebarTableNameFilter(scopeKey, { includePatterns: ["new_%"], excludePatterns: [] });
+    const secondRefresh = store.refreshTreeNodeForTableNameFilter(currentTableGroup(), scopeKey, secondRevision);
+    await secondStartedPromise;
+
+    resolveSecond([{ name: "new_users", table_type: "BASE TABLE", comment: null }]);
+    await secondRefresh;
+    expect(currentTableGroup().children?.map((node) => node.label)).toEqual(["new_users"]);
+
+    resolveFirst([{ name: "old_users", table_type: "BASE TABLE", comment: null }]);
+    await firstRefresh;
+    expect(currentTableGroup().children?.map((node) => node.label)).toEqual(["new_users"]);
   });
 
   it("clears a stale connection error after a schema metadata retry succeeds", async () => {

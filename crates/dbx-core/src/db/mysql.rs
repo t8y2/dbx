@@ -13,6 +13,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
+use crate::schema::{table_name_filter_matches, TableNameFilter};
 use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
@@ -1702,7 +1703,7 @@ pub(super) fn database_infos_from_names(
 }
 
 pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
-    list_tables_filtered(pool, database, None, None, None, None).await
+    list_tables_filtered(pool, database, None, None, None, None, None).await
 }
 
 pub async fn list_tables_filtered(
@@ -1712,8 +1713,9 @@ pub async fn list_tables_filtered(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<TableInfo>, String> {
-    let sql = list_tables_sql(database, filter, limit, offset, object_types);
+    let sql = list_tables_sql(database, filter, limit, offset, object_types, table_name_filter);
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let result = match conn.query_iter(&sql).await {
         Ok(result) => result,
@@ -1721,9 +1723,9 @@ pub async fn list_tables_filtered(
             log::debug!(
                 "Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES failed: {err}"
             );
-            return list_tables_show_filtered(pool, database, filter)
-                .await
-                .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types));
+            return list_tables_show_filtered(pool, database, filter).await.map(|tables| {
+                filter_list_tables_fallback(tables, filter, limit, offset, object_types, table_name_filter)
+            });
         }
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -1748,7 +1750,7 @@ pub async fn list_tables_filtered(
         log::debug!("Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables");
         return list_tables_show_filtered(pool, database, filter)
             .await
-            .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types));
+            .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types, table_name_filter));
     }
 
     Ok(tables)
@@ -1760,6 +1762,7 @@ fn filter_list_tables_fallback(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> Vec<TableInfo> {
     let filter = filter.unwrap_or("").trim();
     let normalized_object_types: Vec<String> = object_types
@@ -1778,6 +1781,7 @@ fn filter_list_tables_fallback(
             crate::sql::contains_or_fuzzy_match(&table.name, filter)
                 || table.comment.as_deref().is_some_and(|comment| crate::sql::contains_or_fuzzy_match(comment, filter))
         })
+        .filter(|table| table_name_filter_matches(&table.name, table_name_filter))
         .filter(|table| if table.table_type.eq_ignore_ascii_case("VIEW") { wants_view } else { wants_table })
         .skip(offset.unwrap_or(0))
         .take(limit.unwrap_or(usize::MAX))
@@ -1790,6 +1794,7 @@ fn list_tables_sql(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> String {
     let mut sql = format!(
         "SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = {}",
@@ -1833,6 +1838,7 @@ fn list_tables_sql(
             ));
         }
     }
+    append_table_name_filter_sql(&mut sql, table_name_filter);
     sql.push_str(" ORDER BY TABLE_NAME");
     if let Some(limit) = limit {
         sql.push_str(&format!(" LIMIT {}", limit));
@@ -1841,6 +1847,34 @@ fn list_tables_sql(
         sql.push_str(&format!(" OFFSET {}", offset));
     }
     sql
+}
+
+fn quote_table_name_like_pattern(pattern: &str) -> String {
+    quote_value(&pattern.trim().to_ascii_lowercase())
+}
+
+fn append_table_name_filter_sql(sql: &mut String, filter: Option<&TableNameFilter>) {
+    let Some(filter) = filter.filter(|filter| !filter.is_empty()) else {
+        return;
+    };
+    let include_patterns: Vec<&str> =
+        filter.include_patterns.iter().map(|pattern| pattern.trim()).filter(|pattern| !pattern.is_empty()).collect();
+    let exclude_patterns: Vec<&str> =
+        filter.exclude_patterns.iter().map(|pattern| pattern.trim()).filter(|pattern| !pattern.is_empty()).collect();
+    if !include_patterns.is_empty() {
+        let clauses = include_patterns
+            .iter()
+            .map(|pattern| format!("LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\'", quote_table_name_like_pattern(pattern)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        sql.push_str(&format!(" AND ({clauses})"));
+    }
+    for pattern in exclude_patterns {
+        sql.push_str(&format!(
+            " AND LOWER(TABLE_NAME) NOT LIKE {} ESCAPE '\\\\'",
+            quote_table_name_like_pattern(pattern)
+        ));
+    }
 }
 
 pub async fn completion_assistant_search(
@@ -4090,7 +4124,7 @@ mod tests {
 
     #[test]
     fn mysql_list_tables_sql_applies_filter_limit_and_offset() {
-        let sql = list_tables_sql("app", Some("user_%"), Some(101), Some(200), None);
+        let sql = list_tables_sql("app", Some("user_%"), Some(101), Some(200), None, None);
 
         assert!(sql.contains("FROM information_schema.TABLES"));
         assert!(sql.contains("TABLE_SCHEMA = 'app'"));
@@ -4105,7 +4139,7 @@ mod tests {
 
     #[test]
     fn mysql_list_tables_sql_adds_fuzzy_filter_pattern() {
-        let sql = list_tables_sql("app", Some("sysu"), Some(100), None, None);
+        let sql = list_tables_sql("app", Some("sysu"), Some(100), None, None, None);
 
         assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%sysu%' ESCAPE '\\\\'"));
         assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%sysu%' ESCAPE '\\\\'"));
@@ -4115,7 +4149,7 @@ mod tests {
 
     #[test]
     fn mysql_list_tables_sql_skips_fuzzy_filter_for_single_character() {
-        let sql = list_tables_sql("app", Some("u"), Some(100), None, None);
+        let sql = list_tables_sql("app", Some("u"), Some(100), None, None, None);
 
         assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%' ESCAPE '\\\\'"));
         assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%u%' ESCAPE '\\\\'"));
@@ -4127,13 +4161,13 @@ mod tests {
     #[test]
     fn mysql_list_tables_sql_filters_table_type_before_pagination() {
         let tables = vec!["TABLE".to_string()];
-        let table_sql = list_tables_sql("app", None, Some(1000), None, Some(&tables));
+        let table_sql = list_tables_sql("app", None, Some(1000), None, Some(&tables), None);
         assert!(table_sql.contains("TABLE_TYPE <> 'VIEW'"));
         assert!(table_sql.find("TABLE_TYPE <> 'VIEW'") < table_sql.find("ORDER BY TABLE_NAME"));
         assert!(table_sql.find("ORDER BY TABLE_NAME") < table_sql.find("LIMIT 1000"));
 
         let views = vec!["VIEW".to_string()];
-        let view_sql = list_tables_sql("app", None, Some(1000), None, Some(&views));
+        let view_sql = list_tables_sql("app", None, Some(1000), None, Some(&views), None);
         assert!(view_sql.contains("TABLE_TYPE = 'VIEW'"));
     }
 
@@ -4195,6 +4229,21 @@ mod tests {
     }
 
     #[test]
+    fn mysql_list_tables_sql_applies_table_name_filter_before_pagination() {
+        let filter = TableNameFilter {
+            include_patterns: vec!["ads_cp%".to_string(), "user_%".to_string()],
+            exclude_patterns: vec!["%_bak".to_string()],
+        };
+        let sql = list_tables_sql("app", None, Some(100), Some(200), None, Some(&filter));
+
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE 'ads_cp%' ESCAPE '\\\\'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE 'user_%' ESCAPE '\\\\'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) NOT LIKE '%_bak' ESCAPE '\\\\'"));
+        assert!(sql.find("LOWER(TABLE_NAME) LIKE").unwrap() < sql.find("ORDER BY TABLE_NAME").unwrap());
+        assert!(sql.find("ORDER BY TABLE_NAME").unwrap() < sql.find("LIMIT 100").unwrap());
+    }
+
+    #[test]
     fn mysql_show_tables_fallback_applies_filter_type_limit_and_offset() {
         let rows = vec![
             TableInfo {
@@ -4219,7 +4268,8 @@ mod tests {
                 parent_name: None,
             },
         ];
-        let filtered = filter_list_tables_fallback(rows, Some("audit"), Some(1), Some(1), Some(&["TABLE".to_string()]));
+        let filtered =
+            filter_list_tables_fallback(rows, Some("audit"), Some(1), Some(1), Some(&["TABLE".to_string()]), None);
 
         assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["audit_2025"]);
 
@@ -4230,7 +4280,7 @@ mod tests {
             parent_schema: None,
             parent_name: None,
         }];
-        let filtered = filter_list_tables_fallback(rows, Some("ood"), None, None, Some(&["TABLE".to_string()]));
+        let filtered = filter_list_tables_fallback(rows, Some("ood"), None, None, Some(&["TABLE".to_string()]), None);
 
         assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["t_0001"]);
     }

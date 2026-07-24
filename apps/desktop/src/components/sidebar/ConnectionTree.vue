@@ -6,7 +6,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import type { ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import type { ObjectSourceKind, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards } from "@/lib/sidebar/sidebarSearchTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
@@ -31,6 +31,8 @@ import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { cancelPendingSidebarDataOpen, runSidebarDataOpenImmediately, type SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { codeMirrorSqlDialect } from "@/lib/database/jdbcDialect";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { createSidebarActionTarget, findSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
@@ -78,6 +80,10 @@ const sidebarVisibleDatabasesTarget = ref<TreeNode | null>(null);
 const sidebarVisibleDatabasesOpen = ref(false);
 const sidebarVisibleSchemasTarget = ref<TreeNode | null>(null);
 const sidebarVisibleSchemasOpen = ref(false);
+const sidebarTableNameFilterTarget = ref<TreeNode | null>(null);
+const sidebarTableNameFilterOpen = ref(false);
+const tableNameFilterIncludeDraft = ref("");
+const tableNameFilterExcludeDraft = ref("");
 let sidebarActionGeneration = 0;
 const sidebarDdlDatabaseType = computed(() => {
   const connectionId = sidebarDdlTarget.value?.connectionId;
@@ -1029,11 +1035,13 @@ function beginSidebarAction(): number {
   sidebarProcedureOpen.value = false;
   sidebarVisibleDatabasesOpen.value = false;
   sidebarVisibleSchemasOpen.value = false;
+  sidebarTableNameFilterOpen.value = false;
   sidebarDdlTarget.value = null;
   sidebarObjectSourceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
+  sidebarTableNameFilterTarget.value = null;
   return sidebarActionGeneration;
 }
 
@@ -1106,6 +1114,61 @@ function openSidebarVisibleSchemas(node: TreeNode) {
   sidebarVisibleSchemasOpen.value = true;
 }
 
+function tableNameFilterScopeForNode(node: TreeNode): string | null {
+  if (!node.connectionId || !node.database) return null;
+  return store.tableNameFilterScopeKey({
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    nodeKind: node.type,
+    catalog: node.catalog,
+  });
+}
+
+function patternsFromDraft(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((pattern) => pattern.trim())
+    .filter(Boolean);
+}
+
+function openSidebarTableNameFilters(node: TreeNode) {
+  const scopeKey = tableNameFilterScopeForNode(node);
+  if (!scopeKey) return;
+  beginSidebarAction();
+  sidebarTableNameFilterTarget.value = createSidebarActionTarget(node);
+  const filter = store.sidebarTableNameFilters[scopeKey];
+  tableNameFilterIncludeDraft.value = filter?.includePatterns.join("\n") ?? "";
+  tableNameFilterExcludeDraft.value = filter?.excludePatterns.join("\n") ?? "";
+  sidebarTableNameFilterOpen.value = true;
+}
+
+async function saveSidebarTableNameFilters() {
+  const target = sidebarTableNameFilterTarget.value;
+  if (!target) return;
+  const scopeKey = tableNameFilterScopeForNode(target);
+  if (!scopeKey) return;
+  const filter: TableNameFilter = {
+    includePatterns: patternsFromDraft(tableNameFilterIncludeDraft.value),
+    excludePatterns: patternsFromDraft(tableNameFilterExcludeDraft.value),
+  };
+  const revision = store.setSidebarTableNameFilter(scopeKey, filter);
+  sidebarTableNameFilterOpen.value = false;
+  const currentTarget = findSidebarActionTarget(store.treeNodes, target);
+  if (currentTarget) {
+    try {
+      await store.refreshTreeNodeForTableNameFilter(currentTarget, scopeKey, revision);
+    } catch (error: any) {
+      toast(error?.message || String(error), 5000);
+    }
+  }
+}
+
+function clearSidebarTableNameFilters() {
+  tableNameFilterIncludeDraft.value = "";
+  tableNameFilterExcludeDraft.value = "";
+}
+
 function openSidebarProcedureSql(sql: string) {
   const target = sidebarProcedureTarget.value;
   if (!target?.connectionId || !target.database || !sql) return;
@@ -1151,6 +1214,10 @@ watch(sidebarVisibleDatabasesOpen, (open) => {
 
 watch(sidebarVisibleSchemasOpen, (open) => {
   if (!open) sidebarVisibleSchemasTarget.value = null;
+});
+
+watch(sidebarTableNameFilterOpen, (open) => {
+  if (!open) sidebarTableNameFilterTarget.value = null;
 });
 
 function collapseAllTreeNodes() {
@@ -1396,6 +1463,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"
       @open-visible-schemas="openSidebarVisibleSchemas"
+      @open-table-name-filters="openSidebarTableNameFilters"
       @request-group-rename="startRenamingCreatedGroup"
       @open-danger-dialog="openSidebarDangerDialog"
       @open-dialog-controller="updateSidebarTreeItemDialogController"
@@ -1583,6 +1651,42 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :connection-name="sidebarVisibleSchemasTarget.label"
       :database="sidebarVisibleSchemasTarget.database"
     />
+    <Dialog v-model:open="sidebarTableNameFilterOpen">
+      <DialogContent class="max-w-xl">
+        <DialogHeader class="space-y-2">
+          <DialogTitle>{{ t("contextMenu.tableNameFilters") }}</DialogTitle>
+          <DialogDescription>
+            {{ t("contextMenu.tableNameFiltersDescription") }}
+          </DialogDescription>
+        </DialogHeader>
+        <div class="space-y-5 py-1">
+          <div class="rounded-lg border bg-muted/20 p-3.5">
+            <label class="mb-2.5 block text-sm font-medium leading-none">{{ t("contextMenu.tableNameFilterInclude") }}</label>
+            <textarea
+              v-model="tableNameFilterIncludeDraft"
+              class="min-h-32 w-full resize-y rounded-md border bg-background px-3 py-2.5 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-2 focus:ring-ring/40"
+              :placeholder="t('contextMenu.tableNameFilterIncludePlaceholder')"
+            ></textarea>
+          </div>
+          <div class="rounded-lg border bg-muted/20 p-3.5">
+            <label class="mb-2.5 block text-sm font-medium leading-none">{{ t("contextMenu.tableNameFilterExclude") }}</label>
+            <textarea
+              v-model="tableNameFilterExcludeDraft"
+              class="min-h-32 w-full resize-y rounded-md border bg-background px-3 py-2.5 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-2 focus:ring-ring/40"
+              :placeholder="t('contextMenu.tableNameFilterExcludePlaceholder')"
+            ></textarea>
+          </div>
+          <p class="rounded-md bg-muted/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{{ t("contextMenu.tableNameFilterLikeHint") }}</p>
+        </div>
+        <DialogFooter class="gap-2 sm:justify-between">
+          <Button variant="ghost" @click="clearSidebarTableNameFilters">{{ t("common.clear") }}</Button>
+          <div class="flex gap-2">
+            <Button variant="outline" @click="sidebarTableNameFilterOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+            <Button @click="saveSidebarTableNameFilters">{{ t("common.save") }}</Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <SidebarDangerConfirmDialog
       v-if="sidebarDangerDialogRequest"
       v-model:open="sidebarDangerDialogOpen"

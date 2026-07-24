@@ -5062,9 +5062,10 @@ mod tests {
         state.get_or_create_pool("sqlite-conn", None).await.unwrap();
         let databases = schema::list_databases_core(&state, "sqlite-conn").await.unwrap();
         assert!(databases.iter().any(|database| database.name == "analytics"));
-        let tables = schema::list_tables_core(&state, "sqlite-conn", "analytics", "analytics", None, None, None, None)
-            .await
-            .unwrap();
+        let tables =
+            schema::list_tables_core(&state, "sqlite-conn", "analytics", "analytics", None, None, None, None, None)
+                .await
+                .unwrap();
         assert!(tables.iter().any(|table| table.name == "events"));
 
         state.connections.write().await.clear();
@@ -5933,9 +5934,10 @@ for line in sys.stdin:
 
         let schemas = schema::list_schemas_core(&state, "kwdb-live", &database).await.unwrap();
         assert!(schemas.iter().any(|schema| schema == test_schema));
-        let tables = schema::list_tables_core(&state, "kwdb-live", &database, test_schema, None, None, None, None)
-            .await
-            .unwrap();
+        let tables =
+            schema::list_tables_core(&state, "kwdb-live", &database, test_schema, None, None, None, None, None)
+                .await
+                .unwrap();
         assert!(tables.iter().any(|table| table.name == "devices" && table.table_type == "BASE TABLE"));
         let columns = schema::get_columns_core(&state, "kwdb-live", &database, test_schema, "devices").await.unwrap();
         let id_column = columns.iter().find(|column| column.name == "id").expect("id column should be listed");

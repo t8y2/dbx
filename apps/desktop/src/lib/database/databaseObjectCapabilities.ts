@@ -9,6 +9,7 @@ export interface DatabaseObjectCapabilities {
 }
 
 const TABLE_VIEW_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW"];
+const TABLE_VIEW_MV_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW"];
 
 const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"];
 
@@ -40,8 +41,8 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["cloudflare-d1", TABLE_VIEW_OBJECTS],
   ["duckdb", TABLE_VIEW_OBJECTS],
   ["clickhouse", TABLE_VIEW_OBJECTS],
-  ["doris", TABLE_VIEW_OBJECTS],
-  ["starrocks", TABLE_VIEW_OBJECTS],
+  ["doris", TABLE_VIEW_MV_OBJECTS],
+  ["starrocks", TABLE_VIEW_MV_OBJECTS],
   ["hive", TABLE_VIEW_OBJECTS],
   ["spark", TABLE_VIEW_OBJECTS],
   ["trino", TABLE_VIEW_OBJECTS],

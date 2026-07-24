@@ -2274,8 +2274,11 @@ fn classify_starrocks_materialized_views(
         }
     };
 
+    // Trust `information_schema.materialized_views` as the authoritative source so that
+    // both synchronous MVs (which `SHOW FULL TABLES` reports as `VIEW`) and asynchronous
+    // MVs (which `SHOW FULL TABLES` reports as `BASE TABLE`) are classified consistently.
     for table in tables {
-        if table.table_type.eq_ignore_ascii_case("VIEW") && materialized_view_names.contains(&table.name) {
+        if materialized_view_names.contains(&table.name) {
             table.table_type = "MATERIALIZED_VIEW".to_string();
         }
     }
@@ -4667,6 +4670,37 @@ mod tests {
         assert_eq!(
             tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
             vec![("orders", "BASE TABLE"), ("orders_view", "VIEW"), ("orders_mv", "MATERIALIZED_VIEW")]
+        );
+    }
+
+    #[test]
+    fn starrocks_async_materialized_views_reported_as_base_table_are_reclassified() {
+        // Async materialized views (StarRocks >= 2.5) appear as `BASE TABLE` in
+        // `SHOW FULL TABLES`. Classification must trust the
+        // `information_schema.materialized_views` source.
+        let mut tables = vec![
+            TableInfo {
+                name: "orders".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_async_mv".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let materialized_views = HashSet::from(["orders_async_mv".to_string()]);
+
+        classify_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+
+        assert_eq!(
+            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
+            vec![("orders", "BASE TABLE"), ("orders_async_mv", "MATERIALIZED_VIEW")]
         );
     }
 

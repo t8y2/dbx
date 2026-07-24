@@ -36,15 +36,16 @@ test("keeps appearance section spacing and help icons aligned without stacked ma
   assert.match(settingsDialogSource, /<div class="flex min-w-0 items-center gap-1">\s*<Label class="min-w-0 whitespace-normal leading-tight">\{\{ t\("settings\.dataGridFontFamily"\) \}\}<\/Label>/);
 });
 
-test("matches the result grid font selector styling with date and time selectors", () => {
+test("matches the result grid font selector styling with appearance form controls", () => {
   const selectorStart = settingsDialogSource.indexOf(`:model-value="editTableFontFamily"`);
   const selectorEnd = settingsDialogSource.indexOf(`</SearchableSelect>`, selectorStart);
   const selectorSource = settingsDialogSource.slice(selectorStart, selectorEnd);
 
   assert.ok(selectorStart >= 0);
   assert.ok(selectorEnd > selectorStart);
-  assert.match(selectorSource, /trigger-variant="outline"/);
-  assert.match(selectorSource, /trigger-class="h-9 w-full max-w-none justify-between"/);
+  // SearchableSelect defaults to outline; appearance fonts share the h-8 control chrome class.
+  assert.match(selectorSource, /:trigger-class="appearanceFontSearchTriggerClass"/);
+  assert.match(settingsDialogSource, /const fontSearchTriggerClass =\s*"h-8 w-full max-w-none justify-between/);
 });
 
 test("uses a table font label in view options without changing the settings label", () => {

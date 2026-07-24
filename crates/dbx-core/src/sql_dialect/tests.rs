@@ -316,7 +316,7 @@ fn builds_table_data_where_and_schema_queries() {
         build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Kingbase),
             identifier_quote: Some("`".to_string()),
-            schema: Some("cqbq_ls".to_string()),
+            schema: Some("nacos-v3".to_string()),
             table_name: "actionlogs".to_string(),
             table_type: None,
             primary_keys: Vec::new(),
@@ -329,7 +329,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT * FROM `cqbq_ls`.`actionlogs` LIMIT 100;"
+        "SELECT * FROM `nacos-v3`.`actionlogs` LIMIT 100;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

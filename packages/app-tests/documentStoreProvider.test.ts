@@ -211,6 +211,11 @@ test("uses elemMatch only for AND conditions on the same array object", () => {
 test("formats document query object input", () => {
   assert.equal(formatDocumentQueryInput('{profile:{city:"上海"},status:"active"}', "mongodb"), ["{", '  "profile": {', '    "city": "上海"', "  },", '  "status": "active"', "}"].join("\n"));
 });
+test("normalizes Mongo shell syntax in manual document filters", () => {
+  assert.equal(currentDocumentFilterJson("{id:NumberLong('144115205316939462')}", null, "mongodb"), JSON.stringify({ id: { $numberLong: "144115205316939462" } }));
+  assert.equal(currentDocumentFilterJson("{owner:ObjectId('507f1f77bcf86cd799439011'),status:'active'}", null, "mongodb"), JSON.stringify({ owner: { $oid: "507f1f77bcf86cd799439011" }, status: "active" }));
+});
+
 test("preserves MongoDB int64 document filter values", () => {
   const id = "2048938405781032962";
   const firstUnsafeInteger = "9007199254740993";

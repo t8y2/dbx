@@ -71,6 +71,15 @@ pub struct DocumentFindRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ElasticsearchCountDocumentsRequest {
+    pub connection_id: String,
+    pub index: String,
+    pub filter: Option<String>,
+    pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DocumentInsertRequest {
     pub connection_id: String,
     pub database: String,
@@ -167,7 +176,7 @@ pub async fn list_collections(
 pub async fn find_documents(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentFindRequest>,
-) -> Result<Json<dbx_core::db::mongo_driver::MongoDocumentResult>, AppError> {
+) -> Result<Json<dbx_core::db::document_result::DocumentQueryResult>, AppError> {
     let result = run_cancellable(
         &state,
         req.execution_id,
@@ -181,6 +190,24 @@ pub async fn find_documents(
             req.filter.as_deref(),
             req.projection.as_deref(),
             req.sort.as_deref(),
+        ),
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+pub async fn elasticsearch_count_documents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ElasticsearchCountDocumentsRequest>,
+) -> Result<Json<u64>, AppError> {
+    let result = run_cancellable(
+        &state,
+        req.execution_id,
+        dbx_core::document_ops::count_elasticsearch_documents_core(
+            &state.app,
+            &req.connection_id,
+            &req.index,
+            req.filter.as_deref(),
         ),
     )
     .await?;

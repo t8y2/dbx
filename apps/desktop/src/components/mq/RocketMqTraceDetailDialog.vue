@@ -118,7 +118,7 @@ watch(
   width: min(860px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
   overflow: auto;
-  border-radius: 10px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
   display: flex;
@@ -190,7 +190,7 @@ watch(
 
 .panel-error {
   padding: 12px 14px;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-error-bg);
   color: var(--color-error);
   font-size: 13px;
@@ -206,7 +206,7 @@ watch(
 .message-row {
   padding: 10px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background-secondary);
 }
 
@@ -223,7 +223,7 @@ watch(
   padding: 10px;
   max-height: 240px;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
@@ -241,7 +241,7 @@ watch(
 .message-headers span {
   padding: 2px 6px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--dbx-radius-fixed-4);
   font-size: 12px;
   color: var(--color-text-secondary);
 }
@@ -249,7 +249,7 @@ watch(
 .btn-secondary {
   padding: 7px 16px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;

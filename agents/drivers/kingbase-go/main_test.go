@@ -163,6 +163,11 @@ func (connection *modeDetectionConn) QueryContext(_ context.Context, query strin
 	connection.state.mu.Unlock()
 
 	switch {
+	case strings.Contains(query, "SELECT current_database()"):
+		return &valueRows{
+			columns: []string{"current_database", "current_user", "version", "current_schema"},
+			rows:    [][]driver.Value{{"test", "system", "KingbaseES", "public"}},
+		}, nil
 	case strings.Contains(query, "LOWER(name) = 'database_mode'"):
 		if connection.state.databaseErr != nil {
 			return nil, connection.state.databaseErr
@@ -467,6 +472,32 @@ func TestDetectMySQLCompatModePrefersDatabaseModeOverSQLModePresence(t *testing.
 	defer state.mu.Unlock()
 	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "database_mode") {
 		t.Fatalf("database_mode should be authoritative when present: %v", state.queries)
+	}
+}
+
+func TestConnectionInfoReportsCompatibilityIdentifierQuote(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		mysqlCompat bool
+		expected    string
+	}{
+		{name: "postgres compatible", expected: `"`},
+		{name: "mysql compatible", mysqlCompat: true, expected: "`"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			db := openModeDetectionDB(t, &modeDetectionDriverState{})
+			server := newServer()
+			server.db = db
+			server.mode.mysqlCompat = testCase.mysqlCompat
+
+			info, err := server.connectionInfo()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info["identifierQuote"] != testCase.expected {
+				t.Fatalf("unexpected identifier quote: %#v", info["identifierQuote"])
+			}
+		})
 	}
 }
 

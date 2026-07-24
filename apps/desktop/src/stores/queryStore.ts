@@ -49,7 +49,7 @@ import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEd
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
 import { estimateQueryResultsBytes, selectInactiveResultEvictions } from "@/lib/tabs/queryResultSize";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
-import { isMysqlExecutionErrorResult } from "@/lib/query/queryResultError";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/query/queryResultArchive";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -3472,7 +3472,7 @@ export const useQueryStore = defineStore("query", () => {
           current.results[activeGroupIndex] = results[0];
           current.result = results[0];
         } else if (results.length > 1) {
-          const errorResultIndex = results.findIndex((result) => isMysqlExecutionErrorResult(result, conn?.db_type));
+          const errorResultIndex = results.findIndex((result) => isQueryExecutionErrorResult(result));
           const activeResultIndex = results.findIndex((result) => result.columns.length > 0);
           const resultIndex = errorResultIndex >= 0 ? errorResultIndex : (preservedResultIndex(results, current.activeResultIndex, options?.preserveActiveResultIndex) ?? (activeResultIndex >= 0 ? activeResultIndex : 0));
           current.results = results;

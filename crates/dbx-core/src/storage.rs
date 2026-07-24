@@ -1650,6 +1650,19 @@ impl Storage {
         self.load_app_state_value(APP_STATE_OPEN_TABS_KEY).await
     }
 
+    /// Persist open tabs under an isolated state key while sharing the rest of the database.
+    ///
+    /// Desktop development builds use this to avoid overwriting the installed app's
+    /// in-progress SQL when both instances use the same data directory.
+    pub async fn save_open_tabs_state_with_key(&self, key: &str, state: &serde_json::Value) -> Result<(), String> {
+        self.save_app_state_value(key, state).await
+    }
+
+    /// Load open tabs from an isolated state key.
+    pub async fn load_open_tabs_state_with_key(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
+        self.load_app_state_value(key).await
+    }
+
     pub async fn save_saved_sql_editor_positions(&self, positions: &serde_json::Value) -> Result<(), String> {
         self.save_app_state_value(APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY, positions).await
     }
@@ -1745,6 +1758,26 @@ impl Storage {
         let mut settings = self.load_app_settings_json().await?;
         settings.remove("webdav_sync_secrets_passphrase");
         self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn save_max_agent_turns(&self, max_agent_turns: u32) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.insert(
+            "max_agent_turns".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(crate::agent_loop::clamp_max_agent_turns(
+                max_agent_turns,
+            ))),
+        );
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_max_agent_turns(&self) -> Result<u32, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings
+            .get("max_agent_turns")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| crate::agent_loop::clamp_max_agent_turns(value.min(u32::MAX as u64) as u32))
+            .unwrap_or(crate::agent_loop::DEFAULT_MAX_AGENT_TURNS))
     }
 }
 
@@ -4385,6 +4418,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn max_agent_turns_defaults_and_persists_clamped() {
+        let path = temp_db_path("max-agent-turns");
+        let storage = Storage::open(&path).await.unwrap();
+
+        assert_eq!(storage.load_max_agent_turns().await.unwrap(), crate::agent_loop::DEFAULT_MAX_AGENT_TURNS);
+
+        storage.save_max_agent_turns(100).await.unwrap();
+        assert_eq!(storage.load_max_agent_turns().await.unwrap(), 100);
+
+        // Out-of-range values are clamped on save so raw DB edits cannot disable the safety limit.
+        storage.save_max_agent_turns(0).await.unwrap();
+        assert_eq!(storage.load_max_agent_turns().await.unwrap(), crate::agent_loop::MIN_MAX_AGENT_TURNS);
+        storage.save_max_agent_turns(u32::MAX).await.unwrap();
+        assert_eq!(storage.load_max_agent_turns().await.unwrap(), crate::agent_loop::MAX_MAX_AGENT_TURNS);
+    }
+
+    #[tokio::test]
     async fn password_hash_preserves_existing_desktop_settings() {
         let path = temp_db_path("password-preserve-desktop-settings");
         let storage = Storage::open(&path).await.unwrap();
@@ -4463,6 +4513,30 @@ mod tests {
         assert_eq!(
             storage.load_editor_settings().await.unwrap(),
             Some(serde_json::json!({ "openTabsRestoreMode": "pinned" }))
+        );
+        assert_eq!(
+            storage.load_open_tabs_state().await.unwrap().and_then(|value| value.get("activeTabId").cloned()),
+            Some(serde_json::json!("tab-1"))
+        );
+
+        let development_open_tabs_key = "development_open_tabs";
+        storage
+            .save_open_tabs_state_with_key(
+                development_open_tabs_key,
+                &serde_json::json!({
+                    "tabs": [{ "id": "tab-2", "title": "Development", "connectionId": "pg", "database": "app", "sql": "select 2" }],
+                    "activeTabId": "tab-2"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .load_open_tabs_state_with_key(development_open_tabs_key)
+                .await
+                .unwrap()
+                .and_then(|value| value.get("activeTabId").cloned()),
+            Some(serde_json::json!("tab-2"))
         );
         assert_eq!(
             storage.load_open_tabs_state().await.unwrap().and_then(|value| value.get("activeTabId").cloned()),

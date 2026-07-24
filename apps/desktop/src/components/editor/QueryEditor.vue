@@ -4370,7 +4370,7 @@ defineExpose({
   margin: 0;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   vertical-align: middle;
   white-space: nowrap;
   transition:
@@ -4417,7 +4417,7 @@ defineExpose({
   margin: 0;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: transparent;
   color: transparent;
   vertical-align: middle;

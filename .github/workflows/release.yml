@@ -15,6 +15,7 @@ env:
 
 jobs:
   nix-packaging:
+    if: false  # sorchk/dbx fork does not publish Nix packages; skip.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
@@ -26,6 +27,7 @@ jobs:
         run: nix build .#dbx-desktop --no-link --print-build-logs
 
   bump-jdbc-plugin-version:
+    if: false  # sorchk/dbx fork does not auto-bump JDBC plugin version; skip.
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.bump.outputs.changed }}
@@ -83,20 +85,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-          - platform: macos-15-intel
-            target: x86_64-apple-darwin
+          # sorchk/dbx fork only ships Linux desktop (amd64 + arm64); macOS / Windows entries
+          # are intentionally excluded — add them back when restoring cross-platform releases.
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-          - platform: windows-2022
-            target: x86_64-pc-windows-msvc
-            arch: x64
-          - platform: windows-2022
-            target: aarch64-pc-windows-msvc
-            arch: arm64
 
     runs-on: ${{ matrix.platform }}
     env:
@@ -209,7 +203,7 @@ jobs:
         id: release-notes
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           BODY="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             -f tag_name="${GITHUB_REF_NAME}" \
@@ -227,7 +221,7 @@ jobs:
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_PASSWORD || '' }}
@@ -248,9 +242,10 @@ jobs:
 
       - name: Upload Windows portable ZIP
         if: matrix.arch == 'x64' || matrix.arch == 'arm64'
+        timeout-minutes: 20
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $arch = "${{ matrix.arch }}"
@@ -287,7 +282,13 @@ jobs:
           Set-Content -Path (Join-Path $portableDir "portable-update.json") -Value $manifest -Encoding utf8NoBOM
 
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
-          pnpm tauri signer sign $zipName
+          # Tauri prompts interactively when the password is omitted, so pass an explicit
+          # empty value for the existing passwordless updater key used by DBX releases.
+          if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            pnpm tauri signer sign "--password=" $zipName
+          } else {
+            pnpm tauri signer sign $zipName
+          }
 
           $signatureName = "${zipName}.sig"
           if (!(Test-Path $signatureName)) {
@@ -301,7 +302,7 @@ jobs:
         if: matrix.arch == 'x64' || matrix.arch == 'arm64'
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $arch = "${{ matrix.arch }}"
@@ -334,7 +335,7 @@ jobs:
     steps:
       - name: Remove standalone updater signature assets
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         shell: bash
         run: |
           mapfile -t SIG_ASSETS < <(
@@ -357,6 +358,7 @@ jobs:
           done
 
   jdbc-plugin:
+    if: false  # depends on bump-jdbc-plugin-version which is skipped.
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
     steps:
@@ -387,7 +389,7 @@ jobs:
 
       - name: Upload JDBC plugin asset
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
             "plugins/jdbc/dist/dbx-jdbc-plugin-${{ steps.jdbc-plugin.outputs.version }}.zip" \
@@ -397,7 +399,7 @@ jobs:
 
       - name: Add JDBC plugin metadata to latest.json
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/latest-json"
@@ -409,7 +411,7 @@ jobs:
             "$RUNNER_TEMP/latest-json/latest.json" \
             "${{ steps.jdbc-plugin.outputs.version }}" \
             "1" \
-            "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip"
+            "https://github.com/sorchk/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip"
           gh release upload "${GITHUB_REF_NAME}" \
             "$RUNNER_TEMP/latest-json/latest.json" \
             --repo "${GITHUB_REPOSITORY}" \
@@ -422,7 +424,7 @@ jobs:
     steps:
       - name: Publish draft release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
 
   sync-release-to-cnb:
@@ -437,7 +439,7 @@ jobs:
         env:
           TAG_NAME: ${{ github.ref_name }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
@@ -481,11 +483,14 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to CNB Registry
+        if: ${{ env.CNB_TOKEN != '' }}
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.CNB_REGISTRY }}
           username: cnb
-          password: ${{ secrets.CNB_TOKEN }}
+          password: ${{ env.CNB_TOKEN }}
 
       - name: Build and push Docker Hub by digest
         id: build-dockerhub
@@ -509,12 +514,17 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.platform }}
 
       - name: Export digests
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           mkdir -p /tmp/digests/dockerhub /tmp/digests/cnb
           dockerhub_digest="${{ steps.build-dockerhub.outputs.digest }}"
-          cnb_digest="${{ steps.build-cnb.outputs.digest }}"
           touch "/tmp/digests/dockerhub/${dockerhub_digest#sha256:}"
-          touch "/tmp/digests/cnb/${cnb_digest#sha256:}"
+          # CNB digest is only present when CNB_TOKEN is configured
+          if [ -n "${CNB_TOKEN:-}" ] && [ -n "${{ steps.build-cnb.outputs.digest }}" ]; then
+            cnb_digest="${{ steps.build-cnb.outputs.digest }}"
+            touch "/tmp/digests/cnb/${cnb_digest#sha256:}"
+          fi
 
       - name: Upload Docker Hub digest
         uses: actions/upload-artifact@v7
@@ -560,24 +570,32 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to CNB Registry
+        if: ${{ env.CNB_TOKEN != '' }}
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.CNB_REGISTRY }}
           username: cnb
-          password: ${{ secrets.CNB_TOKEN }}
+          password: ${{ env.CNB_TOKEN }}
 
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create manifest list and push
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
         run: |
           docker buildx imagetools create \
             -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:${{ steps.version.outputs.version }} \
             -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:latest \
             $(cd /tmp/digests/dockerhub && printf '${{ secrets.DOCKERHUB_USERNAME }}/dbx@sha256:%s ' *)
 
-          docker buildx imagetools create \
-            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
-            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
-            $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
+          # Only push CNB manifest if CNB digests were uploaded
+          if [ -n "${CNB_TOKEN:-}" ] && compgen -G "/tmp/digests/cnb/*" > /dev/null; then
+            docker buildx imagetools create \
+              -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
+              -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
+              $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
+          fi

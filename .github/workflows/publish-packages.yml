@@ -6,6 +6,11 @@ on:
       tag:
         description: "Release tag (e.g. v0.3.10)"
         required: true
+      notify:
+        description: "Send release notification"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -13,10 +18,11 @@ permissions:
 env:
   APP_NAME: dbx
   PRODUCT_NAME: DBX
-  REPO_OWNER: t8y2
+  REPO_OWNER: sorchk
 
 jobs:
   publish:
+    if: false  # sorchk/dbx fork does not publish to Homebrew / Scoop / R2; skip.
     name: Publish to Homebrew & Scoop
     runs-on: ubuntu-latest
     steps:
@@ -35,7 +41,7 @@ jobs:
 
       - name: Download release assets
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           mkdir -p artifacts
           VERSION="${{ steps.version.outputs.version }}"
@@ -225,7 +231,7 @@ jobs:
 
       - name: Download release assets
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           mkdir -p assets
           gh release download "${{ steps.version.outputs.tag }}" \
@@ -246,7 +252,7 @@ jobs:
           jq '.platforms[]?.url // empty' "$LATEST_JSON"
           jq --arg tag "$TAG" '
             (.platforms[]?.url?) |= (
-              sub("https://github\\.com/t8y2/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/latest/")
+              sub("https://github\\.com/sorchk/dbx/releases/download/" + $tag + "/"; "https://github.com/sorchk/dbx/releases/latest/download/")
               + "?v=" + $tag
             )
           ' "$LATEST_JSON" > "$LATEST_JSON.tmp"
@@ -275,7 +281,7 @@ jobs:
       - name: Keep latest five versioned releases in R2
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -361,6 +367,7 @@ jobs:
           CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
 
   promote-release:
+    if: false  # depends on publish (Homebrew/Scoop/R2) which is skipped.
     name: Promote to Release
     needs: [publish, upload-r2]
     runs-on: ubuntu-latest
@@ -370,7 +377,7 @@ jobs:
 
       - name: Promote prerelease to release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           TAG="${{ github.event.inputs.tag }}"
           gh release edit "${TAG}" \
@@ -382,7 +389,7 @@ jobs:
       - name: Promote CNB prerelease to release
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
@@ -400,12 +407,13 @@ jobs:
   notify-qq:
     name: QQ Notify
     needs: [promote-release]
+    if: false  # sorchk/dbx fork does not notify QQ; skip.
     runs-on: ubuntu-latest
     steps:
       - name: Build message
         id: msg
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           TAG: ${{ github.event.inputs.tag }}
         run: |
           RELEASE_JSON=$(gh release view "${TAG}" --repo "${{ github.repository }}" --json tagName,name,url,body)

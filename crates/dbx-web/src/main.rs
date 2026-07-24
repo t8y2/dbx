@@ -476,6 +476,10 @@ async fn main() {
         .route("/document-store/list-databases", post(routes::document_store::list_databases))
         .route("/document-store/list-collections", post(routes::document_store::list_collections))
         .route("/document-store/find-documents", post(routes::document_store::find_documents))
+        .route(
+            "/document-store/elasticsearch-count-documents",
+            post(routes::document_store::elasticsearch_count_documents),
+        )
         .route("/document-store/list-gridfs-buckets", post(routes::document_store::list_gridfs_buckets))
         .route("/document-store/create-gridfs-bucket", post(routes::document_store::create_gridfs_bucket))
         .route("/document-store/delete-gridfs-bucket", post(routes::document_store::delete_gridfs_bucket))
@@ -610,8 +614,8 @@ async fn main() {
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
         .route(
-            "/app-settings/favorites-state",
-            get(routes::app_settings::load_favorites_state).post(routes::app_settings::save_favorites_state),
+            "/app-settings/max-agent-turns",
+            get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
         )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync

@@ -61,3 +61,9 @@ test("document save uses shared identity plan and write helpers", () => {
   assert.doesNotMatch(source, /async function rekeyDocumentStoreDocument/);
   assert.doesNotMatch(source, /async function replaceDocumentStoreDocument/);
 });
+
+test("document query inputs apply on Enter and reserve Shift+Enter for newlines", () => {
+  const source = documentBrowserSource();
+  assert.equal(source.match(/@keydown\.enter\.exact\.prevent="applyFilter"/g)?.length, 2);
+  assert.doesNotMatch(source, /@keydown\.shift\.enter\.prevent="applyFilter"/);
+});

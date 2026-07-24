@@ -16,6 +16,7 @@ import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
+import { clampDocumentPage, documentPageRequestLimit, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
 import {
   arrayObjectAncestorPathForDocumentField,
   buildDocumentFilterCondition,
@@ -84,7 +85,9 @@ type ViewMode = "document" | "table";
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
 const lastGridColumns = ref<string[]>([]);
-const total = ref(0);
+const total = ref<number | undefined>(undefined);
+const totalIsExact = ref(true);
+const paginationTotal = ref<number | undefined>(undefined);
 const loading = ref(false);
 const documentLoadExecutionId = ref("");
 const documentLoadCancelling = ref(false);
@@ -123,7 +126,18 @@ const tableFindPaneWidth = ref<number | null>(null);
 const isResizingTableSearchSplit = ref(false);
 let tableSearchSplitStartX = 0;
 let tableSearchSplitStartWidth = 0;
+let elasticsearchCountKey: string | null = null;
+let elasticsearchExactTotal: number | undefined;
+let elasticsearchPaginationLowerBound: number | undefined;
+let elasticsearchCountExecutionId = "";
+let elasticsearchCountGeneration = 0;
 const documentStoreProvider = computed(() => documentStoreProviderFor(props.databaseType));
+
+const pageTotal = computed(() => paginationTotal.value ?? total.value ?? 0);
+const documentRequestLimit = computed(() => {
+  if (documentStoreProvider.value.kind !== "elasticsearch" || paginationTotal.value === undefined) return pageSize.value;
+  return documentPageRequestLimit(page.value, pageSize.value, paginationTotal.value);
+});
 
 const tableFindPaneStyle = computed(() => {
   if (tableFindPaneWidth.value == null) return {};
@@ -131,7 +145,7 @@ const tableFindPaneStyle = computed(() => {
 });
 const documentFontStyle = computed(() => documentViewerFontStyle(settingsStore.editorSettings));
 const documentStoreLabels = computed(() => ({
-  documentsLabel: documentStoreProvider.value.documentsLabel({ total: total.value, t }),
+  documentsLabel: documentStoreProvider.value.documentsLabel({ total: total.value ?? 0, t }),
   queryPreview: documentQueryPreview.value,
 }));
 
@@ -436,7 +450,7 @@ const documentQueryPreview = computed(() => {
     filterJson: filter,
     sortJson: sortInput.value.trim(),
     skip: page.value * pageSize.value,
-    limit: pageSize.value,
+    limit: documentRequestLimit.value,
   });
 });
 
@@ -580,6 +594,7 @@ async function gridSave(changes: DocumentGridChanges) {
     await api.documentInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc));
   }
 
+  if (isEs) resetElasticsearchTotals({ preservePaginationTotal: true });
   await load();
 }
 
@@ -684,6 +699,100 @@ function startDocumentLoadingTimer() {
   }, 100);
 }
 
+function elasticsearchCountFilterKey(filter: string | undefined): string {
+  return JSON.stringify([props.connectionId, props.database, props.collection, filter ?? ""]);
+}
+
+function cancelElasticsearchCount() {
+  elasticsearchCountGeneration++;
+  const executionId = elasticsearchCountExecutionId;
+  elasticsearchCountExecutionId = "";
+  if (executionId) void api.cancelQuery(executionId);
+}
+
+function resetElasticsearchTotals(options: { preservePaginationTotal?: boolean } = {}) {
+  const nextTotals = resetElasticsearchDocumentTotals(paginationTotal.value, options.preservePaginationTotal);
+  cancelElasticsearchCount();
+  elasticsearchCountKey = null;
+  elasticsearchExactTotal = undefined;
+  elasticsearchPaginationLowerBound = undefined;
+  paginationTotal.value = nextTotals.paginationTotal;
+  total.value = nextTotals.total;
+  totalIsExact.value = nextTotals.totalIsExact;
+}
+
+function clampPageToPaginationTotal(): boolean {
+  const cap = paginationTotal.value;
+  if (cap === undefined) return false;
+  const nextPage = clampDocumentPage(page.value, pageSize.value, cap);
+  if (page.value === nextPage) return false;
+  page.value = nextPage;
+  return true;
+}
+
+function startElasticsearchExactCount(filter: string | undefined) {
+  if (elasticsearchCountExecutionId || elasticsearchExactTotal !== undefined || !elasticsearchCountKey) return;
+  const key = elasticsearchCountKey;
+  const executionId = uuid();
+  const generation = elasticsearchCountGeneration;
+  elasticsearchCountExecutionId = executionId;
+
+  void api
+    .elasticsearchCountDocuments(props.connectionId, props.collection, filter, executionId)
+    .then((exactCount) => {
+      if (generation !== elasticsearchCountGeneration || key !== elasticsearchCountKey || executionId !== elasticsearchCountExecutionId || !Number.isFinite(exactCount) || exactCount < 0) {
+        return;
+      }
+      elasticsearchExactTotal = exactCount;
+      const totals = resolveElasticsearchDocumentTotals(elasticsearchPaginationLowerBound ?? exactCount, false, exactCount);
+      total.value = totals.total;
+      totalIsExact.value = totals.totalIsExact;
+      paginationTotal.value = totals.paginationTotal;
+      if (clampPageToPaginationTotal()) void load();
+    })
+    .catch(() => {
+      // The lower-bound result remains truthful when a background count fails.
+    })
+    .finally(() => {
+      if (generation === elasticsearchCountGeneration && executionId === elasticsearchCountExecutionId) {
+        elasticsearchCountExecutionId = "";
+      }
+    });
+}
+
+function applyElasticsearchSearchTotal(searchTotal: number, isExact: boolean, filter: string | undefined) {
+  const key = elasticsearchCountFilterKey(filter);
+  if (key !== elasticsearchCountKey) {
+    cancelElasticsearchCount();
+    elasticsearchCountKey = key;
+    elasticsearchExactTotal = undefined;
+    elasticsearchPaginationLowerBound = undefined;
+  }
+
+  elasticsearchPaginationLowerBound = searchTotal;
+  const totals = resolveElasticsearchDocumentTotals(searchTotal, isExact, elasticsearchExactTotal);
+  if (isExact) {
+    cancelElasticsearchCount();
+    elasticsearchExactTotal = searchTotal;
+    total.value = totals.total;
+    totalIsExact.value = totals.totalIsExact;
+    paginationTotal.value = totals.paginationTotal;
+    return;
+  }
+
+  if (elasticsearchExactTotal !== undefined) {
+    total.value = totals.total;
+    totalIsExact.value = totals.totalIsExact;
+    paginationTotal.value = totals.paginationTotal;
+    return;
+  }
+
+  total.value = totals.total;
+  totalIsExact.value = totals.totalIsExact;
+  paginationTotal.value = totals.paginationTotal;
+  startElasticsearchExactCount(filter);
+}
+
 async function load() {
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
   const executionId = uuid();
@@ -696,8 +805,12 @@ async function load() {
   const previousSelectedId = previousSelectedIdx === null ? null : documentIdentity(documents.value[previousSelectedIdx]);
   try {
     const filter = currentDocumentFilter();
+    if (documentStoreProvider.value.kind === "elasticsearch" && elasticsearchCountKey !== null && elasticsearchCountKey !== elasticsearchCountFilterKey(filter)) {
+      resetElasticsearchTotals();
+    }
     const sort = currentDocumentSortJson(sortInput.value);
-    const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, page.value * pageSize.value, pageSize.value, filter, undefined, sort, executionId);
+    const skip = page.value * pageSize.value;
+    const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, skip, documentRequestLimit.value, filter, undefined, sort, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
     const nextDocuments =
       documentStoreProvider.value.kind === "elasticsearch" && result.raw_documents?.length === result.documents.length
@@ -722,7 +835,14 @@ async function load() {
       }
       lastGridColumns.value = [...keySet];
     }
-    total.value = result.total;
+    if (documentStoreProvider.value.kind === "elasticsearch") {
+      applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
+    } else {
+      cancelElasticsearchCount();
+      total.value = result.total;
+      totalIsExact.value = true;
+      paginationTotal.value = result.total;
+    }
     syncSelectedDocumentAfterLoad(previousSelectedIdx, previousSelectedId);
   } catch (e: unknown) {
     if (documentLoadExecutionId.value === executionId) error.value = e instanceof Error ? e.message : String(e);
@@ -734,6 +854,11 @@ async function load() {
       stopDocumentLoadingTimer();
     }
   }
+}
+
+async function refreshDocuments() {
+  if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
+  await load();
 }
 
 async function cancelDocumentLoad() {
@@ -754,20 +879,22 @@ async function cancelDocumentLoad() {
 
 function applyFilter() {
   page.value = 0;
-  load();
+  if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals();
+  void load();
 }
 
 function paginate(offset: number, limit: number) {
   const normalizedLimit = normalizeResultPageSize(limit, pageSize.value);
   pageSize.value = normalizedLimit;
-  page.value = Math.floor(Math.max(0, offset) / normalizedLimit);
-  load();
+  const requestedPage = Math.floor(Math.max(0, offset) / normalizedLimit);
+  page.value = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
+  void load();
 }
 
 function onSort(column: string, _columnIndex: number, direction: "asc" | "desc" | null) {
   sortInput.value = documentStoreProvider.value.sortInputForColumn(column, direction);
   page.value = 0;
-  load();
+  void load();
 }
 
 function asRecord(value: unknown): JsonRecord {
@@ -1129,6 +1256,7 @@ async function saveDoc() {
     isNew.value = false;
     documentEditMode.value = "fields";
     editFields.value = [];
+    if (kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
     await load();
     if (selectedIdx.value !== null && documents.value[selectedIdx.value]) {
       editJson.value = stringifyDocumentStoreValue(documents.value[selectedIdx.value], documentStoreProvider.value.kind, 2);
@@ -1151,6 +1279,7 @@ async function applyDeleteDoc(idx: number) {
       selectedIdx.value = null;
       editJson.value = "";
     }
+    if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
     await load();
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -1176,13 +1305,13 @@ async function confirmDelete() {
 function prevPage() {
   if (page.value <= 0) return;
   page.value--;
-  load();
+  void load();
 }
 
 function nextPage() {
-  if ((page.value + 1) * pageSize.value >= total.value) return;
+  if ((page.value + 1) * pageSize.value >= pageTotal.value) return;
   page.value++;
-  load();
+  void load();
 }
 
 function docPreview(doc: JsonRecord): string {
@@ -1274,6 +1403,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
+  cancelElasticsearchCount();
   stopDocumentLoadingTimer();
   endTableSearchSplitResize();
 });
@@ -1339,14 +1469,14 @@ defineExpose({ focusSearch });
       <span class="shrink-0 ml-1">{{ documentStoreLabels.documentsLabel }}</span>
 
       <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" @click="startNew"><Plus class="h-3 w-3" /></Button>
-      <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" @click="load"><RefreshCw class="h-3 w-3" :class="{ 'animate-spin': loading }" /></Button>
+      <Button v-if="viewMode === 'document'" variant="ghost" size="icon" class="h-5 w-5" @click="refreshDocuments"><RefreshCw class="h-3 w-3" :class="{ 'animate-spin': loading }" /></Button>
 
       <div v-if="viewMode === 'document'" class="flex items-center gap-1 ml-1">
         <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="page <= 0" @click="prevPage">
           <ChevronLeft class="h-3 w-3" />
         </Button>
-        <span>{{ page + 1 }} / {{ Math.max(1, Math.ceil(total / pageSize)) }}</span>
-        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="(page + 1) * pageSize >= total" @click="nextPage">
+        <span>{{ page + 1 }} / {{ Math.max(1, Math.ceil(pageTotal / pageSize)) }}</span>
+        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="(page + 1) * pageSize >= pageTotal" @click="nextPage">
           <ChevronRight class="h-3 w-3" />
         </Button>
       </div>
@@ -1361,7 +1491,7 @@ defineExpose({ focusSearch });
             <span v-if="(dataGridRef?.hiddenColumnCount ?? 0) > 0" class="tabular-nums"> {{ dataGridRef?.visibleColumnCount }}/{{ dataGridRef?.displayableColumnCount }} </span>
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="end" class="w-64 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+        <PopoverContent align="end" class="w-64 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
           <div class="border-b bg-muted/40 px-2 py-1.5">
             <div class="flex items-center justify-between gap-2">
               <div class="text-xs font-semibold">{{ t("grid.columnVisibility") }}</div>
@@ -1406,7 +1536,7 @@ defineExpose({ focusSearch });
             <Wrench class="h-4 w-4" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="end" class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+        <PopoverContent align="end" class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
           <div class="border-b bg-muted/40 px-3 py-2">
             <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
           </div>
@@ -1446,8 +1576,10 @@ defineExpose({ focusSearch });
       :page-offset="page * pageSize"
       :page-limit="pageSize"
       :total-row-count="total"
+      :total-row-count-is-exact="totalIsExact"
+      :pagination-total-row-count="pageTotal"
       @sort="onSort"
-      @reload="load"
+      @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"
     >
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
@@ -1655,6 +1787,7 @@ defineExpose({ focusSearch });
               rows="1"
               class="document-query-input flex-1 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
               placeholder="{}"
+              @keydown.enter.exact.prevent="applyFilter"
               @keydown.ctrl.enter.prevent="applyFilter"
               @keydown.meta.enter.prevent="applyFilter"
             />
@@ -1693,6 +1826,7 @@ defineExpose({ focusSearch });
               rows="1"
               class="document-query-input flex-1 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
               placeholder="{}"
+              @keydown.enter.exact.prevent="applyFilter"
               @keydown.ctrl.enter.prevent="applyFilter"
               @keydown.meta.enter.prevent="applyFilter"
             />
@@ -1850,7 +1984,7 @@ defineExpose({ focusSearch });
   min-height: 0;
   resize: none;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--background);
   color: var(--foreground);
   padding: 14px 16px;

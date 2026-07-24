@@ -631,11 +631,14 @@ async fn duckdb_attached_database_names(state: &AppState, connection_id: &str) -
     state.configs.read().await.get(connection_id).map(crate::db::duckdb_sql::config_attached_names).unwrap_or_default()
 }
 
+// ClickHouse 无 schema 概念：schema 参数携带 SQL 中 `库.表` 限定的目标库，
+// database 参数是 tab/连接的当前库。与 mysql_table_metadata_catalog 一致，
+// schema 非空时必须优先，否则跨库查询会在当前库下查不到元数据（字段注释丢失）
 fn clickhouse_metadata_database<'a>(database: &'a str, schema: &'a str) -> &'a str {
-    if database.is_empty() {
-        schema
-    } else {
+    if schema.trim().is_empty() {
         database
+    } else {
+        schema
     }
 }
 
@@ -3379,10 +3382,11 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_metadata_uses_schema_when_database_is_empty() {
+    fn clickhouse_metadata_prefers_schema_qualifier() {
         assert_eq!(clickhouse_metadata_database("", "testdb"), "testdb");
         assert_eq!(clickhouse_metadata_database("testdb", ""), "testdb");
-        assert_eq!(clickhouse_metadata_database("default", "testdb"), "default");
+        // 查询元数据流程：database 是 tab 当前库，schema 是 SQL 限定的真实库
+        assert_eq!(clickhouse_metadata_database("default", "testdb"), "testdb");
     }
 
     #[test]

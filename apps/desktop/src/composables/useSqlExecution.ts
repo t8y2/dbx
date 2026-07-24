@@ -9,7 +9,7 @@ import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCap
 import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
-import { isMysqlExecutionErrorResult, usesMysqlProtocolDatabaseType } from "@/lib/query/queryResultError";
+import { isQueryExecutionErrorResult, usesMysqlProtocolDatabaseType } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redis/redisCommandSafety";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
@@ -61,12 +61,11 @@ function primarySqlOperation(sql: string): string {
 
 function firstQueryExecutionError(tab: Pick<QueryTab, "result" | "results">, databaseType: DatabaseType | undefined) {
   const activeResult = tab.result;
-  if (activeResult && isMysqlExecutionErrorResult(activeResult, databaseType)) return activeResult;
+  if (activeResult && isQueryExecutionErrorResult(activeResult)) return activeResult;
   if (!usesMysqlProtocolDatabaseType(databaseType) && activeResult?.columns.includes("Error")) return activeResult;
-  if (!usesMysqlProtocolDatabaseType(databaseType)) return undefined;
 
   const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
-  return results.find((result) => isMysqlExecutionErrorResult(result, databaseType));
+  return results.find((result) => isQueryExecutionErrorResult(result));
 }
 
 export function useSqlExecution(deps: {

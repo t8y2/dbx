@@ -18,6 +18,12 @@ export function isMysqlExecutionErrorResult(result: QueryResult, databaseType: D
   return usesMysqlProtocolDatabaseType(databaseType) && result.execution_error === true;
 }
 
+export function isQueryExecutionErrorResult(result: QueryResult): boolean {
+  // Multi-database batch responses use this explicit marker so a successful
+  // query column named Error is never promoted as the failed statement.
+  return result.execution_error === true;
+}
+
 export function isNoSnapshotErrorResult(result: QueryResult | undefined | null): boolean {
   if (!result || !result.columns.includes("Error") || result.rows.length === 0) return false;
   return NO_SNAPSHOT_ERROR_PATTERN.test(String(result.rows[0]?.[0] ?? ""));

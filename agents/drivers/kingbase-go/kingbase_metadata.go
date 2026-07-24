@@ -152,6 +152,15 @@ func mysqlSQLModeExists(db *sql.DB) bool {
 	return db.QueryRow("SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'").Scan(&value) == nil
 }
 
+func (s *server) identifierQuote() string {
+	// Kingbase MySQL compatibility mode follows MySQL identifier quoting;
+	// other modes retain the PostgreSQL-compatible double quote.
+	if s.mode.mysqlCompat {
+		return "`"
+	}
+	return `"`
+}
+
 func (s *server) connectionInfo() (map[string]any, error) {
 	db, err := s.requireDB()
 	if err != nil {
@@ -164,7 +173,7 @@ func (s *server) connectionInfo() (map[string]any, error) {
 	}
 	return map[string]any{
 		"database": database, "username": username, "version": version, "schema": schema,
-		"mysql_compat_mode": s.mode.mysqlCompat,
+		"mysql_compat_mode": s.mode.mysqlCompat, "identifierQuote": s.identifierQuote(),
 	}, nil
 }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -69,7 +68,7 @@ const selectedSource = ref<string | File | null>(null);
 const batchTasks = ref<BatchImportTask[]>([]);
 const activeTaskIndex = ref(0);
 const sourceFormat = ref<api.TableImportSourceFormat>("csv");
-const preview = ref<api.TableImportPreview | null>(null);
+const preview = shallowRef<api.TableImportPreview | null>(null);
 const columnMapping = ref<Record<string, string>>({});
 const columnDataTypes = ref<Record<string, string>>({});
 const dynamicDataTypeOptions = ref<string[]>([]);
@@ -229,6 +228,7 @@ function startImportElapsedClock() {
 
 function resetState() {
   stopImportElapsedClock();
+  closeDataTypePicker();
   importStartedAt = 0;
   liveElapsedMs.value = 0;
   previewRequestId++;
@@ -372,6 +372,65 @@ function applySuggestedColumnDataTypes(currentPreview = preview.value) {
   const suggested = suggestImportTargetDataTypes(currentPreview.columns, currentPreview.rows, structureDatabaseType.value);
   const previous = columnDataTypes.value;
   columnDataTypes.value = Object.fromEntries(currentPreview.columns.map((sourceColumn) => [sourceColumn, previous[sourceColumn]?.trim() ? previous[sourceColumn] : suggested[sourceColumn] || "TEXT"]));
+}
+
+// 200+ 列时 SearchableSelect 太重，换成一个全局 popover，
+// 只有点击输入框时才挂载，避免创建上百分组件实例。
+const activeDataTypeColumn = ref<string | null>(null);
+const dataTypePickerOpen = ref(false);
+const dataTypePickerStyle = ref<Record<string, string>>({});
+const activeDataTypeOptionIndex = ref(-1);
+const dataTypePickerOptions = computed(() => {
+  const options = dataTypeOptions.value;
+  const sourceColumn = activeDataTypeColumn.value;
+  const currentValue = sourceColumn ? columnDataTypes.value[sourceColumn] : "";
+  return currentValue && !options.includes(currentValue) ? [...options, currentValue] : options;
+});
+
+function closeDataTypePicker() {
+  dataTypePickerOpen.value = false;
+  activeDataTypeColumn.value = null;
+  activeDataTypeOptionIndex.value = -1;
+}
+
+function openDataTypePicker(sourceColumn: string, input: HTMLInputElement) {
+  const rect = input.getBoundingClientRect();
+  dataTypePickerStyle.value = {
+    position: "fixed",
+    top: `${rect.bottom + 2}px`,
+    left: `${rect.left}px`,
+    width: `${Math.max(rect.width, 200)}px`,
+  };
+  activeDataTypeColumn.value = sourceColumn;
+  activeDataTypeOptionIndex.value = -1;
+  dataTypePickerOpen.value = true;
+}
+
+function selectDataTypeOption(value: string) {
+  const sourceColumn = activeDataTypeColumn.value;
+  if (sourceColumn) updateColumnDataType(sourceColumn, value);
+  closeDataTypePicker();
+}
+
+function handleDataTypePickerKeydown(event: KeyboardEvent, sourceColumn: string, input: HTMLInputElement) {
+  if (!dataTypePickerOpen.value && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    openDataTypePicker(sourceColumn, input);
+  }
+  if (!dataTypePickerOpen.value || !activeDataTypeColumn.value) return;
+  const options = dataTypePickerOptions.value;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeDataTypePicker();
+  } else if (event.key === "ArrowDown" && options.length) {
+    event.preventDefault();
+    activeDataTypeOptionIndex.value = (activeDataTypeOptionIndex.value + 1) % options.length;
+  } else if (event.key === "ArrowUp" && options.length) {
+    event.preventDefault();
+    activeDataTypeOptionIndex.value = activeDataTypeOptionIndex.value <= 0 ? options.length - 1 : activeDataTypeOptionIndex.value - 1;
+  } else if (event.key === "Enter" && activeDataTypeOptionIndex.value >= 0) {
+    event.preventDefault();
+    selectDataTypeOption(options[activeDataTypeOptionIndex.value]);
+  }
 }
 
 async function loadDataTypeOptions() {
@@ -917,6 +976,9 @@ watch(
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
 watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
+watch(wizardStep, (step) => {
+  if (step !== "mapping") closeDataTypePicker();
+});
 watch(targetMode, (mode) => {
   if (mode === "existing") {
     columnDataTypes.value = {};
@@ -1211,34 +1273,42 @@ watch(rawProgressPercent, (percent) => {
                   <div class="truncate font-mono text-xs" :title="sourceColumn">
                     {{ sourceColumn }}
                   </div>
-                  <Input v-if="targetMode === 'create'" :model-value="columnMapping[sourceColumn] ?? sourceColumn" class="h-7 text-xs font-mono" @update:model-value="(value: any) => updateMapping(sourceColumn, value)" />
-                  <Select v-else :model-value="columnMapping[sourceColumn] || SKIP_VALUE" @update:model-value="(value: any) => updateMapping(sourceColumn, value)">
-                    <SelectTrigger class="h-7 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem :value="SKIP_VALUE">{{ t("tableImport.skipColumn") }}</SelectItem>
-                      <SelectItem v-for="column in targetColumns" :key="column.name" :value="column.name">
-                        {{ column.name }}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <SearchableSelect
+                  <!-- 原生 input/select: 200+ 列时 Vue Input/Select 组件是渲染瓶颈 -->
+                  <input
                     v-if="targetMode === 'create'"
-                    :model-value="columnDataTypes[sourceColumn] || ''"
-                    :placeholder="t('tableImport.targetDataType')"
-                    :search-placeholder="t('tableImport.targetDataType')"
-                    :empty-text="t('structureEditor.noMatchingType')"
-                    :loading-text="t('common.loading')"
-                    :loading="loadingDataTypeOptions"
-                    :options="dataTypeOptions"
-                    :allow-custom="true"
-                    :trigger-class="'h-7 w-full max-w-none rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25'"
-                    :content-class="'w-56'"
-                    :item-class="'font-mono text-xs'"
-                    :trigger-icon-class="'h-3 w-3'"
-                    @update:model-value="(value: any) => updateColumnDataType(sourceColumn, value)"
+                    :value="columnMapping[sourceColumn] ?? sourceColumn"
+                    class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                    @input="(e) => updateMapping(sourceColumn, (e.target as HTMLInputElement).value)"
                   />
+                  <select
+                    v-else
+                    :value="columnMapping[sourceColumn] || SKIP_VALUE"
+                    class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                    @change="(e) => updateMapping(sourceColumn, (e.target as HTMLSelectElement).value)"
+                  >
+                    <option :value="SKIP_VALUE">{{ t("tableImport.skipColumn") }}</option>
+                    <option v-for="column in targetColumns" :key="column.name" :value="column.name">
+                      {{ column.name }}
+                    </option>
+                  </select>
+                  <!-- 数据类型：plain input + 全局 popover，点击才弹出 -->
+                  <div v-if="targetMode === 'create'" class="relative">
+                    <input
+                      data-dt-input
+                      :value="columnDataTypes[sourceColumn] || ''"
+                      :placeholder="t('tableImport.targetDataType')"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      :aria-expanded="activeDataTypeColumn === sourceColumn && dataTypePickerOpen"
+                      aria-controls="table-import-data-type-options"
+                      :aria-activedescendant="activeDataTypeColumn === sourceColumn && activeDataTypeOptionIndex >= 0 ? `table-import-data-type-option-${activeDataTypeOptionIndex}` : undefined"
+                      class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                      @focus="(event) => openDataTypePicker(sourceColumn, event.currentTarget as HTMLInputElement)"
+                      @blur="closeDataTypePicker"
+                      @keydown="(event) => handleDataTypePickerKeydown(event, sourceColumn, event.currentTarget as HTMLInputElement)"
+                      @input="(e) => updateColumnDataType(sourceColumn, (e.target as HTMLInputElement).value)"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -1380,6 +1450,26 @@ watch(rawProgressPercent, (percent) => {
           {{ errorMessage }}
         </div>
       </div>
+
+      <!-- 全局数据类型 popover：仅一个实例，替代每列的 SearchableSelect -->
+      <Teleport to="body">
+        <div v-if="activeDataTypeColumn && dataTypePickerOpen" id="table-import-data-type-options" role="listbox" :style="dataTypePickerStyle" class="z-[9999] max-h-48 overflow-auto rounded-md border bg-popover p-0.5 shadow-md">
+          <button
+            v-for="(opt, index) in dataTypePickerOptions"
+            :key="opt"
+            :id="`table-import-data-type-option-${index}`"
+            type="button"
+            role="option"
+            :aria-selected="opt === (activeDataTypeColumn ? columnDataTypes[activeDataTypeColumn] : '')"
+            class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground"
+            :class="{ 'bg-accent/50': index === activeDataTypeOptionIndex || opt === (activeDataTypeColumn ? columnDataTypes[activeDataTypeColumn] : '') }"
+            @pointerenter="activeDataTypeOptionIndex = index"
+            @pointerdown.prevent="selectDataTypeOption(opt)"
+          >
+            {{ opt }}
+          </button>
+        </div>
+      </Teleport>
 
       <DialogFooter class="shrink-0">
         <Button variant="outline" :disabled="running" @click="open = false">

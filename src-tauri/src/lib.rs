@@ -84,6 +84,15 @@ fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool, linux_appind
         && (matches!(target_os, "macos" | "windows") || (target_os == "linux" && linux_appindicator_available))
 }
 
+fn should_enable_single_instance(debug_build: bool) -> bool {
+    !debug_build
+}
+
+#[cfg(target_os = "macos")]
+fn development_dock_badge_label(debug_build: bool) -> Option<&'static str> {
+    debug_build.then_some("DEV")
+}
+
 #[cfg(target_os = "linux")]
 fn linux_appindicator_available() -> bool {
     const APPINDICATOR_LIBRARIES: &[&str] = &["libayatana-appindicator3.so.1", "libappindicator3.so.1"];
@@ -545,6 +554,21 @@ fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconThe
     })
 }
 
+#[cfg(target_os = "macos")]
+fn apply_macos_development_dock_badge(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::NSString;
+
+    let badge_label = development_dock_badge_label(cfg!(debug_assertions));
+    app.run_on_main_thread(move || {
+        let marker = unsafe { MainThreadMarker::new_unchecked() };
+        let application = NSApplication::sharedApplication(marker);
+        let badge_label = badge_label.map(NSString::from_str);
+        application.dockTile().setBadgeLabel(badge_label.as_deref());
+    })
+}
+
 fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -613,9 +637,9 @@ mod tests {
     use super::{
         linux_appimage_system_gtk_immodules_cache, linux_appimage_wayland_backend_override,
         linux_nvidia_driver_from_state, linux_selected_drm_render_device, linux_webkit_rendering_workarounds,
-        native_window_decorations_override, should_confirm_app_exit_request, should_fallback_to_native_quit,
-        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
-        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        native_window_decorations_override, should_confirm_app_exit_request, should_enable_single_instance,
+        should_fallback_to_native_quit, should_hide_window_on_close, should_setup_desktop_tray,
+        should_show_main_window_after_setup, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
@@ -642,6 +666,19 @@ mod tests {
         assert!(!should_setup_desktop_tray("windows", false, true));
         assert!(!should_setup_desktop_tray("macos", false, true));
         assert!(!should_setup_desktop_tray("linux", false, true));
+    }
+
+    #[test]
+    fn keeps_single_instance_for_release_builds_only() {
+        assert!(!should_enable_single_instance(true));
+        assert!(should_enable_single_instance(false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn labels_debug_builds_in_the_macos_dock() {
+        assert_eq!(super::development_dock_badge_label(true), Some("DEV"));
+        assert_eq!(super::development_dock_badge_label(false), None);
     }
 
     #[cfg(target_os = "macos")]
@@ -888,8 +925,10 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        .plugin(tauri_plugin_fs::init());
+
+    let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let links = commands::deep_link::connection_deep_links_from_args(args.clone());
             open_connection_deep_links(app, links);
 
@@ -910,6 +949,11 @@ pub fn run() {
             }
             show_main_window(app);
         }))
+    } else {
+        builder
+    };
+
+    let builder = builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -1002,7 +1046,7 @@ pub fn run() {
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
             let state = Arc::new(state);
             app.manage(state.clone());
-            commands::redis_pubsub_server::start_pubsub_server(state.clone());
+            app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
@@ -1030,6 +1074,8 @@ pub fn run() {
                 setup_desktop_tray(app, desktop_settings.icon_theme)?;
             }
             apply_desktop_icon_theme(app.handle(), desktop_settings.icon_theme)?;
+            #[cfg(target_os = "macos")]
+            apply_macos_development_dock_badge(app.handle())?;
             window_state_guard::enforce_main_window_bounds(app.handle());
             if should_show_main_window_after_setup() {
                 show_main_window(app.handle());
@@ -1080,6 +1126,8 @@ pub fn run() {
             commands::prompt_template::set_ai_global_custom_instructions,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
+            commands::app_settings::load_max_agent_turns,
+            commands::app_settings::save_max_agent_turns,
             commands::app_settings::complete_app_close,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
@@ -1344,6 +1392,7 @@ pub fn run() {
             commands::document_cmd::document_list_databases,
             commands::document_cmd::document_list_collections,
             commands::document_cmd::document_find_documents,
+            commands::document_cmd::elasticsearch_count_documents,
             commands::document_cmd::document_list_gridfs_buckets,
             commands::document_cmd::document_create_gridfs_bucket,
             commands::document_cmd::document_delete_gridfs_bucket,

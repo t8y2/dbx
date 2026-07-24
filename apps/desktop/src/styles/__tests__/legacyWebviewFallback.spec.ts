@@ -40,4 +40,10 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(dialogScrollContentSource).toContain("max-h-[calc(var(--dbx-viewport-height)-6rem)]");
     expect(connectionDialogSource).toContain("max-height: calc(var(--dbx-viewport-height) - 2rem);");
   });
+
+  it("keeps legacy tab triggers connected to the configured corner style", () => {
+    const tabsTriggerRule = globalsCss.match(/\[data-slot="tabs-trigger"\] \{([\s\S]*?)\n  \}/)?.[1];
+
+    expect(tabsTriggerRule).toContain("border-radius: var(--dbx-radius-fixed-6);");
+  });
 });

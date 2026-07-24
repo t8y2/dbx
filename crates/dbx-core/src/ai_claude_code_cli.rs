@@ -32,6 +32,13 @@ impl ClaudeCodeIsolatedCwd {
         })?;
         Ok(Self { path })
     }
+
+    fn write_mcp_config(&self, config: &str) -> Result<PathBuf, String> {
+        let path = self.path.join("mcp.json");
+        std::fs::write(&path, config)
+            .map_err(|error| format!("[claudeCodeRunFailed] Failed to write temporary MCP configuration: {error}"))?;
+        Ok(path)
+    }
 }
 
 impl Drop for ClaudeCodeIsolatedCwd {
@@ -243,6 +250,14 @@ pub fn build_claude_code_command(
     _prompt: &str,
     options: &ClaudeCodeRunOptions,
 ) -> ClaudeCodeCommandSpec {
+    build_claude_code_command_with_mcp_arg(config, options, claude_code_mcp_config(options))
+}
+
+fn build_claude_code_command_with_mcp_arg(
+    config: &AiConfig,
+    options: &ClaudeCodeRunOptions,
+    mcp_config_arg: String,
+) -> ClaudeCodeCommandSpec {
     let enabled_tools = claude_code_enabled_tools(options.agent_mode);
     let mut args = vec![
         "--print".to_string(),
@@ -255,7 +270,7 @@ pub fn build_claude_code_command(
         "--permission-mode".to_string(),
         "dontAsk".to_string(),
         "--mcp-config".to_string(),
-        claude_code_mcp_config(options),
+        mcp_config_arg,
         "--strict-mcp-config".to_string(),
     ];
     append_claude_code_isolation_args(&mut args);
@@ -438,12 +453,11 @@ pub async fn test_claude_code_connection(config: &AiConfig) -> Result<AiTestConn
 
 fn classify_claude_code_spawn_error(message: &str) -> String {
     if message.contains("No such file") || message.contains("not found") {
-        "[claudeCodeNotInstalled] Claude Code CLI was not found. Install Claude Code or set the Claude Code CLI path in DBX AI settings."
-            .to_string()
+        format!("[claudeCodeNotInstalled] {message}")
     } else if is_command_line_too_long_error(message) {
-        "[claudeCodeCommandLineTooLong] Claude Code CLI command line is too long.".to_string()
+        format!("[claudeCodeCommandLineTooLong] {message}")
     } else {
-        format!("[claudeCodeRunFailed] Failed to start Claude Code CLI: {message}")
+        format!("[claudeCodeRunFailed] {message}")
     }
 }
 
@@ -457,16 +471,19 @@ fn is_command_line_too_long_error(message: &str) -> bool {
 
 fn classify_claude_code_run_error(stderr: &str) -> String {
     let lower = stderr.to_ascii_lowercase();
-    if lower.contains("not authenticated") || lower.contains("login") || lower.contains("auth") {
-        format!(
-            "[claudeCodeNotAuthenticated] Claude Code CLI is not authenticated. Run `claude auth login` and try again. {stderr}"
-        )
+    if lower.contains("invalid mcp configuration") || lower.contains("mcp config file not found") {
+        format!("[claudeCodeMcpConfigInvalid] {stderr}")
+    } else if lower.contains("not authenticated")
+        || lower.contains("authentication required")
+        || lower.contains("please login")
+    {
+        format!("[claudeCodeNotAuthenticated] {stderr}")
     } else if lower.contains("dbx-mcp-server") || lower.contains("enoent") {
-        format!("[dbxMcpMissing] DBX MCP server was not found. Install @dbx-app/mcp-server and try again. {stderr}")
+        format!("[dbxMcpMissing] {stderr}")
     } else if lower.contains("mcp") && (lower.contains("dbx") || lower.contains("server")) {
-        format!("[claudeCodeMcpStartupFailed] Claude Code could not start the DBX MCP server. {stderr}")
+        format!("[claudeCodeMcpStartupFailed] {stderr}")
     } else {
-        format!("[claudeCodeRunFailed] Claude Code CLI failed. {stderr}")
+        format!("[claudeCodeRunFailed] {stderr}")
     }
 }
 
@@ -482,10 +499,12 @@ pub async fn run_claude_code_agent(
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
     let program = validate_claude_code_program(config)?;
-    let mut command = build_claude_code_command(config, prompt, &options);
+    let isolated_cwd = ClaudeCodeIsolatedCwd::create()?;
+    let mcp_config_path = isolated_cwd.write_mcp_config(&claude_code_mcp_config(&options))?;
+    let mut command =
+        build_claude_code_command_with_mcp_arg(config, &options, mcp_config_path.to_string_lossy().to_string());
     command.program = program;
     let env = claude_code_process_env(config, &command)?;
-    let isolated_cwd = ClaudeCodeIsolatedCwd::create()?;
     let result = run_cli_jsonl_agent(
         CliAgentProcessSpec {
             command,
@@ -506,8 +525,9 @@ pub async fn run_claude_code_agent(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_claude_code_command, claude_code_cli_env, claude_code_enabled_tools, parse_claude_code_jsonl_event,
-        parse_claude_code_models, validate_claude_code_program, ClaudeCodeRunOptions, DEFAULT_CLAUDE_CODE_MODELS,
+        build_claude_code_command, classify_claude_code_run_error, claude_code_cli_env, claude_code_enabled_tools,
+        parse_claude_code_jsonl_event, parse_claude_code_models, validate_claude_code_program, ClaudeCodeRunOptions,
+        DEFAULT_CLAUDE_CODE_MODELS,
     };
     #[cfg(unix)]
     use super::{list_claude_code_models, run_claude_code_agent};
@@ -584,10 +604,13 @@ mod tests {
             &executable,
             r#"#!/bin/sh
 user_settings=false
+mcp_config=""
 previous=""
 for arg in "$@"; do
   if [ "$previous" = "--setting-sources" ] && [ "$arg" = "user" ]; then
     user_settings=true
+  elif [ "$previous" = "--mcp-config" ]; then
+    mcp_config="$arg"
   fi
   previous="$arg"
 done
@@ -603,6 +626,10 @@ case " $* " in
     printf '%s\n' '{"type":"control_response","response":{"response":{"models":[{"value":"claude-user-model","displayName":"User Model"}]}}}'
     ;;
   *)
+    if [ ! -f "$mcp_config" ] || ! grep -q '"mcpServers"' "$mcp_config"; then
+      printf '%s\n' 'invalid MCP configuration' >&2
+      exit 10
+    fi
     printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"isolated execution"}]}}'
     printf '%s\n' '{"type":"result","subtype":"success"}'
     ;;
@@ -665,7 +692,7 @@ esac
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn execution_uses_user_settings_from_an_isolated_directory() {
+    async fn execution_uses_user_settings_and_temporary_mcp_config_from_an_isolated_directory() {
         let (config, project_dir, hook_marker) = isolated_cli_test_config();
 
         let output = run_claude_code_agent(&config, "hello", run_options(), &Notify::new(), |_| {}).await.unwrap();
@@ -760,6 +787,26 @@ esac
         let stdout = r#"{"type":"control_response","response":{"subtype":"success","response":{"commands":[]}}}"#;
 
         assert!(parse_claude_code_models(stdout).is_none());
+    }
+
+    #[test]
+    fn invalid_mcp_config_is_not_reported_as_a_missing_server_package() {
+        let error = classify_claude_code_run_error(
+            r#"Invalid MCP configuration: MCP config file not found: C:\Temp\{mcpServers:{dbx:{args:[C:\node_modules\@dbx-app\mcp-server\bin\dbx-mcp-server.js]}}}"#,
+        );
+
+        assert!(error.starts_with("[claudeCodeMcpConfigInvalid]"));
+        assert!(!error.contains("[dbxMcpMissing]"));
+    }
+
+    #[test]
+    fn invalid_mcp_config_path_containing_auth_is_not_reported_as_authentication_failure() {
+        let error = classify_claude_code_run_error(
+            r#"Invalid MCP configuration: MCP config file not found: C:\Users\auth-test\AppData\Local\Temp\dbx\mcp.json"#,
+        );
+
+        assert!(error.starts_with("[claudeCodeMcpConfigInvalid]"));
+        assert!(!error.contains("[claudeCodeNotAuthenticated]"));
     }
 
     #[test]

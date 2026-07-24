@@ -11,7 +11,7 @@ jobs:
   submit:
     runs-on: ubuntu-latest
     env:
-      REPO_OWNER: t8y2
+      REPO_OWNER: sorchk
     steps:
       - uses: actions/checkout@v5
 

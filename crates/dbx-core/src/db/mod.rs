@@ -2,6 +2,7 @@ pub mod agent_driver;
 pub mod clickhouse_driver;
 pub mod cloudflare_d1;
 pub use cloudflare_d1 as cloudflare_d1_driver;
+pub mod document_result;
 pub mod duckdb_driver;
 pub mod duckdb_sql;
 #[cfg(feature = "duckdb-bundled")]

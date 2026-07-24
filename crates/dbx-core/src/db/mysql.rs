@@ -2651,13 +2651,37 @@ fn columns_sql(database: &str, table: &str) -> String {
     format!(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
          c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
-         c.CHARACTER_SET_NAME, c.COLLATION_NAME \
+         c.CHARACTER_SET_NAME, c.COLLATION_NAME, t.TABLE_COLLATION \
          FROM information_schema.COLUMNS c \
+         LEFT JOIN information_schema.TABLES t \
+           ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
          WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
          ORDER BY c.ORDINAL_POSITION",
         quote_value(database),
         quote_value(table),
     )
+}
+
+fn table_collation_sql(database: &str, table: &str) -> String {
+    format!(
+        "SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} LIMIT 1",
+        quote_value(database),
+        quote_value(table),
+    )
+}
+
+fn normalize_mysql_column_charset_metadata(columns: &mut [ColumnInfo], table_collation: Option<&str>) {
+    let Some(table_collation) = table_collation.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    for column in columns {
+        if column.collation.as_deref().is_some_and(|value| value.eq_ignore_ascii_case(table_collation)) {
+            // MySQL reports effective values and does not preserve whether an
+            // equivalent table-default collation was explicitly written.
+            column.character_set = None;
+            column.collation = None;
+        }
+    }
 }
 
 /// Attempt to reverse CP1252→UTF-8 double-encoding.
@@ -2797,7 +2821,9 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    let columns: Vec<ColumnInfo> = rows
+    let table_collation =
+        rows.iter().find_map(|row| get_opt_str(row, "TABLE_COLLATION").filter(|value| !value.trim().is_empty()));
+    let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
             let name = get_str_by_name(row, "COLUMN_NAME").trim().to_string();
@@ -2841,6 +2867,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
         return get_columns_show(pool, database, table).await;
     }
 
+    normalize_mysql_column_charset_metadata(&mut columns, table_collation.as_deref());
     Ok(columns)
 }
 
@@ -2855,7 +2882,12 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
             result.collect_and_drop().await.map_err(|e| e.to_string())?
         }
     };
-    Ok(rows
+    let table_collation = if database.trim().is_empty() {
+        None
+    } else {
+        query_first_nonblank_string(&mut conn, &table_collation_sql(database, table)).await
+    };
+    let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
             let name = get_str_by_name(row, "Field").trim().to_string();
@@ -2885,7 +2917,9 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
                 collation,
             })
         })
-        .collect())
+        .collect();
+    normalize_mysql_column_charset_metadata(&mut columns, table_collation.as_deref());
+    Ok(columns)
 }
 
 fn show_columns_sql(database: &str, table: &str, full: bool) -> String {
@@ -4810,10 +4844,12 @@ mod tests {
     }
 
     #[test]
-    fn mysql_columns_sql_uses_column_key_for_primary_keys_without_join() {
+    fn mysql_columns_sql_uses_column_key_and_table_default_collation() {
         let sql = columns_sql("app", "users");
 
         assert!(sql.contains("information_schema.COLUMNS"));
+        assert!(sql.contains("information_schema.TABLES"));
+        assert!(sql.contains("t.TABLE_COLLATION"));
         assert!(!sql.contains("KEY_COLUMN_USAGE"));
         assert!(!sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
         assert!(sql.contains("c.COLUMN_KEY"));
@@ -4821,6 +4857,47 @@ mod tests {
         assert!(sql.contains("c.COLUMN_TYPE"));
         assert!(!sql.contains("COLLATE"));
         assert!(!sql.contains("AS ENUM_VALUES"));
+    }
+
+    #[test]
+    fn mysql_column_charset_metadata_clears_values_matching_table_default() {
+        let mut columns = vec![
+            ColumnInfo {
+                name: "inherited_name".to_string(),
+                character_set: Some("utf8mb4".to_string()),
+                collation: Some("utf8mb4_unicode_ci".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "explicit_other".to_string(),
+                character_set: Some("latin1".to_string()),
+                collation: Some("latin1_bin".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo { name: "numeric_value".to_string(), ..Default::default() },
+        ];
+
+        normalize_mysql_column_charset_metadata(&mut columns, Some("utf8mb4_unicode_ci"));
+
+        assert_eq!((columns[0].character_set.as_deref(), columns[0].collation.as_deref()), (None, None));
+        assert_eq!(columns[1].character_set.as_deref(), Some("latin1"));
+        assert_eq!(columns[1].collation.as_deref(), Some("latin1_bin"));
+        assert_eq!((columns[2].character_set.as_deref(), columns[2].collation.as_deref()), (None, None));
+    }
+
+    #[test]
+    fn mysql_column_charset_metadata_preserves_values_without_table_default() {
+        let mut columns = vec![ColumnInfo {
+            name: "name".to_string(),
+            character_set: Some("utf8mb4".to_string()),
+            collation: Some("utf8mb4_unicode_ci".to_string()),
+            ..Default::default()
+        }];
+
+        normalize_mysql_column_charset_metadata(&mut columns, None);
+
+        assert_eq!(columns[0].character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(columns[0].collation.as_deref(), Some("utf8mb4_unicode_ci"));
     }
 
     #[test]

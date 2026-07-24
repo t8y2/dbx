@@ -26,7 +26,7 @@ jobs:
         id: bump
         shell: bash
         run: |
-          LEGACY_REPO="https://github.com/t8y2/dbx-agents.git"
+          LEGACY_REPO="https://github.com/sorchk/dbx-agents.git"
           LEGACY_BASE_TAG="v0.2.33"
           PREV_TAG=$(git tag --sort=-creatordate | grep '^agents-v' | sed -n '2p')
           SKIP_BUMP=false
@@ -543,7 +543,7 @@ jobs:
 
       - name: Update agents-latest GitHub release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           git tag -f agents-latest "$GITHUB_SHA"
           git push origin refs/tags/agents-latest --force
@@ -648,7 +648,7 @@ jobs:
         env:
           TAG_NAME: ${{ matrix.tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"

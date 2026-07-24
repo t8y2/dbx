@@ -1,4 +1,5 @@
 import type { ComposerTranslation } from "vue-i18n";
+import { normalizeJsonArgument } from "@dbx-app/mongo-shell";
 import type { DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
 import { formatMongoShellLiteral } from "@/lib/mongo/mongoDocumentValues";
@@ -531,9 +532,21 @@ function isDigit(value: string | undefined): boolean {
 export function parseDocumentFilterInput(input: string, options: DocumentFilterParseOptions = {}): Record<string, unknown> {
   const trimmed = input.trim();
   if (!trimmed) return {};
-  const safe = quoteUnquotedObjectKeys(trimmed);
+  const safe = normalizeDocumentQueryObjectInput(trimmed, options.kind);
   const parsed = parseJsonPreservingLargeIntegers(safe, options);
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+}
+
+type DocumentQueryInputNormalizer = (input: string) => string | null;
+
+const documentQueryInputNormalizers: Record<DocumentStoreKind, DocumentQueryInputNormalizer> = {
+  mongodb: normalizeJsonArgument,
+  elasticsearch: quoteUnquotedObjectKeys,
+};
+
+function normalizeDocumentQueryObjectInput(input: string, kind?: DocumentStoreKind): string {
+  const normalize = kind ? documentQueryInputNormalizers[kind] : quoteUnquotedObjectKeys;
+  return normalize(input) ?? input;
 }
 
 export function currentDocumentFilterJson(input: string, structured: Record<string, unknown> | null, kind?: DocumentStoreKind): string | undefined {

@@ -872,6 +872,15 @@ pub fn claude_headers(config: &AiConfig) -> Result<HeaderMap, String> {
     Ok(headers)
 }
 
+fn claude_http_model(model: &str) -> &str {
+    let model = model.trim();
+    if model.to_ascii_lowercase().ends_with("[1m]") {
+        model[..model.len() - "[1m]".len()].trim_end()
+    } else {
+        model
+    }
+}
+
 fn normalize_ai_proxy_url(proxy_url: &str) -> String {
     let proxy_url = proxy_url.trim();
     if proxy_url.contains("://") || proxy_url.is_empty() {
@@ -1006,7 +1015,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
 
 pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
     let body = json!({
-        "model": request.config.model,
+        "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
@@ -1116,10 +1125,10 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
+        .map_err(|e| format_transport_error("Gemini", e))?;
 
     let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
     if !status.is_success() {
         return Err(extract_error(&data).unwrap_or_else(|| format!("Gemini API error: {status}")));
     }
@@ -1134,6 +1143,248 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
 /// Read the SSE byte stream until the first content-bearing chunk arrives,
 /// then return its latency and the delta text.  Used by `test_connection_core`
 /// to mirror CC-Switch's streaming probe approach.
+#[derive(Default)]
+struct StreamProbeDiagnostics {
+    bytes_received: usize,
+    data_events: usize,
+    json_events: usize,
+    gemini_finish_reasons: Vec<String>,
+    gemini_block_reasons: Vec<String>,
+    gemini_safety_ratings: Vec<String>,
+    gemini_prompt_tokens: Option<u64>,
+    gemini_candidate_tokens: Option<u64>,
+    gemini_thought_tokens: Option<u64>,
+    gemini_total_tokens: Option<u64>,
+}
+
+impl StreamProbeDiagnostics {
+    fn observe_gemini(&mut self, event: &serde_json::Value) {
+        if let Some(reason) = event.pointer("/promptFeedback/blockReason").and_then(serde_json::Value::as_str) {
+            push_unique(&mut self.gemini_block_reasons, reason);
+        }
+        if let Some(message) = event.pointer("/promptFeedback/blockReasonMessage").and_then(serde_json::Value::as_str) {
+            push_unique(&mut self.gemini_block_reasons, message);
+        }
+        collect_gemini_safety_ratings(
+            event.pointer("/promptFeedback/safetyRatings").and_then(serde_json::Value::as_array).map(Vec::as_slice),
+            &mut self.gemini_safety_ratings,
+        );
+
+        if let Some(candidates) = event.get("candidates").and_then(serde_json::Value::as_array) {
+            for candidate in candidates {
+                if let Some(reason) = candidate.get("finishReason").and_then(serde_json::Value::as_str) {
+                    push_unique(&mut self.gemini_finish_reasons, reason);
+                }
+                collect_gemini_safety_ratings(
+                    candidate.get("safetyRatings").and_then(serde_json::Value::as_array).map(Vec::as_slice),
+                    &mut self.gemini_safety_ratings,
+                );
+            }
+        }
+
+        if let Some(usage) = event.get("usageMetadata") {
+            update_token_count(&mut self.gemini_prompt_tokens, usage.get("promptTokenCount"));
+            update_token_count(&mut self.gemini_candidate_tokens, usage.get("candidatesTokenCount"));
+            update_token_count(&mut self.gemini_thought_tokens, usage.get("thoughtsTokenCount"));
+            update_token_count(&mut self.gemini_total_tokens, usage.get("totalTokenCount"));
+        }
+    }
+
+    fn usage_summary(&self) -> String {
+        let mut values = Vec::new();
+        if let Some(tokens) = self.gemini_prompt_tokens {
+            values.push(format!("prompt={tokens}"));
+        }
+        if let Some(tokens) = self.gemini_candidate_tokens {
+            values.push(format!("candidates={tokens}"));
+        }
+        if let Some(tokens) = self.gemini_thought_tokens {
+            values.push(format!("thoughts={tokens}"));
+        }
+        if let Some(tokens) = self.gemini_total_tokens {
+            values.push(format!("total={tokens}"));
+        }
+        if values.is_empty() {
+            String::new()
+        } else {
+            format!(", tokenUsage={}", values.join("/"))
+        }
+    }
+
+    fn empty_stream_error(&self, is_gemini: bool) -> String {
+        if self.bytes_received == 0 {
+            return "AI stream response body was empty after HTTP success; the endpoint or proxy may have closed the response".to_string();
+        }
+        if self.data_events == 0 {
+            return format!(
+                "AI stream returned {} bytes but no SSE data events; verify the endpoint and proxy streaming support",
+                self.bytes_received
+            );
+        }
+        if !is_gemini {
+            return format!(
+                "AI stream ended without text after {} data event(s) and {} JSON event(s)",
+                self.data_events, self.json_events
+            );
+        }
+
+        let usage = self.usage_summary();
+        if !self.gemini_block_reasons.is_empty() {
+            let safety = self.safety_summary();
+            return format!(
+                "Gemini returned no text because the prompt was blocked (blockReason={}{}{safety})",
+                self.gemini_block_reasons.join(", "),
+                usage
+            );
+        }
+
+        if self.gemini_finish_reasons.iter().any(|reason| reason.eq_ignore_ascii_case("MAX_TOKENS")) {
+            return format!(
+                "Gemini returned no text (finishReason=MAX_TOKENS{usage}). The connection-test output limit may have been consumed by thinking tokens; retry with thinking disabled or another model"
+            );
+        }
+
+        let safety_finish = self.gemini_finish_reasons.iter().any(|reason| {
+            matches!(
+                reason.to_ascii_uppercase().as_str(),
+                "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "SPII" | "IMAGE_SAFETY"
+            )
+        });
+        if safety_finish {
+            return format!(
+                "Gemini returned no text because the response was blocked by a safety filter (finishReason={}{}{safety})",
+                self.gemini_finish_reasons.join(", "),
+                usage,
+                safety = self.safety_summary(),
+            );
+        }
+
+        if !self.gemini_finish_reasons.is_empty() {
+            return format!(
+                "Gemini returned no text (finishReason={}{}{}); check the model response policy and proxy behavior",
+                self.gemini_finish_reasons.join(", "),
+                usage,
+                self.safety_summary(),
+            );
+        }
+
+        if self.gemini_thought_tokens.unwrap_or_default() > 0 {
+            return format!(
+                "Gemini returned thinking metadata but no visible text ({usage_without_comma}); the output limit may have been consumed by thinking",
+                usage_without_comma = usage.trim_start_matches(", "),
+            );
+        }
+
+        format!(
+            "Gemini stream returned {} data event(s) but no text{usage}; the model returned only metadata or the proxy altered the stream",
+            self.data_events
+        )
+    }
+
+    fn safety_summary(&self) -> String {
+        if self.gemini_safety_ratings.is_empty() {
+            String::new()
+        } else {
+            format!(", safetyRatings={}", self.gemini_safety_ratings.join("/"))
+        }
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() && !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn update_token_count(target: &mut Option<u64>, value: Option<&serde_json::Value>) {
+    if let Some(value) = value.and_then(serde_json::Value::as_u64) {
+        *target = Some(value);
+    }
+}
+
+fn collect_gemini_safety_ratings(ratings: Option<&[serde_json::Value]>, output: &mut Vec<String>) {
+    let Some(ratings) = ratings else { return };
+    for rating in ratings {
+        let category = rating.get("category").and_then(serde_json::Value::as_str).unwrap_or("UNKNOWN");
+        let probability = rating.get("probability").and_then(serde_json::Value::as_str).unwrap_or("UNKNOWN");
+        let blocked = rating.get("blocked").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        if blocked || !probability.eq_ignore_ascii_case("NEGLIGIBLE") {
+            let summary =
+                if blocked { format!("{category}:{probability}:blocked") } else { format!("{category}:{probability}") };
+            push_unique(output, &summary);
+        }
+    }
+}
+
+fn probe_stream_payload(
+    data: &str,
+    is_claude: bool,
+    is_gemini: bool,
+    diagnostics: &mut StreamProbeDiagnostics,
+) -> Result<Option<String>, String> {
+    diagnostics.data_events += 1;
+    if data == "[DONE]" {
+        return Ok(None);
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(data)
+        .map_err(|e| format!("AI stream JSON parse error: {e}; payload={}", truncate_diagnostic(data, 240)))?;
+    diagnostics.json_events += 1;
+    if is_gemini {
+        diagnostics.observe_gemini(&parsed);
+    }
+
+    let delta = if is_claude {
+        claude_stream_text(&parsed).or_else(|| parsed["delta"]["thinking"].as_str()).map(ToString::to_string)
+    } else if is_gemini {
+        let text = gemini_text(&parsed);
+        (!text.is_empty()).then_some(text)
+    } else {
+        openai_stream_text(&parsed).or_else(|| openai_stream_reasoning(&parsed).map(ToString::to_string)).or_else(
+            || {
+                let text = responses_text(&parsed);
+                (!text.is_empty()).then_some(text)
+            },
+        )
+    };
+    Ok(delta.filter(|text| !text.trim().is_empty()))
+}
+
+fn truncate_diagnostic(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+async fn categorized_http_error(response: reqwest::Response, provider: &str, api_key: &str) -> String {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|data| extract_error(&data).or_else(|| Some(data.to_string())))
+        .unwrap_or_else(|| {
+            if body.trim().is_empty() {
+                "empty response body".to_string()
+            } else {
+                body.trim().to_string()
+            }
+        });
+    let detail = if api_key.trim().is_empty() { detail } else { detail.replace(api_key, "***") };
+    let detail = truncate_diagnostic(&detail, 500);
+    let diagnostic = format!("HTTP {}: {detail}", status.as_u16());
+    format!("[{}] {provider} API error ({diagnostic})", classify_error(&diagnostic))
+}
+
+fn format_transport_error(provider: &str, error: reqwest::Error) -> String {
+    // Request URLs may contain credentials in query parameters, notably Gemini API keys.
+    format!("{provider} request failed: {}", error.without_url())
+}
+
 async fn measure_first_stream_chunk(
     mut byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
     start: std::time::Instant,
@@ -1141,47 +1392,36 @@ async fn measure_first_stream_chunk(
     is_gemini: bool,
 ) -> Result<(u64, String), String> {
     let mut buf = Vec::new();
+    let mut diagnostics = StreamProbeDiagnostics::default();
     while let Some(chunk) = byte_stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read error: {e}"))?;
+        let chunk = chunk.map_err(|e| format!("stream read error: {}", e.without_url()))?;
+        diagnostics.bytes_received += chunk.len();
         buf.extend_from_slice(&chunk);
 
         while let Some(line) = drain_next_stream_line(&mut buf)? {
             let Some(data) = stream_data_payload(&line) else { continue };
             if data == "[DONE]" {
-                // stream finished without content — not a real failure but rare
-                return Err("no content in response".to_string());
+                diagnostics.data_events += 1;
+                return Err(diagnostics.empty_stream_error(is_gemini));
             }
-
-            // Parse the JSON to extract the text delta
-            let parsed: serde_json::Value = serde_json::from_str(data).map_err(|e| format!("JSON parse error: {e}"))?;
-
-            let delta = if is_claude {
-                // Accept both text and thinking deltas — thinking is often the first
-                // streamed content when extended thinking is enabled.
-                claude_stream_text(&parsed).or_else(|| parsed["delta"]["thinking"].as_str()).map(|s| s.to_string())
-            } else if is_gemini {
-                let text = gemini_text(&parsed);
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
-            } else {
-                // Accept text, reasoning, or responses content as the first chunk.
-                openai_stream_text(&parsed)
-                    .or_else(|| openai_stream_reasoning(&parsed).map(|s| s.to_string()))
-                    .or_else(|| Some(responses_text(&parsed)))
-            };
-
-            if let Some(text) = delta {
-                if !text.trim().is_empty() {
-                    let latency = start.elapsed().as_millis() as u64;
-                    return Ok((latency, text));
-                }
+            if let Some(text) = probe_stream_payload(data, is_claude, is_gemini, &mut diagnostics)? {
+                let latency = start.elapsed().as_millis() as u64;
+                return Ok((latency, text));
             }
         }
     }
-    Err("stream ended without content".to_string())
+
+    if !buf.is_empty() {
+        let line = String::from_utf8(buf).map_err(|e| format!("AI stream returned invalid UTF-8: {e}"))?;
+        if let Some(data) = stream_data_payload(&line) {
+            if let Some(text) = probe_stream_payload(data, is_claude, is_gemini, &mut diagnostics)? {
+                let latency = start.elapsed().as_millis() as u64;
+                return Ok((latency, text));
+            }
+        }
+    }
+
+    Err(diagnostics.empty_stream_error(is_gemini))
 }
 
 const TEST_PROMPT: &str = "Who are you?";
@@ -1223,7 +1463,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     let byte_stream = match config.provider {
         AiProvider::Claude => {
             let body = json!({
-                "model": &model,
+                "model": claude_http_model(&model),
                 "max_tokens": 16,
                 "system": CLAUDE_DEFAULT_SYSTEM,
                 "messages": [{ "role": "user", "content": TEST_PROMPT }],
@@ -1237,8 +1477,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 .await
                 .map_err(|e| format!("Claude request failed: {e}"))?;
             if !res.status().is_success() {
-                let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-                return Err(categorize_error(&data, config));
+                return Err(categorized_http_error(res, "Claude", &config.api_key).await);
             }
             res.bytes_stream()
         }
@@ -1252,20 +1491,19 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 .query(&[("key", config.api_key.as_str()), ("alt", "sse")])
                 .json(&json!({
                     "contents": [{ "parts": [{ "text": TEST_PROMPT }], "role": "user" }],
-                    "generationConfig": { "maxOutputTokens": 16 },
+                    "generationConfig": { "maxOutputTokens": 256 },
                 }))
                 .send()
                 .await
-                .map_err(|e| format!("Gemini request failed: {e}"))?;
+                .map_err(|e| format_transport_error("Gemini", e))?;
             if !res.status().is_success() {
-                let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-                return Err(categorize_error(&data, config));
+                return Err(categorized_http_error(res, "Gemini", &config.api_key).await);
             }
             res.bytes_stream()
         }
         AiProvider::Custom if uses_anthropic_messages_api(config) => {
             let body = json!({
-                "model": &model,
+                "model": claude_http_model(&model),
                 "max_tokens": 16,
                 "system": CLAUDE_DEFAULT_SYSTEM,
                 "messages": [{ "role": "user", "content": TEST_PROMPT }],
@@ -1279,8 +1517,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 .await
                 .map_err(|e| format!("Claude request failed: {e}"))?;
             if !res.status().is_success() {
-                let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-                return Err(categorize_error(&data, config));
+                return Err(categorized_http_error(res, "Claude", &config.api_key).await);
             }
             res.bytes_stream()
         }
@@ -1315,20 +1552,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 .await
                 .map_err(|e| format!("AI request failed: {e}"))?;
             if !res.status().is_success() {
-                let status = res.status();
-                let body = res.text().await.unwrap_or_default();
-                // Try JSON first (APIs like OpenAI return structured error bodies)
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
-                    let raw = extract_error(&data).unwrap_or_else(|| "API error".to_string());
-                    return Err(format!("[{}] {}", classify_error(&raw), raw));
-                }
-                // Non-JSON body — show HTTP status + raw body
-                let msg = if body.trim().is_empty() {
-                    format!("HTTP {}", status)
-                } else {
-                    format!("HTTP {}: {}", status, body.trim())
-                };
-                return Err(format!("[{}] {}", classify_error(&msg), msg));
+                return Err(categorized_http_error(res, "AI", &config.api_key).await);
             }
             res.bytes_stream()
         }
@@ -1349,27 +1573,46 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     }
 }
 
-/// Map known API error bodies to a short category string.
-fn categorize_error(data: &serde_json::Value, _config: &AiConfig) -> String {
-    let raw = extract_error(data).unwrap_or_else(|| "API error".to_string());
-    let category = classify_error(&raw);
-    format!("[{category}] {raw}")
-}
-
 fn classify_error(msg: &str) -> &'static str {
     let lower = msg.to_ascii_lowercase();
     if lower.contains("401")
+        || lower.contains("403")
         || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("permission denied")
+        || lower.contains("permission_denied")
         || lower.contains("invalid api key")
         || lower.contains("incorrect api key")
+        || lower.contains("api key not valid")
+        || lower.contains("api_key_invalid")
     {
         "auth"
-    } else if lower.contains("404") || lower.contains("not found") || lower.contains("model not found") {
+    } else if lower.contains("404")
+        || lower.contains("not found")
+        || lower.contains("model not found")
+        || lower.contains("model does not exist")
+        || lower.contains("not supported for generatecontent")
+    {
         "modelNotFound"
-    } else if lower.contains("429") || lower.contains("rate limit") || lower.contains("too many requests") {
+    } else if lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("resource_exhausted")
+        || lower.contains("quota exceeded")
+    {
         "rateLimit"
     } else if lower.contains("timeout") || lower.contains("timed out") || lower.contains("504") {
         "timeout"
+    } else if lower.contains("finishreason=max_tokens") || lower.contains("thinking tokens") {
+        "tokenLimit"
+    } else if lower.contains("safety filter") || lower.contains("prompt was blocked") {
+        "safety"
+    } else if lower.contains("no text")
+        || lower.contains("response body was empty")
+        || lower.contains("no sse data events")
+        || lower.contains("without text")
+    {
+        "emptyResponse"
     } else if lower.contains("connect")
         || lower.contains("dns")
         || lower.contains("resolve")
@@ -1472,7 +1715,7 @@ async fn stream_claude(
     on_chunk: &impl Fn(AiStreamChunk),
 ) -> Result<(), String> {
     let body = json!({
-        "model": request.config.model,
+        "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
@@ -1744,10 +1987,10 @@ async fn stream_gemini(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
+        .map_err(|e| format_transport_error("Gemini", e))?;
 
     if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
         return Err(extract_error(&data).unwrap_or_else(|| "Gemini API error".to_string()));
     }
 
@@ -1758,7 +2001,7 @@ async fn stream_gemini(
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
+                let chunk = chunk.map_err(|e| e.without_url().to_string())?;
                 buf.extend_from_slice(&chunk);
 
                 while let Some(line) = drain_next_stream_line(&mut buf)? {
@@ -1939,7 +2182,7 @@ async fn stream_claude_with_tools(
     let tool_json: Vec<serde_json::Value> = tools.iter().map(|t| t.to_anthropic_tool()).collect();
 
     let body = json!({
-        "model": request.config.model,
+        "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(4096),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": messages,
@@ -2436,10 +2679,10 @@ async fn stream_gemini_with_tools(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Gemini request failed: {e}"))?;
+        .map_err(|e| format_transport_error("Gemini", e))?;
 
     if !res.status().is_success() {
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
         return Err(extract_error(&data).unwrap_or_else(|| "Gemini API error".to_string()));
     }
 
@@ -2452,7 +2695,7 @@ async fn stream_gemini_with_tools(
         tokio::select! {
             chunk = byte_stream.next() => {
                 let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
+                let chunk = chunk.map_err(|e| e.without_url().to_string())?;
                 buf.extend_from_slice(&chunk);
 
                 while let Some(line) = drain_next_stream_line(&mut buf)? {
@@ -2631,16 +2874,143 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        apply_chat_completion_thinking_toggle, build_ai_http_client, build_responses_input_with_tools, claude_headers,
-        claude_system_prompt, drain_next_stream_line, emit_responses_function_call_item, gemini_text, is_kimi_model,
-        maybe_bearer_headers, openai_response_text, openai_stream_reasoning, openai_stream_text,
+        apply_chat_completion_thinking_toggle, build_ai_http_client, build_responses_input_with_tools, call_claude,
+        classify_error, claude_headers, claude_system_prompt, drain_next_stream_line,
+        emit_responses_function_call_item, format_transport_error, gemini_text, is_kimi_model, maybe_bearer_headers,
+        measure_first_stream_chunk, openai_response_text, openai_stream_reasoning, openai_stream_text,
         parse_model_list_response, resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_list_endpoint,
         responses_function_tool, responses_max_output_tokens, responses_stream_text, responses_text,
-        responses_token_usage, set_chat_completion_token_limit, stream_data_payload, stream_openai_with_tools,
-        uses_anthropic_messages_api, validate_config, validate_model_list_config, AiApiStyle, AiAuthMethod,
-        AiCompletionRequest, AiConfig, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent,
-        StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        responses_token_usage, set_chat_completion_token_limit, stream_claude, stream_claude_with_tools,
+        stream_data_payload, stream_openai_with_tools, uses_anthropic_messages_api, validate_config,
+        validate_model_list_config, AiApiStyle, AiAuthMethod, AiCompletionRequest, AiConfig, AiMessage, AiModelInfo,
+        AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
+        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
+
+    struct CapturedJsonRequest {
+        headers: String,
+        body: serde_json::Value,
+    }
+
+    async fn spawn_json_capture_server(
+        response_content_type: &'static str,
+        response_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<CapturedJsonRequest>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while request.len() < header_end + content_length {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before body was complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {response_content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            CapturedJsonRequest { headers, body }
+        });
+
+        (format!("http://{address}/v1/messages"), server)
+    }
+
+    fn claude_http_test_request(endpoint: String) -> AiCompletionRequest {
+        AiCompletionRequest {
+            config: AiConfig {
+                provider: AiProvider::Claude,
+                api_key: "secret".to_string(),
+                auth_method: AiAuthMethod::ApiKey,
+                endpoint,
+                model: "claude-sonnet-4-6[1m]".to_string(),
+                models: Vec::new(),
+                api_style: AiApiStyle::Completions,
+                proxy_enabled: false,
+                proxy_url: String::new(),
+                enable_thinking: true,
+                reasoning_level: AiReasoningLevel::Default,
+                context_window: Some(1_000_000),
+                codex_cli_path: None,
+                codex_cli_env: Default::default(),
+                claude_code_cli_path: None,
+                claude_code_cli_env: Default::default(),
+            },
+            system_prompt: "Be concise.".to_string(),
+            messages: vec![AiMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
+            task_contract: None,
+            max_tokens: Some(64),
+        }
+    }
+
+    fn assert_claude_http_request(captured: CapturedJsonRequest) {
+        assert_eq!(captured.body["model"], "claude-sonnet-4-6");
+        assert!(!captured.headers.to_ascii_lowercase().contains("anthropic-beta:"));
+    }
+
+    #[tokio::test]
+    async fn claude_http_completion_strips_cli_context_suffix_without_beta_header() {
+        let (endpoint, server) =
+            spawn_json_capture_server("application/json", r#"{"content":[{"type":"text","text":"ok"}]}"#).await;
+        let request = claude_http_test_request(endpoint);
+        let client = build_ai_http_client(&request.config, 10).unwrap();
+
+        assert_eq!(call_claude(&client, request).await.unwrap(), "ok");
+        assert_claude_http_request(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn claude_http_stream_strips_cli_context_suffix_without_beta_header() {
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", "data: [DONE]\n\n").await;
+        let request = claude_http_test_request(endpoint);
+        let client = build_ai_http_client(&request.config, 10).unwrap();
+
+        stream_claude(&client, "test", &request, &Notify::new(), &|_| {}).await.unwrap();
+        assert_claude_http_request(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn claude_http_tool_stream_strips_cli_context_suffix_without_beta_header() {
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", "data: [DONE]\n\n").await;
+        let request = claude_http_test_request(endpoint);
+        let client = build_ai_http_client(&request.config, 10).unwrap();
+        let tools = [crate::agent_events::ToolDefinition {
+            name: "get_tables",
+            description: "List tables",
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            read_only: true,
+            parallel_ok: true,
+        }];
+
+        stream_claude_with_tools(&client, "test", &request, &tools, &Notify::new(), &|_| {}).await.unwrap();
+        assert_claude_http_request(server.await.unwrap());
+    }
 
     /// Reproduce the "Unknown tool:" bug: some OpenAI-compatible providers
     /// (e.g. GLM via proxy) re-send the `id` field in every tool-call delta.
@@ -2693,6 +3063,100 @@ mod tests {
 
         assert_eq!(parsed["delta"].as_str(), Some(text));
         assert!(!decoded.contains('\u{fffd}'));
+    }
+
+    #[tokio::test]
+    async fn gemini_connection_probe_reports_thinking_token_exhaustion() {
+        let event = serde_json::json!({
+            "candidates": [{ "finishReason": "MAX_TOKENS" }],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 0,
+                "thoughtsTokenCount": 256,
+                "totalTokenCount": 261
+            }
+        });
+        let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}\n\n")))]);
+
+        let error = measure_first_stream_chunk(stream, std::time::Instant::now(), false, true).await.unwrap_err();
+
+        assert!(error.contains("finishReason=MAX_TOKENS"));
+        assert!(error.contains("thoughts=256"));
+        assert!(error.contains("thinking tokens"));
+        assert_eq!(classify_error(&error), "tokenLimit");
+    }
+
+    #[tokio::test]
+    async fn gemini_connection_probe_reports_prompt_safety_block() {
+        let event = serde_json::json!({
+            "promptFeedback": {
+                "blockReason": "SAFETY",
+                "safetyRatings": [{
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "probability": "HIGH",
+                    "blocked": true
+                }]
+            }
+        });
+        let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}\n\n")))]);
+
+        let error = measure_first_stream_chunk(stream, std::time::Instant::now(), false, true).await.unwrap_err();
+
+        assert!(error.contains("blockReason=SAFETY"));
+        assert!(error.contains("HARM_CATEGORY_DANGEROUS_CONTENT:HIGH:blocked"));
+        assert_eq!(classify_error(&error), "safety");
+    }
+
+    #[tokio::test]
+    async fn transport_errors_do_not_expose_request_query_parameters() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let secret = "gemini-secret-key";
+        let error = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/models?key={secret}"))
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(error.url().is_some_and(|url| url.as_str().contains(secret)));
+        let message = format_transport_error("Gemini", error);
+        assert!(!message.contains(secret));
+        assert!(!message.contains("?key="));
+    }
+
+    #[tokio::test]
+    async fn connection_probe_distinguishes_empty_body_from_non_sse_proxy_response() {
+        let empty = futures::stream::empty::<Result<bytes::Bytes, reqwest::Error>>();
+        let empty_error = measure_first_stream_chunk(empty, std::time::Instant::now(), false, true).await.unwrap_err();
+        assert!(empty_error.contains("response body was empty"));
+        assert!(empty_error.contains("endpoint or proxy"));
+        assert_eq!(classify_error(&empty_error), "emptyResponse");
+
+        let proxy = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from_static(b"proxy response"))]);
+        let proxy_error = measure_first_stream_chunk(proxy, std::time::Instant::now(), false, true).await.unwrap_err();
+        assert!(proxy_error.contains("14 bytes but no SSE data events"));
+        assert!(proxy_error.contains("proxy streaming support"));
+        assert_eq!(classify_error(&proxy_error), "emptyResponse");
+    }
+
+    #[tokio::test]
+    async fn connection_probe_accepts_final_sse_line_without_newline() {
+        let event = serde_json::json!({
+            "candidates": [{ "content": { "parts": [{ "text": "OK" }] } }]
+        });
+        let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}")))]);
+
+        let (_, text) = measure_first_stream_chunk(stream, std::time::Instant::now(), false, true).await.unwrap();
+
+        assert_eq!(text, "OK");
+    }
+
+    #[test]
+    fn classifies_google_api_error_codes() {
+        assert_eq!(classify_error("HTTP 403: API_KEY_INVALID"), "auth");
+        assert_eq!(classify_error("HTTP 404: model is not supported for generateContent"), "modelNotFound");
+        assert_eq!(classify_error("HTTP 429: RESOURCE_EXHAUSTED quota exceeded"), "rateLimit");
     }
 
     #[test]
@@ -3052,6 +3516,7 @@ mod tests {
         let api_key_headers = claude_headers(&config).unwrap();
         assert_eq!(api_key_headers.get("x-api-key").unwrap(), "secret");
         assert!(api_key_headers.get(AUTHORIZATION).is_none());
+        assert!(api_key_headers.get("anthropic-beta").is_none());
 
         config.auth_method = AiAuthMethod::Bearer;
         let bearer_headers = claude_headers(&config).unwrap();

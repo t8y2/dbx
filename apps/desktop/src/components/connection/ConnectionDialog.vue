@@ -51,7 +51,7 @@ import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
 import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
-import { driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { driverInstallProgressChannel, driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import {
   ArrowLeft,
@@ -1309,6 +1309,7 @@ function setAgentInstallDialogOpen(value: boolean) {
 
 function handleAgentInstallProgress(payload: DriverInstallProgress) {
   if (!agentInstallRunning.value || !agentInstallDriverKey.value) return;
+  if (driverInstallProgressChannel(payload) !== "agent") return;
   if (payload.db_type && payload.db_type !== agentInstallDriverKey.value) return;
   if (payload.step === "done" || payload.step === "all-done") {
     agentInstallProgress.value = null;
@@ -2202,7 +2203,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "mq",
     titleKey: "connection.databaseCategoryMq",
-    optionValues: ["mq", "kafka", "rocketmq"],
+    optionValues: ["mq", "kafka", "rocketmq", "rabbitmq"],
   },
   {
     key: "registry_config",
@@ -5620,7 +5621,7 @@ function openExternalUrl(url: string) {
                                     ? 'catalog=paimon_catalog'
                                     : form.db_type === 'cassandra'
                                       ? 'localdatacenter=dc1'
-                                      : 'sslmode=disable'
+                                      : 'sslmode=prefer'
                       "
                     />
                   </div>

@@ -6,7 +6,7 @@ describe("OptionHelpPanel layout", () => {
     expect(OPTION_HELP_PANEL_CLASS).toContain("self-start");
     expect(OPTION_HELP_PANEL_CLASS).toContain("max-h-64");
     expect(OPTION_HELP_PANEL_CLASS).toContain("overflow-y-auto");
-    expect(OPTION_HELP_PANEL_CLASS).toContain("rounded-md");
+    expect(OPTION_HELP_PANEL_CLASS).toContain("rounded-lg");
     expect(OPTION_HELP_PANEL_CLASS).toContain("shadow-md");
     expect(OPTION_HELP_PANEL_CLASS).toContain("sm:mt-[var(--option-help-offset)]");
   });

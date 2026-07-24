@@ -1,6 +1,6 @@
 services:
   dbx:
-    image: t8y2/dbx:latest
+    image: sorchk/dbx:latest
     container_name: ${CONTAINER_NAME}
     ports:
       - "${PANEL_APP_PORT_HTTP}:4224"

@@ -605,7 +605,7 @@ async fn install_agent_driver_with_batch(
             if let Some(local_jar) = find_local_agent_jar(db_type) {
                 install_local_agent(am, db_type, local_jar)?;
                 am.stop_daemon_by_key(db_type).await;
-                progress(AgentProgressEvent::step("done"));
+                progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
                 return Ok(());
             }
             Err(registry_err)
@@ -682,7 +682,7 @@ async fn install_local_agent_with_registry_jre(
         am.save_state(&local_state)?;
     }
     am.stop_daemon_by_key(db_type).await;
-    progress(AgentProgressEvent::step("done"));
+    progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
     Ok(())
 }
 
@@ -782,7 +782,7 @@ async fn install_agent_driver_from_registry(
     am.save_state(&local_state)?;
     am.stop_daemon_by_key(db_type).await;
     cleanup_driver_download_cache_after_success(am, db_type);
-    progress(AgentProgressEvent::step("done"));
+    progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
     Ok(())
 }
 
@@ -1882,7 +1882,8 @@ mod agent_registry_install_tests {
         let native_path = manager.driver_native_path(db_type);
         let cache_path =
             write_cached_driver_download(&manager, db_type, version, native_url, &native_path, native_bytes);
-        let progress = |_| {};
+        let events = std::sync::Mutex::new(Vec::new());
+        let progress = |event| events.lock().unwrap().push(event);
 
         install_agent_driver_from_registry(
             &manager,
@@ -1900,6 +1901,11 @@ mod agent_registry_install_tests {
         assert!(!cache_path.exists());
         assert!(!manager.driver_jar_path(db_type).exists());
         assert_eq!(manager.load_state().installed_drivers.get(db_type).unwrap().version, version);
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.step == "done" && event.db_type.as_deref() == Some(db_type)));
     }
 
     #[tokio::test]

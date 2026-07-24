@@ -493,7 +493,7 @@ defineExpose({
 .editor-search-panel--editor {
   background: #f6f7f9;
   border-color: #d8dce3;
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   box-shadow:
     0 8px 22px rgb(15 23 42 / 0.14),
     0 1px 0 rgb(255 255 255 / 0.78) inset;
@@ -537,7 +537,7 @@ defineExpose({
 .editor-search-panel--editor :deep(.border-input) {
   background: #ffffff;
   border-color: #c7ccd5;
-  border-radius: 5px;
+  border-radius: var(--dbx-radius-fixed-5);
   box-shadow: 0 1px 0 rgb(15 23 42 / 0.03) inset;
 }
 

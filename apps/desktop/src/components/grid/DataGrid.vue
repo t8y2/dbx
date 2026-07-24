@@ -287,6 +287,8 @@ interface DataGridProps {
   pageLimit?: number;
   countSql?: string;
   totalRowCount?: number;
+  totalRowCountIsExact?: boolean;
+  paginationTotalRowCount?: number;
   totalRowCountLoading?: boolean;
   loading?: boolean;
   cacheKey?: string;
@@ -2363,9 +2365,13 @@ const inferredBackendTotalRowCount = computed(() => {
 });
 const serverKnownTotalRowCount = computed(() => props.totalRowCount ?? manualTotalRowCount.value);
 const displayedTotalRowCount = computed(() => serverKnownTotalRowCount.value ?? inferredBackendTotalRowCount.value);
+const totalRowCountIsExact = computed(() => props.totalRowCountIsExact !== false);
+// A backend can expose an exact display total while deliberately restricting
+// offset pagination to a smaller safe range.
+const paginationTotalRowCount = computed(() => props.paginationTotalRowCount ?? serverKnownTotalRowCount.value);
 // Only a server-confirmed total drives pagination — an inferred total means
 // rows exist that we never fetched, so navigation must stay inside rows.length.
-const hasKnownTotalRowCount = computed(() => typeof serverKnownTotalRowCount.value === "number" && serverKnownTotalRowCount.value >= 0);
+const hasKnownPaginationTotalRowCount = computed(() => typeof paginationTotalRowCount.value === "number" && paginationTotalRowCount.value >= 0);
 // When context=results and the caller hasn't configured server-side
 // pagination (no pageLimit), the backend handed us every row up-front and
 // rowCount IS the total. Without this hint, the "page is full → assume more"
@@ -2391,11 +2397,11 @@ const canGoNextPage = computed(() => {
     pageSize: pageSize.value,
     pageOffset: props.pageOffset,
     currentPage: currentPage.value,
-    totalRowCount: hasKnownTotalRowCount.value ? displayedTotalRowCount.value : undefined,
+    totalRowCount: hasKnownPaginationTotalRowCount.value ? paginationTotalRowCount.value : undefined,
     allRowsLoaded: allRowsLoaded.value,
   });
 });
-const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
+const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || allRowsLoaded.value || !!props.tableMeta || !!props.countSql));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const canCalculateTotalRowCount = computed(() => !!props.connectionId && (!!props.tableMeta || !!props.countSql));
 // When a refresh/rollback completes and the current page exceeds the last
@@ -2408,7 +2414,7 @@ watch(
     // and the completion was triggered by a refresh/rollback.
     if (!loading && prevLoading && isRefreshingData.value) {
       isRefreshingData.value = false;
-      const total = displayedTotalRowCount.value;
+      const total = paginationTotalRowCount.value;
       if (!total || total <= 0) return;
       const lastPageNum = Math.max(1, Math.ceil(total / pageSize.value));
       if (currentPage.value <= lastPageNum) return;
@@ -2571,8 +2577,8 @@ function applyCustomPageSize() {
 
 async function lastPage() {
   if (infiniteScrollEnabled.value) return;
-  if (hasKnownTotalRowCount.value) {
-    const total = displayedTotalRowCount.value ?? 0;
+  if (hasKnownPaginationTotalRowCount.value) {
+    const total = paginationTotalRowCount.value ?? 0;
     if (total <= 0) return;
     const lastPageNum = Math.ceil(total / pageSize.value);
     if (lastPageNum <= currentPage.value) return;
@@ -4864,7 +4870,7 @@ const canvasDetailButtonStyle = computed(() => {
   const edgeGap = 6;
   return {
     left: `${Math.max(DATA_GRID_ROW_NUM_WIDTH, cell.rect.left + cell.rect.width - actionWidth - edgeGap)}px`,
-    top: `${cell.rect.top + 2}px`,
+    top: `${cell.rect.top + cell.rect.height / 2}px`,
   };
 });
 
@@ -7845,7 +7851,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex) }}</span>
                         </template>
                         <template v-else>{{ firstLineCellDisplayValue(cell.display) }}</template>
-                        <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-2 top-0.5 flex items-center gap-1">
+                        <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
                             :items="binaryCellDownloadMenuItems"
@@ -7996,7 +8002,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               <Code2 class="h-3.5 w-3.5" />
                             </button>
                           </PopoverTrigger>
-                          <PopoverContent align="start" side="bottom" class="w-[450px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+                          <PopoverContent align="start" side="bottom" class="w-[450px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
                             <div class="border-b bg-muted/40 px-3 py-2">
                               <div class="text-sm font-semibold">
                                 {{ t("grid.columnFormatterFor", { column: col.name }) }}
@@ -8175,7 +8181,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               <Filter class="h-3.5 w-3.5" />
                             </button>
                           </PopoverTrigger>
-                          <PopoverContent align="start" side="bottom" class="w-[300px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-xl border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+                          <PopoverContent align="start" side="bottom" class="w-[300px] max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
                             <div class="border-b bg-muted/40 px-2 py-1.5 text-center text-xs font-semibold">
                               {{ columnFilterPanelTitle(col.name) }}
                             </div>
@@ -8341,7 +8347,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         @paste.stop="onCellEditTextareaPaste"
                       />
                     </div>
-                    <div v-if="canvasDetailButtonCell" class="absolute pointer-events-auto z-20 flex items-center gap-1" :style="canvasDetailButtonStyle" @mouseenter="keepCanvasDetailHover" @mouseleave="clearCanvasDetailHover">
+                    <div v-if="canvasDetailButtonCell" class="absolute pointer-events-auto z-20 flex -translate-y-1/2 items-center gap-1" :style="canvasDetailButtonStyle" @mouseenter="keepCanvasDetailHover" @mouseleave="clearCanvasDetailHover">
                       <LightDropdownMenu
                         v-if="canvasDetailButtonCell.canQuickDownload"
                         :items="binaryCellDownloadMenuItems"
@@ -8503,7 +8509,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           <span class="text-muted-foreground/70 italic">{{ draftCellPlaceholder(item, col.actualColIdx) }}</span>
                         </template>
                         <template v-else>{{ firstLineCellDisplayValue(formatCellCached(item.data[col.actualColIdx], col.actualColIdx)) }}</template>
-                        <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-0.5 flex items-center gap-1">
+                        <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
                             :items="binaryCellDownloadMenuItems"
@@ -8547,7 +8553,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 <div ref="gridVerticalScrollbarThumbRef" class="data-grid-vertical-scrollbar__thumb" />
               </div>
               <div v-if="loading" class="absolute inset-0 z-20 bg-background/50 flex items-center justify-center">
-                <div class="flex items-center gap-2 px-3 py-1.5 rounded-md bg-background border shadow-sm text-xs text-muted-foreground">
+                <div class="flex items-center gap-2 rounded-md border bg-background px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
                   <Loader2 class="w-3.5 h-3.5 animate-spin" />
                   <span>{{ formatElapsedSeconds(loadingElapsed) }}s</span>
                 </div>
@@ -8916,7 +8922,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       <div class="flex min-w-0 items-center gap-2 overflow-hidden">
         <span v-if="hasData" class="shrink-0">
           {{ t(showTruncationWarning ? "grid.loadedRows" : "grid.totalRows", { count: result.rows.length }) }}
-          <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t("grid.totalRowCount", { count: displayedTotalRowCount }) }}</span>
+          <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountIsExact === false ? "grid.totalRowCountAtLeast" : "grid.totalRowCount", { count: displayedTotalRowCount }) }}</span>
           <span v-else-if="totalRowCountBusy" class="text-muted-foreground/70">
             {{ t("grid.totalRowCountLoading") }}
           </span>
@@ -9502,7 +9508,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   background-color: var(--background);
   background-color: color-mix(in oklab, var(--background) 96%, var(--primary) 4%);
   border: 1px solid color-mix(in oklab, var(--primary) 62%, var(--border));
-  border-radius: 6px;
+  border-radius: var(--dbx-radius-fixed-6);
   z-index: 90;
   box-shadow:
     0 28px 72px rgb(0 0 0 / 34%),

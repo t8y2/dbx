@@ -530,6 +530,12 @@ test("normalizeEditorSettings keeps valid UI scales with two-decimal precision",
   assert.equal(normalizeEditorSettings({ uiScale: 1.125 }).uiScale, 1.13);
 });
 
+test("shows persisted UI scales that are not available as presets", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+
+  assert.match(source, /<SelectValue>\{\{ Math\.round\(editUiScale \* 100\) \}\}%<\/SelectValue>/);
+});
+
 test("defaults SQL formatter settings", () => {
   assert.deepEqual(DEFAULT_EDITOR_SETTINGS.sqlFormatter, DEFAULT_SQL_FORMATTER_SETTINGS);
   assert.deepEqual(normalizeEditorSettings({}).sqlFormatter, DEFAULT_EDITOR_SETTINGS.sqlFormatter);

@@ -553,6 +553,27 @@ class MongoAgentTest {
     }
 
     @Test
+    void bsonToExtendedJsonWrapsUnsafeLongsForJsonClients() {
+        Document doc = new Document("_id", 144_115_205_316_939_462L)
+            .append("nested", new Document("sequence", -144_115_205_316_939_462L))
+            .append("items", List.of(144_115_205_316_939_462L))
+            .append("safe", 42L);
+
+        JsonObject json = MongoAgent.bsonToExtendedJson(doc);
+
+        assertEquals("144115205316939462", json.getAsJsonObject("_id").get("$numberLong").getAsString());
+        assertEquals(
+            "-144115205316939462",
+            json.getAsJsonObject("nested").getAsJsonObject("sequence").get("$numberLong").getAsString()
+        );
+        assertEquals(
+            "144115205316939462",
+            json.getAsJsonArray("items").get(0).getAsJsonObject().get("$numberLong").getAsString()
+        );
+        assertEquals(42L, json.get("safe").getAsLong());
+    }
+
+    @Test
     void documentForWriteParsesMongoShellIsoDateStrings() {
         Document doc = MongoAgent.documentForWrite("{\"$set\":{\"CreateDate\":\"ISODate(\\\"2026-06-10T13:59:31.287Z\\\")\"}}");
 

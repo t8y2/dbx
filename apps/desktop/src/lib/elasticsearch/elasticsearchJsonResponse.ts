@@ -9,9 +9,8 @@ export interface ElasticsearchJsonResponse {
 const ELASTICSEARCH_REST_STATEMENT = /^(?:GET|POST|PUT|DELETE|HEAD)\s+\S+/i;
 
 /**
- * Detect the result shape emitted for a JSON response to an explicit
- * Elasticsearch REST request. SQL and text (such as CAT) results keep using
- * the normal data-grid path.
+ * Detect the raw HTTP result emitted for an Elasticsearch REST request.
+ * DBX asks unformatted CAT requests for JSON so they use this response panel.
  */
 export function elasticsearchJsonResponseForResult(databaseType: DatabaseType | undefined, sourceStatement: string | undefined, result: QueryResult | undefined): ElasticsearchJsonResponse | undefined {
   if (databaseType !== "elasticsearch" || !result || typeof sourceStatement !== "string") return undefined;

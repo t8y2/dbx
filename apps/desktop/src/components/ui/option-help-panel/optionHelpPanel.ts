@@ -1,1 +1,1 @@
-export const OPTION_HELP_PANEL_CLASS = "w-full shrink-0 self-start max-h-64 overflow-y-auto rounded-md border bg-popover px-3 py-2 text-xs leading-relaxed text-muted-foreground shadow-md sm:mt-[var(--option-help-offset)] sm:w-[min(26rem,calc(100vw-5rem))]";
+export const OPTION_HELP_PANEL_CLASS = "w-full shrink-0 self-start max-h-64 overflow-y-auto rounded-lg border bg-popover px-3 py-2 text-xs leading-relaxed text-muted-foreground shadow-md sm:mt-[var(--option-help-offset)] sm:w-[min(26rem,calc(100vw-5rem))]";

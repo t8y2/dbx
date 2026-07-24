@@ -7008,6 +7008,20 @@ mod ddl_tests {
     }
 
     #[test]
+    fn opengauss_table_ddl_appends_trigger_definitions() {
+        let ddl = append_opengauss_trigger_definitions(
+            "CREATE TABLE \"public\".\"users\" (\n  \"id\" integer\n);".to_string(),
+            &[r#"CREATE TRIGGER users_bi BEFORE INSERT ON "public"."users" FOR EACH ROW EXECUTE PROCEDURE fill_created_at()"#
+                .to_string()],
+        );
+
+        assert!(ddl.contains("CREATE TABLE \"public\".\"users\""));
+        assert!(ddl.contains(
+            "\n\nCREATE TRIGGER users_bi BEFORE INSERT ON \"public\".\"users\" FOR EACH ROW EXECUTE PROCEDURE fill_created_at();"
+        ));
+    }
+
+    #[test]
     fn mysql_display_ddl_gets_statement_terminator() {
         let ddl = "CREATE TABLE `users` (\n  `id` int NOT NULL\n) ENGINE=InnoDB";
 
@@ -7074,15 +7088,6 @@ pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &s
     .map_err(|e| e.to_string())?
 }
 
-pub async fn opengauss_table_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    first_string_cell(db::postgres::execute_query(pool, &opengauss_table_ddl_sql(schema, table)).await?)
-}
-
-pub fn opengauss_table_ddl_sql(schema: &str, table: &str) -> String {
-    let qualified_name = format!("{}.{}", pg_ident(schema), pg_ident(table));
-    format!("SELECT pg_get_tabledef({})", sql_string(&qualified_name))
-}
-
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
     let (columns, indexes, fkeys, table_comment, partition_key, trigger_definitions) = tokio::try_join!(
         db::postgres::get_columns(pool, schema, table),
@@ -7107,7 +7112,38 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
     ))
 }
 
+pub async fn opengauss_table_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+    let (ddl, trigger_definitions) = tokio::try_join!(
+        async { first_string_cell(db::postgres::execute_query(pool, &opengauss_table_ddl_sql(schema, table)).await?) },
+        db::postgres::list_trigger_definitions(pool, schema, table),
+    )?;
+
+    Ok(append_opengauss_trigger_definitions(ddl, &trigger_definitions))
+}
+
+pub fn opengauss_table_ddl_sql(schema: &str, table: &str) -> String {
+    let qualified_name = format!("{}.{}", pg_ident(schema), pg_ident(table));
+    format!("SELECT pg_get_tabledef({})", sql_string(&qualified_name))
+}
+
 fn append_postgres_trigger_definitions(mut ddl: String, trigger_definitions: &[String]) -> String {
+    for definition in
+        trigger_definitions.iter().map(|definition| definition.trim()).filter(|definition| !definition.is_empty())
+    {
+        ddl = ddl.trim_end().to_string();
+        if !ddl.ends_with(';') {
+            ddl.push(';');
+        }
+        ddl.push_str("\n\n");
+        ddl.push_str(definition);
+        if !definition.ends_with(';') {
+            ddl.push(';');
+        }
+    }
+    ddl
+}
+
+fn append_opengauss_trigger_definitions(mut ddl: String, trigger_definitions: &[String]) -> String {
     for definition in
         trigger_definitions.iter().map(|definition| definition.trim()).filter(|definition| !definition.is_empty())
     {

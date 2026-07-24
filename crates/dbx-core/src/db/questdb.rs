@@ -210,6 +210,15 @@ async fn questdb_normal_view_ddl(pool: &Pool, view: &str) -> Result<String, Stri
     first_string_cell(db::postgres::execute_query(pool, &sql).await?)
 }
 
+fn first_string_cell(result: QueryResult) -> Result<String, String> {
+    result
+        .rows
+        .first()
+        .and_then(|row| row.iter().find_map(|value| value.as_str().map(str::to_string)))
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Object source not found".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,13 +229,4 @@ mod tests {
         assert_eq!(questdb_tables_sql_mat_view_version(), "SELECT table_name, matView FROM tables()");
         assert_eq!(questdb_tables_sql_basic(), "SELECT table_name FROM tables()");
     }
-}
-
-fn first_string_cell(result: QueryResult) -> Result<String, String> {
-    result
-        .rows
-        .first()
-        .and_then(|row| row.iter().find_map(|value| value.as_str().map(str::to_string)))
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "Object source not found".to_string())
 }

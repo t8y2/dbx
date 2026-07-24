@@ -483,6 +483,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to CNB Registry
+        if: ${{ secrets.CNB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.CNB_REGISTRY }}
@@ -514,9 +515,12 @@ jobs:
         run: |
           mkdir -p /tmp/digests/dockerhub /tmp/digests/cnb
           dockerhub_digest="${{ steps.build-dockerhub.outputs.digest }}"
-          cnb_digest="${{ steps.build-cnb.outputs.digest }}"
           touch "/tmp/digests/dockerhub/${dockerhub_digest#sha256:}"
-          touch "/tmp/digests/cnb/${cnb_digest#sha256:}"
+          # CNB digest is only present when CNB_TOKEN is configured
+          if [ -n "${CNB_TOKEN:-}" ] && [ -n "${{ steps.build-cnb.outputs.digest }}" ]; then
+            cnb_digest="${{ steps.build-cnb.outputs.digest }}"
+            touch "/tmp/digests/cnb/${cnb_digest#sha256:}"
+          fi
 
       - name: Upload Docker Hub digest
         uses: actions/upload-artifact@v7
@@ -562,6 +566,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to CNB Registry
+        if: ${{ secrets.CNB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           registry: ${{ env.CNB_REGISTRY }}
@@ -579,7 +584,10 @@ jobs:
             -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:latest \
             $(cd /tmp/digests/dockerhub && printf '${{ secrets.DOCKERHUB_USERNAME }}/dbx@sha256:%s ' *)
 
-          docker buildx imagetools create \
-            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
-            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
-            $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
+          # Only push CNB manifest if CNB digests were uploaded
+          if [ -n "${CNB_TOKEN:-}" ] && compgen -G "/tmp/digests/cnb/*" > /dev/null; then
+            docker buildx imagetools create \
+              -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
+              -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
+              $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
+          fi

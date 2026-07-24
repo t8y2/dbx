@@ -417,6 +417,7 @@ export default withEnglishFallback({
     sshAuthMethod: "Método de acceso",
     sshAuthMethodPassword: "Contraseña",
     sshAuthMethodKey: "Clave privada",
+    sshAuthMethodKeyPassword: "Clave privada + Contraseña",
     sshAuthMethodNone: "Ninguno",
     sshAuthMethodNoneHint: "No se enviarán credenciales. Úsalo para bastiones o proxies que aceptan conexiones sin autenticación.",
     sshAuthMethodAgentLegacy: "SSH Agent (heredado)",

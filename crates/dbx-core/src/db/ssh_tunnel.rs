@@ -106,6 +106,46 @@ async fn connect_and_authenticate(
         return Err("SSH authentication failed: server rejected the connection without credentials".to_string());
     }
 
+    // "key+password": try private key first, fall back to password on failure.
+    // Both credential fields are expected to be filled in by the UI.
+    if auth_method == "key+password" {
+        if !ssh_key_path.is_empty() {
+            validate_file_path(ssh_key_path, |_| false)?;
+
+            let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase) };
+            let key_pair =
+                load_ssh_private_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
+            let auth_res = tokio::time::timeout(
+                connect_timeout,
+                session.authenticate_publickey(
+                    ssh_user,
+                    PrivateKeyWithHashAlg::new(
+                        Arc::new(key_pair),
+                        session.best_supported_rsa_hash().await.ok().flatten().flatten(),
+                    ),
+                ),
+            )
+            .await
+            .map_err(|_| format!("SSH key auth timed out ({connect_timeout_secs}s)"))?
+            .map_err(|e| format!("SSH key auth failed: {e}"))?;
+            if auth_res.success() {
+                return Ok(session);
+            }
+        }
+
+        if !ssh_password.is_empty() {
+            let auth_res = tokio::time::timeout(connect_timeout, session.authenticate_password(ssh_user, ssh_password))
+                .await
+                .map_err(|_| format!("SSH password auth timed out ({connect_timeout_secs}s)"))?
+                .map_err(|e| format!("SSH password auth failed: {e}"))?;
+            if auth_res.success() {
+                return Ok(session);
+            }
+        }
+
+        return Err("SSH authentication failed: both key and password were rejected".to_string());
+    }
+
     // "none" was rejected — fall back to the configured credential method.
     // When auth_method is set, only try the matching method.
     let try_key = auth_method.is_empty() && !ssh_key_path.is_empty() || auth_method == "key";

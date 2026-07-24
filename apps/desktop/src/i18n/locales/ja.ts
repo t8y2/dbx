@@ -409,6 +409,7 @@ export default withEnglishFallback({
     sshAuthMethod: "ログイン方式",
     sshAuthMethodPassword: "パスワード",
     sshAuthMethodKey: "秘密鍵",
+    sshAuthMethodKeyPassword: "秘密鍵 + パスワード",
     sshAuthMethodNone: "なし",
     sshAuthMethodNoneHint: "認証情報は送信されません。無認証接続を許可する踏み台やプロキシに使用してください。",
     sshAuthMethodAgentLegacy: "SSH Agent(旧)",

@@ -305,11 +305,13 @@ pub struct SshTunnelConfig {
     /// the `SSH_AUTH_SOCK` environment variable.
     #[serde(default)]
     pub ssh_agent_sock_path: String,
-    /// Login method: `"password"`, `"key"`, `"agent"`, or `"none"`.
+    /// Login method: `"password"`, `"key"`, `"key+password"`, `"agent"`, or `"none"`.
     /// Empty string means an older saved connection predating this field —
     /// the backend falls back to probing key > password > agent based on
     /// which fields are non-empty. When set to a specific method the backend
     /// only tries that method (after the standard `none` probe).
+    /// `"key+password"` tries private key auth first and falls back to
+    /// password auth if the key is rejected.
     #[serde(default)]
     pub auth_method: String,
     /// When non-empty, this layer references a shared tunnel profile
@@ -468,7 +470,6 @@ pub enum DatabaseType {
     Dameng,
     Kingbase,
     Highgo,
-    Uxdb,
     Vastbase,
     Goldendb,
     Gaussdb,
@@ -853,7 +854,6 @@ impl ConnectionConfig {
             DatabaseType::Kwdb => Some("defaultdb"),
             DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
-            DatabaseType::Uxdb => Some("uxdb"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Oscar => Some("osrdb"),
             DatabaseType::Firebird => Some("employee"),
@@ -996,7 +996,6 @@ impl ConnectionConfig {
             DatabaseType::Dameng => format!("dm://{host}:{port}{db_part}"),
             DatabaseType::Kingbase => format!("kingbase://{host}:{port}{db_part}"),
             DatabaseType::Highgo => format!("highgo://{host}:{port}{db_part}"),
-            DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => format!("gaussdb://{host}:{port}{db_part}"),
@@ -1149,9 +1148,6 @@ impl ConnectionConfig {
             }
             DatabaseType::Highgo => {
                 format!("highgo://{}:{}@{host}:{port}{db_part}", username, password)
-            }
-            DatabaseType::Uxdb => {
-                format!("uxdb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Vastbase => {
                 format!("vastbase://{}:{}@{host}:{port}{db_part}", username, password)
@@ -2548,15 +2544,6 @@ mod tests {
 
         assert_eq!(config.effective_database(), Some("postgres"));
         assert_eq!(config.connection_url(), "vastbase://vastbase:secret@10.1.2.3:5432/postgres");
-    }
-
-    #[test]
-    fn uxdb_connection_url_uses_uxdb_scheme() {
-        let mut config = mysql_config("uxdb", "secret", Some("warehouse"));
-        config.db_type = DatabaseType::Uxdb;
-        config.port = 52025;
-
-        assert_eq!(config.connection_url(), "uxdb://uxdb:secret@10.1.2.3:52025/warehouse");
     }
 
     #[test]

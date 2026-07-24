@@ -537,6 +537,7 @@ export default withEnglishFallback({
     sshAuthMethod: "登录方式",
     sshAuthMethodPassword: "密码",
     sshAuthMethodKey: "私钥",
+    sshAuthMethodKeyPassword: "私钥 + 密码",
     sshAuthMethodNone: "无认证",
     sshAuthMethodNoneHint: "不会发送任何凭据,适用于接受无认证连接的 bastion 或代理。",
     sshAuthMethodAgentLegacy: "SSH Agent(旧版)",

@@ -534,6 +534,7 @@ export default {
     sshAuthMethod: "Login Method",
     sshAuthMethodPassword: "Password",
     sshAuthMethodKey: "Private Key",
+    sshAuthMethodKeyPassword: "Private Key + Password",
     sshAuthMethodNone: "None",
     sshAuthMethodNoneHint: "No credentials will be sent. Use this for bastions or proxies that accept unauthenticated connections.",
     sshAuthMethodAgentLegacy: "SSH Agent (legacy)",

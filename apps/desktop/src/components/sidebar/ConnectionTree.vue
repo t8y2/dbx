@@ -39,8 +39,8 @@ import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
-import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNodeComment } from "@/lib/sidebar/sidebarTreeItemLayout";
-import { sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
 
 const { t } = useI18n();
@@ -373,7 +373,10 @@ const flatNodes = computed<FlatTreeNode[]>(() =>
 
 const sidebarCommentLabelWidths = shallowRef(new Map<string, number>());
 let sidebarCommentMeasureFrame = 0;
+const sidebarTreeContentWidth = ref(0);
+let sidebarTreeContentMeasureFrame = 0;
 const sidebarTableNameDisplayTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "mongo-collection", "vector-collection", "elasticsearch-index"]);
+const sidebarStorageDisplayTypes = new Set<TreeNodeType>(["database", "table", "materialized_view"]);
 
 function sidebarCommentLabel(node: TreeNode): string {
   const label = sidebarTableNameDisplayTypes.has(node.type) ? sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes) : node.label;
@@ -411,7 +414,51 @@ function scheduleSidebarCommentLabelMeasure() {
   sidebarCommentMeasureFrame = window.requestAnimationFrame(measureSidebarCommentLabelWidths);
 }
 
+function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
+  const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
+  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node)) return true;
+  return mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
+}
+
+const sidebarTreeNaturalWidthItems = computed(() =>
+  flatNodes.value.map(({ depth, node }) => ({
+    depth,
+    label: sidebarCommentLabel(node),
+    usesNaturalWidth: usesFullWidthTreeLabel(node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll, sidebarNodeHasTrailingMetadata(node)),
+    trailingWidth: node.pinned || store.isTreeNodePinned(node) ? 20 : 0,
+  })),
+);
+
+function measureSidebarTreeContentWidth() {
+  sidebarTreeContentMeasureFrame = 0;
+  if (!settingsStore.editorSettings.sidebarAllowHorizontalScroll || typeof document === "undefined" || !rootRef.value) {
+    sidebarTreeContentWidth.value = 0;
+    return;
+  }
+
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return;
+  const style = window.getComputedStyle(rootRef.value);
+  context.font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  sidebarTreeContentWidth.value = sidebarTreeNaturalContentWidth(sidebarTreeNaturalWidthItems.value, (text) => context.measureText(text).width);
+  void nextTick(scheduleSidebarScrollMetricsUpdate);
+}
+
+function scheduleSidebarTreeContentWidthMeasure() {
+  if (typeof window === "undefined") {
+    measureSidebarTreeContentWidth();
+    return;
+  }
+  if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
+  sidebarTreeContentMeasureFrame = window.requestAnimationFrame(measureSidebarTreeContentWidth);
+}
+
 watch([flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarCommentLabelMeasure, {
+  flush: "post",
+  immediate: true,
+});
+
+watch([sidebarTreeNaturalWidthItems, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarTreeContentWidthMeasure, {
   flush: "post",
   immediate: true,
 });
@@ -474,7 +521,7 @@ function updateSidebarScrollMetrics() {
     clientHeight: scroller.clientHeight,
     clientWidth: scroller.clientWidth,
     scrollHeight: scroller.scrollHeight,
-    scrollWidth: scroller.scrollWidth,
+    scrollWidth: Math.max(scroller.scrollWidth, sidebarTreeContentWidth.value),
   };
 }
 
@@ -516,6 +563,8 @@ watch(
 
     sidebarScrollbarResizeObserver = new ResizeObserver(scheduleSidebarScrollMetricsUpdate);
     sidebarScrollbarResizeObserver.observe(scroller);
+    const content = scroller.querySelector<HTMLElement>(".connection-tree-content");
+    if (content) sidebarScrollbarResizeObserver.observe(content);
     scheduleSidebarScrollMetricsUpdate();
 
     onCleanup(() => {
@@ -567,6 +616,7 @@ watch(flatNodes, () => {
 });
 
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
+const sidebarTreeScrollerStyle = computed<CSSProperties>(() => ({ "--sidebar-tree-content-width": `${sidebarTreeContentWidth.value}px` }) as CSSProperties);
 
 const hasSidebarVerticalOverflow = computed(() => sidebarScrollMetrics.value.scrollHeight > sidebarScrollMetrics.value.clientHeight + 1);
 const hasSidebarHorizontalOverflow = computed(() => settingsStore.editorSettings.sidebarAllowHorizontalScroll && sidebarScrollMetrics.value.scrollWidth > sidebarScrollMetrics.value.clientWidth + 1);
@@ -1469,6 +1519,7 @@ onUnmounted(() => {
   window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);
   window.clearTimeout(sidebarScrollingTimer);
   if (sidebarCommentMeasureFrame) window.cancelAnimationFrame(sidebarCommentMeasureFrame);
+  if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
 });
 
 defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
@@ -1570,6 +1621,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           ref="treeScrollerRef"
           class="sidebar-tree connection-tree-scroller h-full overflow-y-auto"
           :class="sidebarTreeOverflowClass"
+          :style="sidebarTreeScrollerStyle"
           @click="clearSidebarSelection"
           :items="flatNodes"
           :item-size="SIDEBAR_TREE_ROW_HEIGHT"
@@ -1578,6 +1630,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           :skip-hover="true"
           key-field="id"
           type-field="poolType"
+          list-class="connection-tree-content"
           flow-mode
         >
           <template #default="{ item }">
@@ -1617,20 +1670,22 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
         </div>
       </div>
       <div v-else-if="flatNodes.length > 0" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
-        <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
-          <TreeItem
-            v-for="item in flatNodes"
-            :key="item.id"
-            :node="item.node"
-            :depth="item.depth"
-            :drag-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
-            :pending-rename="pendingRenameGroupId === item.node.id"
-            :highlighted="highlightedNodeId === item.id"
-            :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
-            @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-            @rename-started="pendingRenameGroupId = null"
-            @group-created="startRenamingCreatedGroup"
-          />
+        <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" :style="sidebarTreeScrollerStyle" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
+          <div class="connection-tree-content">
+            <TreeItem
+              v-for="item in flatNodes"
+              :key="item.id"
+              :node="item.node"
+              :depth="item.depth"
+              :drag-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
+              :pending-rename="pendingRenameGroupId === item.node.id"
+              :highlighted="highlightedNodeId === item.id"
+              :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
+              @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+              @rename-started="pendingRenameGroupId = null"
+              @group-created="startRenamingCreatedGroup"
+            />
+          </div>
         </div>
         <div
           v-if="hasSidebarVerticalOverflow"
@@ -1759,6 +1814,11 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
 
 .connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.vue-recycle-scroller__item-view) {
   width: max-content;
+}
+
+.connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.connection-tree-content),
+.connection-tree-scroller.sidebar-tree-horizontal-scroll > .connection-tree-content {
+  min-width: max(100%, var(--sidebar-tree-content-width));
 }
 
 .connection-tree-scroll-shell--horizontal-overflow .connection-tree-scroller {

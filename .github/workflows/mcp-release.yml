@@ -6,6 +6,30 @@ on:
       version:
         description: "Package version to publish, for example 0.4.4"
         required: true
+  pull_request:
+    paths:
+      - '.github/workflows/mcp-release.yml'
+      - '.github/actions/**'
+      - 'crates/dbx-cli/**'
+      - 'crates/dbx-mcp/**'
+      - 'apps/desktop/src-tauri/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/mcp-release.yml'
+      - '.github/actions/**'
+      - 'crates/dbx-cli/**'
+      - 'crates/dbx-mcp/**'
+      - 'apps/desktop/src-tauri/**'
+
+# Pinned upstream tool versions so the release is reproducible.
+# Bump these together when upgrading zig or cargo-zigbuild.
+env:
+  GLIBC_VERSION: "2.31"
+  ZIG_VERSION: "0.13.0"
+  CARGO_ZIGBUILD_VERSION: "0.23.0"
+  # mlugg/setup-zig v2.2.0 (2025-12-04)
+  SETUP_ZIG_ACTION_REF: "mlugg/setup-zig@e7d1537c378b83b8049f65dda471d87a2f7b2df2"
 
 permissions:
   attestations: write
@@ -206,6 +230,90 @@ jobs:
             git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
           fi
 
+  # PR / push 阶段的非发布校验：跑出与发布同款的 Linux 产物并验证 GLIBC 符号 ≤ $GLIBC_VERSION。
+  # 触发条件由 `on.pull_request` / `on.push` 控制；手动发布的 workflow_dispatch 不进此处。
+  validate-linux-glibc:
+    name: Validate Linux glibc ≤ ${{ env.GLIBC_VERSION }}
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev
+
+      - name: Install zig ${{ env.ZIG_VERSION }} (pinned action)
+        uses: ${{ env.SETUP_ZIG_ACTION_REF }}
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install cargo-zigbuild ${{ env.CARGO_ZIGBUILD_VERSION }}
+        run: cargo install cargo-zigbuild --locked --version "=${{ env.CARGO_ZIGBUILD_VERSION }}"
+
+      - name: Build dbx-cli (Linux glibc ≤ ${{ env.GLIBC_VERSION }})
+        run: |
+          cargo zigbuild --release -p dbx-cli --no-default-features \
+            --target "${{ matrix.target }}.${{ env.GLIBC_VERSION }}"
+
+      - name: Build dbx-mcp (Linux glibc ≤ ${{ env.GLIBC_VERSION }})
+        run: |
+          cargo zigbuild --release -p dbx-mcp \
+            --target "${{ matrix.target }}.${{ env.GLIBC_VERSION }}"
+
+      - name: Verify GLIBC symbols ≤ ${{ env.GLIBC_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ALLOWED="${{ env.GLIBC_VERSION }}"
+          ARTIFACT_DIR="target/${{ matrix.target }}.${ALLOWED}/release"
+          for BINARY in "${ARTIFACT_DIR}/dbx" "${ARTIFACT_DIR}/dbx-mcp"; do
+            if [ ! -f "${BINARY}" ]; then
+              echo "::error::missing binary: ${BINARY}"
+              exit 1
+            fi
+            # 提取动态符号表里所有 GLIBC_x.y 的最高版本（沿用 cargo-zigbuild 官方 README 的脚本）
+            MAX=$(LANG=C readelf -W --version-info --dyn-syms "${BINARY}" \
+              | grep 'Name: GLIBC' \
+              | sed -re 's/.*GLIBC_(.+) Flags.*/\1/g' \
+              | sort -t . -k1,1n -k2,2n \
+              | tail -n 1 || true)
+            if [ -z "${MAX}" ]; then
+              echo "::error::could not detect any GLIBC_* symbol in ${BINARY}"
+              exit 1
+            fi
+            HIGHEST=$(printf '%s\n' "${MAX}" "${ALLOWED}" | sort -V | tail -n1)
+            echo "${BINARY}: highest GLIBC = ${MAX} (allowed = ${ALLOWED})"
+            if [ "${HIGHEST}" != "${ALLOWED}" ]; then
+              echo "::error::${BINARY} requires GLIBC_${MAX} which is newer than allowed GLIBC_${ALLOWED}"
+              exit 1
+            fi
+          done
+          echo "All Linux artifacts require GLIBC ≤ ${ALLOWED}."
+
+      - name: Upload validated Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbx-validate-${{ matrix.target }}.glibc-${{ env.GLIBC_VERSION }}
+          path: |
+            target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release/dbx
+            target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release/dbx-mcp
+          if-no-files-found: error
+
   publish-cli-platforms:
     name: Publish ${{ matrix.package-name }}
     needs: prepare
@@ -297,30 +405,66 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
-      - name: Install zig for glibc-2.31 Linux builds
+      - name: Install zig ${{ env.ZIG_VERSION }} (pinned action)
         if: runner.os == 'Linux'
-        uses: mlugg/setup-zig@v2
+        uses: ${{ env.SETUP_ZIG_ACTION_REF }}
+        with:
+          version: ${{ env.ZIG_VERSION }}
 
-      - name: Install cargo-zigbuild
+      - name: Install cargo-zigbuild ${{ env.CARGO_ZIGBUILD_VERSION }}
         if: runner.os == 'Linux'
-        run: cargo install cargo-zigbuild --locked
+        run: cargo install cargo-zigbuild --locked --version "=${{ env.CARGO_ZIGBUILD_VERSION }}"
 
       - name: Build Rust CLI binary
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # 用 zig 作为链接器把 glibc 目标压到 2.31，覆盖 Deepin 23 / Debian 12 /
-            # Ubuntu 22.04 等老 glibc 系统；非 Linux 平台走原生的 cargo build。
-            ZIG_GLIBC=2.31 cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+            # cargo-zigbuild 通过 target 后缀 `.2.31` 把 glibc 目标压到 2.31，
+            # 让 dbx-cli 在 Deepin 23 / Debian 12 / Ubuntu 22.04 等老 glibc 系统上
+            # 不报 `GLIBC_2.34 not found`；非 Linux 走原生 cargo build 不变。
+            cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}.${{ env.GLIBC_VERSION }}"
           else
             cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+          fi
+
+      - name: Verify GLIBC symbols ≤ ${{ env.GLIBC_VERSION }}
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release/${{ matrix.binary }}"
+          ALLOWED="${{ env.GLIBC_VERSION }}"
+          if [ ! -f "${BINARY}" ]; then
+            echo "::error::missing binary: ${BINARY}"
+            exit 1
+          fi
+          MAX=$(LANG=C readelf -W --version-info --dyn-syms "${BINARY}" \
+            | grep 'Name: GLIBC' \
+            | sed -re 's/.*GLIBC_(.+) Flags.*/\1/g' \
+            | sort -t . -k1,1n -k2,2n \
+            | tail -n 1 || true)
+          if [ -z "${MAX}" ]; then
+            echo "::error::could not detect any GLIBC_* symbol in ${BINARY}"
+            exit 1
+          fi
+          HIGHEST=$(printf '%s\n' "${MAX}" "${ALLOWED}" | sort -V | tail -n1)
+          echo "${BINARY}: highest GLIBC = ${MAX} (allowed = ${ALLOWED})"
+          if [ "${HIGHEST}" != "${ALLOWED}" ]; then
+            echo "::error::${BINARY} requires GLIBC_${MAX} which is newer than allowed GLIBC_${ALLOWED}; refusing to publish."
+            exit 1
           fi
 
       - name: Stage platform package
         shell: bash
         run: |
           mkdir -p "packages/${{ matrix.package-dir }}/bin"
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # Linux zigbuild 产物路径里带 `.2.31` 后缀
+            ARTIFACT_DIR="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release"
+          else
+            ARTIFACT_DIR="target/${{ matrix.target }}/release"
+          fi
+          cp "${ARTIFACT_DIR}/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           if [[ "${{ runner.os }}" != "Windows" ]]; then chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"; fi
 
       - uses: actions/setup-node@v6
@@ -487,30 +631,66 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
-      - name: Install zig for glibc-2.31 Linux builds
+      - name: Install zig ${{ env.ZIG_VERSION }} (pinned action)
         if: runner.os == 'Linux'
-        uses: mlugg/setup-zig@v2
+        uses: ${{ env.SETUP_ZIG_ACTION_REF }}
+        with:
+          version: ${{ env.ZIG_VERSION }}
 
-      - name: Install cargo-zigbuild
+      - name: Install cargo-zigbuild ${{ env.CARGO_ZIGBUILD_VERSION }}
         if: runner.os == 'Linux'
-        run: cargo install cargo-zigbuild --locked
+        run: cargo install cargo-zigbuild --locked --version "=${{ env.CARGO_ZIGBUILD_VERSION }}"
 
       - name: Build Rust MCP binary
         shell: bash
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # 用 zig 作为链接器把 glibc 目标压到 2.31，覆盖 Deepin 23 / Debian 12 /
-            # Ubuntu 22.04 等老 glibc 系统；非 Linux 平台走原生的 cargo build。
-            ZIG_GLIBC=2.31 cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}"
+            # cargo-zigbuild 通过 target 后缀 `.2.31` 把 glibc 目标压到 2.31，
+            # 让 dbx-mcp 在 Deepin 23 / Debian 12 / Ubuntu 22.04 等老 glibc 系统上
+            # 不报 `GLIBC_2.34 not found`；非 Linux 走原生 cargo build 不变。
+            cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}.${{ env.GLIBC_VERSION }}"
           else
             cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
+          fi
+
+      - name: Verify GLIBC symbols ≤ ${{ env.GLIBC_VERSION }}
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINARY="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release/${{ matrix.binary }}"
+          ALLOWED="${{ env.GLIBC_VERSION }}"
+          if [ ! -f "${BINARY}" ]; then
+            echo "::error::missing binary: ${BINARY}"
+            exit 1
+          fi
+          MAX=$(LANG=C readelf -W --version-info --dyn-syms "${BINARY}" \
+            | grep 'Name: GLIBC' \
+            | sed -re 's/.*GLIBC_(.+) Flags.*/\1/g' \
+            | sort -t . -k1,1n -k2,2n \
+            | tail -n 1 || true)
+          if [ -z "${MAX}" ]; then
+            echo "::error::could not detect any GLIBC_* symbol in ${BINARY}"
+            exit 1
+          fi
+          HIGHEST=$(printf '%s\n' "${MAX}" "${ALLOWED}" | sort -V | tail -n1)
+          echo "${BINARY}: highest GLIBC = ${MAX} (allowed = ${ALLOWED})"
+          if [ "${HIGHEST}" != "${ALLOWED}" ]; then
+            echo "::error::${BINARY} requires GLIBC_${MAX} which is newer than allowed GLIBC_${ALLOWED}; refusing to publish."
+            exit 1
           fi
 
       - name: Stage platform package
         shell: bash
         run: |
           mkdir -p "packages/${{ matrix.package-dir }}/bin"
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # Linux zigbuild 产物路径里带 `.2.31` 后缀
+            ARTIFACT_DIR="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release"
+          else
+            ARTIFACT_DIR="target/${{ matrix.target }}/release"
+          fi
+          cp "${ARTIFACT_DIR}/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           fi

@@ -233,7 +233,7 @@ jobs:
   # PR / push 阶段的非发布校验：跑出与发布同款的 Linux 产物并验证 GLIBC 符号 ≤ $GLIBC_VERSION。
   # 触发条件由 `on.pull_request` / `on.push` 控制；手动发布的 workflow_dispatch 不进此处。
   validate-linux-glibc:
-    name: Validate Linux glibc ≤ ${{ env.GLIBC_VERSION }}
+    name: Validate Linux glibc <= 2.31
     if: github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -257,8 +257,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
-      - name: Install zig ${{ env.ZIG_VERSION }} (pinned action)
-        uses: ${{ env.SETUP_ZIG_ACTION_REF }}
+      - name: Install zig 0.13.0 (pinned action)
+        uses: mlugg/setup-zig@e7d1537c378b83b8049f65dda471d87a2f7b2df2  # v2.2.0
         with:
           version: ${{ env.ZIG_VERSION }}
 
@@ -405,9 +405,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
-      - name: Install zig ${{ env.ZIG_VERSION }} (pinned action)
+      - name: Install zig 0.13.0 (pinned action)
         if: runner.os == 'Linux'
-        uses: ${{ env.SETUP_ZIG_ACTION_REF }}
+        uses: mlugg/setup-zig@e7d1537c378b83b8049f65dda471d87a2f7b2df2  # v2.2.0
         with:
           version: ${{ env.ZIG_VERSION }}
 
@@ -631,9 +631,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev
 
-      - name: Install zig ${{ env.ZIG_VERSION }} (pinned action)
+      - name: Install zig 0.13.0 (pinned action)
         if: runner.os == 'Linux'
-        uses: ${{ env.SETUP_ZIG_ACTION_REF }}
+        uses: mlugg/setup-zig@e7d1537c378b83b8049f65dda471d87a2f7b2df2  # v2.2.0
         with:
           version: ${{ env.ZIG_VERSION }}
 

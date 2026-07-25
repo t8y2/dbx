@@ -574,6 +574,14 @@ JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
 WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname, pos.n`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 }
 
+func kingbaseCatalogFunction(catalog, sysFunction, postgresFunction string) string {
+	// Kingbase compatibility modes expose different catalog-qualified deparser names.
+	if catalog == "pg_catalog" {
+		return "pg_catalog." + postgresFunction
+	}
+	return "sys_catalog." + sysFunction
+}
+
 func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error) {
 	effective, err := s.effectiveSchema(schema)
 	if err != nil {
@@ -736,10 +744,11 @@ func (s *server) listIndexDefinitions(schema, table string) ([]string, error) {
 	if s.mode.postgresCatalog {
 		catalog, prefix = "pg_catalog", "pg"
 	}
-	query := fmt.Sprintf(`SELECT i.relname, pg_get_indexdef(ix.indexrelid, 0, true), obj_description(i.oid)
+	indexDefinitionFunction := kingbaseCatalogFunction(catalog, "sys_get_indexdef", "pg_get_indexdef")
+	query := fmt.Sprintf(`SELECT i.relname, %s(ix.indexrelid, 0, true), obj_description(i.oid)
 FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
 JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
-WHERE n.nspname = %s AND t.relname = %s AND NOT ix.indisprimary ORDER BY i.relname`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
+WHERE n.nspname = %s AND t.relname = %s AND NOT ix.indisprimary ORDER BY i.relname`, indexDefinitionFunction, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -772,9 +781,10 @@ func (s *server) listTriggerDefinitions(schema, table string) ([]string, error) 
 	if s.mode.postgresCatalog {
 		catalog, prefix = "pg_catalog", "pg"
 	}
-	query := fmt.Sprintf(`SELECT pg_get_triggerdef(tg.oid, true)
+	triggerDefinitionFunction := kingbaseCatalogFunction(catalog, "sys_get_triggerdef", "pg_get_triggerdef")
+	query := fmt.Sprintf(`SELECT %s(tg.oid, true)
 FROM %s.%s_trigger tg JOIN %s.%s_class c ON c.oid = tg.tgrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = %s AND c.relname = %s AND NOT tg.tgisinternal ORDER BY tg.tgname`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
+WHERE n.nspname = %s AND c.relname = %s AND NOT tg.tgisinternal ORDER BY tg.tgname`, triggerDefinitionFunction, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err

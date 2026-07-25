@@ -130,7 +130,7 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 			rows:    [][]driver.Value{{"orders table"}},
 		}, nil
 	}
-	if strings.Contains(query, "SELECT i.relname, pg_get_indexdef(") {
+	if strings.Contains(query, "SELECT i.relname, sys_catalog.sys_get_indexdef(") || strings.Contains(query, "SELECT i.relname, pg_catalog.pg_get_indexdef(") {
 		return &valueRows{
 			columns: []string{"index_name", "index_definition", "index_comment"},
 			rows: [][]driver.Value{
@@ -138,7 +138,7 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 			},
 		}, nil
 	}
-	if strings.Contains(query, "SELECT pg_get_triggerdef(tg.oid, true)") {
+	if strings.Contains(query, "SELECT sys_catalog.sys_get_triggerdef(tg.oid, true)") || strings.Contains(query, "SELECT pg_catalog.pg_get_triggerdef(tg.oid, true)") {
 		return &valueRows{
 			columns: []string{"trigger_definition"},
 			rows: [][]driver.Value{
@@ -304,6 +304,48 @@ func TestKingbaseListIndexesQuerySupportsSQLServerMode(t *testing.T) {
 	}
 	if strings.Contains(query, "[pos.n]") {
 		t.Fatalf("index query should not use dynamic array subscripts in SQL Server mode: %s", query)
+	}
+}
+
+func TestKingbaseCatalogFunctionsFollowMetadataMode(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	tests := []struct {
+		name            string
+		postgresCatalog bool
+		expectedIndex   string
+		expectedTrigger string
+	}{
+		{name: "sys catalog", expectedIndex: "sys_catalog.sys_get_indexdef", expectedTrigger: "sys_catalog.sys_get_triggerdef"},
+		{name: "postgres catalog", postgresCatalog: true, expectedIndex: "pg_catalog.pg_get_indexdef", expectedTrigger: "pg_catalog.pg_get_triggerdef"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &fallbackDriverState{}
+			expressionFallbackState.Store(state)
+			db, err := sql.Open("kingbase-expression-fallback-test", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.SetMaxOpenConns(1)
+			t.Cleanup(func() { _ = db.Close() })
+			server := newServer()
+			server.db = db
+			server.mode.postgresCatalog = test.postgresCatalog
+
+			if _, err := server.listIndexDefinitions("public", "orders"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := server.listTriggerDefinitions("public", "orders"); err != nil {
+				t.Fatal(err)
+			}
+
+			state.mu.Lock()
+			queries := append([]string(nil), state.queries...)
+			state.mu.Unlock()
+			if len(queries) != 2 || !strings.Contains(queries[0], test.expectedIndex+"(") || !strings.Contains(queries[1], test.expectedTrigger+"(") {
+				t.Fatalf("catalog functions do not match metadata mode: %v", queries)
+			}
+		})
 	}
 }
 

@@ -6,21 +6,9 @@ on:
       version:
         description: "Package version to publish, for example 0.4.4"
         required: true
-  pull_request:
-    paths:
-      - '.github/workflows/mcp-release.yml'
-      - '.github/actions/**'
-      - 'crates/dbx-cli/**'
-      - 'crates/dbx-mcp/**'
-      - 'apps/desktop/src-tauri/**'
   push:
-    branches: [main]
-    paths:
-      - '.github/workflows/mcp-release.yml'
-      - '.github/actions/**'
-      - 'crates/dbx-cli/**'
-      - 'crates/dbx-mcp/**'
-      - 'apps/desktop/src-tauri/**'
+    tags:
+      - "v*"
 
 # Pinned upstream tool versions so the release is reproducible.
 # Bump these together when upgrading zig or cargo-zigbuild.
@@ -84,12 +72,15 @@ jobs:
       - name: Set package versions
         id: version
         env:
-          VERSION: ${{ github.event.inputs.version }}
+          # workflow_dispatch: use the manually supplied version.
+          # push tag (e.g. v0.4.4): strip the leading "v" from the tag name.
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
         run: |
           node <<'NODE'
           const fs = require("fs");
 
-          const version = process.env.VERSION.trim();
+          const raw = (process.env.VERSION || "").trim();
+          const version = raw.startsWith("v") ? raw.slice(1) : raw;
           if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
             throw new Error(`Invalid semver version: ${version}`);
           }

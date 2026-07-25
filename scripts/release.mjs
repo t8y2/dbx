@@ -6,9 +6,6 @@ import { evaluateAgentVersionBump, getAgentVersionChanges, isAgentPublishRelevan
 
 const REPO = "t8y2/dbx";
 const PACKAGES_WORKFLOW = "mcp-release.yml";
-const APP_PUBLISH_WORKFLOW = "publish-packages.yml";
-const APP_CNB_SYNC_WORKFLOW = "sync-cnb-release-assets.yml";
-const APP_DOCKER_ROLLBACK_WORKFLOW = "rollback-docker-latest.yml";
 const PACKAGE_TAG_PREFIX = "packages-v";
 const AGENT_TAG_PREFIX = "agents-v";
 const APP_TAG_PREFIX = "v";
@@ -205,59 +202,29 @@ async function releaseAgents(bump) {
 async function publishApp(tagInput) {
   const latest = getLatestAppTag();
   const releaseTag = tagInput ? resolveAppTag(tagInput) : latest.tag;
-  const workflowArgs = ["workflow", "run", APP_PUBLISH_WORKFLOW, "--repo", REPO, "-f", `tag=${releaseTag}`];
 
   console.log(kv("Release target", "App distribution", bold));
   console.log(kv("Latest app tag", latest.tag, yellow));
   console.log(kv("Publish tag", releaseTag, yellow));
-  console.log(kv("Workflow", `Publish Packages (${APP_PUBLISH_WORKFLOW})`, magenta));
-  console.log(kv("Command", `gh ${workflowArgs.join(" ")}`, dim));
+  console.log(yellow("App distribution is now driven by pushing a v* tag; no separate workflow dispatch is required."));
 
   if (dryRun) {
-    console.log(dim("Dry run only; workflow was not triggered."));
+    console.log(dim("Dry run only; nothing was triggered."));
     return;
   }
-
-  ensureGhReady(APP_PUBLISH_WORKFLOW);
-  run("gh", ["release", "view", releaseTag, "--repo", REPO], { stdio: "inherit" });
-  await confirmOrExit(`Confirm publishing app distribution for ${bold(releaseTag)}? [y/N] `);
-
-  run("gh", workflowArgs, { stdio: "inherit" });
-  console.log(green(`Triggered Publish Packages for ${releaseTag}.`));
 }
 
 async function rollbackApp(tagInput) {
   const releaseTag = resolveRollbackTag(tagInput ?? (await promptRollbackTag()));
-  const publishArgs = ["workflow", "run", APP_PUBLISH_WORKFLOW, "--repo", REPO, "-f", `tag=${releaseTag}`, "-f", "notify=false"];
-  const cnbArgs = ["workflow", "run", APP_CNB_SYNC_WORKFLOW, "--repo", REPO, "-f", `tag=${releaseTag}`];
-  const dockerArgs = ["workflow", "run", APP_DOCKER_ROLLBACK_WORKFLOW, "--repo", REPO, "-f", `tag=${releaseTag}`];
 
   console.log(kv("Release target", "Emergency app rollback", bold));
   console.log(kv("Rollback tag", releaseTag, yellow));
-  console.log(yellow("This stops further rollout but does not downgrade clients that already installed a newer version."));
-  console.log(kv("GitHub / R2 / Homebrew / Scoop", `gh ${publishArgs.join(" ")}`, dim));
-  console.log(kv("CNB release assets", `gh ${cnbArgs.join(" ")}`, dim));
-  console.log(kv("Docker latest", `gh ${dockerArgs.join(" ")}`, dim));
+  console.log(yellow("Rollback tooling is no longer wired to a workflow; restore a v* tag manually if a desktop release needs to be republished."));
 
   if (dryRun) {
-    console.log(dim("Dry run only; rollback workflows were not triggered and release metadata was not changed."));
+    console.log(dim("Dry run only; nothing was triggered."));
     return;
   }
-
-  ensureGhWorkflowsReady([APP_PUBLISH_WORKFLOW, APP_CNB_SYNC_WORKFLOW, APP_DOCKER_ROLLBACK_WORKFLOW]);
-  const latestRelease = getGithubRelease();
-  const rollbackRelease = getGithubRelease(releaseTag);
-  validateRollbackRelease(rollbackRelease, latestRelease);
-
-  console.log(kv("Current latest release", latestRelease.tagName, red));
-  console.log(kv("Rollback release", rollbackRelease.tagName, green));
-  await confirmRollbackOrExit(releaseTag);
-
-  // Dispatch existing credential-owning workflows instead of handling release secrets locally.
-  run("gh", publishArgs, { stdio: "inherit" });
-  run("gh", cnbArgs, { stdio: "inherit" });
-  run("gh", dockerArgs, { stdio: "inherit" });
-  console.log(green(`Triggered emergency rollback to ${releaseTag}. Monitor all three workflows before announcing completion.`));
 }
 
 async function promptTarget() {

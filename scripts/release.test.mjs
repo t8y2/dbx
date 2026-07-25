@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -54,18 +54,15 @@ function createMockGh() {
   return directory;
 }
 
-test("rollback dry-run prints all affected channels without invoking GitHub", () => {
+test("rollback dry-run prints advisory without invoking GitHub", () => {
   const result = runRelease(["rollback", "v0.5.63", "--dry-run", "--skip-fetch"]);
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Emergency app rollback/);
-  assert.match(result.stdout, /publish-packages\.yml.*notify=false/);
-  assert.match(result.stdout, /sync-cnb-release-assets\.yml/);
-  assert.match(result.stdout, /rollback-docker-latest\.yml/);
-  assert.match(result.stdout, /does not downgrade clients/);
+  assert.match(result.stdout, /no longer wired to a workflow/);
 });
 
-test("rollback dispatches each distribution workflow after validation", () => {
+test("rollback does not dispatch any workflow", () => {
   const mockBin = createMockGh();
   const logPath = join(mockBin, "gh.log");
   const result = runRelease(["rollback", "v0.5.63", "--yes", "--skip-fetch"], {
@@ -75,30 +72,13 @@ test("rollback dispatches each distribution workflow after validation", () => {
   });
 
   assert.equal(result.status, 0, result.stderr);
-  const commands = readFileSync(logPath, "utf8").trim().split("\n");
-  assert.deepEqual(commands, [
-    "workflow run publish-packages.yml --repo t8y2/dbx -f tag=v0.5.63 -f notify=false",
-    "workflow run sync-cnb-release-assets.yml --repo t8y2/dbx -f tag=v0.5.63",
-    "workflow run rollback-docker-latest.yml --repo t8y2/dbx -f tag=v0.5.63",
-  ]);
+  assert.equal(existsSync(logPath), false, "rollback should not invoke any gh commands");
 });
 
-test("rollback rejects a target that is not older than latest", () => {
-  const mockBin = createMockGh();
-  const logPath = join(mockBin, "gh.log");
-  const result = runRelease(["rollback", "v0.5.64", "--yes", "--skip-fetch"], {
-    PATH: `${mockBin}:${process.env.PATH}`,
-    GH_LOG: logPath,
-    MOCK_LATEST_TAG: "v0.5.64",
-  });
+test("app distribution prints advisory without invoking GitHub", () => {
+  const result = runRelease(["app", "v0.5.63", "--dry-run", "--skip-fetch"]);
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /must be older than the current latest release v0\.5\.64/);
-});
-
-test("rollback rejects prerelease tag syntax", () => {
-  const result = runRelease(["rollback", "v0.5.63-rc.1", "--dry-run", "--skip-fetch"]);
-
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /only supports stable vX\.Y\.Z app releases/);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /App distribution/);
+  assert.match(result.stdout, /pushing a v\* tag/);
 });

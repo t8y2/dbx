@@ -4535,7 +4535,12 @@ export const useConnectionStore = defineStore("connection", () => {
     return `${connectionId}:${database}:${catalog?.toLowerCase() ?? ""}:${schema?.toLowerCase() ?? ""}`;
   }
 
-  function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string, catalog?: string): string {
+  function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string, catalog?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): string {
+    if (getConfig(connectionId)?.db_type === "oracle") {
+      const normalizedTable = context?.tableQuoted === false ? table.toUpperCase() : table;
+      const normalizedSchema = schema && context?.schemaQuoted === false ? schema.toUpperCase() : (schema ?? "");
+      return `${connectionId}:${database}:${catalog ?? ""}:${normalizedSchema}:${normalizedTable}`;
+    }
     return `${completionTableScopeKey(connectionId, database, schema, catalog)}:${table.toLowerCase()}`;
   }
 
@@ -4905,8 +4910,8 @@ export const useConnectionStore = defineStore("connection", () => {
     return result;
   }
 
-  function lookupLocalCompletionColumns(connectionId: string, database: string, table: string, schema?: string, catalog?: string): SqlCompletionColumn[] {
-    return completionColumnIndex.get(completionColumnsKey(connectionId, database, table, schema, catalog))?.columns ?? [];
+  function lookupLocalCompletionColumns(connectionId: string, database: string, table: string, schema?: string, catalog?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): SqlCompletionColumn[] {
+    return completionColumnIndex.get(completionColumnsKey(connectionId, database, table, schema, catalog, context))?.columns ?? [];
   }
 
   function lookupLocalCompletionForeignKeys(connectionId: string, database: string, table: string, schema?: string): SqlCompletionForeignKey[] {

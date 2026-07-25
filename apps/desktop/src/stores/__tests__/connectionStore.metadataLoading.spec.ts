@@ -628,4 +628,66 @@ describe("connectionStore metadata loading", () => {
     expect(listObjects).toHaveBeenNthCalledWith(3, connection.id, "app", "app", ["PROCEDURE"], "p_0999", undefined, undefined);
     expect(storedProcedureGroup?.children?.map((node) => node.label)).toEqual(["p_0999"]);
   });
+
+  it("reloads a collapsed database after a forced connection database refresh", async () => {
+    const listDatabases = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { name: "test1", comment: null },
+        { name: "test2", comment: null },
+      ])
+      .mockResolvedValueOnce([{ name: "test1", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    const connectionNode: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: true,
+      children: [
+        {
+          id: test1Id,
+          label: "test1",
+          type: "database",
+          connectionId: connection.id,
+          database: "test1",
+          isExpanded: false,
+          children: [],
+        },
+      ],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    await store.loadTables(connection.id, "test1");
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+    expect(connectionNode.children![0].children?.length).toBeGreaterThan(0);
+
+    connectionNode.children![0].isExpanded = false;
+    connectionNode.children![0].children = [];
+
+    await store.loadDatabases(connection.id, { force: true });
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+    expect(connectionNode.children![0].children?.length ?? 0).toBe(0);
+
+    await store.loadTables(connection.id, "test1");
+    expect(connectionNode.children![0].children?.length).toBeGreaterThan(0);
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+  });
 });

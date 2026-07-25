@@ -51,6 +51,7 @@ import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarN
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
+import { treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
 import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
@@ -1558,6 +1559,9 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       const normalizedChildren = sortSidebarTreeChildrenForParent(node, withSavedSqlRoot(node.connectionId, node.children || [], node), getConfig(node.connectionId)?.db_type);
       setChildren(node, normalizedChildren);
+    } else if (!treeNodeLoadedChildrenContentPresent(node, useSettingsStore().editorSettings.sidebarObjectDisplay)) {
+      loadedTreeNodeChildrenIds.value.delete(node.id);
+      return false;
     }
     node.isExpanded = true;
     return true;

@@ -773,6 +773,24 @@ test("a failed NULL save keeps the pending cell edit", async () => {
   assert.equal(editor.hasPendingChanges.value, true);
 });
 
+test("committing a no-op edit batch keeps the existing save error", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const editor = createPeopleGridEditor();
+
+  editor.applyCellValue(0, 1, "Ada Lovelace");
+  editor.saveError.value = "Previous save failed";
+  const version = editor.pendingChangesVersion.value;
+
+  editor.beginBatch();
+  editor.applyCellValue(0, 1, "Ada Lovelace");
+  editor.commitBatch();
+
+  assert.equal(editor.saveError.value, "Previous save failed");
+  assert.equal(editor.pendingChangesVersion.value, version);
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), "Ada Lovelace");
+});
+
 test("a NOT NULL validation failure keeps the pending NULL cell edit recoverable", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();

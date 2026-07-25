@@ -502,12 +502,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   let isBatching = false;
   let batchUndoSnapshotPushed = false;
+  let batchMutated = false;
   let batchColumnInfoCache: Map<number, ColumnInfo | undefined> | null = null;
 
   function beginBatch() {
     if (isBatching) return;
     isBatching = true;
     batchUndoSnapshotPushed = false;
+    batchMutated = false;
     batchColumnInfoCache = new Map();
   }
 
@@ -515,9 +517,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!isBatching) return;
     isBatching = false;
     batchColumnInfoCache = null;
+    if (!batchMutated) return;
     dirtyRows.value = new Map(dirtyRows.value);
     newRows.value = [...newRows.value];
     touchPendingChanges();
+  }
+
+  function markBatchMutated() {
+    if (isBatching) batchMutated = true;
   }
 
   function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
@@ -784,6 +791,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         pushUndoSnapshot();
       }
       quickEntryDraftRow.value = draftRowHasValue(nextDraftRow) ? nextDraftRow : emptyDraftRow();
+      markBatchMutated();
       if (!isBatching) {
         touchPendingChanges();
       }
@@ -807,6 +815,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         pushUndoSnapshot();
       }
       row[col] = newVal;
+      markBatchMutated();
       if (!isBatching) {
         newRows.value = [...newRows.value];
         touchPendingChanges();
@@ -834,6 +843,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
       if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
       dirtyRows.value.get(item.sourceIndex)!.set(col, newVal);
+      markBatchMutated();
       if (useTransaction.value && !transactionActive.value) {
         enterTransaction();
       }
@@ -850,6 +860,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
       rowChanges?.delete(col);
       if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
+      if (hasPendingCellChange) markBatchMutated();
     }
     if (!isBatching) {
       dirtyRows.value = new Map(dirtyRows.value);

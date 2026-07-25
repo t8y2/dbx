@@ -1292,9 +1292,12 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   if (nacosImplementation.value === "rnacos" && normalized.warnings.length) {
     throw new Error(t("connection.nacosRNacosOpenApiRequired"));
   }
+  const rnacosConsoleConfigured = nacosImplementation.value === "rnacos" && !!nacosRNacosConsoleAddr.value.trim();
+  if (nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value && !rnacosConsoleConfigured) {
+    throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
+  }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
-  if (nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value) {
-    if (!nacosRNacosConsoleAddr.value.trim()) throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
+  if (rnacosConsoleConfigured) {
     if (nacosConsoleAuthKind.value === "inherit") {
       if (nacosAuthKind.value !== "usernamePassword") throw new Error(t("connection.nacosConsoleAuthSeparateRequired"));
       rnacosConsoleAuth = { kind: "inherit" };
@@ -1312,7 +1315,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     serverAddr: normalized.serverAddr,
     namespace: nacosNamespace.value.trim() || undefined,
     contextPath: normalized.contextPath || undefined,
-    rnacosConsoleAddr: nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value ? nacosRNacosConsoleAddr.value.trim() || undefined : undefined,
+    rnacosConsoleAddr: nacosImplementation.value === "rnacos" ? nacosRNacosConsoleAddr.value.trim() || undefined : undefined,
     rnacosHistoryEnabled: nacosImplementation.value === "rnacos" ? nacosHistoryEnabled.value : undefined,
     rnacosConsoleAuth,
     auth: buildNacosAuth(),
@@ -5274,11 +5277,15 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                     </div>
-                    <template v-if="nacosHistoryEnabled">
-                      <div class="grid grid-cols-4 items-center gap-4">
-                        <Label :class="connectionLabelClass">{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
-                        <Input v-model="nacosRNacosConsoleAddr" class="col-span-3" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
-                      </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
+                      <Input v-model="nacosRNacosConsoleAddr" class="col-span-3" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">{{ t("connection.nacosRNacosConsoleUrlHint") }}</p>
+                    </div>
+                    <template v-if="nacosRNacosConsoleAddr.trim()">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.nacosConsoleAuthentication") }}</Label>
                         <div class="col-span-3 flex gap-2">

@@ -1,5 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  NacosBatchPreview,
+  NacosBatchReport,
+  NacosConfigSelector,
+  NacosConfigTransferRequest,
+  NacosConflictPolicy,
+  NacosContentSearchRequest,
+  NacosContentSearchResult,
   NacosConfigHistoryKey,
   NacosConfigHistoryList,
   NacosConfigHistoryQuery,
@@ -21,6 +28,7 @@ import type {
   NacosRawResponse,
   NacosServiceList,
   NacosServiceQuery,
+  NacosSearchProgress,
 } from "@/types/nacos";
 
 export async function nacosTestConnection(connectionId: string): Promise<NacosConnectionInfo> {
@@ -53,6 +61,38 @@ export async function nacosPublishConfig(connectionId: string, req: NacosConfigU
 
 export async function nacosDeleteConfig(connectionId: string, key: NacosConfigKey): Promise<void> {
   return invoke("nacos_delete_config", { connectionId, key });
+}
+
+export async function nacosSearchConfigContent(connectionId: string, req: NacosContentSearchRequest, onProgress?: (progress: NacosSearchProgress) => void): Promise<NacosContentSearchResult> {
+  const channel = new Channel<NacosSearchProgress>();
+  channel.onmessage = (progress) => onProgress?.(progress);
+  return invoke("nacos_search_config_content", { connectionId, req, onProgress: channel });
+}
+
+export async function nacosCancelConfigContentSearch(operationId: string): Promise<boolean> {
+  return invoke("nacos_cancel_operation", { operationId });
+}
+
+export async function nacosExportConfigs(connectionId: string, selector: NacosConfigSelector, destination: string, _fileName?: string): Promise<void> {
+  return invoke("nacos_export_configs", { connectionId, selector, destination });
+}
+
+export async function nacosPreviewConfigImport(connectionId: string, targetNamespace: string, archivePath: string | File): Promise<NacosBatchPreview> {
+  if (typeof archivePath !== "string") throw new Error("Desktop Nacos ZIP import requires a local file path");
+  return invoke("nacos_preview_config_import", { connectionId, targetNamespace, archivePath });
+}
+
+export async function nacosApplyConfigImport(connectionId: string, operationId: string, targetNamespace: string, archivePath: string | File, planHash: string, conflictPolicy: NacosConflictPolicy, _archiveToken?: string): Promise<NacosBatchReport> {
+  if (typeof archivePath !== "string") throw new Error("Desktop Nacos ZIP import requires a local file path");
+  return invoke("nacos_apply_config_import", { connectionId, operationId, targetNamespace, archivePath, planHash, conflictPolicy });
+}
+
+export async function nacosPreviewConfigTransfer(req: NacosConfigTransferRequest): Promise<NacosBatchPreview> {
+  return invoke("nacos_preview_config_transfer", { req });
+}
+
+export async function nacosApplyConfigTransfer(req: NacosConfigTransferRequest, planHash: string): Promise<NacosBatchReport> {
+  return invoke("nacos_apply_config_transfer", { req, planHash });
 }
 
 export async function nacosListConfigHistory(connectionId: string, query: NacosConfigHistoryQuery): Promise<NacosConfigHistoryList> {

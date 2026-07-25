@@ -59,7 +59,8 @@ pub struct NacosAdminConfig {
     pub context_path: String,
     /// Optional r-nacos authenticated-console address. This is separate from
     /// the OpenAPI server address because r-nacos exposes console-only APIs
-    /// (including config history) on its console service, normally port 10848.
+    /// (including config history plus config type and description metadata) on
+    /// its console service, normally port 10848.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rnacos_console_addr: String,
     /// `None` preserves legacy records where supplying a console address

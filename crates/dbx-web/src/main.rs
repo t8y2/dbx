@@ -470,6 +470,13 @@ async fn main() {
         .route("/nacos/instances/list", post(routes::nacos::list_instances))
         .route("/nacos/instances/update", post(routes::nacos::update_instance))
         .route("/nacos/raw", post(routes::nacos::raw_request))
+        .route("/nacos/configs/search", post(routes::nacos::search_config_content))
+        .route("/nacos/configs/search/cancel", post(routes::nacos::cancel_operation))
+        .route("/nacos/configs/export", post(routes::nacos::export_configs))
+        .route("/nacos/configs/import/preview", post(routes::nacos::preview_config_import))
+        .route("/nacos/configs/import/apply", post(routes::nacos::apply_config_import))
+        .route("/nacos/configs/copy/preview", post(routes::nacos::preview_config_transfer))
+        .route("/nacos/configs/copy/apply", post(routes::nacos::apply_config_transfer))
         // MongoDB
         .route("/mongo/list-databases", post(routes::mongo::list_databases))
         .route("/mongo/list-collections", post(routes::mongo::list_collections))

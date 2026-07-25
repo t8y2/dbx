@@ -1610,7 +1610,17 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
     <template v-else-if="activeTab.mode === 'nacos'">
       <div class="flex-1 min-h-0">
-        <NacosAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :namespace="activeTab.nacosNamespace" :namespace-name="activeTab.nacosNamespaceName" :read-only="activeConnection?.read_only ?? false" />
+        <NacosAdminConsole
+          :key="activeTab.id"
+          :connection-id="activeTab.connectionId"
+          :namespace="activeTab.nacosNamespace"
+          :namespace-name="activeTab.nacosNamespaceName"
+          :target-data-id="activeTab.nacosTargetDataId"
+          :target-group="activeTab.nacosTargetGroup"
+          :target-keyword="activeTab.nacosTargetKeyword"
+          :target-request-id="activeTab.nacosTargetRequestId"
+          :read-only="activeConnection?.read_only ?? false"
+        />
       </div>
     </template>
 

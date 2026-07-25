@@ -1425,12 +1425,18 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
-  function openNacosAdmin(connectionId: string, target?: { namespace?: string; namespaceName?: string }) {
+  function openNacosAdmin(connectionId: string, target?: { namespace?: string; namespaceName?: string; dataId?: string; group?: string; keyword?: string }) {
     const namespace = target?.namespace ?? "";
     const namespaceName = target?.namespaceName || (namespace ? namespace : "public");
     const existing = tabs.value.find((tab) => tab.mode === "nacos" && tab.connectionId === connectionId && (tab.nacosNamespace || "") === namespace);
     if (existing) {
       existing.nacosNamespaceName = namespaceName;
+      if (target?.dataId) {
+        existing.nacosTargetDataId = target.dataId;
+        existing.nacosTargetGroup = target.group || "DEFAULT_GROUP";
+        existing.nacosTargetKeyword = target.keyword;
+        existing.nacosTargetRequestId = (existing.nacosTargetRequestId ?? 0) + 1;
+      }
       if (!existing.customTitle) existing.title = `${useConnectionStore().getConfig(connectionId)?.name || "Nacos"}:${namespaceName}`;
       switchTab(existing.id);
       return existing.id;
@@ -1450,10 +1456,22 @@ export const useQueryStore = defineStore("query", () => {
       mode: "nacos",
       nacosNamespace: namespace,
       nacosNamespaceName: namespaceName,
+      nacosTargetDataId: target?.dataId,
+      nacosTargetGroup: target?.group,
+      nacosTargetKeyword: target?.keyword,
+      nacosTargetRequestId: target?.dataId ? 1 : undefined,
     };
     tabs.value.push(tab);
     activeTabId.value = id;
     return id;
+  }
+
+  function clearNacosNavigationTarget(connectionId: string, namespace: string, requestId?: number) {
+    const tab = tabs.value.find((candidate) => candidate.mode === "nacos" && candidate.connectionId === connectionId && (candidate.nacosNamespace || "") === namespace);
+    if (!tab || (requestId !== undefined && tab.nacosTargetRequestId !== requestId)) return;
+    tab.nacosTargetDataId = undefined;
+    tab.nacosTargetGroup = undefined;
+    tab.nacosTargetKeyword = undefined;
   }
 
   function applyTableStructureInitialTab(tab: QueryTab, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget) {
@@ -4583,6 +4601,7 @@ export const useQueryStore = defineStore("query", () => {
     openDamengJobAdmin,
     openMqAdmin,
     openNacosAdmin,
+    clearNacosNavigationTarget,
     openTableStructure,
     linkSavedSql,
     linkExternalSqlPath,

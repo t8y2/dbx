@@ -77,6 +77,7 @@ import {
   editableDatabasePropertyGroups,
   supportsDatabaseCreation,
   supportsDatabaseSearch,
+  supportsConnectionQueryActions,
   supportsFieldLineage,
   supportsObjectBrowserTreeNode,
   supportsSchemaDiagram,
@@ -3515,12 +3516,17 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    const supportsQueryActions = supportsConnectionQueryActions(currentDatabaseType());
+    if (supportsQueryActions) {
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    }
     if (currentDatabaseType() === "redis") {
       items.push({ label: t("contextMenu.instanceInfo"), action: openRedisInstanceInfo, icon: Info });
     }
-    const sqlHistoryMenu = savedSqlHistorySubmenu();
-    if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+    if (supportsQueryActions) {
+      const sqlHistoryMenu = savedSqlHistorySubmenu();
+      if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+    }
     if (node.connectionId && connectionSupportsDatabaseUserAdmin(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }

@@ -6891,65 +6891,9 @@ function openExternalUrl(url: string) {
   max-height: calc(var(--dbx-viewport-height) - 2rem);
 }
 
-/* Tailwind CSS v4 targets Safari 16.4+. Keep the explicit fallback local to
- * the connection picker so current Windows and macOS WebViews stay unchanged. */
+/* Legacy responsive layout rules live in public/connection-dialog-legacy.css
+ * so the production build cannot rewrite their classic media queries. */
 @supports not (color: oklch(0.5 0.1 180)) {
-  @media (min-width: 640px) {
-    [data-slot="dialog-content"].connection-dialog-content--picker {
-      width: calc(100vw - 2rem) !important;
-      height: 720px !important;
-      max-width: 880px !important;
-    }
-
-    [data-slot="dialog-content"].connection-dialog-content--standard {
-      max-width: 560px !important;
-    }
-
-    [data-slot="dialog-content"].connection-dialog-content--wide {
-      max-width: 660px !important;
-    }
-
-    .connection-db-picker-toolbar {
-      flex-direction: row !important;
-      align-items: center !important;
-      justify-content: space-between !important;
-    }
-
-    .connection-db-picker-search {
-      width: 16rem !important;
-    }
-
-    .connection-db-picker-body {
-      flex-direction: row !important;
-      gap: 1rem !important;
-    }
-
-    [data-connection-category-nav] {
-      width: 10rem !important;
-      flex-direction: column !important;
-      overflow-x: hidden !important;
-      overflow-y: auto !important;
-      border-right: 1px solid rgb(229, 229, 229) !important;
-      border-bottom-width: 0 !important;
-      padding-top: 0.125rem !important;
-      padding-right: 0.875rem !important;
-      padding-bottom: 0.125rem !important;
-    }
-
-    .connection-db-category-option {
-      width: 100% !important;
-    }
-
-    .connection-db-picker-results {
-      min-width: 0 !important;
-      flex: 1 1 0% !important;
-    }
-
-    .dark [data-connection-category-nav] {
-      border-right-color: rgb(63, 63, 70) !important;
-    }
-  }
-
   .connection-db-category-option--selected {
     color: rgb(23, 23, 23) !important;
     background-color: rgba(23, 23, 23, 0.08) !important;
@@ -6968,18 +6912,6 @@ function openExternalUrl(url: string) {
   .dark .connection-db-category-option--selected:hover {
     color: rgb(244, 244, 245) !important;
     background-color: rgba(255, 255, 255, 0.14) !important;
-  }
-}
-
-@media (min-width: 640px) {
-  .connection-db-picker-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-  }
-}
-
-@media (min-width: 1024px) {
-  .connection-db-picker-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
   }
 }
 

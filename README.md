@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.t8y2%2Fdbx.svg)](https://mcptoplist.com/server/io.github.t8y2%2Fdbx)
+
 <div align="center">
   <p style="font-size: 18px; white-space: nowrap;"><strong>70+ databases in 20 MB. Desktop, Docker, CLI, built-in AI assistant, and MCP Server.</strong></p>
 

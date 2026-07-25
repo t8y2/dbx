@@ -2359,7 +2359,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
-            assert_eq!(request.split_whitespace().nth(0), Some("POST"));
+            assert_eq!(request.split_whitespace().next(), Some("POST"));
             assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v3/console/core/namespace"));
             assert!(request.contains("customNamespaceId=team-dev"));
             write_json_response(&mut socket, r#"{\"code\":0,\"message\":\"success\",\"data\":true}"#).await;
@@ -2387,7 +2387,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
-            assert_eq!(request.split_whitespace().nth(0), Some("POST"));
+            assert_eq!(request.split_whitespace().next(), Some("POST"));
             assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v1/console/namespaces"));
             assert!(request.contains("customNamespaceId=team-v2"));
             write_json_response(&mut socket, "true").await;

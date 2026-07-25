@@ -2763,6 +2763,8 @@ const {
   isSaving,
   saveError,
   useTransaction,
+  beginBatch,
+  commitBatch,
   exitTransaction,
   startEdit,
   commitEdit,
@@ -5468,28 +5470,33 @@ function fillSelectionWithValue(value: string | null): boolean {
   const range = selectedRange.value;
   let applied = false;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
-  if (range) {
-    for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+  beginBatch();
+  try {
+    if (range) {
+      for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+        const item = displayItemAt(rowIndex);
+        if (!item) continue;
+        for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
+          applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue) || applied;
+        }
+      }
+      return applied;
+    }
+
+    if (!hasColumnSelection.value) return false;
+    const visibleColumnIndexes = selectedVisibleColumnIndexes();
+    if (!visibleColumnIndexes.length) return false;
+    for (let rowIndex = 0; rowIndex < displayRowCount.value; rowIndex++) {
       const item = displayItemAt(rowIndex);
       if (!item) continue;
-      for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
-        applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue) || applied;
+      for (const visibleCol of visibleColumnIndexes) {
+        applied = applyVisibleSelectedCellValue(item, visibleCol, value) || applied;
       }
     }
     return applied;
+  } finally {
+    commitBatch();
   }
-
-  if (!hasColumnSelection.value) return false;
-  const visibleColumnIndexes = selectedVisibleColumnIndexes();
-  if (!visibleColumnIndexes.length) return false;
-  for (let rowIndex = 0; rowIndex < displayRowCount.value; rowIndex++) {
-    const item = displayItemAt(rowIndex);
-    if (!item) continue;
-    for (const visibleCol of visibleColumnIndexes) {
-      applied = applyVisibleSelectedCellValue(item, visibleCol, value) || applied;
-    }
-  }
-  return applied;
 }
 
 function selectionHasEditableCells(): boolean {
@@ -5572,9 +5579,14 @@ function applyGeneratedSelectionValue(kind: CellValueGenerationKind, startValue 
   const values = generateCellValues(kind, cells.length, { startValue });
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
   let applied = false;
-  cells.forEach((cell, index) => {
-    applied = applyVisibleSelectedCellValue(cell.item, cell.visibleCol, values[index] ?? null, allowDraftSelectionValue, { preserveEmptyString: kind === "empty" }) || applied;
-  });
+  beginBatch();
+  try {
+    cells.forEach((cell, index) => {
+      applied = applyVisibleSelectedCellValue(cell.item, cell.visibleCol, values[index] ?? null, allowDraftSelectionValue, { preserveEmptyString: kind === "empty" }) || applied;
+    });
+  } finally {
+    commitBatch();
+  }
   if (applied) toast(t("grid.generatedValuesApplied", { count: cells.length }));
   return applied;
 }
@@ -5628,12 +5640,17 @@ function cutSelection() {
   copySelectionTsv();
   const range = selectedRange.value;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
-  for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
-    const item = displayItemAt(rowIndex);
-    if (!item) continue;
-    for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
-      applyVisibleSelectedCellValue(item, visibleCol, null, allowDraftSelectionValue);
+  beginBatch();
+  try {
+    for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+      const item = displayItemAt(rowIndex);
+      if (!item) continue;
+      for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
+        applyVisibleSelectedCellValue(item, visibleCol, null, allowDraftSelectionValue);
+      }
     }
+  } finally {
+    commitBatch();
   }
 }
 

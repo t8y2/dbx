@@ -75,6 +75,7 @@ import type {
   KvListPrefixResponse,
   KvListPrefixOptions,
   KvGetResponse,
+  KvGetOptions,
   KvPutOptions,
   KvPutResponse,
   KvDeleteResponse,
@@ -2037,12 +2038,25 @@ export async function etcdListPrefix(connectionId: string, prefix: string, limit
   return post("/api/etcd/list-prefix", { connectionId, prefix, limit, continuation });
 }
 
-export async function etcdGet(connectionId: string, key: string): Promise<KvGetResponse> {
-  return post("/api/etcd/get", { connectionId, key });
+export async function etcdSupportsTtl(connectionId: string): Promise<boolean> {
+  return post("/api/etcd/supports-ttl", { connectionId });
 }
 
-export async function etcdPut(connectionId: string, key: string, value: KvValue, lease?: number | null): Promise<KvPutResponse> {
-  return post("/api/etcd/put", { connectionId, key, value, lease });
+export async function etcdGet(connectionId: string, key: string, options?: KvGetOptions | null): Promise<KvGetResponse> {
+  return post("/api/etcd/get", { connectionId, key, metadataOnly: options?.metadataOnly ?? null });
+}
+
+export async function etcdPut(connectionId: string, key: string, value: KvValue, options?: KvPutOptions | number | null): Promise<KvPutResponse> {
+  const legacyLease = typeof options === "number" ? options : null;
+  const putOptions = typeof options === "object" ? options : null;
+  return post("/api/etcd/put", {
+    connectionId,
+    key,
+    value,
+    lease: legacyLease ?? putOptions?.lease ?? null,
+    ttl: putOptions?.ttl ?? null,
+    preserveLease: putOptions?.preserveLease ?? null,
+  });
 }
 
 export async function etcdDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {

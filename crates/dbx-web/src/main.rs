@@ -443,6 +443,7 @@ async fn main() {
         .route("/redis/slowlog-get", post(routes::redis::slowlog_get))
         .route("/redis/cluster-master-nodes", post(routes::redis::cluster_master_nodes))
         // etcd
+        .route("/etcd/supports-ttl", post(routes::etcd::supports_ttl))
         .route("/etcd/list-prefix", post(routes::etcd::list_prefix))
         .route("/etcd/get", post(routes::etcd::get))
         .route("/etcd/put", post(routes::etcd::put))

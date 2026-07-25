@@ -1539,6 +1539,7 @@ pub fn run() {
             commands::redis_pubsub_server::redis_pubsub_server_port,
             commands::redis_cmd::redis_slowlog_get,
             commands::redis_cmd::redis_cluster_master_nodes,
+            commands::etcd_cmd::etcd_supports_ttl,
             commands::etcd_cmd::etcd_list_prefix,
             commands::etcd_cmd::etcd_get,
             commands::etcd_cmd::etcd_put,

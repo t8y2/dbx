@@ -15,6 +15,7 @@
     "transaction",
     "ddl",
     "kv",
+    "kv_ttl",
     "multi_session"
   ],
   "capabilities": [

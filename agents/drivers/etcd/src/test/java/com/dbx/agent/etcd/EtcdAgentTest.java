@@ -17,6 +17,7 @@ final class EtcdAgentTest {
 
         Assertions.assertEquals(1, result.get("protocolVersion").getAsInt());
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_ttl\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"connect\"")));
     }
 

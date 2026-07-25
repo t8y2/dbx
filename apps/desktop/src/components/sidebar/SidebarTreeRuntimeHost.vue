@@ -2800,7 +2800,7 @@ async function confirmPasteTable() {
   showPasteDialog.value = false;
   let successCount = 0;
   let failCount = 0;
-  const refreshedConnections = new Set<string>();
+  const refreshTargets = new Map<string, { connectionId: string; database: string; schema?: string }>();
   for (const entry of entries) {
     const targetName = entry.targetName.trim();
     try {
@@ -2832,13 +2832,22 @@ async function confirmPasteTable() {
       }
       successCount++;
       const refreshKey = `${entry.connectionId}:${entry.database}:${entry.schema || ""}`;
-      if (!refreshedConnections.has(refreshKey)) {
-        refreshedConnections.add(refreshKey);
-        await connectionStore.refreshObjectListTreeNode(entry.connectionId, entry.database, entry.schema);
-      }
+      refreshTargets.set(refreshKey, {
+        connectionId: entry.connectionId,
+        database: entry.database,
+        schema: entry.schema,
+      });
     } catch (e: any) {
       failCount++;
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
+    }
+  }
+  for (const refreshTarget of refreshTargets.values()) {
+    try {
+      await connectionStore.refreshObjectListTreeNode(refreshTarget.connectionId, refreshTarget.database, refreshTarget.schema);
+    } catch (e: any) {
+      failCount++;
+      console.error(`Failed to refresh pasted tables for "${refreshTarget.database}"${refreshTarget.schema ? ` schema "${refreshTarget.schema}"` : ""}:`, e);
     }
   }
   if (failCount === 0) {

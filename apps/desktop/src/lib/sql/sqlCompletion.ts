@@ -1204,8 +1204,10 @@ export type SqlKeywordCase = "preserve" | "upper" | "lower";
 
 export interface SqlCompletionReferencedTable {
   name: string;
+  nameQuoted?: boolean;
   database?: string;
   schema?: string;
+  schemaQuoted?: boolean;
   alias?: string;
   columns?: string[];
   columnAliases?: string[];
@@ -2504,13 +2506,16 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
       referenced.push({ name: unquoteIdentifier(rawName), alias: cleanAlias });
       continue;
     }
-    const parts = splitQualifiedNameParts(rawName);
+    const rawParts = splitQualifiedNameRawParts(rawName);
+    const parts = rawParts.map((part) => unquoteIdentifier(part)).filter(Boolean);
     const name = parts[parts.length - 1];
     if (!name) continue;
     const table: SqlCompletionReferencedTable = {
       name,
+      nameQuoted: isQuotedIdentifier(rawParts[rawParts.length - 1]),
       database: parts.length >= 3 ? parts[parts.length - 3] : undefined,
       schema: parts.length >= 2 ? parts[parts.length - 2] : undefined,
+      schemaQuoted: parts.length >= 2 ? isQuotedIdentifier(rawParts[rawParts.length - 2]) : undefined,
       alias: cleanAlias,
     };
     referenced.push(table);
@@ -2771,6 +2776,12 @@ function splitQualifiedName(input: string): [string | undefined, string | undefi
 }
 
 function splitQualifiedNameParts(input: string): string[] {
+  return splitQualifiedNameRawParts(input)
+    .map((part) => unquoteIdentifier(part))
+    .filter(Boolean);
+}
+
+function splitQualifiedNameRawParts(input: string): string[] {
   const parts: string[] = [];
   let current = "";
   let inDoubleQuote = false;
@@ -2800,7 +2811,12 @@ function splitQualifiedNameParts(input: string): string[] {
   }
   if (current.trim()) parts.push(current.trim());
 
-  return parts.map((p) => unquoteIdentifier(p)).filter(Boolean);
+  return parts;
+}
+
+function isQuotedIdentifier(value: string | undefined): boolean {
+  if (!value) return false;
+  return (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("`") && value.endsWith("`")) || (value.startsWith("[") && value.endsWith("]"));
 }
 
 function unquoteIdentifier(value: string): string {

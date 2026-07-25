@@ -272,6 +272,30 @@ describe("connectionStore completion assistant", () => {
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
   });
 
+  it("normalizes unquoted Oracle aliases while preserving quoted case before catalog lookup", async () => {
+    const completionAssistantSearch = vi.fn();
+    const getColumns = vi.fn().mockResolvedValue([]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    await store.listCompletionColumns("oracle-1", "ORCL", "orders_alias", undefined, { clientSessionId: "tab-a", version: 0, tableQuoted: false });
+    await store.listCompletionColumns("oracle-1", "ORCL", "orders_alias", undefined, { clientSessionId: "tab-a", version: 1, tableQuoted: true });
+    await store.listCompletionColumns("oracle-1", "ORCL", "Orders_Alias", undefined, { clientSessionId: "tab-a", version: 2, tableQuoted: true });
+
+    expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["ORDERS_ALIAS", "orders_alias", "Orders_Alias"]);
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+  });
+
   it("isolates Oracle CURRENT_SCHEMA column caches by tab and context version", async () => {
     const completionAssistantSearch = vi.fn();
     const getColumns = vi

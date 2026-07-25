@@ -67,16 +67,24 @@ describe("SQL Server legacy compatibility", () => {
     migrateSqlServerLegacyCompatibilityConfig(config);
 
     expect(config.driver_profile).toBe("sqlserver-legacy");
-    expect(config.url_params).toBe("applicationName=dbx&encrypt=false");
+    expect(config.url_params).toBe("applicationName=dbx;encrypt=false");
   });
 
-  it("preserves special characters in unrelated params during migration", () => {
-    const config = connectionConfig("applicationName={DBX Client};password=50%;sqlserverEncryption=disabled;encrypt=false");
+  it("preserves semicolons and special characters inside braced values during migration", () => {
+    const config = connectionConfig("applicationName={DBX; Client};password=50%;sqlserverEncryption=disabled;encrypt=false");
 
     migrateSqlServerLegacyCompatibilityConfig(config);
 
     expect(config.driver_profile).toBe("sqlserver-legacy");
-    expect(config.url_params).toBe("applicationName={DBX Client}&password=50%&encrypt=false");
+    expect(config.url_params).toBe("applicationName={DBX; Client};password=50%;encrypt=false");
+  });
+
+  it("keeps escaped closing braces from exposing separators inside braced values", () => {
+    const config = connectionConfig("applicationName={DBX}}; Client};sqlserverEncryption=disabled;encrypt=false");
+
+    migrateSqlServerLegacyCompatibilityConfig(config);
+
+    expect(config.url_params).toBe("applicationName={DBX}}; Client};encrypt=false");
   });
 
   it("keeps generic JDBC encrypt=false on the native driver", () => {

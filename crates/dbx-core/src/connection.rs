@@ -627,6 +627,7 @@ impl AppState {
         agent_dir: PathBuf,
         app_version: impl Into<String>,
     ) -> Self {
+        let data_dir = storage.data_dir().to_path_buf();
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             task_supervisor: TaskSupervisor::new(),
@@ -635,7 +636,7 @@ impl AppState {
             connection_attempts: RwLock::new(HashMap::new()),
             configs: RwLock::new(HashMap::new()),
             running_queries: RunningQueries::default(),
-            tunnels: TunnelManager::new(),
+            tunnels: TunnelManager::new(data_dir),
             proxy_tunnels: ProxyTunnelManager::new(),
             http_tunnels: HttpTunnelManager::new(),
             storage,

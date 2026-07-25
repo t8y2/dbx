@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
@@ -106,6 +106,9 @@ pub fn maybe_import_user_data_db(
 
 pub struct Storage {
     db: SqliteHandle,
+    /// Path to the SQLite database file (`dbx.db`). Its parent directory is the
+    /// application data dir where dbx-managed state (e.g. `known_hosts`) lives.
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,11 +388,18 @@ const SCHEMA_STATEMENTS: &[&str] = &[
 
 impl Storage {
     pub async fn open(db_path: &Path) -> Result<Self, String> {
+        let path = db_path.to_path_buf();
         let db_path = db_path.to_string_lossy().to_string();
         let db = connect_path_create_if_missing(&db_path).await?;
-        let storage = Self { db };
+        let storage = Self { db, path };
         storage.init_schema().await?;
         Ok(storage)
+    }
+
+    /// Directory containing the SQLite database (`dbx.db`). SSH host keys are
+    /// stored in `<data_dir>/known_hosts` so dbx never touches `~/.ssh`.
+    pub fn data_dir(&self) -> &Path {
+        self.path.parent().unwrap_or_else(|| Path::new("."))
     }
 
     async fn init_schema(&self) -> Result<(), String> {

@@ -37,7 +37,7 @@ SSH tunnels are built in. You do not need to create a manual terminal port forwa
 
   </Tab>
   <Tab value="Private Key + Password">
-    Use a private key as the primary credential with password as a fallback. DBX tries key authentication first; if the server rejects the key, it automatically falls back to password authentication.
+    Use a private key as the primary credential with password as a fallback. DBX tries key authentication first; if the server rejects the key and continues to offer password authentication, it automatically falls back to password authentication.
 
     - **Key Path** — Browse and select your key file.
     - **Key Passphrase** — Enter the passphrase if your key is encrypted.

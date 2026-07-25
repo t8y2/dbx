@@ -4,23 +4,13 @@ export type KvMetadataRefreshDecision = { type: "notFound" } | { type: "stop" } 
 
 export class KvListRequestGuard {
   private foregroundGeneration = 0;
-  private snapshotRevision = 0;
 
   beginForegroundRequest(): number {
-    this.snapshotRevision++;
     return ++this.foregroundGeneration;
   }
 
   isForegroundRequestCurrent(generation: number): boolean {
     return generation === this.foregroundGeneration;
-  }
-
-  captureSnapshotRevision(): number {
-    return this.snapshotRevision;
-  }
-
-  isSnapshotRevisionCurrent(revision: number): boolean {
-    return revision === this.snapshotRevision;
   }
 }
 
@@ -59,11 +49,17 @@ export function removeMissingKvKey(keys: readonly KvKeySummary[], missingKey: st
   return keys.filter((key) => key.key !== missingKey);
 }
 
-export function loadedKvPageCount(loadedKeyCount: number, pageSize: number): number {
-  if (!Number.isInteger(pageSize) || pageSize <= 0) return 1;
-  return Math.max(1, Math.ceil(Math.max(0, loadedKeyCount) / pageSize));
+export function knownKvLeaseKeys(keys: readonly KvKeySummary[], selectedKey: string | null): string[] {
+  return keys.filter((key) => key.key !== selectedKey && typeof key.lease === "number" && key.lease > 0).map((key) => key.key);
 }
 
-export function selectedKeyMissingFromCompleteSnapshot(selectedKey: string | null, keys: readonly KvKeySummary[], continuation?: string | null): boolean {
-  return !!selectedKey && !continuation && !keys.some((key) => key.key === selectedKey);
+export function mergeKvKeyMetadata(keys: readonly KvKeySummary[], key: string, incoming: KvGetResponse): KvKeySummary[] {
+  if (!incoming.found) return removeMissingKvKey(keys, key);
+  if (!incoming.metadata) return [...keys];
+  return keys.map((item) => (item.key === key ? { ...item, ...incoming.metadata, key: item.key, valueSize: item.valueSize } : item));
+}
+
+export function nextKvLeaseRefreshDelay(currentDelayMs: number, failed: boolean, baseDelayMs = 2000, maxDelayMs = 30000): number {
+  if (!failed) return baseDelayMs;
+  return Math.min(maxDelayMs, Math.max(baseDelayMs, currentDelayMs) * 2);
 }

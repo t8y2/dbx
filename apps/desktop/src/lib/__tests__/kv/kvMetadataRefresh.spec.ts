@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KvGetResponse } from "@/lib/backend/api";
-import { decideKvMetadataRefresh, KvListRequestGuard, loadedKvPageCount, mergeKvValueRefresh, removeMissingKvKey, selectedKeyMissingFromCompleteSnapshot, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
+import { decideKvMetadataRefresh, knownKvLeaseKeys, KvListRequestGuard, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
 
 function found(metadata: NonNullable<KvGetResponse["metadata"]>): KvGetResponse {
   return {
@@ -12,17 +12,12 @@ function found(metadata: NonNullable<KvGetResponse["metadata"]>): KvGetResponse 
 }
 
 describe("decideKvMetadataRefresh", () => {
-  it("invalidates an in-flight silent snapshot for every foreground request", () => {
+  it("keeps only the latest foreground request current", () => {
     const guard = new KvListRequestGuard();
-    const initialSnapshot = guard.captureSnapshotRevision();
-
     const firstPageRequest = guard.beginForegroundRequest();
-    expect(guard.isSnapshotRevisionCurrent(initialSnapshot)).toBe(false);
     expect(guard.isForegroundRequestCurrent(firstPageRequest)).toBe(true);
 
-    const silentSnapshot = guard.captureSnapshotRevision();
     const loadMoreRequest = guard.beginForegroundRequest();
-    expect(guard.isSnapshotRevisionCurrent(silentSnapshot)).toBe(false);
     expect(guard.isForegroundRequestCurrent(firstPageRequest)).toBe(false);
     expect(guard.isForegroundRequestCurrent(loadMoreRequest)).toBe(true);
   });
@@ -87,19 +82,31 @@ describe("decideKvMetadataRefresh", () => {
     expect(removeMissingKvKey(keys, "/dbx/aaaaa")).toEqual([{ key: "/dbx/a" }, { key: "/test/a" }]);
   });
 
-  it("refreshes every page that the user has already loaded", () => {
-    expect(loadedKvPageCount(0, 200)).toBe(1);
-    expect(loadedKvPageCount(200, 200)).toBe(1);
-    expect(loadedKvPageCount(201, 200)).toBe(2);
-    expect(loadedKvPageCount(400, 200)).toBe(2);
+  it("tracks only known leased keys and excludes the selected key", () => {
+    const keys = [{ key: "/no-lease", lease: 0 }, { key: "/leased", lease: 10 }, { key: "/selected", lease: 20 }, { key: "/unknown" }];
+
+    expect(knownKvLeaseKeys(keys, "/selected")).toEqual(["/leased"]);
+    expect(knownKvLeaseKeys(keys, null)).toEqual(["/leased", "/selected"]);
   });
 
-  it("only clears a selected key after a complete refreshed snapshot proves it expired", () => {
-    const keys = [{ key: "/dbx/a" }];
+  it("merges refreshed metadata without replacing the known value size and removes expired keys", () => {
+    const keys = [
+      { key: "/leased", lease: 10, ttl: 4, valueSize: 12 },
+      { key: "/expired", lease: 20, ttl: 1 },
+    ];
 
-    expect(selectedKeyMissingFromCompleteSnapshot("/dbx/expired", keys, null)).toBe(true);
-    expect(selectedKeyMissingFromCompleteSnapshot("/dbx/expired", keys, "next-page")).toBe(false);
-    expect(selectedKeyMissingFromCompleteSnapshot("/dbx/a", keys, null)).toBe(false);
-    expect(selectedKeyMissingFromCompleteSnapshot(null, keys, null)).toBe(false);
+    expect(mergeKvKeyMetadata(keys, "/leased", found({ lease: 11, ttl: 3, modRevision: 5, valueSize: 0 }))).toEqual([
+      { key: "/leased", lease: 11, ttl: 3, modRevision: 5, valueSize: 12 },
+      { key: "/expired", lease: 20, ttl: 1 },
+    ]);
+    expect(mergeKvKeyMetadata(keys, "/expired", { found: false })).toEqual([{ key: "/leased", lease: 10, ttl: 4, valueSize: 12 }]);
+  });
+
+  it("backs off after failures and resets after a successful cycle", () => {
+    expect(nextKvLeaseRefreshDelay(2000, true)).toBe(4000);
+    expect(nextKvLeaseRefreshDelay(4000, true)).toBe(8000);
+    expect(nextKvLeaseRefreshDelay(16000, true)).toBe(30000);
+    expect(nextKvLeaseRefreshDelay(30000, true)).toBe(30000);
+    expect(nextKvLeaseRefreshDelay(16000, false)).toBe(2000);
   });
 });

@@ -14,7 +14,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import type { KvCreateMode, KvGetResponse, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/backend/api";
 import { buildKvKeyTree, flattenVisibleKvKeyTree, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
 import { refreshedKvSelectionKey } from "@/lib/kv/kvRefreshSelection";
-import { decideKvMetadataRefresh, KvListRequestGuard, loadedKvPageCount, mergeKvValueRefresh, removeMissingKvKey, selectedKeyMissingFromCompleteSnapshot, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
+import { decideKvMetadataRefresh, knownKvLeaseKeys, KvListRequestGuard, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
 import { parseOptionalTtl } from "@/lib/kv/kvTtl";
 import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
 import { formatTtl } from "@/lib/common/ttlFormat";
@@ -139,16 +139,16 @@ const selectedPrettyValue = ref<string | null>(null);
 const lazyTreeState = reactive(createLazyKvKeyTreeState());
 const pageSize = 200;
 const metadataRefreshIntervalMs = 1000;
-const keyListRefreshIntervalMs = 2000;
+const keyListRefreshBaseIntervalMs = 2000;
+const keyListRefreshMaxIntervalMs = 30000;
 let detailRequestId = 0;
 let metadataRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let metadataRefreshGeneration = 0;
 let metadataRefreshInFlight = false;
-let keyListRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let keyListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let keyListRefreshGeneration = 0;
-let keyListRefreshInFlight = false;
+let keyListRefreshDelayMs = keyListRefreshBaseIntervalMs;
 let loadedPrefix = "";
-let keyListSnapshotReady = false;
 const keyListRequestGuard = new KvListRequestGuard();
 type LoadKeysOptions = {
   preserveSelection?: boolean;
@@ -197,12 +197,12 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
   }
 
   const loadGeneration = keyListRequestGuard.beginForegroundRequest();
+  stopKeyListRefresh();
   const connectionId = props.connectionId;
   const keyToRestore = options.preserveSelection ? selectedKey.value : null;
   const requestedPrefix = reset ? prefix.value.trim() : loadedPrefix;
   const continuationToUse = reset ? null : continuation.value;
   if (reset) {
-    keyListSnapshotReady = false;
     loading.value = true;
     continuation.value = null;
     keys.value = [];
@@ -222,7 +222,6 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
     continuation.value = result.continuation || null;
     if (reset) {
       loadedPrefix = requestedPrefix;
-      keyListSnapshotReady = true;
     }
     preserveExpandedGroups(!!requestedPrefix);
     if (reset && options.preserveSelection) {
@@ -237,9 +236,10 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
     if (!keyListRequestGuard.isForegroundRequestCurrent(loadGeneration) || props.connectionId !== connectionId) return;
     throw error;
   } finally {
-    if (keyListRequestGuard.isForegroundRequestCurrent(loadGeneration)) {
+    if (keyListRequestGuard.isForegroundRequestCurrent(loadGeneration) && props.connectionId === connectionId) {
       loading.value = false;
       loadingMore.value = false;
+      startKeyListRefresh();
     }
   }
 }
@@ -397,6 +397,10 @@ async function loadSelectedKey(key: string) {
   try {
     const result = await props.api.get(props.connectionId, key);
     if (requestId !== detailRequestId || selectedKey.value !== key) return;
+    if (!result.found) {
+      removeExpiredSelectedKey(key);
+      return;
+    }
     selectedValue.value = result;
     startMetadataRefresh(key);
   } catch (error) {
@@ -438,55 +442,69 @@ function stopMetadataRefresh() {
 
 function startKeyListRefresh() {
   stopKeyListRefresh();
-  if (!props.supportsTtl || props.lazyHierarchy) return;
+  keyListRefreshDelayMs = keyListRefreshBaseIntervalMs;
+  scheduleKeyListRefresh(keyListRefreshGeneration);
+}
 
-  const generation = keyListRefreshGeneration;
-  keyListRefreshTimer = setInterval(() => {
-    void refreshLoadedKeysSilently(generation);
-  }, keyListRefreshIntervalMs);
+function activeMetadataRefreshKey(): string | null {
+  return metadataRefreshTimer !== null ? selectedKey.value : null;
+}
+
+function scheduleKeyListRefresh(generation: number) {
+  if (generation !== keyListRefreshGeneration || !props.supportsTtl || props.lazyHierarchy || !props.api.getMetadata || knownKvLeaseKeys(keys.value, activeMetadataRefreshKey()).length === 0) {
+    return;
+  }
+
+  keyListRefreshTimer = setTimeout(() => {
+    keyListRefreshTimer = null;
+    void refreshKnownLeaseKeys(generation);
+  }, keyListRefreshDelayMs);
 }
 
 function stopKeyListRefresh() {
   keyListRefreshGeneration++;
-  keyListRefreshInFlight = false;
   if (keyListRefreshTimer !== null) {
-    clearInterval(keyListRefreshTimer);
+    clearTimeout(keyListRefreshTimer);
     keyListRefreshTimer = null;
   }
 }
 
-async function refreshLoadedKeysSilently(generation: number) {
-  if (!props.supportsTtl || props.lazyHierarchy || !keyListSnapshotReady || keyListRefreshInFlight || loading.value || loadingMore.value || generation !== keyListRefreshGeneration) {
+async function refreshKnownLeaseKeys(generation: number) {
+  const getMetadata = props.api.getMetadata;
+  if (!props.supportsTtl || props.lazyHierarchy || !getMetadata || loading.value || loadingMore.value || generation !== keyListRefreshGeneration) {
     return;
   }
 
   const connectionId = props.connectionId;
-  const prefixToRefresh = loadedPrefix;
-  const snapshotRevision = keyListRequestGuard.captureSnapshotRevision();
-  const pagesToRefresh = loadedKvPageCount(keys.value.length, pageSize);
-  keyListRefreshInFlight = true;
-  try {
-    const refreshed: KvKeySummary[] = [];
-    let nextContinuation: string | null = null;
-    for (let page = 0; page < pagesToRefresh; page++) {
-      const result = await props.api.listPrefix(connectionId, prefixToRefresh, pageSize, nextContinuation);
-      if (generation !== keyListRefreshGeneration || !keyListRequestGuard.isSnapshotRevisionCurrent(snapshotRevision) || props.connectionId !== connectionId || loadedPrefix !== prefixToRefresh) return;
-      refreshed.push(...result.keys);
-      nextContinuation = result.continuation || null;
-      if (!nextContinuation) break;
-    }
+  const leaseKeys = knownKvLeaseKeys(keys.value, activeMetadataRefreshKey());
+  let failed = false;
+  for (const key of leaseKeys) {
+    try {
+      const result = await getMetadata(connectionId, key);
+      if (generation !== keyListRefreshGeneration || props.connectionId !== connectionId) return;
+      if (result.found && !result.metadata) {
+        failed = true;
+        continue;
+      }
+      if (!result.found && selectedKey.value === key) {
+        removeExpiredSelectedKey(key);
+        continue;
+      }
 
-    keys.value = refreshed;
-    continuation.value = nextContinuation;
-    preserveExpandedGroups(!!prefixToRefresh);
-    if (selectedKeyMissingFromCompleteSnapshot(selectedKey.value, refreshed, nextContinuation)) {
-      clearSelectedKey();
+      const previousLength = keys.value.length;
+      keys.value = mergeKvKeyMetadata(keys.value, key, result);
+      if (keys.value.length !== previousLength) {
+        preserveExpandedGroups();
+      }
+    } catch {
+      if (generation !== keyListRefreshGeneration || props.connectionId !== connectionId) return;
+      failed = true;
     }
-  } catch {
-    // Keep the timer alive so a transient Agent or network error is retried.
-  } finally {
-    if (generation === keyListRefreshGeneration) keyListRefreshInFlight = false;
   }
+
+  if (generation !== keyListRefreshGeneration || props.connectionId !== connectionId) return;
+  keyListRefreshDelayMs = nextKvLeaseRefreshDelay(keyListRefreshDelayMs, failed, keyListRefreshBaseIntervalMs, keyListRefreshMaxIntervalMs);
+  scheduleKeyListRefresh(generation);
 }
 
 function removeExpiredSelectedKey(key: string) {
@@ -770,7 +788,6 @@ watch(
   () => props.connectionId,
   async () => {
     stopKeyListRefresh();
-    keyListSnapshotReady = false;
     clearSelectedKey();
     try {
       await connectionStore.ensureConnected(props.connectionId);
@@ -778,7 +795,6 @@ watch(
       // Connection failed — loadKeys will show the error state
     }
     await loadKeys(true);
-    startKeyListRefresh();
   },
 );
 
@@ -787,6 +803,13 @@ watch(
   (supported) => {
     if (supported) startKeyListRefresh();
     else stopKeyListRefresh();
+  },
+);
+
+watch(
+  () => selectedKey.value,
+  () => {
+    startKeyListRefresh();
   },
 );
 
@@ -807,12 +830,11 @@ onMounted(async () => {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
   await loadKeys(true);
-  startKeyListRefresh();
 });
 
 onBeforeUnmount(() => {
-  stopKeyListRefresh();
   clearSelectedKey();
+  stopKeyListRefresh();
 });
 defineExpose({ focusSearch, refresh });
 </script>

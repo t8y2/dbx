@@ -1232,6 +1232,8 @@ export default withEnglishFallback({
     redoChange: "変更をやり直す",
     filterBuilderSearchColumns: "フィールドを検索...",
     filterBuilderNoMatchingColumns: "一致するフィールドがありません",
+    cachedResultUnavailable: "キャッシュ結果が不足しているか互換性がありません。",
+    reexecuteQuery: "クエリを再実行",
   },
   exportProgress: {
     title: "テーブルデータをエクスポート中",
@@ -2031,6 +2033,8 @@ export default withEnglishFallback({
     materializedViews: "マテリアライズドビュー",
     extensions: "拡張機能",
     types: "タイプ",
+    gridfs: "GridFS",
+    buckets: "バケット",
   },
   zookeeper: {
     prefixPlaceholder: "パスプレフィックス（例: /app/）",
@@ -5162,6 +5166,14 @@ export default withEnglishFallback({
     killConfirm: "セッション {id}（{user}）を強制終了しますか？現在のステートメントは中断され、接続が閉じられます。",
     killSuccess: "セッション {id} を強制終了しました。",
     killFailed: "セッションの強制終了に失敗しました：{message}",
+    colPid: "PID",
+    colClient: "クライアント",
+    colApp: "アプリケーション",
+    colWait: "待機",
+    colQuery: "クエリ",
+    previewTitle: "ステートメント",
+    copy: "コピー",
+    copied: "コピー済み",
   },
   serverDashboard: {
     title: "サーバーダッシュボード",

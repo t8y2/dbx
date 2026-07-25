@@ -1233,6 +1233,8 @@ export default withEnglishFallback({
     truncatedHint: "Los resultados se truncaron después de cargar {count} filas. Usa la paginación inferior para explorar los datos cargados; al exportar el resultado completo se vuelve a consultar la base de datos.",
     filterBuilderSearchColumns: "Buscar columnas...",
     filterBuilderNoMatchingColumns: "Sin columnas coincidentes",
+    cachedResultUnavailable: "Resultado en caché faltante o incompatible.",
+    reexecuteQuery: "Volver a ejecutar consulta",
   },
   exportProgress: {
     title: "Exportando datos de la tabla",
@@ -2032,6 +2034,8 @@ export default withEnglishFallback({
     objectBrowser: "Explorar en el navegador de objetos ({count})",
     extensions: "Extensiones",
     types: "tipo",
+    gridfs: "GridFS",
+    buckets: "Buckets",
   },
   userAdmin: {
     title: "Usuarios y Privilegios",
@@ -5164,6 +5168,14 @@ export default withEnglishFallback({
     killConfirm: "¿Está seguro de que desea terminar la sesión {id} ({user})? La sentencia actual se cancelará y la conexión se cerrará.",
     killSuccess: "Sesión {id} terminada",
     killFailed: "Error al terminar la sesión: {message}",
+    colPid: "PID",
+    colClient: "Cliente",
+    colApp: "Aplicación",
+    colWait: "Espera",
+    colQuery: "Consulta",
+    previewTitle: "Sentencia",
+    copy: "Copiar",
+    copied: "Copiado",
   },
   serverDashboard: {
     title: "Panel de control del servidor",

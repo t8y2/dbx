@@ -1232,6 +1232,8 @@ export default withEnglishFallback({
     truncatedHint: "結果已截斷，已載入前 {count} 筆。可透過底部分頁瀏覽已載入資料；匯出完整結果時會重新查詢資料庫。",
     filterBuilderSearchColumns: "搜尋欄位...",
     filterBuilderNoMatchingColumns: "沒有匹配的欄位",
+    cachedResultUnavailable: "快取結果缺失或不相容。",
+    reexecuteQuery: "重新執行查詢",
   },
   exportProgress: {
     title: "匯出資料表資料",
@@ -2031,6 +2033,8 @@ export default withEnglishFallback({
     objectBrowser: "在物件瀏覽器中檢視 ({count})",
     extensions: "擴展",
     types: "類型",
+    gridfs: "GridFS",
+    buckets: "Buckets",
   },
   objects: {
     all: "全部",
@@ -5160,6 +5164,14 @@ export default withEnglishFallback({
     killConfirm: "確定終止會話 {id}（{user}）？其目前的陳述式將被中止，連線將被關閉。",
     killSuccess: "已終止會話 {id}",
     killFailed: "終止會話失敗：{message}",
+    colPid: "PID",
+    colClient: "用戶端",
+    colApp: "應用程式",
+    colWait: "等待",
+    colQuery: "查詢",
+    previewTitle: "語句",
+    copy: "複製",
+    copied: "已複製",
   },
   serverDashboard: {
     title: "伺服器儀表板",

@@ -32,10 +32,11 @@ test = false
 bench = false
 
 [features]
-default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
+default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-bundled = ["duckdb/bundled", "duckdb/parquet"]
 mq-admin = []
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+system-fonts = ["font-kit"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -88,7 +89,7 @@ argon2 = "0.5"
 sha2 = "0.10"
 async-trait = "0.1"
 bytes = "1"
-font-kit = "0.14.3"
+font-kit = { version = "0.14.3", optional = true }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 sysinfo = { version = "0.32", features = ["system"] }
 tempfile = "3"

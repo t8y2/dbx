@@ -13,10 +13,11 @@ name = "dbx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
+default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-bundled = ["duckdb", "duckdb/parquet", "dbx-core/duckdb-bundled"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
+system-fonts = ["dbx-core/system-fonts"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }

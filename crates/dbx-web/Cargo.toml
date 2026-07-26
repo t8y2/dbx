@@ -9,10 +9,11 @@ name = "dbx-web"
 path = "src/main.rs"
 
 [features]
-default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher"]
+default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-bundled = ["dbx-core/duckdb-bundled"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
+system-fonts = ["dbx-core/system-fonts"]
 
 [dependencies]
 dbx-core = { path = "../dbx-core", default-features = false }

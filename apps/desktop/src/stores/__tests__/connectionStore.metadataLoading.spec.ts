@@ -690,4 +690,671 @@ describe("connectionStore metadata loading", () => {
     expect(connectionNode.children![0].children?.length).toBeGreaterThan(0);
     expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
   });
+
+  it("reloads a collapsed database in simple mode after a forced connection database refresh", async () => {
+    const tables: TableInfo[] = [{ name: "users", table_type: "TABLE", comment: null }];
+    const listDatabases = vi
+      .fn()
+      .mockResolvedValueOnce([{ name: "test1", comment: null }])
+      .mockResolvedValueOnce([{ name: "test1", comment: null }]);
+    const listTables = vi.fn().mockResolvedValue(tables);
+    const listObjects = vi.fn().mockResolvedValue([]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listTables,
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "simple";
+
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    const connectionNode: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: true,
+      children: [
+        {
+          id: test1Id,
+          label: "test1",
+          type: "database",
+          connectionId: connection.id,
+          database: "test1",
+          isExpanded: false,
+          children: [],
+        },
+      ],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    await store.loadTables(connection.id, "test1");
+    expect(listTables).toHaveBeenCalledTimes(1);
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+
+    connectionNode.children![0].isExpanded = false;
+    connectionNode.children![0].children = [];
+
+    await store.loadDatabases(connection.id, { force: true });
+    listTables.mockClear();
+
+    await store.loadTables(connection.id, "test1");
+    expect(connectionNode.children![0].children?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("does not refetch a legitimately empty simple-mode database on re-expand", async () => {
+    const listTables = vi.fn().mockResolvedValue([]);
+    const listObjects = vi.fn().mockResolvedValue([]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "simple";
+
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: test1Id,
+            label: "test1",
+            type: "database",
+            connectionId: connection.id,
+            database: "test1",
+            isExpanded: true,
+            children: [],
+          },
+        ],
+      },
+    ];
+
+    await store.loadTables(connection.id, "test1");
+    expect(listTables).toHaveBeenCalledTimes(1);
+    expect(store.canUseLoadedTreeNodeToggle(store.treeNodes[0].children![0])).toBe(true);
+
+    listTables.mockClear();
+    await store.loadTables(connection.id, "test1");
+    expect(listTables).not.toHaveBeenCalled();
+  });
+
+  it("clears grouped object-group markers when the database shell goes stale", async () => {
+    const tables: TableInfo[] = [{ name: "users", table_type: "TABLE", comment: null }];
+    const listTables = vi.fn().mockResolvedValue(tables);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    const dbNode: TreeNode = {
+      id: test1Id,
+      label: "test1",
+      type: "database",
+      connectionId: connection.id,
+      database: "test1",
+      isExpanded: true,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [dbNode],
+      },
+    ];
+
+    await store.loadTables(connection.id, "test1");
+    const tablesGroup = dbNode.children?.find((child) => child.type === "group-tables");
+    expect(tablesGroup).toBeDefined();
+    await store.loadObjectGroupChildren(tablesGroup!);
+    const tablesGroupInTree = dbNode.children?.find((child) => child.type === "group-tables");
+    expect(tablesGroupInTree?.children?.length ?? 0).toBeGreaterThan(0);
+    const groupId = tablesGroupInTree!.id;
+    expect(store.isTreeNodeChildrenLoaded(groupId)).toBe(true);
+    expect(store.canUseLoadedTreeNodeToggle(tablesGroupInTree!)).toBe(true);
+
+    dbNode.children = [];
+    listTables.mockClear();
+    await store.loadTables(connection.id, "test1");
+
+    expect(store.isTreeNodeChildrenLoaded(groupId)).toBe(false);
+    expect(store.canUseLoadedTreeNodeToggle({ ...tablesGroup!, id: groupId, children: [] } as TreeNode)).toBe(false);
+
+    const refreshedTablesGroup = dbNode.children?.find((child) => child.type === "group-tables");
+    expect(refreshedTablesGroup).toBeDefined();
+    await store.loadObjectGroupChildren(refreshedTablesGroup!);
+    expect(listTables).toHaveBeenCalledTimes(1);
+    expect(refreshedTablesGroup?.children?.length).toBeGreaterThan(0);
+  });
+
+  it("applies async table loads to the current tree node after an in-tree replacement", async () => {
+    const tables: TableInfo[] = [{ name: "users", table_type: "TABLE", comment: null }];
+    let resolveTables!: (tables: TableInfo[]) => void;
+    const listTablesPromise = new Promise<TableInfo[]>((resolve) => {
+      resolveTables = resolve;
+    });
+    const listTables = vi.fn(() => listTablesPromise);
+    const listObjects = vi.fn().mockResolvedValue([]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    const staleDbNode: TreeNode = {
+      id: test1Id,
+      label: "test1",
+      type: "database",
+      connectionId: connection.id,
+      database: "test1",
+      isExpanded: true,
+      children: [],
+    };
+    const connectionNode: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: true,
+      children: [staleDbNode],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    const loadPromise = store.loadTables(connection.id, "test1");
+    await vi.waitFor(() => expect(listTables).toHaveBeenCalled());
+    const replacementDb: TreeNode = {
+      id: test1Id,
+      label: "test1",
+      type: "database",
+      connectionId: connection.id,
+      database: "test1",
+      isExpanded: true,
+      children: [],
+    };
+    connectionNode.children = [replacementDb];
+    resolveTables(tables);
+    await loadPromise;
+
+    expect(staleDbNode.children?.length ?? 0).toBe(0);
+    expect(replacementDb.children?.length ?? 0).toBeGreaterThan(0);
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+  });
+
+  it("applies persisted cache to the current tree node after an in-tree replacement", async () => {
+    const cachedTable: TreeNode = {
+      id: "mysql-1:test1:users",
+      label: "users",
+      type: "table",
+      connectionId: "mysql-1",
+      database: "test1",
+      isExpanded: false,
+      children: [],
+    };
+    let resolveCache!: (payload: unknown) => void;
+    const loadSchemaCachePromise = new Promise<unknown>((resolve) => {
+      resolveCache = resolve;
+    });
+    const loadSchemaCache = vi.fn(() => loadSchemaCachePromise);
+    const listTables = vi.fn();
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache,
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    const staleDbNode: TreeNode = {
+      id: test1Id,
+      label: "test1",
+      type: "database",
+      connectionId: connection.id,
+      database: "test1",
+      isExpanded: true,
+      children: [],
+    };
+    const connectionNode: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: true,
+      children: [staleDbNode],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    const loadPromise = store.loadTables(connection.id, "test1");
+    await vi.waitFor(() => expect(loadSchemaCache).toHaveBeenCalled());
+    const replacementDb: TreeNode = {
+      id: test1Id,
+      label: "test1",
+      type: "database",
+      connectionId: connection.id,
+      database: "test1",
+      isExpanded: true,
+      children: [],
+    };
+    connectionNode.children = [replacementDb];
+    resolveCache({
+      version: 2,
+      cachedAt: new Date().toISOString(),
+      children: [cachedTable],
+    });
+    await loadPromise;
+
+    expect(listTables).not.toHaveBeenCalled();
+    expect(staleDbNode.children?.length ?? 0).toBe(0);
+    expect(replacementDb.children?.length ?? 0).toBeGreaterThan(0);
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+  });
+
+  it("keeps database loaded markers when connection children are reordered only", async () => {
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "test1", comment: null }]);
+    const listTables = vi.fn().mockResolvedValue([{ name: "users", table_type: "TABLE", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: test1Id,
+            label: "test1",
+            type: "database",
+            connectionId: connection.id,
+            database: "test1",
+            isExpanded: true,
+            children: [],
+          },
+        ],
+      },
+    ];
+
+    await store.loadDatabases(connection.id, { force: true });
+    await store.loadTables(connection.id, "test1");
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+    listTables.mockClear();
+
+    await store.loadDatabases(connection.id);
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+    expect(listTables).not.toHaveBeenCalled();
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+  });
+
+  it("keeps database loaded markers when connection refresh passes utility-only children", async () => {
+    const listDatabases = vi
+      .fn()
+      .mockResolvedValueOnce([{ name: "test1", comment: null }])
+      .mockResolvedValueOnce([]);
+    const listTables = vi.fn().mockResolvedValue([{ name: "users", table_type: "TABLE", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = mysqlConnection();
+    const test1Id = `${connection.id}:test1`;
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [],
+      },
+    ];
+
+    await store.loadDatabases(connection.id, { force: true });
+    await store.loadTables(connection.id, "test1");
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+    listTables.mockClear();
+
+    await store.loadDatabases(connection.id, { force: true });
+
+    expect(listDatabases).toHaveBeenCalledTimes(2);
+    expect(listTables).not.toHaveBeenCalled();
+    expect(store.treeNodes[0].children?.some((child) => child.id === test1Id && child.type === "database")).toBe(true);
+    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
+  });
+
+  it("clears connection loading after disconnect even when metadata apply is skipped", async () => {
+    let resolveDatabases!: (value: { name: string; comment: null }[]) => void;
+    const listDatabases = vi.fn(
+      () =>
+        new Promise<{ name: string; comment: null }[]>((resolve) => {
+          resolveDatabases = resolve;
+        }),
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = mysqlConnection();
+    const connectionNode: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: true,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    const loadPromise = store.loadDatabases(connection.id, { force: true });
+    await vi.waitFor(() => expect(listDatabases).toHaveBeenCalled());
+    expect(connectionNode.isLoading).toBe(true);
+    store.connectedIds.delete(connection.id);
+    resolveDatabases([{ name: "app", comment: null }]);
+    await loadPromise;
+
+    const liveConnection = store.treeNodes.find((node) => node.id === connection.id);
+    expect(liveConnection?.isLoading).toBe(false);
+    expect(connectionNode.isLoading).toBe(false);
+  });
+
+  it("merges load-more table pages onto the live group node after an in-tree replacement", async () => {
+    const firstPage = Array.from({ length: 201 }, (_, index) => ({
+      name: `t_${String(index + 1).padStart(4, "0")}`,
+      table_type: "TABLE" as const,
+      comment: null,
+    }));
+    let resolveSecondPage!: (tables: TableInfo[]) => void;
+    const secondPagePromise = new Promise<TableInfo[]>((resolve) => {
+      resolveSecondPage = resolve;
+    });
+    const listTables = vi
+      .fn()
+      .mockResolvedValueOnce(firstPage)
+      .mockImplementationOnce(() => secondPagePromise);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 200;
+
+    const connection = mysqlConnection();
+    const staleTablesGroup: TreeNode = {
+      id: "mysql-1:app:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    const connectionNode: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: true,
+      children: [
+        {
+          id: "mysql-1:app",
+          label: "app",
+          type: "database",
+          connectionId: connection.id,
+          database: "app",
+          isExpanded: true,
+          children: [staleTablesGroup],
+        },
+      ],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    await store.loadObjectGroupChildren(staleTablesGroup);
+    const loadMoreNode = staleTablesGroup.children?.at(-1);
+    expect(loadMoreNode?.type).toBe("load-more");
+
+    const loadMorePromise = store.loadMoreObjectGroupChildren(loadMoreNode!);
+    await vi.waitFor(() => expect(listTables).toHaveBeenCalledTimes(2));
+
+    const concurrentTable: TreeNode = {
+      id: "mysql-1:app:__concurrent_marker",
+      label: "__concurrent_marker",
+      type: "table",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    const liveTablesGroup: TreeNode = {
+      ...staleTablesGroup,
+      children: [...(staleTablesGroup.children?.filter((child) => child.type !== "load-more") ?? []), concurrentTable, loadMoreNode!],
+    };
+    connectionNode.children![0].children = [liveTablesGroup];
+
+    resolveSecondPage([{ name: "t_0202", table_type: "TABLE", comment: null }]);
+    await loadMorePromise;
+
+    expect(staleTablesGroup.children?.some((child) => child.label === "t_0202")).toBe(false);
+    expect(liveTablesGroup.children?.some((child) => child.id === concurrentTable.id)).toBe(true);
+    expect(liveTablesGroup.children?.some((child) => child.label === "t_0202")).toBe(true);
+  });
+
+  it("keeps table column loaded markers when a tables group appends via load-more", async () => {
+    const firstPage = Array.from({ length: 201 }, (_, index) => ({
+      name: `t_${String(index + 1).padStart(4, "0")}`,
+      table_type: "TABLE" as const,
+      comment: null,
+    }));
+    const listTables = vi
+      .fn()
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce([{ name: "t_0202", table_type: "TABLE", comment: null }]);
+    const getColumns = vi.fn().mockResolvedValue([{ name: "id", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      getColumns,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 200;
+
+    const connection = mysqlConnection();
+    const tablesGroup: TreeNode = {
+      id: "mysql-1:app:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: false,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "mysql-1:app",
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: true,
+            children: [tablesGroup],
+          },
+        ],
+      },
+    ];
+
+    await store.loadObjectGroupChildren(tablesGroup);
+    const firstTable = tablesGroup.children?.find((child) => child.type === "table");
+    expect(firstTable).toBeDefined();
+    await store.loadTableGroups(connection.id, "app", firstTable!.label, undefined, firstTable!.id);
+    const columnsGroupId = `${firstTable!.id}:__columns`;
+    await store.loadColumns(connection.id, "app", firstTable!.label, undefined, columnsGroupId);
+    expect(store.isTreeNodeChildrenLoaded(columnsGroupId)).toBe(true);
+
+    const loadMoreNode = tablesGroup.children?.at(-1);
+    expect(loadMoreNode?.type).toBe("load-more");
+    getColumns.mockClear();
+    await store.loadMoreObjectGroupChildren(loadMoreNode!);
+
+    expect(store.isTreeNodeChildrenLoaded(columnsGroupId)).toBe(true);
+    expect(getColumns).not.toHaveBeenCalled();
+  });
 });

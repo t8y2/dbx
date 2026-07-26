@@ -511,14 +511,14 @@ async function toggle() {
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.
   const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
-  if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
+  if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }
 
-  if (node.type === "group-extensions" && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
+  if (node.type === "group-extensions" && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);

@@ -53,7 +53,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
-import { isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
+import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
@@ -639,12 +639,11 @@ const isConnecting = computed(() => activeNode.value.type === "connection" && !!
 const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false));
 
 const databaseOpenVisual = computed(() => {
-  const opened = isSidebarDatabaseOpened(activeNode.value, connectionStore.isTreeNodeChildrenLoaded);
-  const showsIndicator = activeNode.value.type === "database" && (opened || (!!activeNode.value.connectionId && activeNode.value.database != null && queryStore.openDatabaseKeys.has(`${activeNode.value.connectionId}\x00${activeNode.value.database}`)));
+  const databaseOpen = isSidebarDatabaseOpenForVisual(activeNode.value, connectionStore.isTreeNodeChildrenLoaded, queryStore.openDatabaseKeys);
   const infoClass = getIconInfo(activeNode.value)?.colorClass;
   return {
-    iconClass: activeNode.value.type !== "database" || opened ? infoClass : "text-muted-foreground/65",
-    showsIndicator,
+    iconClass: activeNode.value.type !== "database" || databaseOpen ? infoClass : "text-muted-foreground/65",
+    showsIndicator: databaseOpen,
   };
 });
 

@@ -2680,7 +2680,8 @@ const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLega
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "sm:h-[720px] sm:max-w-[880px]";
-  return shouldUseWideConnectionDialog.value ? "sm:max-w-[660px]" : "sm:max-w-[560px]";
+  const widthClass = shouldUseWideConnectionDialog.value ? "sm:max-w-[660px]" : "sm:max-w-[560px]";
+  return `${widthClass} connection-dialog-content--config`;
 });
 const connectionLabelClass = "justify-self-start text-left";
 const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
@@ -6885,6 +6886,22 @@ function openExternalUrl(url: string) {
   display: flex;
   flex-direction: column;
   max-height: calc(var(--dbx-viewport-height) - 2rem);
+}
+
+.connection-dialog-content--config {
+  min-height: 0;
+}
+
+@media (max-height: 720px) {
+  .connection-dialog-content--config {
+    /* A definite flex height lets tab bodies shrink and scroll above the fixed footer. */
+    height: calc(var(--dbx-viewport-height) - 2rem);
+  }
+
+  .connection-dialog-content--config .connection-form-body {
+    /* Keep grid rows compact when the scroll viewport is taller than the form. */
+    align-content: start;
+  }
 }
 
 @media (min-width: 640px) {

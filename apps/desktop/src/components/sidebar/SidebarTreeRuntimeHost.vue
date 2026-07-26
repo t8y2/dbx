@@ -1844,6 +1844,7 @@ async function confirmRenameObject() {
   const newName = renameObjectName.value.trim();
   if (!objectType || !newName || newName === node.label || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
+  let renameApplied = false;
   try {
     const dbType = databaseTypeForNode(node);
     await connectionStore.ensureConnected(node.connectionId);
@@ -1871,12 +1872,18 @@ async function confirmRenameObject() {
       });
       await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     }
+    renameApplied = true;
     toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
     showRenameObjectDialog.value = false;
     const renamedNode: TreeNode = { ...node, label: newName, objectName: newName, tableName: newName };
     await refreshTableList(node);
     connectionStore.replacePinnedTreeNode(node, renamedNode);
   } catch (e: any) {
+    if (renameApplied) {
+      // The database mutation succeeded even when metadata refresh did not;
+      // remove the old pin instead of allowing it to revive later.
+      connectionStore.removePinnedTreeNodes([node]);
+    }
     renameObjectError.value = e?.message || String(e);
   }
 }

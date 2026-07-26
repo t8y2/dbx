@@ -116,4 +116,19 @@ describe("connectionStore pinned tree node removal", () => {
     expect(store.isTreeNodePinned(accounts)).toBe(true);
     expect(store.isTreeNodePinned(recreatedUsers)).toBe(false);
   });
+
+  it("removes the old pin when a renamed replacement is not loaded in the sidebar", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const users = tableNode("users");
+    const accounts = tableNode("accounts");
+    store.treeNodes = [{ id: "conn", label: "Connection", type: "connection", connectionId: "conn", children: [users] }];
+    store.toggleTreeNodePin(users);
+
+    expect(store.replacePinnedTreeNode(users, accounts)).toBe(true);
+    expect(store.isTreeNodePinned(users)).toBe(false);
+    expect(store.isTreeNodePinned(accounts)).toBe(false);
+  });
 });

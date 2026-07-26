@@ -1182,8 +1182,10 @@ export const useConnectionStore = defineStore("connection", () => {
   function replacePinnedTreeNode(oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): boolean {
     // Use the freshly loaded sidebar node when available so the persisted key
     // carries its real id, not the id of the pre-rename object.
-    const loadedReplacement = findTreeNodes(treeNodes.value, (node) => pinnedTreeNodeIdentityMatches(treeNodePinIdentity(node), treeNodePinIdentity(newNode), canonicalize))[0] ?? newNode;
-    const nextPinnedOrder = replacePinnedTreeNodeInOrder(pinnedTreeNodeOrder.value, oldNode, loadedReplacement, canonicalize);
+    const loadedReplacement = findTreeNodes(treeNodes.value, (node) => pinnedTreeNodeIdentityMatches(treeNodePinIdentity(node), treeNodePinIdentity(newNode), canonicalize))[0];
+    // A caller may provide a virtual row while the sidebar object is unloaded;
+    // persisting that row id would create a pin that the sidebar cannot restore.
+    const nextPinnedOrder = loadedReplacement ? replacePinnedTreeNodeInOrder(pinnedTreeNodeOrder.value, oldNode, loadedReplacement, canonicalize) : removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, [oldNode], canonicalize);
     if (nextPinnedOrder.length === pinnedTreeNodeOrder.value.length && nextPinnedOrder.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
     setPinnedTreeNodeOrder(nextPinnedOrder);
     syncPinnedTreeState(treeNodes.value);

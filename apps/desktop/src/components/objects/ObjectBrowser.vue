@@ -1193,6 +1193,8 @@ async function confirmRename() {
   const newName = renameInput.value.trim();
   if (!row || !newName || newName === row.name) return;
   renameError.value = "";
+  const oldPinnedNode = pinnedTreeNodeForObjectBrowserRow(row);
+  let renameApplied = false;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
     if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
@@ -1223,10 +1225,10 @@ async function confirmRename() {
       const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
       if (!executed) return;
     }
+    renameApplied = true;
     toast(t("contextMenu.renameObjectSuccess", { oldName: row.name, newName }));
     showRenameDialog.value = false;
     if (sourceRow.value?.id === row.id) closeSource();
-    const oldPinnedNode = pinnedTreeNodeForObjectBrowserRow(row);
     const renamedTarget = { ...oldPinnedNode, label: newName, objectName: newName, tableName: newName };
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
@@ -1239,6 +1241,11 @@ async function confirmRename() {
       connectionStore.removePinnedTreeNodes([oldPinnedNode], canonicalizeObjectBrowserPinnedIdentity);
     }
   } catch (e: any) {
+    if (renameApplied) {
+      // The database mutation succeeded even when metadata refresh did not;
+      // remove the old pin instead of allowing it to revive later.
+      connectionStore.removePinnedTreeNodes([oldPinnedNode], canonicalizeObjectBrowserPinnedIdentity);
+    }
     renameError.value = e?.message || String(e);
   }
 }

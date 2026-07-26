@@ -139,7 +139,7 @@ pub fn build_query_pagination_execution_plan(
     let can_use_first_page_cursor = options.use_agent_cursor && options.pagination.offset == 0;
     let prefer_server_pagination = options.database_type == Some(DatabaseType::Kingbase);
     if can_use_first_page_cursor && !prefer_server_pagination {
-        if !options.first_page_uses_actual_sql {
+        if !options.first_page_uses_actual_sql && options.sql == options.query_base_sql {
             plan.sql_to_execute = options.query_base_sql;
         }
         plan.page_limit = Some(options.pagination.limit);
@@ -149,7 +149,7 @@ pub fn build_query_pagination_execution_plan(
     }
 
     let paginated = build_paginated_query_sql(PaginatedQuerySqlOptions {
-        original_sql: options.sql,
+        original_sql: options.sql.clone(),
         database_type: options.database_type,
         limit: options.pagination.limit,
         offset: options.pagination.offset,
@@ -164,7 +164,7 @@ pub fn build_query_pagination_execution_plan(
         // LIMIT/OFFSET whenever the statement can be rewritten safely. Keep the
         // Agent cursor as a bounded fallback for multi-statement or dialect-
         // specific SQL that the pagination parser cannot transform.
-        if !options.first_page_uses_actual_sql {
+        if !options.first_page_uses_actual_sql && options.sql == options.query_base_sql {
             plan.sql_to_execute = options.query_base_sql;
         }
         plan.page_limit = Some(options.pagination.limit);
@@ -266,7 +266,11 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     let use_derived_column_aliases = options.database_type != Some(DatabaseType::Mysql)
         && options.database_type != Some(DatabaseType::ClickHouse)
         && options.database_type != Some(DatabaseType::Sqlite)
-        && options.database_type != Some(DatabaseType::DuckDb);
+        && options.database_type != Some(DatabaseType::DuckDb)
+        && options.database_type != Some(DatabaseType::Dameng)
+        && options.database_type != Some(DatabaseType::Oracle)
+        && options.database_type != Some(DatabaseType::OceanbaseOracle)
+        && options.database_type != Some(DatabaseType::Jdbc);
     let sort_alias = if use_derived_column_aliases {
         aliases
             .get(options.column_index)
@@ -2499,6 +2503,34 @@ WHERE u.id = picked.id;
             result.sql.unwrap(),
             "SELECT * FROM (SELECT id, name FROM users) t([id], [name]) ORDER BY [name] ASC;"
         );
+    }
+
+    #[test]
+    fn builds_dameng_sorted_query_without_alias_list() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Dameng),
+            result_columns: vec!["id".to_string(), "name".to_string()],
+            column_index: 0,
+            column: "id".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t ORDER BY \"id\" ASC;");
+    }
+
+    #[test]
+    fn builds_jdbc_sorted_query_without_alias_list() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM users".to_string(),
+            database_type: Some(DatabaseType::Jdbc),
+            result_columns: vec!["id".to_string(), "name".to_string()],
+            column_index: 0,
+            column: "id".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t ORDER BY id ASC;");
     }
 
     #[test]

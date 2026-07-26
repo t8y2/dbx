@@ -1778,12 +1778,16 @@ export const useConnectionStore = defineStore("connection", () => {
         return false;
       }
       const normalizedChildren = sortSidebarTreeChildrenForParent(node, withSavedSqlRoot(node.connectionId, node.children || [], node), getConfig(node.connectionId)?.db_type);
-      setChildren(node, normalizedChildren);
+      const liveNode = treeNodeForMetadataApply(node) ?? treeNodeInSidebarTree(node);
+      if (!liveNode) return false;
+      setChildren(liveNode, normalizedChildren);
+      liveNode.isExpanded = true;
     } else if (!isTreeNodeLoadedChildrenUsable(node)) {
       clearLoadedChildrenCache(node.id);
       return false;
     }
-    node.isExpanded = true;
+    const liveNode = treeNodeInSidebarTree(node) ?? node;
+    liveNode.isExpanded = true;
     return true;
   }
 
@@ -2788,8 +2792,9 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await loadDatabases(connectionId, { connectedOnly: true });
     } finally {
-      node.isExpanded = wasExpanded;
-      node.isLoading = false;
+      const liveNode = treeNodeInSidebarTree(node);
+      if (liveNode) liveNode.isExpanded = wasExpanded;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -2807,8 +2812,10 @@ export const useConnectionStore = defineStore("connection", () => {
         config?.visible_databases,
       );
       const visibleNameSet = new Set(visibleNames);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         withSavedSqlRoot(
           connectionId,
           dbs
@@ -2824,15 +2831,15 @@ export const useConnectionStore = defineStore("connection", () => {
               isExpanded: false,
               children: [],
             })),
-          node,
+          targetNode,
         ),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -2843,8 +2850,10 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       await ensureConnected(connectionId);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         withSavedSqlRoot(
           connectionId,
           [
@@ -2858,15 +2867,15 @@ export const useConnectionStore = defineStore("connection", () => {
               children: [],
             },
           ],
-          node,
+          targetNode,
         ),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -2877,8 +2886,10 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       await ensureConnected(connectionId);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         withSavedSqlRoot(
           connectionId,
           [
@@ -2892,15 +2903,15 @@ export const useConnectionStore = defineStore("connection", () => {
               children: [],
             },
           ],
-          node,
+          targetNode,
         ),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -2919,7 +2930,9 @@ export const useConnectionStore = defineStore("connection", () => {
         // tenant and exposes virtual hosts as namespaces inside the console. Create a
         // synthetic child that opens the MQ admin console directly when clicked.
         const mqTenant = resolveMqSystemKindFromConnection(config) === "rabbitmq" ? RABBITMQ_MQ_TENANT : "_flat_mq";
-        setChildren(node, [
+        const targetNode = treeNodeForMetadataApply(node);
+        if (!targetNode) return;
+        setChildren(targetNode, [
           {
             id: schemaCacheKey(connectionId, "mq-tenant", mqTenant),
             label: "Topics",
@@ -2932,8 +2945,10 @@ export const useConnectionStore = defineStore("connection", () => {
       } else {
         const tenants = await withMetadataLoadTimeout(connectionId, api.mqListTenants(connectionId), "message queue tenants");
         const tenantNames = sortSidebarNames(tenants.map((tenant) => tenant.name).filter((name) => !!name.trim()));
+        const targetNode = treeNodeForMetadataApply(node);
+        if (!targetNode) return;
         setChildren(
-          node,
+          targetNode,
           tenantNames.map((tenant) => ({
             id: schemaCacheKey(connectionId, "mq-tenant", tenant),
             label: tenant,
@@ -2943,12 +2958,13 @@ export const useConnectionStore = defineStore("connection", () => {
           })),
         );
       }
-      node.isExpanded = true;
+      const liveNode = treeNodeForMetadataApply(node) ?? treeNodeInSidebarTree(node);
+      if (liveNode) liveNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -2967,8 +2983,10 @@ export const useConnectionStore = defineStore("connection", () => {
         const rightLabel = right.namespaceShowName || right.namespace || "public";
         return leftLabel.localeCompare(rightLabel);
       });
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         sorted.map((namespace) => {
           const value = namespace.namespace || "";
           const label = namespace.namespaceShowName || value || "public";
@@ -2984,12 +3002,12 @@ export const useConnectionStore = defineStore("connection", () => {
           };
         }),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3032,8 +3050,10 @@ export const useConnectionStore = defineStore("connection", () => {
       const dbs = await withMetadataLoadTimeout(connectionId, api.mongoListDatabases(connectionId), "MongoDB databases");
       const config = getConfig(connectionId);
       const visibleDbs = filterDatabaseNamesForConnection(dbs, config);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         withSavedSqlRoot(
           connectionId,
           sortSidebarNames(visibleDbs).map((db) => ({
@@ -3045,15 +3065,15 @@ export const useConnectionStore = defineStore("connection", () => {
             isExpanded: false,
             children: [],
           })),
-          node,
+          targetNode,
         ),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3065,8 +3085,10 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await ensureConnected(connectionId);
       const indices = await withMetadataLoadTimeout(connectionId, api.elasticsearchListIndices(connectionId), "Elasticsearch indices");
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         withSavedSqlRoot(
           connectionId,
           sortSidebarNames(indices).map((index) => ({
@@ -3077,15 +3099,15 @@ export const useConnectionStore = defineStore("connection", () => {
             database: "default",
             isExpanded: false,
           })),
-          node,
+          targetNode,
         ),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3097,8 +3119,10 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await ensureConnected(connectionId);
       const dbs = await withMetadataLoadTimeout(connectionId, api.documentListDatabases(connectionId), "Milvus databases");
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         withSavedSqlRoot(
           connectionId,
           sortSidebarNames(dbs).map((db) => ({
@@ -3110,15 +3134,15 @@ export const useConnectionStore = defineStore("connection", () => {
             isExpanded: false,
             children: [],
           })),
-          node,
+          targetNode,
         ),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3145,13 +3169,15 @@ export const useConnectionStore = defineStore("connection", () => {
         isExpanded: false,
         meta: { dimension: info.dimension, collectionId: info.id } as VectorCollectionMeta,
       }));
-      setChildren(node, isMilvus && database ? collectionChildren : withSavedSqlRoot(connectionId, collectionChildren, node));
-      node.isExpanded = true;
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
+      setChildren(targetNode, isMilvus && database ? collectionChildren : withSavedSqlRoot(connectionId, collectionChildren, targetNode));
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3188,13 +3214,15 @@ export const useConnectionStore = defineStore("connection", () => {
         },
         ...collectionChildren,
       ];
-      setChildren(node, children);
-      node.isExpanded = true;
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
+      setChildren(targetNode, children);
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3297,14 +3325,16 @@ export const useConnectionStore = defineStore("connection", () => {
       const schemas = filterSchemaNamesForConnection(await api.listSchemas(connectionId, database), config, database);
       const children = buildSqlServerDatabaseTreeNodes(connectionId, database, schemas);
       if (isSidebarSearchQueryChanged(options)) return;
-      setChildren(node, children);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
+      setChildren(targetNode, children);
       await savePersistedTreeChildren(cacheKey, children);
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3318,8 +3348,10 @@ export const useConnectionStore = defineStore("connection", () => {
       const config = getConfig(connectionId);
       const database = sqlServerLinkedRuntimeDatabase(config);
       const linkedServers = await api.listSqlServerLinkedServers(connectionId);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         linkedServers.map((server) => ({
           id: sqlServerLinkedServerId(connectionId, server.name),
           label: server.name,
@@ -3332,12 +3364,12 @@ export const useConnectionStore = defineStore("connection", () => {
           children: [],
         })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3351,8 +3383,10 @@ export const useConnectionStore = defineStore("connection", () => {
       if (useCachedChildren(node, options)) return;
       const catalogs = await api.listSqlServerLinkedServerCatalogs(connectionId, server);
       const database = node.database || sqlServerLinkedRuntimeDatabase(getConfig(connectionId));
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         catalogs
           .filter((catalog) => catalog.name.trim())
           .map((catalog) => ({
@@ -3367,12 +3401,12 @@ export const useConnectionStore = defineStore("connection", () => {
             children: [],
           })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3384,37 +3418,39 @@ export const useConnectionStore = defineStore("connection", () => {
       if (useCachedChildren(node, options)) return;
       const schemas = await api.listSqlServerLinkedServerSchemas(node.connectionId, node.linkedServer, node.linkedCatalog);
       const database = node.database || sqlServerLinkedRuntimeDatabase(getConfig(node.connectionId));
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         sortSidebarNames(schemas)
           .filter((schema) => schema.trim())
           .map((schema) => {
             const encodedSchema = encodeSqlServerLinkedSchema({
-              server: node.linkedServer!,
-              catalog: node.linkedCatalog!,
+              server: targetNode.linkedServer!,
+              catalog: targetNode.linkedCatalog!,
               schema,
             });
             return {
-              id: `${node.connectionId}:${database}:${encodedSchema}`,
+              id: `${targetNode.connectionId}:${database}:${encodedSchema}`,
               label: schema,
               type: "linked-server-schema" as const,
-              connectionId: node.connectionId,
+              connectionId: targetNode.connectionId,
               database,
               schema: encodedSchema,
-              linkedServer: node.linkedServer,
-              linkedCatalog: node.linkedCatalog,
+              linkedServer: targetNode.linkedServer,
+              linkedCatalog: targetNode.linkedCatalog,
               linkedSchema: schema,
               isExpanded: false,
               children: [],
             };
           }),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(node.connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -3912,14 +3948,16 @@ export const useConnectionStore = defineStore("connection", () => {
         meta: ext,
         isExpanded: false,
       }));
-      setChildren(node, children);
-      node.objectCount = children.length;
-      node.isExpanded = true;
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
+      setChildren(targetNode, children);
+      targetNode.objectCount = children.length;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -4207,8 +4245,10 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     }
 
-    setChildren(node, children);
-    node.isExpanded = true;
+    const targetNode = treeNodeForMetadataApply(node);
+    if (!targetNode) return;
+    setChildren(targetNode, children);
+    targetNode.isExpanded = true;
   }
 
   async function loadColumns(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
@@ -4220,8 +4260,10 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       if (effectiveDatabaseTypeForConnection(getConfig(connectionId)) === "mongodb") {
         const fields = await listMongoCompletionFields(connectionId, database, table);
+        const targetNode = treeNodeForMetadataApply(node);
+        if (!targetNode) return;
         setChildren(
-          node,
+          targetNode,
           fields.map((field) => {
             const column = {
               name: field.name,
@@ -4242,13 +4284,15 @@ export const useConnectionStore = defineStore("connection", () => {
             };
           }),
         );
-        node.isExpanded = true;
+        targetNode.isExpanded = true;
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
       const columns = await api.getColumns(connectionId, database, querySchema, table, catalog);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         columns.map((col) => ({
           id: `${parentId}:${col.name}`,
           label: `${col.name} (${col.data_type})`,
@@ -4260,12 +4304,12 @@ export const useConnectionStore = defineStore("connection", () => {
           meta: col,
         })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -4278,14 +4322,18 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const metadataCapabilities = getTableMetadataCapabilities(effectiveDatabaseTypeForConnection(getConfig(connectionId)));
       if (!metadataCapabilities.indexes) {
-        setChildren(node, []);
-        node.isExpanded = true;
+        const targetNode = treeNodeForMetadataApply(node);
+        if (!targetNode) return;
+        setChildren(targetNode, []);
+        targetNode.isExpanded = true;
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
       const indexes = await api.listIndexes(connectionId, database, querySchema, table, catalog);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         indexes.map((idx) => ({
           id: `${parentId}:${idx.name}`,
           label: `${idx.name} (${idx.columns.join(", ")})`,
@@ -4297,12 +4345,12 @@ export const useConnectionStore = defineStore("connection", () => {
           meta: idx,
         })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -4315,8 +4363,10 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const metadataCapabilities = getTableMetadataCapabilities(effectiveDatabaseTypeForConnection(getConfig(connectionId)));
       if (!metadataCapabilities.foreignKeys) {
-        setChildren(node, []);
-        node.isExpanded = true;
+        const targetNode = treeNodeForMetadataApply(node);
+        if (!targetNode) return;
+        setChildren(targetNode, []);
+        targetNode.isExpanded = true;
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
@@ -4325,8 +4375,10 @@ export const useConnectionStore = defineStore("connection", () => {
       completionForeignKeysCache.value[cacheKey] = fkeys;
       evictOldestCacheEntries(completionForeignKeysCache.value, COMPLETION_CACHE_MAX);
       indexCompletionForeignKeys(connectionId, database, table, schema, sqlCompletionForeignKeys(fkeys));
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         fkeys.map((fk) => ({
           id: `${parentId}:${fk.name}`,
           label: `${fk.column} → ${fk.ref_table}.${fk.ref_column}`,
@@ -4338,12 +4390,12 @@ export const useConnectionStore = defineStore("connection", () => {
           meta: fk,
         })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -4356,14 +4408,18 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       const metadataCapabilities = getTableMetadataCapabilities(effectiveDatabaseTypeForConnection(getConfig(connectionId)));
       if (!metadataCapabilities.triggers) {
-        setChildren(node, []);
-        node.isExpanded = true;
+        const targetNode = treeNodeForMetadataApply(node);
+        if (!targetNode) return;
+        setChildren(targetNode, []);
+        targetNode.isExpanded = true;
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
       const triggers = await api.listTriggers(connectionId, database, querySchema, table, catalog);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         triggers.map((tr) => ({
           id: `${parentId}:${tr.name}`,
           label: `${tr.name} (${tr.timing} ${tr.event})`,
@@ -4376,12 +4432,12 @@ export const useConnectionStore = defineStore("connection", () => {
           meta: tr,
         })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -4392,8 +4448,10 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       const constraints = await api.listConstraints(connectionId, database, metadataQuerySchema(connectionId, database, schema), table, catalog);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         constraints.map((constraint) => ({
           id: `${parentId}:${constraint.name}`,
           label: `${constraint.name} (${constraint.constraint_type})${constraint.valid ? "" : " · INVALID"}`,
@@ -4405,12 +4463,12 @@ export const useConnectionStore = defineStore("connection", () => {
           meta: constraint,
         })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -4421,8 +4479,10 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       const partitions = await api.listPartitions(connectionId, database, metadataQuerySchema(connectionId, database, schema), table, catalog);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         partitions.map((partition) => ({
           id: `${parentId}:${partition.name}`,
           label: `${partition.name} (${partition.partition_type}${partition.value ? `: ${partition.value}` : ""})`,
@@ -4434,12 +4494,12 @@ export const useConnectionStore = defineStore("connection", () => {
           meta: partition,
         })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 
@@ -4450,8 +4510,10 @@ export const useConnectionStore = defineStore("connection", () => {
     node.isLoading = true;
     try {
       const partitions = await api.listSubpartitions(connectionId, database, metadataQuerySchema(connectionId, database, schema), table, catalog);
+      const targetNode = treeNodeForMetadataApply(node);
+      if (!targetNode) return;
       setChildren(
-        node,
+        targetNode,
         partitions.map((partition) => ({
           id: `${parentId}:${partition.name}`,
           label: `${partition.name} (${partition.partition_type}${partition.value ? `: ${partition.value}` : ""})`,
@@ -4463,12 +4525,12 @@ export const useConnectionStore = defineStore("connection", () => {
           meta: partition,
         })),
       );
-      node.isExpanded = true;
+      targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e);
       throw e;
     } finally {
-      node.isLoading = false;
+      clearTreeNodeLoadingFlag(node);
     }
   }
 

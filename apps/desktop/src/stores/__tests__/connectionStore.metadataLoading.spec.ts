@@ -1542,4 +1542,81 @@ describe("connectionStore metadata loading", () => {
     expect(store.isTreeNodeChildrenLoaded(columnsGroupId)).toBe(true);
     expect(getColumns).not.toHaveBeenCalled();
   });
+
+  it("applies SQL Server database object loads to the current tree node after an in-tree replacement", async () => {
+    let resolveSchemas!: (schemas: string[]) => void;
+    const listSchemas = vi.fn(
+      () =>
+        new Promise<string[]>((resolve) => {
+          resolveSchemas = resolve;
+        }),
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listSchemas,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "grouped";
+
+    const connection = {
+      id: "sqlserver-1",
+      name: "SQL Server",
+      db_type: "sqlserver",
+      host: "127.0.0.1",
+      port: 1433,
+      username: "sa",
+      password: "",
+      database: "master",
+    } as ConnectionConfig;
+    const dbId = `${connection.id}:app`;
+    const staleDbNode: TreeNode = {
+      id: dbId,
+      label: "app",
+      type: "database",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: true,
+      children: [],
+    };
+    const connectionNode: TreeNode = {
+      id: connection.id,
+      label: connection.name,
+      type: "connection",
+      connectionId: connection.id,
+      isExpanded: true,
+      children: [staleDbNode],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    const loadPromise = store.loadSqlServerDatabaseObjects(connection.id, "app", { force: true });
+    await vi.waitFor(() => expect(listSchemas).toHaveBeenCalled());
+    const replacementDb: TreeNode = {
+      id: dbId,
+      label: "app",
+      type: "database",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: true,
+      children: [],
+    };
+    connectionNode.children = [replacementDb];
+    resolveSchemas(["dbo"]);
+    await loadPromise;
+
+    expect(staleDbNode.children?.length ?? 0).toBe(0);
+    expect(replacementDb.children?.length ?? 0).toBeGreaterThan(0);
+    expect(store.isTreeNodeChildrenLoaded(dbId)).toBe(true);
+  });
 });

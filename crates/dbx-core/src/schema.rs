@@ -2,6 +2,7 @@ use crate::connection::{connection_url_for_endpoint, database_connection_config,
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -39,6 +40,79 @@ macro_rules! try_sqlserver {
 }
 
 const ORACLE_TABLE_COMMENT_BATCH_SIZE: usize = 500;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableNameFilter {
+    pub include_patterns: Vec<String>,
+    pub exclude_patterns: Vec<String>,
+}
+
+impl TableNameFilter {
+    pub fn is_empty(&self) -> bool {
+        self.include_patterns.iter().all(|pattern| pattern.trim().is_empty())
+            && self.exclude_patterns.iter().all(|pattern| pattern.trim().is_empty())
+    }
+}
+
+fn sql_like_pattern_matches_case_insensitive(pattern: &str, value: &str) -> bool {
+    #[derive(Clone, Copy)]
+    enum LikeToken {
+        Any,
+        One,
+        Literal(char),
+    }
+
+    let mut tokens = Vec::new();
+    let pattern = pattern.trim().to_lowercase();
+    let mut pattern_chars = pattern.chars().peekable();
+    while let Some(ch) = pattern_chars.next() {
+        match ch {
+            '%' => tokens.push(LikeToken::Any),
+            '_' => tokens.push(LikeToken::One),
+            '\\' => tokens.push(LikeToken::Literal(pattern_chars.next().unwrap_or('\\'))),
+            literal => tokens.push(LikeToken::Literal(literal)),
+        }
+    }
+    let value_chars: Vec<char> = value.to_lowercase().chars().collect();
+
+    let mut previous = vec![false; value_chars.len() + 1];
+    previous[0] = true;
+    for token in tokens {
+        let mut current = vec![false; value_chars.len() + 1];
+        match token {
+            LikeToken::Any => {
+                current[0] = previous[0];
+                for value_index in 1..=value_chars.len() {
+                    current[value_index] = previous[value_index] || current[value_index - 1];
+                }
+            }
+            LikeToken::One => {
+                current[1..].copy_from_slice(&previous[..value_chars.len()]);
+            }
+            LikeToken::Literal(literal) => {
+                for value_index in 1..=value_chars.len() {
+                    current[value_index] = previous[value_index - 1] && value_chars[value_index - 1] == literal;
+                }
+            }
+        }
+        previous = current;
+    }
+    previous[value_chars.len()]
+}
+
+pub fn table_name_filter_matches(name: &str, filter: Option<&TableNameFilter>) -> bool {
+    let Some(filter) = filter.filter(|filter| !filter.is_empty()) else {
+        return true;
+    };
+    let include_patterns: Vec<&str> =
+        filter.include_patterns.iter().map(|pattern| pattern.trim()).filter(|pattern| !pattern.is_empty()).collect();
+    let exclude_patterns: Vec<&str> =
+        filter.exclude_patterns.iter().map(|pattern| pattern.trim()).filter(|pattern| !pattern.is_empty()).collect();
+    let included = include_patterns.is_empty()
+        || include_patterns.iter().any(|pattern| sql_like_pattern_matches_case_insensitive(pattern, name));
+    included && !exclude_patterns.iter().any(|pattern| sql_like_pattern_matches_case_insensitive(pattern, name))
+}
 
 #[cfg(feature = "duckdb-bundled")]
 pub fn duckdb_query_tables(con: &duckdb::Connection) -> Result<Vec<db::TableInfo>, String> {
@@ -851,6 +925,7 @@ pub async fn list_doris_catalog_tables_core(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, None).await?;
     let db_config = connection_config(state, connection_id).await;
@@ -864,7 +939,7 @@ pub async fn list_doris_catalog_tables_core(
     } else {
         db::doris::list_catalog_tables(p, catalog, database).await
     }?;
-    Ok(filter_table_infos(tables, filter, limit, offset, object_types))
+    Ok(filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
 }
 
 /// Columns of an external catalog table via `SHOW COLUMNS FROM <catalog>.<db>.<table>`.
@@ -1303,9 +1378,10 @@ pub async fn list_tables_core(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || {
-        list_tables_once(state, connection_id, database, schema, filter, limit, offset, object_types)
+        list_tables_once(state, connection_id, database, schema, filter, limit, offset, object_types, table_name_filter)
     })
     .await
 }
@@ -1457,27 +1533,82 @@ fn oracle_table_comments_from_query_result(result: db::QueryResult) -> HashMap<S
 }
 
 fn oracle_columns_sql(schema: &str, table: &str) -> String {
+    let owner = oracle_columns_owner_filter(schema);
     format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
+        "WITH synonym_chain AS ( \
+           SELECT CONNECT_BY_ROOT s.OWNER AS root_owner, \
+                  s.TABLE_OWNER AS resolved_owner, \
+                  s.TABLE_NAME AS resolved_table, \
+                  LEVEL AS synonym_depth \
+           FROM ALL_SYNONYMS s \
+           START WITH s.SYNONYM_NAME = {table} \
+             AND s.OWNER IN ({owner}, 'PUBLIC') \
+             AND s.DB_LINK IS NULL \
+           CONNECT BY NOCYCLE \
+             PRIOR s.TABLE_OWNER = s.OWNER \
+             AND PRIOR s.TABLE_NAME = s.SYNONYM_NAME \
+             AND s.DB_LINK IS NULL \
+         ), \
+         resolved_object AS ( \
+           SELECT resolved_owner, resolved_table \
+           FROM ( \
+             SELECT resolved_owner, resolved_table, resolution_priority, synonym_depth \
+             FROM ( \
+               SELECT o.OWNER AS resolved_owner, o.OBJECT_NAME AS resolved_table, \
+                      0 AS resolution_priority, 0 AS synonym_depth \
+               FROM ALL_OBJECTS o \
+               WHERE o.OWNER = {owner} \
+                 AND o.OBJECT_NAME = {table} \
+                 AND o.OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW') \
+               UNION ALL \
+               SELECT sc.resolved_owner, sc.resolved_table, \
+                      CASE WHEN sc.root_owner = {owner} THEN 1 ELSE 2 END AS resolution_priority, \
+                      sc.synonym_depth \
+               FROM synonym_chain sc \
+               JOIN ALL_OBJECTS o \
+                 ON o.OWNER = sc.resolved_owner \
+                AND o.OBJECT_NAME = sc.resolved_table \
+                AND o.OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW') \
+             ) \
+             ORDER BY resolution_priority, synonym_depth \
+           ) \
+           WHERE ROWNUM = 1 \
+         ) \
+         SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
          c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, c.COLUMN_ID, \
-         CASE WHEN cc.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
-         cm.COMMENTS \
-         FROM ALL_TAB_COLUMNS c \
-         LEFT JOIN ( \
-           SELECT cols.OWNER, cols.TABLE_NAME, cols.COLUMN_NAME \
+         CASE WHEN EXISTS ( \
+           SELECT 1 \
            FROM ALL_CONS_COLUMNS cols \
            JOIN ALL_CONSTRAINTS con \
-             ON con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME \
-            AND con.OWNER = cols.OWNER \
+             ON con.OWNER = cols.OWNER \
+            AND con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME \
             AND con.CONSTRAINT_TYPE = 'P' \
-         ) cc ON cc.OWNER = c.OWNER AND cc.TABLE_NAME = c.TABLE_NAME AND cc.COLUMN_NAME = c.COLUMN_NAME \
-         LEFT JOIN ALL_COL_COMMENTS cm \
-           ON cm.OWNER = c.OWNER AND cm.TABLE_NAME = c.TABLE_NAME AND cm.COLUMN_NAME = c.COLUMN_NAME \
-         WHERE c.OWNER = {} AND c.TABLE_NAME = {} \
+           WHERE cols.OWNER = c.OWNER \
+             AND cols.TABLE_NAME = c.TABLE_NAME \
+             AND cols.COLUMN_NAME = c.COLUMN_NAME \
+         ) THEN 1 ELSE 0 END AS IS_PK, \
+         ( \
+           SELECT cm.COMMENTS \
+           FROM ALL_COL_COMMENTS cm \
+           WHERE cm.OWNER = c.OWNER \
+             AND cm.TABLE_NAME = c.TABLE_NAME \
+             AND cm.COLUMN_NAME = c.COLUMN_NAME \
+         ) AS COMMENTS \
+         FROM ALL_TAB_COLUMNS c \
+         JOIN resolved_object ro \
+           ON ro.resolved_owner = c.OWNER AND ro.resolved_table = c.TABLE_NAME \
          ORDER BY c.COLUMN_ID",
-        oracle_owner_filter(schema),
-        sql_string(table),
+        table = sql_string(table),
     )
+}
+
+fn oracle_columns_owner_filter(schema: &str) -> String {
+    let schema = schema.trim();
+    if schema.is_empty() {
+        "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')".to_string()
+    } else {
+        sql_string(&schema.to_uppercase())
+    }
 }
 
 fn oracle_column_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
@@ -1572,6 +1703,16 @@ async fn external_driver_oracle_columns_via_sql(
         )
         .await?;
     Ok(deduplicate_column_infos(oracle_columns_from_query_result(result)))
+}
+
+fn should_query_oracle_columns_via_sql_first(
+    db_type: &DatabaseType,
+    schema: &str,
+    client_session_id: Option<&str>,
+) -> bool {
+    *db_type == DatabaseType::Oracle
+        && schema.trim().is_empty()
+        && client_session_id.is_some_and(|session_id| !session_id.trim().is_empty())
 }
 
 fn oracle_object_statistics_sql(schema: &str) -> String {
@@ -2016,6 +2157,7 @@ async fn list_tables_once(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     #[cfg(feature = "duckdb-bundled")]
@@ -2034,24 +2176,25 @@ async fn list_tables_once(
             })
             .await
             .map_err(|e| e.to_string())?
-            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
             let config = config.clone();
             let session = session.clone();
             drop(connections);
             if uses_presto_like_information_schema_tables(&config.db_type) {
+                let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
                 return external_driver_presto_like_tables(
                     session,
                     config.as_ref(),
                     database,
                     schema,
                     filter,
-                    limit,
-                    offset,
+                    if force_local_table_name_filter { None } else { limit },
+                    if force_local_table_name_filter { None } else { offset },
                 )
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
             }
             let mut params =
                 serde_json::json!({ "connection": config.as_ref(), "database": database, "schema": schema });
@@ -2068,14 +2211,14 @@ async fn list_tables_once(
                     agent_metadata_timeout(Some(config.as_ref())),
                 )
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
         #[cfg(feature = "duckdb-bundled")]
         if let Some(con) = extract_pool!(&connections, &pool_key, DuckDb) {
             drop(connections);
             let con = con.lock().map_err(|e| e.to_string())?;
             return duckdb_query_tables_in_database_with_attached(&con, database, schema, &duckdb_attached_names)
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
         #[cfg(feature = "duckdb-bundled")]
         if let Some(client) = extract_pool!(&connections, &pool_key, DuckDbWorker) {
@@ -2085,19 +2228,19 @@ async fn list_tables_once(
             return client
                 .list_tables(database, schema)
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, ClickHouse) {
             drop(connections);
             return db::clickhouse_driver::list_tables(&client, clickhouse_metadata_database(database, schema))
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
         if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb) {
             drop(connections);
             return db::influxdb_driver::list_tables(&client, database)
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
         if let Some(linked) = crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema) {
             if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
@@ -2113,16 +2256,16 @@ async fn list_tables_once(
                     None,
                 )
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
             }
         }
-        if object_types.is_some() {
+        if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
             if let Some(client) = extract_pool!(&connections, &pool_key, SqlServer) {
                 drop(connections);
                 let mut client = client.lock().await;
                 return db::sqlserver::list_tables(&mut client, schema, filter, None, None)
                     .await
-                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types));
+                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
             }
         }
         try_sqlserver!(connections, &pool_key, list_tables, schema, filter, limit, offset);
@@ -2136,14 +2279,15 @@ async fn list_tables_once(
             drop(connections);
             let mut client = client.lock().await;
             let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
-            let agent_limit = if filter_locally_after_oracle_comments {
+            let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
+            let agent_limit = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                 None
             } else if use_agent_table_paging {
                 limit
             } else {
                 None
             };
-            let agent_offset = if filter_locally_after_oracle_comments {
+            let agent_offset = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                 None
             } else if use_agent_table_paging {
                 offset
@@ -2173,14 +2317,15 @@ async fn list_tables_once(
                         )
                         .await?;
                     }
-                    let final_offset = if filter_locally_after_oracle_comments {
+                    let final_offset = if filter_locally_after_oracle_comments || force_local_table_name_filter {
                         offset
                     } else if agent_paging_likely_applied(use_agent_table_paging, limit, tables.len()) {
                         Some(0)
                     } else {
                         offset
                     };
-                    let tables = filter_table_infos(tables, filter, limit, final_offset, object_types);
+                    let tables =
+                        filter_table_infos(tables, filter, limit, final_offset, object_types, table_name_filter);
                     return Ok(tables);
                 }
                 Ok(tables) => {
@@ -2188,14 +2333,32 @@ async fn list_tables_once(
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
                                 return if object_types.is_some() {
-                                    db::postgres::list_tables_filtered(&pool, schema, filter, None, None)
-                                        .await
-                                        .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                                    db::postgres::list_tables_filtered(&pool, schema, filter, None, None).await.map(
+                                        |tables| {
+                                            filter_table_infos(
+                                                tables,
+                                                filter,
+                                                limit,
+                                                offset,
+                                                object_types,
+                                                table_name_filter,
+                                            )
+                                        },
+                                    )
                                 } else {
                                     db::postgres::list_tables_filtered(&pool, schema, filter, limit, offset).await
                                 };
                             }
-                            Ok(None) => return Ok(filter_table_infos(tables, filter, limit, offset, object_types)),
+                            Ok(None) => {
+                                return Ok(filter_table_infos(
+                                    tables,
+                                    filter,
+                                    limit,
+                                    offset,
+                                    object_types,
+                                    table_name_filter,
+                                ))
+                            }
                             Err(error) => {
                                 log::warn!(
                                     "[schema][agent:list_tables:fallback-failed] connection_id={} database={} schema={} error={}",
@@ -2207,7 +2370,7 @@ async fn list_tables_once(
                             }
                         }
                     }
-                    return Ok(filter_table_infos(tables, filter, limit, offset, object_types));
+                    return Ok(filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
                 }
                 Err(agent_error) => {
                     if let Some(config) = fallback_config.as_ref() {
@@ -2215,9 +2378,18 @@ async fn list_tables_once(
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
                             let result = if object_types.is_some() {
-                                db::postgres::list_tables_filtered(&pool, schema, filter, None, None)
-                                    .await
-                                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                                db::postgres::list_tables_filtered(&pool, schema, filter, None, None).await.map(
+                                    |tables| {
+                                        filter_table_infos(
+                                            tables,
+                                            filter,
+                                            limit,
+                                            offset,
+                                            object_types,
+                                            table_name_filter,
+                                        )
+                                    },
+                                )
                             } else {
                                 db::postgres::list_tables_filtered(&pool, schema, filter, limit, offset).await
                             };
@@ -2239,17 +2411,17 @@ async fn list_tables_once(
         PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_starrocks_config) => {
             db::mysql::list_starrocks_tables(p, database)
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
         }
         PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
             db::mysql::list_tables_show(p, database)
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
         }
         PoolKind::Mysql(p, mode) => {
             if *mode == MysqlMode::OceanBaseOracle {
                 let tables = db::ob_oracle::list_tables(p, schema).await?;
-                Ok(filter_table_infos(tables, filter, limit, offset, object_types))
+                Ok(filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
             } else {
                 db::mysql::list_tables_filtered(
                     p,
@@ -2258,55 +2430,56 @@ async fn list_tables_once(
                     limit,
                     offset,
                     object_types,
+                    table_name_filter,
                 )
                 .await
-                .map(|tables| filter_table_infos(tables, None, None, None, object_types))
+                .map(|tables| filter_table_infos(tables, None, None, None, object_types, None))
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => {
             db::questdb::list_tables(p, schema)
                 .await
-                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
-            if object_types.is_some() {
+            if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
                 db::cloudberry::list_tables_filtered(p, schema, filter, None, None)
                     .await
-                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
             } else {
                 db::cloudberry::list_tables_filtered(p, schema, filter, limit, offset).await
             }
         }
         PoolKind::Postgres(p) => {
-            if object_types.is_some() {
+            if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
                 db::postgres::list_tables_filtered(p, schema, filter, None, None)
                     .await
-                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types))
+                    .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
             } else {
                 db::postgres::list_tables_filtered(p, schema, filter, limit, offset).await
             }
         }
         PoolKind::Sqlite(p) => db::sqlite::list_tables(p, schema)
             .await
-            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::Rqlite(client) => db::rqlite_driver::list_tables(client, schema)
             .await
-            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::MongoDb(client) => db::mongo_driver::list_collections(client, database)
             .await
             .map(|names| collection_names_to_tables(names, "COLLECTION"))
-            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::Elasticsearch(client) => db::elasticsearch_driver::list_indices(client)
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
-            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::VectorDb(client) => db::vector_driver::list_collections(client)
             .await
             .map(|infos| collection_names_to_tables(infos.into_iter().map(|i| i.name).collect(), "COLLECTION"))
-            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::list_tables(client, schema)
             .await
-            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types)),
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         _ => Ok(vec![]),
     }
 }
@@ -2330,6 +2503,7 @@ fn filter_table_infos(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> Vec<db::TableInfo> {
     let filter = filter.unwrap_or("");
     let limit = limit.unwrap_or(usize::MAX);
@@ -2337,6 +2511,7 @@ fn filter_table_infos(
     tables
         .into_iter()
         .filter(|table| metadata_name_or_comment_matches(&table.name, table.comment.as_deref(), filter))
+        .filter(|table| table_name_filter_matches(&table.name, table_name_filter))
         .filter(|table| table_info_matches_object_types(table, object_types))
         .skip(offset)
         .take(limit)
@@ -2465,7 +2640,7 @@ async fn external_driver_presto_like_objects(
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let tables = external_driver_presto_like_tables(session, config, database, schema, filter, None, None)
         .await
-        .map(|tables| filter_table_infos(tables, filter, None, None, object_types))?;
+        .map(|tables| filter_table_infos(tables, filter, None, None, object_types, None))?;
     Ok(tables
         .into_iter()
         .map(|table| db::ObjectInfo {
@@ -2679,7 +2854,8 @@ mod tests {
         oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
         oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_from_query_result,
         oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, visible_schema_filter,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        should_query_oracle_columns_via_sql_first, table_name_filter_matches, visible_schema_filter, TableNameFilter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -2933,7 +3109,7 @@ mod tests {
             test_table_info("users"),
         ];
 
-        let filtered = filter_table_infos(tables, Some("audit"), Some(1), Some(1), None);
+        let filtered = filter_table_infos(tables, Some("audit"), Some(1), Some(1), None, None);
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "audit_record");
@@ -2943,10 +3119,10 @@ mod tests {
     fn filter_table_infos_matches_fuzzy_subsequences() {
         let tables = vec![test_table_info("system_user"), test_table_info("user_order"), test_table_info("alpha")];
 
-        let system_user = filter_table_infos(tables.clone(), Some("sysu"), None, None, None);
+        let system_user = filter_table_infos(tables.clone(), Some("sysu"), None, None, None, None);
         assert_eq!(system_user.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["system_user"]);
 
-        let user_order = filter_table_infos(tables, Some("uo"), None, None, None);
+        let user_order = filter_table_infos(tables, Some("uo"), None, None, None, None);
         assert_eq!(user_order.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_order"]);
     }
 
@@ -2958,7 +3134,7 @@ mod tests {
         profile.comment = Some("customer account data".to_string());
         let tables = vec![orders, profile, test_table_info("logs")];
 
-        let filtered = filter_table_infos(tables, Some("account"), None, None, None);
+        let filtered = filter_table_infos(tables, Some("account"), None, None, None, None);
 
         assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["profile"]);
     }
@@ -2967,7 +3143,7 @@ mod tests {
     fn filter_table_infos_skips_fuzzy_for_single_character_filters() {
         let tables = vec![test_table_info("orders"), test_table_info("user_order")];
 
-        let filtered = filter_table_infos(tables, Some("u"), None, None, None);
+        let filtered = filter_table_infos(tables, Some("u"), None, None, None, None);
 
         assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_order"]);
     }
@@ -2976,9 +3152,36 @@ mod tests {
     fn filter_table_infos_keeps_special_filter_characters_literal() {
         let tables = vec![test_table_info("user_%"), test_table_info("user_account"), test_table_info("userXpercent")];
 
-        let filtered = filter_table_infos(tables, Some("user_%"), None, None, None);
+        let filtered = filter_table_infos(tables, Some("user_%"), None, None, None, None);
 
         assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["user_%"]);
+    }
+
+    #[test]
+    fn table_name_filter_uses_sql_like_without_fuzzy_subsequence() {
+        let filter = TableNameFilter {
+            include_patterns: vec!["ads_cp%".to_string()],
+            exclude_patterns: vec!["%_bak".to_string()],
+        };
+
+        assert!(table_name_filter_matches("ads_cp_report", Some(&filter)));
+        assert!(!table_name_filter_matches("ads_180d_creator_detail_report_di", Some(&filter)));
+        assert!(!table_name_filter_matches("ads_cp_report_bak", Some(&filter)));
+    }
+
+    #[test]
+    fn table_name_filter_supports_escaped_like_wildcards() {
+        let filter = TableNameFilter { include_patterns: vec![r"order\_%".to_string()], exclude_patterns: vec![] };
+
+        assert!(table_name_filter_matches("order_items", Some(&filter)));
+        assert!(!table_name_filter_matches("orderXitems", Some(&filter)));
+    }
+
+    #[test]
+    fn table_name_filter_handles_adversarial_failing_like_pattern() {
+        let filter = TableNameFilter { include_patterns: vec!["%a".repeat(128)], exclude_patterns: vec![] };
+
+        assert!(!table_name_filter_matches(&"a".repeat(127), Some(&filter)));
     }
 
     #[test]
@@ -3003,7 +3206,7 @@ mod tests {
         ];
         let object_types = vec!["VIEW".to_string()];
 
-        let filtered = filter_table_infos(tables, None, Some(1), Some(1), Some(&object_types));
+        let filtered = filter_table_infos(tables, None, Some(1), Some(1), Some(&object_types), None);
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "active_users");
@@ -3037,7 +3240,7 @@ mod tests {
         ];
         let object_types = vec!["MATERIALIZED_VIEW".to_string()];
 
-        let filtered = filter_table_infos(tables, Some("orders"), Some(1), Some(1), Some(&object_types));
+        let filtered = filter_table_infos(tables, Some("orders"), Some(1), Some(1), Some(&object_types), None);
 
         assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["monthly_orders_mv"]);
     }
@@ -3538,8 +3741,62 @@ mod tests {
 
         assert!(sql.contains("ALL_TAB_COLUMNS"));
         assert!(sql.contains("ALL_COL_COMMENTS"));
-        assert!(sql.contains("c.OWNER = 'DBX_TEST'"));
-        assert!(sql.contains("c.TABLE_NAME = 'test'"));
+        assert!(sql.contains("o.OWNER = 'DBX_TEST'"));
+        assert!(sql.contains("o.OBJECT_NAME = 'test'"));
+        assert!(sql.contains("cols.OWNER = c.OWNER"));
+        assert!(sql.contains("cols.TABLE_NAME = c.TABLE_NAME"));
+        assert!(sql.contains("cm.OWNER = c.OWNER"));
+    }
+
+    #[test]
+    fn oracle_columns_sql_resolves_private_and_public_synonyms_in_oracle_precedence_order() {
+        let sql = oracle_columns_sql("", "ORDERS_ALIAS");
+
+        assert!(sql.contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"));
+        assert!(sql.contains("FROM ALL_SYNONYMS s"));
+        assert!(sql.contains("s.OWNER IN (SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'), 'PUBLIC')"));
+        assert!(sql.contains("CASE WHEN sc.root_owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') THEN 1 ELSE 2 END"));
+        assert!(sql.contains("s.DB_LINK IS NULL"));
+        assert!(sql.contains("ORDER BY resolution_priority, synonym_depth"));
+        assert!(sql.contains("WHERE ROWNUM = 1"));
+    }
+
+    #[test]
+    fn oracle_columns_sql_follows_two_level_synonyms_without_cycles() {
+        let sql = oracle_columns_sql("DBX_TEST", "ORDERS_ALIAS");
+
+        assert!(sql.contains("SELECT CONNECT_BY_ROOT s.OWNER AS root_owner"));
+        assert!(sql.contains("LEVEL AS synonym_depth"));
+        assert!(sql.contains("CONNECT BY NOCYCLE"));
+        assert!(sql.contains("PRIOR s.TABLE_OWNER = s.OWNER"));
+        assert!(sql.contains("PRIOR s.TABLE_NAME = s.SYNONYM_NAME"));
+        assert!(sql.contains("JOIN ALL_OBJECTS o"));
+        assert!(sql.contains("o.OWNER = sc.resolved_owner"));
+        assert!(sql.contains("o.OBJECT_NAME = sc.resolved_table"));
+    }
+
+    #[test]
+    fn oracle_columns_sql_preserves_quoted_case_synonym_names_and_excludes_database_links() {
+        let sql = oracle_columns_sql("DBX_TEST", "Order Alias");
+
+        assert!(sql.contains("s.SYNONYM_NAME = 'Order Alias'"));
+        assert!(sql.contains("o.OBJECT_NAME = 'Order Alias'"));
+        assert!(!sql.contains("ORDER ALIAS"));
+        assert_eq!(sql.matches("s.DB_LINK IS NULL").count(), 2);
+    }
+
+    #[test]
+    fn oracle_session_completion_queries_synonym_aware_columns_sql_first() {
+        assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", Some("tab-1")));
+        assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "   ", Some("tab-1")));
+    }
+
+    #[test]
+    fn oracle_columns_sql_first_is_limited_to_current_schema_editor_sessions() {
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "DBX_TEST", Some("tab-1")));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", None));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", Some("  ")));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Postgres, "", Some("tab-1")));
     }
 
     #[test]
@@ -4033,6 +4290,7 @@ async fn completion_assistant_fallback_core(
             Some(limit),
             None,
             object_types.as_deref(),
+            None,
         )
         .await?;
         for table in tables {
@@ -4400,7 +4658,7 @@ async fn list_objects_once(
         _ => {
             drop(connections);
             Ok(unpaged_object_list(
-                list_tables_core(state, connection_id, database, schema, None, None, None, None)
+                list_tables_core(state, connection_id, database, schema, None, None, None, None, None)
                     .await?
                     .into_iter()
                     .map(|table| db::ObjectInfo {
@@ -4645,6 +4903,32 @@ pub async fn get_columns_core_for_session(
                 if uses_presto_like_information_schema_tables(&config.db_type) {
                     return external_driver_presto_like_columns(session, config.as_ref(), database, schema, table).await;
                 }
+                let query_oracle_columns_first =
+                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, client_session_id);
+                if query_oracle_columns_first {
+                    match external_driver_oracle_columns_via_sql(
+                        session.clone(),
+                        config.as_ref(),
+                        database,
+                        schema,
+                        table,
+                    )
+                    .await
+                    {
+                        Ok(columns) if !columns.is_empty() => return Ok(columns),
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][external-driver:get_columns:oracle-primary-sql-failed] connection_id={} database={} schema={} table={} error={}",
+                                connection_id,
+                                database,
+                                schema,
+                                table,
+                                error
+                            );
+                        }
+                    }
+                }
                 let columns = session
                     .invoke_with_timeout::<Vec<db::ColumnInfo>>(
                         "getColumns",
@@ -4657,7 +4941,7 @@ pub async fn get_columns_core_for_session(
                         agent_metadata_timeout(Some(config.as_ref())),
                     )
                     .await?;
-                if columns.is_empty() && config.db_type == DatabaseType::Oracle {
+                if columns.is_empty() && config.db_type == DatabaseType::Oracle && !query_oracle_columns_first {
                     match external_driver_oracle_columns_via_sql(
                         session.clone(),
                         config.as_ref(),
@@ -4733,6 +5017,34 @@ pub async fn get_columns_core_for_session(
                 let fallback_config = db_config.clone();
                 drop(connections);
                 let mut client = client.lock().await;
+                let oracle_sql_config = fallback_config.as_ref().filter(|config| {
+                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, client_session_id)
+                });
+                let query_oracle_columns_first = oracle_sql_config.is_some();
+                if let Some(config) = oracle_sql_config {
+                    match oracle_columns_via_sql(
+                        database,
+                        schema,
+                        table,
+                        &mut client,
+                        agent_metadata_timeout(Some(config)),
+                    )
+                    .await
+                    {
+                        Ok(columns) if !columns.is_empty() => return Ok(columns),
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!(
+                                "[schema][agent:get_columns:oracle-primary-sql-failed] connection_id={} database={} schema={} table={} error={}",
+                                connection_id,
+                                database,
+                                schema,
+                                table,
+                                error
+                            );
+                        }
+                    }
+                }
                 match client
                     .get_columns::<Vec<db::ColumnInfo>>(
                         database,
@@ -4745,7 +5057,7 @@ pub async fn get_columns_core_for_session(
                     Ok(columns) if !columns.is_empty() => return Ok(deduplicate_column_infos(columns)),
                     Ok(columns) => {
                         if let Some(config) = fallback_config.as_ref() {
-                            if config.db_type == DatabaseType::Oracle {
+                            if config.db_type == DatabaseType::Oracle && !query_oracle_columns_first {
                                 match oracle_columns_via_sql(
                                     database,
                                     schema,
@@ -6841,6 +7153,30 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_table_ddl_appends_trigger_definitions() {
+        let ddl = append_postgres_trigger_definitions(
+            render_postgres_table_ddl("public", "users", &[column("id", "integer")], &[], &[], None),
+            &[r#"CREATE TRIGGER users_set_updated_at BEFORE UPDATE ON "public"."users" FOR EACH ROW EXECUTE FUNCTION set_updated_at()"#
+                .to_string()],
+        );
+
+        assert!(ddl.contains("CREATE TABLE \"public\".\"users\""));
+        assert!(ddl.contains(
+            "\n\nCREATE TRIGGER users_set_updated_at BEFORE UPDATE ON \"public\".\"users\" FOR EACH ROW EXECUTE FUNCTION set_updated_at();"
+        ));
+    }
+
+    #[test]
+    fn postgres_table_ddl_does_not_duplicate_trigger_statement_terminators() {
+        let ddl = append_postgres_trigger_definitions(
+            render_postgres_table_ddl("public", "users", &[column("id", "integer")], &[], &[], None),
+            &[r#"CREATE TRIGGER users_audit AFTER INSERT ON "public"."users" FOR EACH ROW EXECUTE FUNCTION audit_user();"#.to_string()],
+        );
+
+        assert!(!ddl.contains("audit_user();;"), "ddl: {ddl}");
+    }
+
+    #[test]
     fn sqlserver_table_ddl_includes_column_comments() {
         let mut display_name = column("display]name", "nvarchar(100)");
         display_name.comment = Some("User's display name".to_string());
@@ -6901,6 +7237,20 @@ mod ddl_tests {
             opengauss_table_ddl_sql("tenant's schema", "active users"),
             "SELECT pg_get_tabledef('\"tenant''s schema\".\"active users\"')"
         );
+    }
+
+    #[test]
+    fn opengauss_table_ddl_appends_trigger_definitions() {
+        let ddl = append_opengauss_trigger_definitions(
+            "CREATE TABLE \"public\".\"users\" (\n  \"id\" integer\n);".to_string(),
+            &[r#"CREATE TRIGGER users_bi BEFORE INSERT ON "public"."users" FOR EACH ROW EXECUTE PROCEDURE fill_created_at()"#
+                .to_string()],
+        );
+
+        assert!(ddl.contains("CREATE TABLE \"public\".\"users\""));
+        assert!(ddl.contains(
+            "\n\nCREATE TRIGGER users_bi BEFORE INSERT ON \"public\".\"users\" FOR EACH ROW EXECUTE PROCEDURE fill_created_at();"
+        ));
     }
 
     #[test]
@@ -6970,8 +7320,37 @@ pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &s
     .map_err(|e| e.to_string())?
 }
 
+pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+    let (columns, indexes, fkeys, table_comment, partition_key, trigger_definitions) = tokio::try_join!(
+        db::postgres::get_columns(pool, schema, table),
+        db::postgres::list_indexes(pool, schema, table),
+        db::postgres::list_foreign_keys(pool, schema, table),
+        async { db::postgres::get_table_comment(pool, schema, table).await },
+        db::postgres::get_table_partition_key(pool, schema, table),
+        db::postgres::list_trigger_definitions(pool, schema, table),
+    )?;
+
+    Ok(append_postgres_trigger_definitions(
+        render_postgres_table_ddl_with_partition_key(
+            schema,
+            table,
+            &columns,
+            &indexes,
+            &fkeys,
+            table_comment.as_deref(),
+            partition_key.as_deref(),
+        ),
+        &trigger_definitions,
+    ))
+}
+
 pub async fn opengauss_table_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    first_string_cell(db::postgres::execute_query(pool, &opengauss_table_ddl_sql(schema, table)).await?)
+    let (ddl, trigger_definitions) = tokio::try_join!(
+        async { first_string_cell(db::postgres::execute_query(pool, &opengauss_table_ddl_sql(schema, table)).await?) },
+        db::postgres::list_trigger_definitions(pool, schema, table),
+    )?;
+
+    Ok(append_opengauss_trigger_definitions(ddl, &trigger_definitions))
 }
 
 pub fn opengauss_table_ddl_sql(schema: &str, table: &str) -> String {
@@ -6979,24 +7358,38 @@ pub fn opengauss_table_ddl_sql(schema: &str, table: &str) -> String {
     format!("SELECT pg_get_tabledef({})", sql_string(&qualified_name))
 }
 
-pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (columns, indexes, fkeys, table_comment, partition_key) = tokio::try_join!(
-        db::postgres::get_columns(pool, schema, table),
-        db::postgres::list_indexes(pool, schema, table),
-        db::postgres::list_foreign_keys(pool, schema, table),
-        async { db::postgres::get_table_comment(pool, schema, table).await },
-        db::postgres::get_table_partition_key(pool, schema, table),
-    )?;
+fn append_postgres_trigger_definitions(mut ddl: String, trigger_definitions: &[String]) -> String {
+    for definition in
+        trigger_definitions.iter().map(|definition| definition.trim()).filter(|definition| !definition.is_empty())
+    {
+        ddl = ddl.trim_end().to_string();
+        if !ddl.ends_with(';') {
+            ddl.push(';');
+        }
+        ddl.push_str("\n\n");
+        ddl.push_str(definition);
+        if !definition.ends_with(';') {
+            ddl.push(';');
+        }
+    }
+    ddl
+}
 
-    Ok(render_postgres_table_ddl_with_partition_key(
-        schema,
-        table,
-        &columns,
-        &indexes,
-        &fkeys,
-        table_comment.as_deref(),
-        partition_key.as_deref(),
-    ))
+fn append_opengauss_trigger_definitions(mut ddl: String, trigger_definitions: &[String]) -> String {
+    for definition in
+        trigger_definitions.iter().map(|definition| definition.trim()).filter(|definition| !definition.is_empty())
+    {
+        ddl = ddl.trim_end().to_string();
+        if !ddl.ends_with(';') {
+            ddl.push(';');
+        }
+        ddl.push_str("\n\n");
+        ddl.push_str(definition);
+        if !definition.ends_with(';') {
+            ddl.push(';');
+        }
+    }
+    ddl
 }
 
 pub async fn cloudberry_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {

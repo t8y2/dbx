@@ -33,9 +33,16 @@ pub struct EtcdListPrefixRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EtcdConnectionRequest {
+    pub connection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EtcdKeyRequest {
     pub connection_id: String,
     pub key: String,
+    pub metadata_only: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +52,17 @@ pub struct EtcdPutRequest {
     pub key: String,
     pub value: dbx_core::agent_kv::KvValue,
     pub lease: Option<i64>,
+    pub ttl: Option<i64>,
+    pub preserve_lease: Option<bool>,
+}
+
+pub async fn supports_ttl(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<EtcdConnectionRequest>,
+) -> Result<Json<bool>, AppError> {
+    let result =
+        dbx_core::agent_kv::kv_supports_ttl_core(&state.app, &req.connection_id).await.map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn list_prefix(
@@ -67,8 +85,14 @@ pub async fn get(
     State(state): State<Arc<WebState>>,
     Json(req): Json<EtcdKeyRequest>,
 ) -> Result<Json<dbx_core::agent_kv::KvGetResponse>, AppError> {
-    let result =
-        dbx_core::agent_kv::kv_get_core(&state.app, &req.connection_id, &req.key).await.map_err(AppError::from)?;
+    let result = dbx_core::agent_kv::kv_get_core_with_options(
+        &state.app,
+        &req.connection_id,
+        &req.key,
+        req.metadata_only.unwrap_or(false),
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -77,9 +101,20 @@ pub async fn put(
     Json(req): Json<EtcdPutRequest>,
 ) -> Result<Json<dbx_core::agent_kv::KvPutResponse>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "Put").await?;
-    let result = dbx_core::agent_kv::kv_put_core(&state.app, &req.connection_id, &req.key, req.value, req.lease)
-        .await
-        .map_err(AppError::from)?;
+    let result = dbx_core::agent_kv::kv_put_core_with_options(
+        &state.app,
+        &req.connection_id,
+        &req.key,
+        req.value,
+        dbx_core::agent_kv::KvPutOptions {
+            lease: req.lease,
+            ttl: req.ttl,
+            preserve_lease: req.preserve_lease,
+            ..dbx_core::agent_kv::KvPutOptions::default()
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

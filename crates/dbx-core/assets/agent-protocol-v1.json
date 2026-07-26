@@ -14,7 +14,8 @@
     "paged_query",
     "transaction",
     "ddl",
-    "kv"
+    "kv",
+    "kv_ttl"
   ],
   "capabilities": [
     "connect",

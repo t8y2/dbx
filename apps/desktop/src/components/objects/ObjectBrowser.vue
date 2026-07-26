@@ -53,7 +53,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
@@ -72,6 +72,7 @@ import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -88,7 +89,11 @@ import {
   formatObjectBrowserBytes,
   formatObjectBrowserCount,
   formatObjectBrowserTimestamp,
+  canonicalizeObjectBrowserPinnedTreeNodeIdentity,
   initialObjectBrowserSortDirection,
+  objectBrowserRowLegacyPinnedTreeNodeIds,
+  objectBrowserRowMatchesPinnedTreeNode,
+  objectBrowserRowPinnedTreeNodeIdentity,
   sortObjectBrowserRows,
   summarizeObjectBrowserSearch,
   type ObjectBrowserFilter,
@@ -656,6 +661,55 @@ function rowMatchesObjectFilter(row: ObjectBrowserRow) {
   return rowMatchesFilter(row, objectFilter.value);
 }
 
+function objectBrowserPinnedTreeNodeContext() {
+  return {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+    catalog: props.catalog,
+    sidebarParentId: props.catalog
+      ? `${props.connection.id}:doris-catalog:${encodeURIComponent(props.catalog)}:${encodeURIComponent(props.database)}`
+      : needsSchema.value && selectedSchema.value
+        ? `${props.connection.id}:${props.database}:${selectedSchema.value}`
+        : `${props.connection.id}:${props.database}`,
+  };
+}
+
+function canonicalizeObjectBrowserPinnedIdentity(identity: PinnedTreeNodeIdentity): PinnedTreeNodeIdentity {
+  return canonicalizeObjectBrowserPinnedTreeNodeIdentity(objectBrowserPinnedTreeNodeContext())(identity);
+}
+
+function sortObjectBrowserRowsWithPins(items: ObjectBrowserRow[]): ObjectBrowserRow[] {
+  const sorted = sortObjectBrowserRows(items, sortKey.value, sortDirection.value);
+  const context = objectBrowserPinnedTreeNodeContext();
+  return connectionStore.orderByPinnedTreeNodes(sorted, (row, identity) => objectBrowserRowMatchesPinnedTreeNode(row, identity, context));
+}
+
+function pinnedTreeNodeForObjectBrowserRow(row: ObjectBrowserRow): TreeNode {
+  const identity = objectBrowserRowPinnedTreeNodeIdentity(row, objectBrowserPinnedTreeNodeContext());
+  return {
+    id: identity.id,
+    label: identity.name,
+    type: identity.type,
+    objectName: identity.name,
+    signature: identity.signature || undefined,
+    connectionId: identity.connectionId,
+    database: identity.database,
+    schema: identity.schema || undefined,
+    catalog: identity.catalog || undefined,
+  };
+}
+
+function legacyPinnedTreeNodesForObjectBrowserRow(row: ObjectBrowserRow): TreeNode[] {
+  const baseNode = pinnedTreeNodeForObjectBrowserRow(row);
+  return objectBrowserRowLegacyPinnedTreeNodeIds(row, objectBrowserPinnedTreeNodeContext()).map((id) => ({ ...baseNode, id }));
+}
+
+function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
+  const nodes = rows.flatMap((row) => [pinnedTreeNodeForObjectBrowserRow(row), ...legacyPinnedTreeNodesForObjectBrowserRow(row)]);
+  connectionStore.removePinnedTreeNodes(nodes, canonicalizeObjectBrowserPinnedIdentity);
+}
+
 function groupedFilteredRows() {
   const query = search.value.trim();
   const candidateRows = rows.value.filter(rowMatchesObjectFilter);
@@ -668,7 +722,7 @@ function groupedFilteredRows() {
     if (!query) return true;
     return matchingIds.has(row.id) || parentIdsWithMatchingPartitions.has(row.id);
   });
-  const sortedRoots = sortObjectBrowserRows(rootRows, sortKey.value, sortDirection.value);
+  const sortedRoots = sortObjectBrowserRowsWithPins(rootRows);
   const result: ObjectBrowserRow[] = [];
 
   for (const row of sortedRoots) {
@@ -679,7 +733,7 @@ function groupedFilteredRows() {
     const shouldShowPartitions = expandedPartitionParentIds.value.has(row.id) || !!query;
     if (!shouldShowPartitions) continue;
     const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id)) : partitions;
-    result.push(...sortObjectBrowserRows(visiblePartitions, sortKey.value, sortDirection.value));
+    result.push(...sortObjectBrowserRowsWithPins(visiblePartitions));
   }
 
   return result;
@@ -1151,6 +1205,9 @@ async function confirmRename() {
   const newName = renameInput.value.trim();
   if (!row || !newName || newName === row.name) return;
   renameError.value = "";
+  const oldPinnedNode = pinnedTreeNodeForObjectBrowserRow(row);
+  const oldLegacyPinnedNodes = legacyPinnedTreeNodesForObjectBrowserRow(row);
+  let renameApplied = false;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
     if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
@@ -1181,12 +1238,32 @@ async function confirmRename() {
       const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
       if (!executed) return;
     }
+    renameApplied = true;
     toast(t("contextMenu.renameObjectSuccess", { oldName: row.name, newName }));
     showRenameDialog.value = false;
     if (sourceRow.value?.id === row.id) closeSource();
+    const renamedTarget = { ...oldPinnedNode, label: newName, objectName: newName, tableName: newName };
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
+    const renamedRow = rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
+    if (renamedRow) {
+      connectionStore.replacePinnedTreeNode(
+        oldPinnedNode,
+        pinnedTreeNodeForObjectBrowserRow(renamedRow),
+        canonicalizeObjectBrowserPinnedIdentity,
+        oldLegacyPinnedNodes.map((node) => node.id),
+      );
+    } else {
+      // The database mutation succeeded, so never leave the old name pinned if
+      // metadata refresh cannot resolve its replacement.
+      connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
+    }
   } catch (e: any) {
+    if (renameApplied) {
+      // The database mutation succeeded even when metadata refresh did not;
+      // remove the old pin instead of allowing it to revive later.
+      connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
+    }
     renameError.value = e?.message || String(e);
   }
 }
@@ -1201,6 +1278,7 @@ async function confirmDrop() {
     const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : "contextMenu.dropTableSuccess";
     toast(t(successKey, { name: row.name }));
     closeDroppedTableObjectTabsForRow(row);
+    removePinnedObjectBrowserRows([row]);
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
   } catch (e: any) {
@@ -1448,6 +1526,7 @@ async function confirmBatchDropTables() {
     });
     if (!executed) return;
     toast(t("objects.batchDropSuccess", { count: targets.length }));
+    removePinnedObjectBrowserRows(targets);
     clearTableSelection();
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);

@@ -73,6 +73,10 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
   return !!dbType && CLEARABLE_QUERY_SCHEMA_TYPES.has(dbType);
 }
 
+export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
+  return dbType !== "nacos";
+}
+
 export function usesFetchFirst(dbType?: DatabaseType): boolean {
   return !!dbType && FETCH_FIRST_TYPES.has(dbType);
 }

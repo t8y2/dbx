@@ -388,7 +388,7 @@ public final class MongoAgent {
         if (filterDoc == null) {
             filterDoc = new Document();
         }
-        long total = col.countDocuments(filterDoc);
+        CollectionTotal total = collectionTotal(col, filterDoc);
 
         var iterable = col.find(filterDoc).skip((int) skip).limit(limit);
         if (projectionDoc != null) {
@@ -402,10 +402,7 @@ public final class MongoAgent {
         for (Document document : iterable) {
             documents.add(bsonToJson(document));
         }
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("documents", documents);
-        result.put("total", total);
-        return result;
+        return documentQueryResult(documents, total);
     }
 
     /**
@@ -426,7 +423,7 @@ public final class MongoAgent {
         if (filterDoc == null) {
             filterDoc = new Document();
         }
-        long total = col.countDocuments(filterDoc);
+        CollectionTotal total = collectionTotal(col, filterDoc);
 
         var iterable = col.find(filterDoc).skip((int) skip).limit(limit);
         if (projectionDoc != null) {
@@ -440,11 +437,27 @@ public final class MongoAgent {
         for (Document document : iterable) {
             documents.add(bsonToExtendedJson(document));
         }
+        return documentQueryResult(documents, total);
+    }
+
+    static CollectionTotal collectionTotal(MongoCollection<Document> collection, Document filter) {
+        if (filter.isEmpty()) {
+            return new CollectionTotal(collection.estimatedDocumentCount(), false);
+        }
+        return new CollectionTotal(collection.countDocuments(filter), true);
+    }
+
+    static Map<String, Object> documentQueryResult(List<?> documents, CollectionTotal total) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("documents", documents);
-        result.put("total", total);
+        result.put("total", total.value());
+        if (!total.exact()) {
+            result.put("total_is_exact", false);
+        }
         return result;
     }
+
+    record CollectionTotal(long value, boolean exact) {}
 
     private static Object countDocuments(JsonObject params) {
         MongoClient c = requireClient();

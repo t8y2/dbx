@@ -5952,6 +5952,41 @@ mod tests {
     }
 
     #[test]
+    fn prepare_data_grid_save_omits_hidden_oracle_rowid_from_cloned_row_insert() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "TT_PLATFORM_CARS".to_string(),
+                primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER", false, None),
+                    column("PLATFORM", "VARCHAR2(100)", true, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "PLATFORM".to_string(), "__DBX_PK_0".to_string()],
+            source_columns: Some(vec![
+                Some("ID".to_string()),
+                Some("PLATFORM".to_string()),
+                Some(DBX_ROWID_COLUMN.to_string()),
+            ]),
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(72), json!("轻卡"), Value::Null]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"INSERT INTO "APP"."TT_PLATFORM_CARS" ("ID", "PLATFORM") VALUES (72, '轻卡');"#]
+        );
+    }
+
+    #[test]
     fn prepare_data_grid_save_skips_sqlite_autoincrement_pk_validation() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Sqlite),

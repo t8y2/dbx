@@ -265,6 +265,8 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     let aliases = build_derived_column_aliases(&options.result_columns);
     let use_derived_column_aliases = options.database_type != Some(DatabaseType::Mysql)
         && options.database_type != Some(DatabaseType::ClickHouse)
+        // Doris accepts the derived-table alias but not its column-name list.
+        && options.database_type != Some(DatabaseType::Doris)
         && options.database_type != Some(DatabaseType::Sqlite)
         && options.database_type != Some(DatabaseType::DuckDb);
     let sort_alias = if use_derived_column_aliases {
@@ -2481,6 +2483,37 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT * FROM (SELECT id, part_day, hid FROM events LIMIT 100) t ORDER BY `id` DESC;"
+        );
+    }
+
+    #[test]
+    fn builds_doris_sorted_query_without_alias_list() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM users LIMIT 100".to_string(),
+            database_type: Some(DatabaseType::Doris),
+            result_columns: vec!["id".to_string(), "name".to_string()],
+            column_index: 0,
+            column: "id".to_string(),
+            direction: QuerySortDirection::Desc,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users LIMIT 100) t ORDER BY `id` DESC;");
+    }
+
+    #[test]
+    fn builds_starrocks_sorted_query_with_alias_list() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM users LIMIT 100".to_string(),
+            database_type: Some(DatabaseType::StarRocks),
+            result_columns: vec!["id".to_string(), "name".to_string()],
+            column_index: 0,
+            column: "id".to_string(),
+            direction: QuerySortDirection::Desc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT id, name FROM users LIMIT 100) t(`id`, `name`) ORDER BY `id` DESC;"
         );
     }
 

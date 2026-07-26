@@ -239,7 +239,7 @@ impl NacosOpenApiAdmin {
     fn rnacos_console_endpoint(&self, path: &str) -> Result<String, String> {
         if self.cfg.rnacos_console_addr.is_empty() {
             return Err(
-                "r-nacos config history requires an r-nacos console URL (the independent console service, normally port 10848)"
+                "r-nacos configuration metadata and history require an r-nacos console URL (the independent console service, normally port 10848)"
                     .to_string(),
             );
         }
@@ -273,7 +273,7 @@ impl NacosOpenApiAdmin {
         if captcha.required {
             return Err(classified_error(
                 "rnacosConsoleCaptchaRequired",
-                "r-nacos console requires a CAPTCHA before configuration history can be accessed",
+                "r-nacos console requires a CAPTCHA before configuration metadata or history can be accessed",
             ));
         }
         self.login_rnacos_console_with_captcha(None).await
@@ -386,6 +386,63 @@ impl NacosOpenApiAdmin {
         }
     }
 
+    async fn get_rnacos_console_json_without_login(
+        &self,
+        path: &str,
+        query: &[(String, String)],
+    ) -> Result<Value, String> {
+        let response = self
+            .http
+            .get(self.rnacos_console_endpoint(path)?)
+            .query(query)
+            .send()
+            .await
+            .map_err(|e| format!("r-nacos console request to {path} failed: {e}"))?;
+        let response = error_for_status(response, path).await?;
+        let value = response_json_or_text(response).await?;
+        match value.get("success").and_then(Value::as_bool) {
+            Some(true) => Ok(value),
+            Some(false) => Err(format!("r-nacos console {path} failed: {}", rnacos_console_error_detail(&value))),
+            None => Err(format!(
+                "r-nacos console {path} returned an unexpected unauthenticated response instead of API JSON"
+            )),
+        }
+    }
+
+    /// Metadata reads also support `RNACOS_ENABLE_NO_AUTH_CONSOLE=true`.
+    /// Once an authenticated session exists, use it directly. Before login,
+    /// first try the endpoint without a token and only start the CAPTCHA-aware
+    /// login flow when the console actually rejects the anonymous request.
+    async fn get_rnacos_console_metadata_json(
+        &self,
+        path: &str,
+        query: Vec<(String, String)>,
+    ) -> Result<Value, String> {
+        let has_valid_token = self
+            .rnacos_console_session
+            .lock()
+            .await
+            .token
+            .as_ref()
+            .is_some_and(|token| token.expires_at > Instant::now() + Duration::from_secs(30));
+        if has_valid_token {
+            return self.get_rnacos_console_json(path, query).await;
+        }
+
+        match self.get_rnacos_console_json_without_login(path, &query).await {
+            Ok(value) => Ok(value),
+            Err(anonymous_error) if self.cfg.has_effective_rnacos_console_credentials() => self
+                .get_rnacos_console_json(path, query)
+                .await
+                .map_err(|authenticated_error| {
+                    format!(
+                        "{authenticated_error}; anonymous r-nacos console metadata request also failed: {anonymous_error}"
+                    )
+                }),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn list_rnacos_console_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
         let value = self.get_rnacos_console_json("/rnacos/api/console/v2/namespaces/list", Vec::new()).await?;
         Ok(parse_namespaces(value))
@@ -454,6 +511,57 @@ impl NacosOpenApiAdmin {
             ],
         )
         .await
+    }
+
+    /// r-nacos's Nacos-compatible configuration API returns the raw content
+    /// only. The independent console keeps the user-facing metadata such as
+    /// `configType` and `desc`, so enrich that compatibility response when a
+    /// console has been configured. Metadata is deliberately best-effort for
+    /// network/version failures. A CAPTCHA requirement is propagated so the UI
+    /// can authenticate once and retry the interrupted list/detail request.
+    async fn enrich_rnacos_config_metadata(&self, mut config: NacosConfigItem) -> Result<NacosConfigItem, String> {
+        if !self.is_explicit_rnacos()
+            || (config.config_type.is_some() && config.desc.is_some())
+            || self.cfg.rnacos_console_addr.is_empty()
+        {
+            return Ok(config);
+        }
+
+        let metadata = self
+            .get_rnacos_console_metadata_json(
+                "/rnacos/api/console/v2/config/info",
+                vec![
+                    ("tenant".to_string(), config.namespace.clone()),
+                    ("dataId".to_string(), config.data_id.clone()),
+                    ("group".to_string(), config.group.clone()),
+                ],
+            )
+            .await
+            .map(|value| {
+                parse_config_detail(value, config.data_id.clone(), config.group.clone(), config.namespace.clone())
+            });
+
+        let metadata = match metadata {
+            Ok(metadata) => metadata,
+            Err(error) if error.contains("[rnacosConsoleCaptchaRequired]") => return Err(error),
+            // Metadata remains optional. Network, permission, or version
+            // mismatches must not hide configuration content obtained from
+            // the compatible OpenAPI.
+            Err(_) => return Ok(config),
+        };
+        if config.desc.is_none() {
+            config.desc = metadata.desc;
+        }
+        if config.config_type.is_none() {
+            config.config_type = metadata.config_type;
+        }
+        if config.md5.is_none() {
+            config.md5 = metadata.md5;
+        }
+        if config.content.is_none() {
+            config.content = metadata.content;
+        }
+        Ok(config)
     }
 
     async fn get_server_state(&self) -> Result<NacosServerStateProbe, String> {
@@ -607,21 +715,33 @@ impl NacosOpenApiAdmin {
         let group = group.unwrap_or_default();
         let app_name = app_name_filter.unwrap_or_default();
         let scan_page_size = page_size.max(self.cfg.page_size).clamp(100, 500);
-        let max_scan_pages = 10;
         let mut matched = Vec::new();
+        let mut seen = HashSet::new();
         let mut current_page = 1;
 
-        while current_page <= max_scan_pages {
+        loop {
             let value =
                 self.get_config_list_value(&namespace, "", &group, &app_name, current_page, scan_page_size).await?;
             let list = parse_config_list(value, namespace.clone(), current_page, scan_page_size);
-            matched.extend(list.items.into_iter().filter(|item| item.data_id.to_lowercase().contains(&filter)));
+            let total_count = list.total_count;
+            let empty = list.items.is_empty();
+            let before = seen.len();
+            for item in list.items {
+                let identity = (item.namespace.clone(), item.group.clone(), item.data_id.clone());
+                if seen.insert(identity) && item.data_id.to_lowercase().contains(&filter) {
+                    matched.push(item);
+                }
+            }
 
-            let scanned = u64::from(current_page) * u64::from(scan_page_size);
-            if scanned >= list.total_count || list.total_count == 0 {
+            if empty || total_count == 0 || seen.len() as u64 >= total_count {
                 break;
             }
-            current_page += 1;
+            if seen.len() == before {
+                return Err("Nacos configuration pagination made no progress; the server repeated a page".to_string());
+            }
+            current_page = current_page
+                .checked_add(1)
+                .ok_or_else(|| "Nacos configuration pagination exceeded the supported page range".to_string())?;
         }
 
         let total_count = matched.len() as u64;
@@ -633,7 +753,12 @@ impl NacosOpenApiAdmin {
 
     async fn enrich_missing_config_formats(&self, mut list: NacosConfigList) -> NacosConfigList {
         for item in list.items.iter_mut() {
-            if item.config_type.is_some() {
+            // Normal Nacos lists already carry descriptions when available.
+            // r-nacos's compatibility list does not carry either the type or
+            // description, and its configured console can supply both.
+            let needs_rnacos_description =
+                self.is_explicit_rnacos() && item.desc.is_none() && !self.cfg.rnacos_console_addr.is_empty();
+            if item.config_type.is_some() && !needs_rnacos_description {
                 continue;
             }
             let detail = self
@@ -644,7 +769,12 @@ impl NacosOpenApiAdmin {
                 })
                 .await;
             if let Ok(detail) = detail {
-                item.config_type = detail.config_type;
+                if item.config_type.is_none() {
+                    item.config_type = detail.config_type;
+                }
+                if item.desc.is_none() {
+                    item.desc = detail.desc;
+                }
             }
         }
         list
@@ -711,6 +841,18 @@ fn qualified_nacos_service_name(service_name: &str, group_name: Option<&str>) ->
         Some(group) => format!("{group}@@{service_name}"),
         None => service_name.to_string(),
     }
+}
+
+fn content_search_endpoint_is_unsupported(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("returned 404")
+        || lower.contains("returned 405")
+        || lower.contains("returned 410")
+        // Spring-based gateways and some Nacos distributions wrap an
+        // unmapped admin route as HTTP 500 instead of returning 404.
+        || lower.contains("no static resource")
+        || lower.contains("unsupported content search")
+        || lower.contains("unsupportedcontentsearch")
 }
 
 #[async_trait]
@@ -810,6 +952,9 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let mut v1_form =
             vec![("namespaceName".to_string(), namespace_name), ("namespaceDesc".to_string(), namespace_desc)];
         if let Some(namespace_id) = namespace_id {
+            // Nacos 3.x Console API uses `customNamespaceId`; passing only
+            // `namespaceId` is accepted but ignored and causes a generated UUID.
+            v3_form.push(("customNamespaceId".to_string(), namespace_id.clone()));
             v3_form.push(("namespaceId".to_string(), namespace_id.clone()));
             v1_form.push(("customNamespaceId".to_string(), namespace_id.clone()));
             v1_form.push(("namespaceId".to_string(), namespace_id));
@@ -906,6 +1051,88 @@ impl NacosAdmin for NacosOpenApiAdmin {
         Ok(parsed)
     }
 
+    async fn search_config_content_page(
+        &self,
+        namespace: &str,
+        query: &str,
+        page_no: u32,
+        page_size: u32,
+    ) -> Result<Option<NacosConfigList>, String> {
+        if self.is_explicit_rnacos() || matches!(self.cfg.version_mode, Some(NacosVersionMode::V2)) {
+            return Ok(None);
+        }
+        let page_no = page_no.max(1);
+        let page_size = page_size.clamp(1, 500);
+        // The native endpoint interprets `configDetail` using Nacos wildcard
+        // syntax. Callers only reach this fast path for wildcard-safe literal
+        // queries, so wrapping the term gives us contains semantics; every
+        // candidate is still fetched and verified with Rust `str::contains`.
+        let config_detail = format!("*{query}*");
+        let attempts = [
+            (
+                "/v3/admin/cs/config/list",
+                vec![
+                    ("configDetail".to_string(), config_detail.clone()),
+                    ("search".to_string(), "blur".to_string()),
+                    ("namespaceId".to_string(), namespace.to_string()),
+                    ("pageNo".to_string(), page_no.to_string()),
+                    ("pageSize".to_string(), page_size.to_string()),
+                ],
+            ),
+            (
+                "/v3/console/cs/config/searchDetail",
+                vec![
+                    ("configDetail".to_string(), config_detail),
+                    ("search".to_string(), "blur".to_string()),
+                    ("namespaceId".to_string(), namespace.to_string()),
+                    ("pageNo".to_string(), page_no.to_string()),
+                    ("pageSize".to_string(), page_size.to_string()),
+                ],
+            ),
+        ];
+        let mut unsupported = false;
+        for (path, params) in attempts {
+            if !self.api_path_allowed(path) {
+                unsupported = true;
+                continue;
+            }
+            let response = match self.request(reqwest::Method::GET, path, params, None, None).await {
+                Ok(response) => response,
+                Err(error) if content_search_endpoint_is_unsupported(&error) => {
+                    unsupported = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let status = response.status();
+            if matches!(
+                status,
+                reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::GONE
+            ) {
+                unsupported = true;
+                continue;
+            }
+            let response = match error_for_status(response, path).await {
+                Ok(response) => response,
+                Err(error) if content_search_endpoint_is_unsupported(&error) => {
+                    unsupported = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let value = response_json_or_text(response).await?;
+            return Ok(Some(parse_config_list(value, namespace.to_string(), page_no, page_size)));
+        }
+        if unsupported {
+            Ok(None)
+        } else {
+            Err(classified_error(
+                "unsupportedContentSearch",
+                "No compatible Nacos content-search endpoint is available",
+            ))
+        }
+    }
+
     async fn get_config(&self, key: NacosConfigKey) -> Result<NacosConfigItem, String> {
         let namespace = self.namespace(key.namespace.as_deref());
         let v3_params = vec![
@@ -936,9 +1163,10 @@ impl NacosAdmin for NacosOpenApiAdmin {
                         let text =
                             resp.text().await.map_err(|e| format!("Failed to read Nacos config response: {e}"))?;
                         if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                            return Ok(parse_config_detail(value, key.data_id, key.group, namespace));
+                            let detail = parse_config_detail(value, key.data_id, key.group, namespace);
+                            return self.enrich_rnacos_config_metadata(detail).await;
                         }
-                        return Ok(NacosConfigItem {
+                        let detail = NacosConfigItem {
                             data_id: key.data_id,
                             group: key.group,
                             namespace,
@@ -949,11 +1177,13 @@ impl NacosAdmin for NacosOpenApiAdmin {
                             md5: None,
                             encrypted_data_key: None,
                             content: Some(text),
-                        });
+                        };
+                        return self.enrich_rnacos_config_metadata(detail).await;
                     }
                     Ok(resp) => {
                         let value = response_json_or_text(resp).await?;
-                        return Ok(parse_config_detail(value, key.data_id, key.group, namespace));
+                        let detail = parse_config_detail(value, key.data_id, key.group, namespace);
+                        return self.enrich_rnacos_config_metadata(detail).await;
                     }
                     Err(err) => errors.push(err),
                 },
@@ -1605,7 +1835,7 @@ fn parse_config_list(value: Value, namespace: String, page_no: u32, page_size: u
             group: string_field(&item, &["group", "groupName"]),
             namespace: string_field(&item, &["tenant", "namespaceId"]).if_empty(&namespace),
             app_name: optional_string_field(&item, &["appName", "app_name"]),
-            desc: optional_string_field(&item, &["desc", "description"]),
+            desc: optional_string_field(&item, &["desc", "description", "configDesc", "config_desc"]),
             tags: optional_string_field(&item, &["tags", "configTags", "config_tags"]),
             config_type: config_format_for_item(&item),
             md5: optional_string_field(&item, &["md5"]),
@@ -1623,12 +1853,13 @@ fn parse_config_detail(value: Value, data_id: String, group: String, namespace: 
         group: string_field(data, &["group", "groupName"]).if_empty(&group),
         namespace: string_field(data, &["tenant", "namespaceId"]).if_empty(&namespace),
         app_name: optional_string_field(data, &["appName", "app_name"]),
-        desc: optional_string_field(data, &["desc", "description"]),
+        desc: optional_string_field(data, &["desc", "description", "configDesc", "config_desc"]),
         tags: optional_string_field(data, &["tags", "configTags", "config_tags"]),
         config_type: config_format_for_item(data).or_else(|| infer_config_format(&data_id)),
         md5: optional_string_field(data, &["md5"]),
         encrypted_data_key: optional_string_field(data, &["encryptedDataKey"]),
-        content: optional_string_field(data, &["content"]).or_else(|| value.as_str().map(str::to_string)),
+        content: optional_string_field(data, &["content", "value", "configValue", "config_value"])
+            .or_else(|| value.as_str().map(str::to_string)),
     }
 }
 
@@ -2031,6 +2262,15 @@ mod tests {
         socket.write_all(response.as_bytes()).await.unwrap();
     }
 
+    async fn write_text_response(socket: &mut tokio::net::TcpStream, body: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
     async fn write_json_response_with_captcha_token(socket: &mut tokio::net::TcpStream, body: &str) {
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCaptcha-Token: 1234567890abcdeffedcba0987654321\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2113,6 +2353,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v3_console_namespace_creation_uses_custom_namespace_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert_eq!(request.split_whitespace().next(), Some("POST"));
+            assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v3/console/core/namespace"));
+            assert!(request.contains("customNamespaceId=team-dev"));
+            write_json_response(&mut socket, r#"{"code":0,"message":"success","data":true}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .create_namespace(NacosNamespaceCreate {
+                namespace_id: Some("team-dev".to_string()),
+                namespace_name: "Team Development".to_string(),
+                namespace_desc: Some("Development environment".to_string()),
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_namespace_creation_uses_legacy_custom_namespace_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert_eq!(request.split_whitespace().next(), Some("POST"));
+            assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v1/console/namespaces"));
+            assert!(request.contains("customNamespaceId=team-v2"));
+            write_json_response(&mut socket, "true").await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .create_namespace(NacosNamespaceCreate {
+                namespace_id: Some("team-v2".to_string()),
+                namespace_name: "Team V2".to_string(),
+                namespace_desc: None,
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_namespace_creation_falls_back_to_nacos_compatible_v1_route() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected_path in ["/v3/console/core/namespace", "/v3/console/core/namespace/create"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                assert_eq!(request.split_whitespace().nth(1), Some(expected_path));
+                write_not_found_response(&mut socket).await;
+            }
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert_eq!(request.split_whitespace().nth(1), Some("/v1/console/namespaces"));
+            assert!(request.contains("customNamespaceId=team-rnacos"));
+            write_json_response(&mut socket, "true").await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .create_namespace(NacosNamespaceCreate {
+                namespace_id: Some("team-rnacos".to_string()),
+                namespace_name: "Team r-nacos".to_string(),
+                namespace_desc: None,
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn version_mode_auto_falls_back_from_v3_to_v1_config_paths() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -2168,6 +2497,276 @@ mod tests {
 
         let namespaces = admin.list_namespaces().await.unwrap();
         assert_eq!(namespaces[1].namespace, "prod");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_config_detail_enriches_raw_openapi_content_with_console_metadata() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
+                write_not_found_response(&mut socket).await;
+            }
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
+            write_text_response(&mut socket, "cloud_providers: {}\n").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            assert!(request.contains("tenant=ops"));
+            assert!(request.contains("dataId=qilong-test"));
+            assert!(request.contains("group=qilong-test"));
+            assert!(request.to_ascii_lowercase().contains("token: console-token"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"cloud_providers: {}\n","md5":"abc123","configType":"YAML","desc":"r-nacos description"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        config.rnacos_console_auth = crate::nacos::config::NacosRNacosConsoleAuth::UsernamePassword {
+            username: "admin".to_string(),
+            password: "admin".to_string(),
+        };
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        admin.rnacos_console_session.lock().await.token = Some(RNacosConsoleToken {
+            token: "console-token".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(300),
+        });
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("ops".to_string()),
+                data_id: "qilong-test".to_string(),
+                group: "qilong-test".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some("cloud_providers: {}\n"));
+        assert_eq!(detail.config_type.as_deref(), Some("yaml"));
+        assert_eq!(detail.desc.as_deref(), Some("r-nacos description"));
+        assert_eq!(detail.md5.as_deref(), Some("abc123"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_config_metadata_supports_no_auth_console() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
+                write_not_found_response(&mut socket).await;
+            }
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
+            write_text_response(&mut socket, "cloud_providers: {}\n").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            assert!(!request.to_ascii_lowercase().contains("\ntoken:"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"configType":"YAML","desc":"anonymous console metadata"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("ops".to_string()),
+                data_id: "qilong-test".to_string(),
+                group: "qilong-test".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.config_type.as_deref(), Some("yaml"));
+        assert_eq!(detail.desc.as_deref(), Some("anonymous console metadata"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_config_metadata_propagates_captcha_requirement_for_ui_retry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
+                write_not_found_response(&mut socket).await;
+            }
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
+            write_text_response(&mut socket, "cloud_providers: {}\n").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/rnacos/api/console/v2/config/info?"));
+            write_text_response(&mut socket, "<html><body>login required</body></html>").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/rnacos/api/console/v2/login/captcha");
+            write_json_response_with_captcha_token(&mut socket, r#"{"success":true,"data":"captcha-image"}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        config.rnacos_console_auth = crate::nacos::config::NacosRNacosConsoleAuth::UsernamePassword {
+            username: "admin".to_string(),
+            password: "admin".to_string(),
+        };
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let error = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("ops".to_string()),
+                data_id: "qilong-test".to_string(),
+                group: "qilong-test".to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("NACOS_ERROR[rnacosConsoleCaptchaRequired]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_config_list_enriches_type_and_description_from_console() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v3/console/cs/config/list?"));
+            write_not_found_response(&mut socket).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
+            write_json_response(
+                &mut socket,
+                r#"{"totalCount":1,"pageItems":[{"dataId":"qilong-test","group":"qilong-test","tenant":"ops"}]}"#,
+            )
+            .await;
+
+            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
+                write_not_found_response(&mut socket).await;
+            }
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
+            write_text_response(&mut socket, "cloud_providers: {}\n").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"configType":"YAML","desc":"r-nacos description"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        config.rnacos_console_auth = crate::nacos::config::NacosRNacosConsoleAuth::UsernamePassword {
+            username: "admin".to_string(),
+            password: "admin".to_string(),
+        };
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        admin.rnacos_console_session.lock().await.token = Some(RNacosConsoleToken {
+            token: "console-token".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(300),
+        });
+
+        let list = admin
+            .list_configs(NacosConfigQuery {
+                namespace: Some("ops".to_string()),
+                group: None,
+                data_id: None,
+                app_name: None,
+                search: None,
+                page_no: Some(1),
+                page_size: Some(20),
+            })
+            .await
+            .unwrap();
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].config_type.as_deref(), Some("yaml"));
+        assert_eq!(list.items[0].desc.as_deref(), Some("r-nacos description"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_config_list_enriches_description_from_no_auth_console_when_type_is_inferred() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v3/console/cs/config/list?"));
+            write_not_found_response(&mut socket).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
+            write_json_response(
+                &mut socket,
+                r#"{"totalCount":1,"pageItems":[{"dataId":"application.yaml","group":"DEFAULT_GROUP","tenant":"ops"}]}"#,
+            )
+            .await;
+
+            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
+                write_not_found_response(&mut socket).await;
+            }
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
+            write_text_response(&mut socket, "server:\n  port: 8848\n").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            assert!(!request.to_ascii_lowercase().contains("\ntoken:"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"configType":"YAML","desc":"anonymous list description"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let list = admin
+            .list_configs(NacosConfigQuery {
+                namespace: Some("ops".to_string()),
+                group: None,
+                data_id: None,
+                app_name: None,
+                search: None,
+                page_no: Some(1),
+                page_size: Some(20),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(list.items[0].config_type.as_deref(), Some("yaml"));
+        assert_eq!(list.items[0].desc.as_deref(), Some("anonymous list description"));
         server.await.unwrap();
     }
 
@@ -2712,6 +3311,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_rnacos_console_config_info_metadata() {
+        let parsed = parse_config_detail(
+            serde_json::json!({
+                "success": true,
+                "data": {
+                    "value": "cloud_providers: {}\n",
+                    "md5": "abc123",
+                    "configType": "YAML",
+                    "desc": "r-nacos description"
+                }
+            }),
+            "qilong-test".to_string(),
+            "qilong-test".to_string(),
+            "ops".to_string(),
+        );
+        assert_eq!(parsed.data_id, "qilong-test");
+        assert_eq!(parsed.group, "qilong-test");
+        assert_eq!(parsed.namespace, "ops");
+        assert_eq!(parsed.content.as_deref(), Some("cloud_providers: {}\n"));
+        assert_eq!(parsed.config_type.as_deref(), Some("yaml"));
+        assert_eq!(parsed.desc.as_deref(), Some("r-nacos description"));
+        assert_eq!(parsed.md5.as_deref(), Some("abc123"));
+    }
+
+    #[test]
     fn builds_v3_publish_form_fields() {
         let (v3_form, v1_form) = build_publish_forms(
             NacosConfigUpsert {
@@ -3075,5 +3699,15 @@ mod tests {
         );
         assert_eq!(classify_nacos_error("404 Not Found"), "apiVersionMismatch");
         assert_eq!(classify_nacos_error("connection refused"), "connectionFailed");
+    }
+
+    #[test]
+    fn treats_gateway_wrapped_missing_content_search_routes_as_unsupported() {
+        assert!(content_search_endpoint_is_unsupported(
+            r#"NACOS_ERROR[contextPathMismatch]: Nacos admin /v3/admin/cs/config/list returned 500 Internal Server Error: {"message":"No static resource v3/admin/cs/config/list."}"#
+        ));
+        assert!(!content_search_endpoint_is_unsupported(
+            "NACOS_ERROR[requestFailed]: Nacos admin /v3/admin/cs/config/list returned 500 Internal Server Error: database unavailable"
+        ));
     }
 }

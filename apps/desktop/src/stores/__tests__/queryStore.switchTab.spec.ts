@@ -68,4 +68,23 @@ describe("queryStore switchTab", () => {
     expect(queryStore.activeTabId).toBe(tabId);
     expect(settingsStore.settingsPageActive).toBe(false);
   });
+
+  it("stores local data-grid column filters on the tab result", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", "users", "data", "public");
+    const tab = queryStore.tabs.find((item) => item.id === tabId)!;
+    tab.result = {
+      columns: ["id", "status"],
+      rows: [[1, "active"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+
+    queryStore.updateDataGridLocalColumnFilters(tabId, { "1": ["str:active"] });
+    expect(tab.result.local_column_filters).toEqual({ "1": ["str:active"] });
+
+    queryStore.updateDataGridLocalColumnFilters(tabId, {});
+    expect(tab.result.local_column_filters).toBeUndefined();
+  });
 });

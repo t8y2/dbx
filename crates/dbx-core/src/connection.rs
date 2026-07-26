@@ -3966,12 +3966,13 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_legacy_url_param_does_not_force_agent_driver() {
+    fn sqlserver_legacy_url_param_requires_canonicalization_before_agent_driver_selection() {
         let mut config = mysql_config(Some("master"));
         config.db_type = DatabaseType::SqlServer;
-        config.url_params = Some("applicationName=dbx;encrypt=false".to_string());
+        config.url_params = Some("applicationName=dbx;sqlserverEncryption=disabled".to_string());
 
         assert!(!sqlserver_uses_legacy_driver(&config));
+        assert!(sqlserver_uses_legacy_driver(&config.canonicalized()));
     }
 
     #[test]
@@ -5068,9 +5069,10 @@ mod tests {
         state.get_or_create_pool("sqlite-conn", None).await.unwrap();
         let databases = schema::list_databases_core(&state, "sqlite-conn").await.unwrap();
         assert!(databases.iter().any(|database| database.name == "analytics"));
-        let tables = schema::list_tables_core(&state, "sqlite-conn", "analytics", "analytics", None, None, None, None)
-            .await
-            .unwrap();
+        let tables =
+            schema::list_tables_core(&state, "sqlite-conn", "analytics", "analytics", None, None, None, None, None)
+                .await
+                .unwrap();
         assert!(tables.iter().any(|table| table.name == "events"));
 
         state.connections.write().await.clear();
@@ -5939,9 +5941,10 @@ for line in sys.stdin:
 
         let schemas = schema::list_schemas_core(&state, "kwdb-live", &database).await.unwrap();
         assert!(schemas.iter().any(|schema| schema == test_schema));
-        let tables = schema::list_tables_core(&state, "kwdb-live", &database, test_schema, None, None, None, None)
-            .await
-            .unwrap();
+        let tables =
+            schema::list_tables_core(&state, "kwdb-live", &database, test_schema, None, None, None, None, None)
+                .await
+                .unwrap();
         assert!(tables.iter().any(|table| table.name == "devices" && table.table_type == "BASE TABLE"));
         let columns = schema::get_columns_core(&state, "kwdb-live", &database, test_schema, "devices").await.unwrap();
         let id_column = columns.iter().find(|column| column.name == "id").expect("id column should be listed");

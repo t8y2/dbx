@@ -80,6 +80,75 @@ BEGIN
   NULL;
 END;`;
 
+const xuguProgrammableObjectFixtures = [
+  `CREATE OR REPLACE PROCEDURE dbx_xugu_procedure AS
+  v_value INTEGER;
+BEGIN
+  v_value := 1;
+END;`,
+  `CREATE PROCEDURE dbx_xugu_procedure_without_replace AS
+  v_value INTEGER;
+BEGIN
+  v_value := 1;
+END;`,
+  `CREATE OR REPLACE FUNCTION dbx_xugu_function RETURN INTEGER AS
+BEGIN
+  RETURN 1;
+END;`,
+  `CREATE FUNCTION dbx_xugu_function_without_replace RETURN INTEGER AS
+BEGIN
+  RETURN 1;
+END;`,
+  `CREATE OR REPLACE TRIGGER dbx_xugu_trigger
+BEFORE INSERT ON dbx_xugu_events
+FOR EACH ROW
+BEGIN
+  NULL;
+END;`,
+  `CREATE TRIGGER dbx_xugu_trigger_without_replace
+BEFORE INSERT ON dbx_xugu_events
+FOR EACH ROW
+BEGIN
+  NULL;
+END;`,
+  `CREATE OR REPLACE PACKAGE BODY dbx_xugu_package AS
+  PROCEDURE ping AS
+  BEGIN
+    NULL;
+  END ping;
+END dbx_xugu_package;`,
+  `CREATE PACKAGE BODY dbx_xugu_package_without_replace AS
+  PROCEDURE ping AS
+  BEGIN
+    NULL;
+  END ping;
+END dbx_xugu_package_without_replace;`,
+  `CREATE OR REPLACE FORCE PACKAGE BODY dbx_xugu_force_package AS
+  PROCEDURE ping AS
+  BEGIN
+    NULL;
+  END ping;
+END dbx_xugu_force_package;`,
+  `CREATE OR REPLACE NOFORCE PACKAGE BODY dbx_xugu_noforce_package AS
+  PROCEDURE ping AS
+  BEGIN
+    NULL;
+  END ping;
+END dbx_xugu_noforce_package;`,
+  `CREATE OR REPLACE TYPE BODY dbx_xugu_type AS
+  MEMBER PROCEDURE ping IS
+  BEGIN
+    NULL;
+  END;
+END;`,
+  `CREATE TYPE BODY dbx_xugu_type_without_replace AS
+  MEMBER PROCEDURE ping IS
+  BEGIN
+    NULL;
+  END;
+END;`,
+];
+
 const mysqlRoutineFixture = `CREATE PROCEDURE p()
 BEGIN
   SELECT 1;
@@ -221,6 +290,54 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps nested GaussDB procedure blocks together", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(gaussDbNestedProcedure, "gaussdb"))).toEqual([gaussDbNestedProcedure]);
+  });
+
+  it("keeps Xugu programmable object DDL together and retains its terminator", () => {
+    for (const sql of xuguProgrammableObjectFixtures) {
+      const ranges = splitSqlStatementRanges(`${sql}\nSELECT 1;`, "xugu");
+      expect(rangeSqlTexts(ranges)).toEqual([sql, "SELECT 1"]);
+      expect(ranges[0].sql.trimEnd()).toMatch(/END(?:\s+\w+)?;$/);
+    }
+  });
+
+  it("splits Xugu package specification without a slash before following SQL", () => {
+    const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
+  FUNCTION get_version RETURN VARCHAR2;
+  PROCEDURE log_message(msg VARCHAR2);
+END pkg_utils;`;
+    const forcePackageSpec = `CREATE OR REPLACE FORCE PACKAGE pkg_utils AS
+  PROCEDURE ping;
+END pkg_utils;`;
+    const packageSpecWithoutReplace = `CREATE PACKAGE pkg_utils_without_replace AS
+  PROCEDURE ping;
+END pkg_utils_without_replace;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpec}\nSELECT 1;`, "xugu"))).toEqual([packageSpec, "SELECT 1"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpec}\n/\nSELECT 1;`, "xugu"))).toEqual([packageSpec, "SELECT 1"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${forcePackageSpec}\nSELECT 1;`, "xugu"))).toEqual([forcePackageSpec, "SELECT 1"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpecWithoutReplace}\nSELECT 1;`, "xugu"))).toEqual([packageSpecWithoutReplace, "SELECT 1"]);
+  });
+
+  it("splits plain CREATE TYPE AS OBJECT on semicolon without waiting for END", () => {
+    const sql = "CREATE OR REPLACE TYPE address_t AS OBJECT (id INT);\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "xugu"))).toEqual(["CREATE OR REPLACE TYPE address_t AS OBJECT (id INT)", "SELECT 1"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("CREATE TYPE address_t_without_replace AS OBJECT (id INT);\nSELECT 1;", "xugu"))).toEqual(["CREATE TYPE address_t_without_replace AS OBJECT (id INT)", "SELECT 1"]);
+  });
+
+  it("keeps Oracle-style CASE expressions inside Xugu and Oracle routines", () => {
+    const routine = `CREATE OR REPLACE FUNCTION dbx_case_expr RETURN NUMBER AS
+BEGIN
+  RETURN CASE WHEN 1 = 1 THEN CASE WHEN 2 = 2 THEN 1 ELSE 2 END ELSE 0 END;
+END;`;
+    const caseStatementRoutine = `CREATE OR REPLACE PROCEDURE dbx_case_statement AS
+BEGIN
+  CASE WHEN 1 = 1 THEN NULL; ELSE NULL; END CASE;
+END;`;
+
+    for (const database of ["xugu", "oracle"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(`${routine}\nSELECT 1;`, database))).toEqual([routine, "SELECT 1"]);
+      expect(rangeSqlTexts(splitSqlStatementRanges(`${caseStatementRoutine}\nSELECT 1;`, database))).toEqual([caseStatementRoutine, "SELECT 1"]);
+    }
   });
 
   it("keeps SAP HANA DO blocks together", () => {

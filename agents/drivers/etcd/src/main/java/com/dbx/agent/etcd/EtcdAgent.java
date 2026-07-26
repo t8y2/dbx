@@ -14,7 +14,14 @@ import io.etcd.jetcd.KeyValue;
 import io.etcd.jetcd.kv.DeleteResponse;
 import io.etcd.jetcd.kv.GetResponse;
 import io.etcd.jetcd.kv.PutResponse;
+import io.etcd.jetcd.kv.TxnResponse;
+import io.etcd.jetcd.lease.LeaseGrantResponse;
+import io.etcd.jetcd.lease.LeaseTimeToLiveResponse;
+import io.etcd.jetcd.op.Cmp;
+import io.etcd.jetcd.op.CmpTarget;
+import io.etcd.jetcd.op.Op;
 import io.etcd.jetcd.options.GetOption;
+import io.etcd.jetcd.options.LeaseOption;
 import io.etcd.jetcd.options.PutOption;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
@@ -38,10 +45,12 @@ public final class EtcdAgent {
     private static final Gson GSON = new Gson();
     private static final int DEFAULT_LIMIT = 100;
     private static final int RPC_TIMEOUT_SECONDS = 30;
+    private static final int PRESERVE_LEASE_MAX_ATTEMPTS = 3;
     private static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
         AgentProtocol.CAPABILITY_CONNECT,
         AgentProtocol.CAPABILITY_TEST_CONNECTION,
-        AgentProtocol.CAPABILITY_KV
+        AgentProtocol.CAPABILITY_KV,
+        AgentProtocol.CAPABILITY_KV_TTL
     ));
     private static Client client;
     private static KV kv;
@@ -162,7 +171,11 @@ public final class EtcdAgent {
     private static Object get(JsonObject params) throws Exception {
         KV active = requireKv();
         String key = params.get("key").getAsString();
-        GetResponse response = active.get(byteSequence(key)).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        boolean metadataOnly = boolOrDefault(params, "metadataOnly", false);
+        GetOption option = metadataOnly
+            ? GetOption.builder().withKeysOnly(true).build()
+            : GetOption.DEFAULT;
+        GetResponse response = active.get(byteSequence(key), option).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         Map<String, Object> result = new LinkedHashMap<>();
         if (response.getKvs().isEmpty()) {
             result.put("found", false);
@@ -172,26 +185,101 @@ public final class EtcdAgent {
             return result;
         }
         KeyValue item = response.getKvs().get(0);
+        Map<String, Object> metadata = metadata(item);
+        if (item.getLease() > 0) {
+            LeaseTimeToLiveResponse lease =
+                requireClient().getLeaseClient().timeToLive(item.getLease(), LeaseOption.DEFAULT)
+                    .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            metadata.put("ttl", lease.getTTL());
+        }
         result.put("found", true);
         result.put("key", displayBytes(item.getKey().getBytes()));
-        result.put("value", valueObject(item.getValue().getBytes()));
-        result.put("metadata", metadata(item));
+        result.put("value", metadataOnly ? null : valueObject(item.getValue().getBytes()));
+        result.put("metadata", metadata);
         return result;
     }
 
     private static Object put(JsonObject params) throws Exception {
         KV active = requireKv();
+        Client activeClient = requireClient();
         String key = params.get("key").getAsString();
         byte[] value = parseValue(params.getAsJsonObject("value"));
+        ByteSequence keyBytes = byteSequence(key);
+        ByteSequence valueBytes = ByteSequence.from(value);
         JsonElement leaseElement = params.get("lease");
-        PutResponse response;
-        if (leaseElement != null && !leaseElement.isJsonNull()) {
-            PutOption option = PutOption.newBuilder().withLeaseId(leaseElement.getAsLong()).build();
-            response = active.put(byteSequence(key), ByteSequence.from(value), option).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        } else {
-            response = active.put(byteSequence(key), ByteSequence.from(value)).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        JsonElement ttlElement = params.get("ttl");
+        boolean hasLease = leaseElement != null && !leaseElement.isJsonNull();
+        boolean hasTtl = ttlElement != null && !ttlElement.isJsonNull();
+        boolean preserveLease = boolOrDefault(params, "preserveLease", false);
+        if ((hasLease && hasTtl) || (preserveLease && (hasLease || hasTtl))) {
+            throw new IllegalArgumentException("lease, ttl, and preserveLease cannot be specified together");
         }
-        return Collections.singletonMap("revision", response.getHeader().getRevision());
+
+        if (preserveLease) {
+            long revision = putPreservingLease(active, keyBytes, valueBytes);
+            return Collections.singletonMap("revision", revision);
+        }
+
+        Long leaseId = null;
+        long grantedLeaseId = 0;
+        if (hasTtl) {
+            long ttl = ttlElement.getAsLong();
+            if (ttl <= 0) {
+                throw new IllegalArgumentException("ttl must be a positive integer");
+            }
+            LeaseGrantResponse grant =
+                activeClient.getLeaseClient().grant(ttl).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            grantedLeaseId = grant.getID();
+            leaseId = grantedLeaseId;
+        } else if (hasLease) {
+            leaseId = leaseElement.getAsLong();
+        }
+
+        try {
+            PutResponse response;
+            if (leaseId != null) {
+                PutOption option = PutOption.newBuilder().withLeaseId(leaseId).build();
+                response = active.put(keyBytes, valueBytes, option)
+                    .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } else {
+                response = active.put(keyBytes, valueBytes)
+                    .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            }
+            return Collections.singletonMap("revision", response.getHeader().getRevision());
+        } catch (Exception error) {
+            if (grantedLeaseId != 0) {
+                try {
+                    activeClient.getLeaseClient().revoke(grantedLeaseId)
+                        .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (Exception revokeError) {
+                    error.addSuppressed(revokeError);
+                }
+            }
+            throw error;
+        }
+    }
+
+    static long putPreservingLease(KV active, ByteSequence key, ByteSequence value) throws Exception {
+        for (int attempt = 0; attempt < PRESERVE_LEASE_MAX_ATTEMPTS; attempt++) {
+            GetResponse existing =
+                active.get(key, GetOption.DEFAULT).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (existing.getKvs().isEmpty() || existing.getKvs().get(0).getLease() <= 0) {
+                throw new IllegalStateException("Cannot preserve lease: key does not exist or has no lease");
+            }
+
+            KeyValue current = existing.getKvs().get(0);
+            PutOption option = PutOption.builder().withLeaseId(current.getLease()).build();
+            TxnResponse response = active.txn()
+                .If(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.modRevision(current.getModRevision())))
+                .Then(Op.put(key, value, option))
+                .commit()
+                .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (response.isSucceeded()) {
+                return response.getHeader().getRevision();
+            }
+        }
+
+        throw new IllegalStateException("Cannot preserve lease: key changed concurrently; retry the save");
     }
 
     private static Object delete(JsonObject params) throws Exception {
@@ -260,6 +348,13 @@ public final class EtcdAgent {
             throw new IllegalStateException("Not connected");
         }
         return kv;
+    }
+
+    private static Client requireClient() {
+        if (client == null) {
+            throw new IllegalStateException("Not connected");
+        }
+        return client;
     }
 
     private static void closeClient() {

@@ -69,11 +69,13 @@ pub async fn install_agent(
     state: State<'_, Arc<AppState>>,
     db_type: String,
     source: Option<DownloadSource>,
+    operation_id: Option<String>,
 ) -> Result<(), String> {
     ensure_no_agent_update_blockers(state.inner().as_ref(), std::slice::from_ref(&db_type)).await?;
     let app_handle = app.clone();
+    let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     install_agent_driver_from(&state.agent_manager, &db_type, source.unwrap_or_default(), move |event| {
-        emit_agent_progress(&app_handle, event)
+        emit_agent_progress(&app_handle, &operation_id, event)
     })
     .await
 }
@@ -83,6 +85,7 @@ pub async fn upgrade_all_agents(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     source: Option<DownloadSource>,
+    operation_id: Option<String>,
 ) -> Result<UpgradeAllAgentDriversResult, String> {
     let source = source.unwrap_or_default();
     let registry = fetch_registry_from(source).await?;
@@ -91,8 +94,11 @@ pub async fn upgrade_all_agents(
         agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
     ensure_no_agent_update_blockers(state.inner().as_ref(), &updatable).await?;
     let app_handle = app.clone();
-    upgrade_all_agent_drivers_from(&state.agent_manager, source, move |event| emit_agent_progress(&app_handle, event))
-        .await
+    let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    upgrade_all_agent_drivers_from(&state.agent_manager, source, move |event| {
+        emit_agent_progress(&app_handle, &operation_id, event)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -136,9 +142,7 @@ pub async fn set_agent_java_runtime_config(
         config.custom_java_path = None;
     }
 
-    let mut local_state = am.load_state();
-    local_state.java_runtime = config.clone();
-    am.save_state(&local_state)?;
+    am.mutate_state(|local_state| local_state.java_runtime = config.clone())?;
     am.stop_daemons().await;
     Ok(config)
 }
@@ -159,15 +163,19 @@ pub async fn import_agents_from_zip(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     path: String,
+    operation_id: Option<String>,
 ) -> Result<u32, String> {
     let am = &state.agent_manager;
     let zip_path = std::path::PathBuf::from(&path);
     let plan = inspect_offline_zip(&zip_path)?;
     ensure_no_offline_import_blockers(state.inner().as_ref(), &plan).await?;
     let app_handle = app.clone();
-    let result = import_agents_from_zip_core(am, &zip_path, |event| emit_agent_progress(&app_handle, event))?;
+    let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let result =
+        import_agents_from_zip_core(am, &zip_path, |event| emit_agent_progress(&app_handle, &operation_id, event))
+            .await?;
     let count = result.drivers_installed.len() as u32;
-    emit_agent_progress(&app, AgentProgressEvent::step("done"));
+    emit_agent_progress(&app, &operation_id, AgentProgressEvent::step("done"));
     Ok(count)
 }
 
@@ -178,7 +186,7 @@ pub async fn import_agent_driver_cmd(
     path: String,
 ) -> Result<(), String> {
     ensure_no_agent_update_blockers(state.inner().as_ref(), std::slice::from_ref(&db_type)).await?;
-    import_agent_driver(&state.agent_manager, &db_type, std::path::Path::new(&path))
+    import_agent_driver(&state.agent_manager, &db_type, std::path::Path::new(&path)).await
 }
 
 #[tauri::command]
@@ -188,7 +196,7 @@ pub async fn import_agent_jar_cmd(
     path: String,
 ) -> Result<(), String> {
     ensure_no_agent_update_blockers(state.inner().as_ref(), std::slice::from_ref(&db_type)).await?;
-    import_agent_driver(&state.agent_manager, &db_type, std::path::Path::new(&path))
+    import_agent_driver(&state.agent_manager, &db_type, std::path::Path::new(&path)).await
 }
 
 #[tauri::command]
@@ -197,17 +205,19 @@ pub async fn reinstall_jre(
     state: State<'_, Arc<AppState>>,
     jre_key: Option<String>,
     source: Option<DownloadSource>,
+    operation_id: Option<String>,
 ) -> Result<(), String> {
     let key = jre_key.as_deref().unwrap_or(DEFAULT_JRE_KEY);
     let app_handle = app.clone();
+    let operation_id = operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     reinstall_agent_jre_from(&state.agent_manager, key, source.unwrap_or_default(), move |event| {
-        emit_agent_progress(&app_handle, event)
+        emit_agent_progress(&app_handle, &operation_id, event)
     })
     .await
 }
 
-fn emit_agent_progress(app: &tauri::AppHandle, event: AgentProgressEvent) {
-    let _ = app.emit("agent-install-progress", event);
+fn emit_agent_progress(app: &tauri::AppHandle, operation_id: &str, event: AgentProgressEvent) {
+    let _ = app.emit("agent-install-progress", event.with_operation_id(operation_id));
 }
 
 async fn ensure_no_agent_update_blockers(state: &AppState, db_types: &[String]) -> Result<(), String> {

@@ -95,25 +95,28 @@ export const clearDriverDownloadCache = forward("clearDriverDownloadCache");
 export const getDriverRuntimeSummary = forward("getDriverRuntimeSummary");
 export const stopDriverRuntime = forward("stopDriverRuntime");
 export const restartDriverRuntime = forward("restartDriverRuntime");
-export async function installAgent(dbType: string) {
+export async function installAgent(dbType: string, operationId?: string) {
   const backend = await getBackend();
-  return backend.installAgent(dbType, useSettingsStore().editorSettings.updateDownloadSource);
+  return backend.installAgent(dbType, useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
-export async function upgradeAllAgents() {
+export async function upgradeAllAgents(operationId?: string) {
   const backend = await getBackend();
-  return backend.upgradeAllAgents(useSettingsStore().editorSettings.updateDownloadSource);
+  return backend.upgradeAllAgents(useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export const checkAgentUpdateBlockers = forward("checkAgentUpdateBlockers");
 export const uninstallAgent = forward("uninstallAgent");
 export const getAgentJavaRuntimeConfig = forward("getAgentJavaRuntimeConfig");
 export const setAgentJavaRuntimeConfig = forward("setAgentJavaRuntimeConfig");
 export const invalidateAgentRegistryCache = forward("invalidateAgentRegistryCache");
-export const importAgentsFromZip = forward("importAgentsFromZip");
+export async function importAgentsFromZip(fileOrPath: string | File, operationId?: string) {
+  const backend = await getBackend();
+  return backend.importAgentsFromZip(fileOrPath, operationId);
+}
 export const importAgentDriver = forward("importAgentDriver");
 export const importAgentJar = importAgentDriver;
-export async function reinstallJre(jreKey?: string) {
+export async function reinstallJre(jreKey?: string, operationId?: string) {
   const backend = await getBackend();
-  return backend.reinstallJre(jreKey, useSettingsStore().editorSettings.updateDownloadSource);
+  return backend.reinstallJre(jreKey, useSettingsStore().editorSettings.updateDownloadSource, operationId);
 }
 export const uninstallJre = forward("uninstallJre");
 export const listenAgentInstallProgress = forward("listenAgentInstallProgress");
@@ -307,6 +310,7 @@ export const listSshConfigHosts = forward("listSshConfigHosts");
 // SQL File Execution
 export const previewSqlFile = forward("previewSqlFile");
 export const executeSqlFile = forward("executeSqlFile");
+export const executeSqlFiles = forward("executeSqlFiles");
 export const cancelSqlFileExecution = forward("cancelSqlFileExecution");
 export const listenSqlFileProgress = forward("listenSqlFileProgress");
 export const pendingOpenSqlFiles = forward("pendingOpenSqlFiles");
@@ -326,6 +330,13 @@ export const nacosListConfigs = forward("nacosListConfigs");
 export const nacosGetConfig = forward("nacosGetConfig");
 export const nacosPublishConfig = forward("nacosPublishConfig");
 export const nacosDeleteConfig = forward("nacosDeleteConfig");
+export const nacosSearchConfigContent = forward("nacosSearchConfigContent");
+export const nacosCancelConfigContentSearch = forward("nacosCancelConfigContentSearch");
+export const nacosExportConfigs = forward("nacosExportConfigs");
+export const nacosPreviewConfigImport = forward("nacosPreviewConfigImport");
+export const nacosApplyConfigImport = forward("nacosApplyConfigImport");
+export const nacosPreviewConfigTransfer = forward("nacosPreviewConfigTransfer");
+export const nacosApplyConfigTransfer = forward("nacosApplyConfigTransfer");
 export const nacosListConfigHistory = forward("nacosListConfigHistory");
 export const nacosGetConfigHistory = forward("nacosGetConfigHistory");
 export const nacosRollbackConfig = forward("nacosRollbackConfig");
@@ -395,6 +406,7 @@ export const redisClusterMasterNodes = forward("redisClusterMasterNodes");
 
 // etcd
 export const etcdListPrefix = forward("etcdListPrefix");
+export const etcdSupportsTtl = forward("etcdSupportsTtl");
 export const etcdGet = forward("etcdGet");
 export const etcdPut = forward("etcdPut");
 export const etcdDelete = forward("etcdDelete");
@@ -612,6 +624,7 @@ export type {
   KvListPrefixResponse,
   KvListPrefixOptions,
   KvGetResponse,
+  KvGetOptions,
   KvWriteMode,
   KvCreateMode,
   KvPutOptions,

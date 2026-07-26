@@ -534,6 +534,69 @@ test("parseMongoAggregateCommand accepts an empty pipeline", () => {
   });
 });
 
+test("parseMongoAggregateCommand accepts Mongo Shell trailing commas", () => {
+  const command = parseMongoAggregateCommand(`db.AdressInfo.aggregate([
+    {
+      $match: {
+        IsDelete: 0,
+        DataSource: { $ne: 'XC' },
+        TypeName: 1,
+      },
+    },
+    {
+      $project: {
+        MainId: '$_id',
+        labels: ['primary', 'backup',],
+      },
+    },
+    { $out: 'IBMBiititle' },
+  ], {
+    allowDiskUse: true,
+  })`);
+
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.pipeline), [
+    {
+      $match: {
+        IsDelete: 0,
+        DataSource: { $ne: "XC" },
+        TypeName: 1,
+      },
+    },
+    {
+      $project: {
+        MainId: "$_id",
+        labels: ["primary", "backup"],
+      },
+    },
+    { $out: "IBMBiititle" },
+  ]);
+  assert.deepEqual(JSON.parse(command.options ?? "null"), { allowDiskUse: true });
+});
+
+test("parseMongoAggregateCommand preserves trailing-comma text inside strings", () => {
+  const command = parseMongoAggregateCommand(`db.logs.aggregate([
+    {
+      $project: {
+        objectText: "literal,}",
+        arrayText: "literal,]",
+        escapedQuote: "literal\\",]",
+      },
+    },
+  ])`);
+
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.pipeline), [
+    {
+      $project: {
+        objectText: "literal,}",
+        arrayText: "literal,]",
+        escapedQuote: 'literal",]',
+      },
+    },
+  ]);
+});
+
 test("parseMongoAggregateCommand ignores comments inside aggregate pipelines", () => {
   const command = parseMongoAggregateCommand(`
     db.cash.aggregate([
@@ -955,6 +1018,15 @@ test("mongoDocumentsToQueryResult keeps aligned extended documents for copying",
   assert.deepEqual(result.mongo_documents, documents);
   assert.deepEqual(result.mongo_copy_documents, copyDocuments);
   assert.equal(mongoDocumentsToQueryResult(documents, 5, 1, []).mongo_copy_documents, undefined);
+});
+
+test("mongoDocumentsToQueryResult preserves an inexact total marker", () => {
+  const result = mongoDocumentsToQueryResult([{ _id: "1" }], 5, 10_000_000, undefined, false);
+
+  assert.equal(result.total_is_exact, false);
+  assert.equal(result.affected_rows, 10_000_000);
+  assert.equal(result.truncated, true);
+  assert.equal(mongoDocumentsToQueryResult([{ _id: "1" }], 5, 1).total_is_exact, undefined);
 });
 
 test("mongoDocumentsToQueryResult displays ids without losing raw type metadata", () => {

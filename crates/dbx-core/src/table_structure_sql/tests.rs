@@ -1241,6 +1241,31 @@ fn mysql_create_unique_index_with_comment_and_btree() {
 }
 
 #[test]
+fn mysql_create_functional_index_preserves_key_part_syntax() {
+    let functional_key_part = "((case when (`STATUS` = _utf8mb4'online') then _utf8mb4'online' else NULL end))";
+    let mut idx = index("test_UNIQUE", &["attr", "attr2", functional_key_part]);
+    idx.is_unique = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "test".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![format!("CREATE UNIQUE INDEX `test_UNIQUE` ON `test` (`attr`, `attr2`, {functional_key_part});")]
+    );
+}
+
+#[test]
 fn mysql_add_timestamp_column_drops_invalid_precision() {
     let mut created_at = column("created_at");
     created_at.data_type = "timestamp(255)".to_string();

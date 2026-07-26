@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -154,6 +155,75 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
     assert!(csv.contains("\"1\",\"1\""));
     assert!(csv.contains("\"2050\",\"1\""));
     assert_eq!(csv.lines().count(), 2051, "unexpected csv row count");
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_HOST/PORT/USER/PASSWORD/DATABASE pointing at a writable PostgreSQL database"]
+async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+    let url = format!("postgresql://{user}:{password}@{host}:{port}/{database}");
+    let setup_pool = postgres::connect(&url, Duration::from_secs(10)).await.expect("connect PostgreSQL");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let schema = format!("dbx_xlsx_temporal_{}", &suffix[..8]);
+    let setup = vec![
+        format!("CREATE SCHEMA \"{schema}\""),
+        format!("CREATE TABLE \"{schema}\".events (day date, created_at timestamp without time zone, label text)"),
+        format!("INSERT INTO \"{schema}\".events VALUES ('2024-02-25', '2024-02-25 13:02:15', '2024-02-25')"),
+    ];
+    let cleanup = vec![format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")];
+    let _ = postgres::execute_batch(&setup_pool, &cleanup).await;
+    postgres::execute_batch(&setup_pool, &setup).await.expect("create temporal export fixture");
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-xlsx-temporal-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "live-postgres-xlsx-temporal";
+    let config = live_postgres_config(connection_id, &host, port, &user, &password, &database);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let file_path = dir.join("result.xlsx");
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-xlsx-temporal-{suffix}"),
+        connection_id: connection_id.to_string(),
+        database: database.clone(),
+        schema: Some(schema.clone()),
+        sql: format!("SELECT day, created_at, label FROM \"{schema}\".events"),
+        query_base_sql: format!("SELECT day, created_at, label FROM \"{schema}\".events"),
+        setup_sql: Vec::new(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "xlsx".to_string(),
+        include_sql_sheet: false,
+        page_size: 100,
+        row_limit: None,
+        total_rows: None,
+        timeout_secs: Some(30),
+        keyset_optimization_enabled: false,
+        client_session_id: Some(format!("live-postgres-xlsx-temporal-{suffix}")),
+        execution_id: Some(format!("live-postgres-xlsx-temporal-{suffix}")),
+        date_time_format: None,
+    };
+
+    export_query_result_core(&state, &request, None, |_| {}).await.expect("export temporal XLSX");
+
+    let workbook = std::fs::read(&file_path).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(workbook)).expect("open generated XLSX");
+    let mut sheet = String::new();
+    archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut sheet).unwrap();
+    assert!(sheet.contains("<c r=\"A2\" s=\"2\"><v>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"B2\" s=\"3\"><v>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>2024-02-25</t></is></c>"), "sheet={sheet}");
+
+    let cleanup_result = postgres::execute_batch(&setup_pool, &cleanup).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_result.expect("cleanup temporal export fixture");
 }
 
 #[tokio::test]

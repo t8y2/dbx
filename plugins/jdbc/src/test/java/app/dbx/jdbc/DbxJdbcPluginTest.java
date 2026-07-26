@@ -523,6 +523,120 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void mysqlPagedQueriesEnableConnectorCursorFetchingByDefault() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyPagedFetchProperties",
+            JsonNode.class,
+            String.class,
+            Properties.class
+        );
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:mysql://127.0.0.1:3306/app",
+              "jdbc_driver_class": "com.mysql.cj.jdbc.Driver"
+            }
+            """);
+
+        method.invoke(null, connection, "jdbc:mysql://127.0.0.1:3306/app", properties);
+
+        assertEquals("true", properties.getProperty("useCursorFetch"));
+    }
+
+    @Test
+    void mysqlPagedQueriesPreserveExplicitCursorFetchSetting() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyPagedFetchProperties",
+            JsonNode.class,
+            String.class,
+            Properties.class
+        );
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false"
+            }
+            """);
+
+        method.invoke(
+            null,
+            connection,
+            "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false",
+            properties
+        );
+
+        assertFalse(properties.containsKey("useCursorFetch"));
+    }
+
+    @Test
+    void postgresPagedQueryUsesCursorTransactionAndRestoresAutoCommit() throws Exception {
+        Method begin = DbxJdbcPlugin.class.getDeclaredMethod(
+            "beginPagedQueryTransaction",
+            JsonNode.class,
+            Connection.class
+        );
+        Method create = DbxJdbcPlugin.class.getDeclaredMethod("createPagedQueryStatement", Connection.class);
+        Method restore = DbxJdbcPlugin.class.getDeclaredMethod(
+            "restorePagedQueryTransaction",
+            Connection.class,
+            boolean.class
+        );
+        begin.setAccessible(true);
+        create.setAccessible(true);
+        restore.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        Connection connection = pagedQueryConnection(calls, true);
+        JsonNode config = MAPPER.readTree("""
+            { "connection_string": "jdbc:postgresql://127.0.0.1:5432/app" }
+            """);
+
+        boolean restoreAutoCommit = (boolean) begin.invoke(null, config, connection);
+        create.invoke(null, connection);
+        restore.invoke(null, connection, restoreAutoCommit);
+
+        assertEquals(true, restoreAutoCommit);
+        assertEquals(
+            List.of(
+                "getAutoCommit",
+                "setAutoCommit:false",
+                "createStatement:" + ResultSet.TYPE_FORWARD_ONLY + ":" + ResultSet.CONCUR_READ_ONLY,
+                "rollback",
+                "setAutoCommit:true"
+            ),
+            calls
+        );
+    }
+
+    @Test
+    void postgresPagedQueryPreservesExistingManualTransaction() throws Exception {
+        Method begin = DbxJdbcPlugin.class.getDeclaredMethod(
+            "beginPagedQueryTransaction",
+            JsonNode.class,
+            Connection.class
+        );
+        Method restore = DbxJdbcPlugin.class.getDeclaredMethod(
+            "restorePagedQueryTransaction",
+            Connection.class,
+            boolean.class
+        );
+        begin.setAccessible(true);
+        restore.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        Connection connection = pagedQueryConnection(calls, false);
+        JsonNode config = MAPPER.readTree("""
+            { "jdbc_driver_class": "org.postgresql.Driver" }
+            """);
+
+        boolean restoreAutoCommit = (boolean) begin.invoke(null, config, connection);
+        restore.invoke(null, connection, restoreAutoCommit);
+
+        assertFalse(restoreAutoCommit);
+        assertEquals(List.of("getAutoCommit"), calls);
+    }
+
+    @Test
     void jdbcxHighPrivilegeExtensionsAreDisabledByDefault() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod(
             "applyJdbcxExtensionSecurity",
@@ -1481,6 +1595,36 @@ final class DbxJdbcPluginTest {
                 if (returnType == float.class) return 0f;
                 if (returnType == double.class) return 0d;
                 return null;
+            }
+        );
+    }
+
+    private static Connection pagedQueryConnection(List<String> calls, boolean autoCommit) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getAutoCommit" -> {
+                    calls.add("getAutoCommit");
+                    yield autoCommit;
+                }
+                case "setAutoCommit" -> {
+                    calls.add("setAutoCommit:" + args[0]);
+                    yield null;
+                }
+                case "rollback" -> {
+                    calls.add("rollback");
+                    yield null;
+                }
+                case "createStatement" -> {
+                    if (args == null || args.length == 0) {
+                        calls.add("createStatement");
+                    } else {
+                        calls.add("createStatement:" + args[0] + ":" + args[1]);
+                    }
+                    yield recordingStatement(new ArrayList<>());
+                }
+                default -> defaultValue(method.getReturnType());
             }
         );
     }

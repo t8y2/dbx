@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, test, vi } from "vitest";
 import driverVersions from "../../agents/versions.json";
-import { buildAgentDownloadCatalog, buildDriverEntries, buildNativeAgentEntries, downloadLinksFor, fetchAgentDownloadCatalog, formatSize } from "./agentRegistry";
+import { buildAgentDownloadCatalog, buildDriverEntries, buildNativeAgentEntries, downloadLinksFor, formatSize } from "./agentRegistry";
+import { fetchAgentDownloadCatalog } from "./agentRegistrySource";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -25,28 +26,18 @@ test("versioned release assets expose GitHub and CNB download links", () => {
 });
 
 test("non-release assets retain their official download link", () => {
-  assert.deepEqual(downloadLinksFor("https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip"), [
-    { source: "official", url: "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip" },
-  ]);
+  assert.deepEqual(downloadLinksFor("https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip"), [{ source: "official", url: "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip" }]);
 });
 
-test("catalog falls back from GitHub to CNB", async () => {
+test("catalog falls back from R2 to CNB without using GitHub API", async () => {
   const requestedUrls: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       requestedUrls.push(url);
-      if (url.includes("api.github.com")) {
-        return Response.json({
-          assets: [
-            {
-              name: "agent-registry.json",
-              size: 1,
-              browser_download_url: "https://github.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json",
-            },
-          ],
-        });
+      if (url === "https://dl.dbxio.com/agents/agent-registry.json") {
+        return new Response("registry unavailable", { status: 503 });
       }
       return Response.json({
         drivers: {
@@ -74,17 +65,11 @@ test("catalog falls back from GitHub to CNB", async () => {
 
   const catalog = await fetchAgentDownloadCatalog();
 
-  assert.deepEqual(requestedUrls, [
-    "https://api.github.com/repos/t8y2/dbx/releases/tags/agents-latest",
-    "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json",
-  ]);
+  assert.deepEqual(requestedUrls, ["https://dl.dbxio.com/agents/agent-registry.json", "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json"]);
   assert.equal(catalog?.drivers[0]?.key, "access");
   assert.equal(catalog?.jres[0]?.platformKey, "macos-aarch64");
   assert.equal(catalog?.bundles[0]?.platformKey, "macos-aarch64");
-  assert.equal(
-    catalog?.bundles[0]?.url,
-    "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agents-offline-macos-aarch64.zip",
-  );
+  assert.equal(catalog?.bundles[0]?.url, "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agents-offline-macos-aarch64.zip");
 });
 
 test("unknown fallback asset sizes render as unavailable", () => {

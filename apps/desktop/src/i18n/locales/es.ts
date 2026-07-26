@@ -626,6 +626,7 @@ export default withEnglishFallback({
     sshHostKeyNoticeChanged: "La clave del host {host}:{port} ha cambiado, puede haber un ataque de intermediario. Si es esperado, elimine el registro antiguo y vuelva a conectar.",
     sshHostKeyNoticeRejected: "Ha rechazado la verificación de la clave del host {host}:{port}. La conexión se ha abortado, no se enviaron credenciales.",
     sshHostKeyNoticeGeneric: "Falló la verificación de la clave del host SSH {host}:{port}.",
+    sshHostKeyNoticeLearnFailed: "No se pudo guardar la clave de host de {host}:{port} — este host solo es de confianza en esta sesión, la próxima conexión requerirá confirmación nuevamente.",
   },
   editor: {
     pressToExecute: "Presiona {mod}+Enter para ejecutar",

@@ -625,6 +625,7 @@ export default withEnglishFallback({
     sshHostKeyNoticeChanged: "A chave do host {host}:{port} foi alterada, pode haver um ataque man-in-the-middle. Se esta alteração era esperada, exclua o registro antigo e reconecte.",
     sshHostKeyNoticeRejected: "Você rejeitou a verificação da chave do host {host}:{port}. A conexão foi abortada e as credenciais não foram enviadas.",
     sshHostKeyNoticeGeneric: "Falha na verificação da chave do host SSH {host}:{port}.",
+    sshHostKeyNoticeLearnFailed: "Não foi possível salvar a chave do host {host}:{port} — o host é confiável apenas nesta sessão, necessitando reconfirmação na próxima conexão.",
   },
   editor: {
     pressToExecute: "Pressione {mod}+Enter para executar",

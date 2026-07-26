@@ -624,6 +624,7 @@ export default withEnglishFallback({
     sshHostKeyNoticeChanged: "ホスト {host}:{port} のキーが変更されました。中間者攻撃の可能性があります。予期された変更である場合は、古いレコードを削除して再接続してください。",
     sshHostKeyNoticeRejected: "ホスト {host}:{port} のホストキー検証を拒否しました。接続は中止され、資格情報は送信されませんでした。",
     sshHostKeyNoticeGeneric: "SSHホスト {host}:{port} のキー検証に失敗しました。",
+    sshHostKeyNoticeLearnFailed: "{host}:{port} のホストキーを保存できません — このホストは現在のセッションでのみ信頼され、次回の接続時に再確認が必要です。",
   },
   editor: {
     pressToExecute: "{mod}+Enter で実行",

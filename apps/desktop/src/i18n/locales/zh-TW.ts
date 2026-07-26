@@ -624,6 +624,7 @@ export default withEnglishFallback({
     sshHostKeyNoticeChanged: "主機 {host}:{port} 的金鑰已變更，可能存在中間人攻擊。如確屬預期，請刪除舊記錄後重新連線。",
     sshHostKeyNoticeRejected: "您已拒絕 {host}:{port} 的主機金鑰驗證，連線已中止，憑證未發送。",
     sshHostKeyNoticeGeneric: "SSH 主機 {host}:{port} 的金鑰驗證失敗。",
+    sshHostKeyNoticeLearnFailed: "無法儲存 {host}:{port} 的主機金鑰 — 該主機僅在本次會話內受信任，下次連線仍需重新確認。",
   },
   editor: {
     pressToExecute: "按 {mod}+Enter 執行查詢",

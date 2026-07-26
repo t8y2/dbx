@@ -38,14 +38,20 @@ const remember = ref(true);
 const secretCode = ref("");
 const resolving = ref(false);
 const unlisteners: Array<() => void> = [];
+let mounted = true;
 
 onMounted(async () => {
   try {
     const { listen } = await import("@tauri-apps/api/event");
+    if (!mounted) return;
     const promptHandle = await listen<SshPromptRequest>("ssh-prompt", (event) => {
       queue.value.push(event.payload);
       visible.value = true;
     });
+    if (!mounted) {
+      promptHandle();
+      return;
+    }
     unlisteners.push(promptHandle);
 
     const noticeHandle = await listen<SshHostKeyNotice>("ssh-host-key-notice", (event) => {
@@ -62,6 +68,10 @@ onMounted(async () => {
       }
       toast(message, 6000);
     });
+    if (!mounted) {
+      noticeHandle();
+      return;
+    }
     unlisteners.push(noticeHandle);
 
     // Backend tells the UI to drop a prompt it already gave up on (timeout,
@@ -70,14 +80,27 @@ onMounted(async () => {
     const dismissHandle = await listen<string>("ssh-prompt-dismiss", (event) => {
       dismissPrompt(event.payload);
     });
+    if (!mounted) {
+      dismissHandle();
+      return;
+    }
     unlisteners.push(dismissHandle);
+
+    // Do not let the backend emit prompts until every listener is installed;
+    // Tauri events sent before a listener exists are not replayed.
+    await invoke("ssh_prompt_ready");
+    if (!mounted) {
+      void invoke("ssh_prompt_not_ready").catch(() => undefined);
+    }
   } catch {
     // Not running inside Tauri (e.g. web preview) — no prompts to handle.
   }
 });
 
 onBeforeUnmount(() => {
+  mounted = false;
   unlisteners.forEach((u) => u());
+  void invoke("ssh_prompt_not_ready").catch(() => undefined);
 });
 
 async function resolve(action: "accept" | "reject" | "secret") {

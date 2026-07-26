@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::nacos::types::*;
@@ -48,14 +50,15 @@ pub async fn nacos_list_configs_core(
     admin.list_configs(query).await
 }
 
-pub async fn nacos_search_config_content_core<F>(
+pub async fn nacos_search_config_content_core<F, Fut>(
     state: &AppState,
     conn_id: &str,
     request: NacosContentSearchRequest,
     on_progress: F,
 ) -> Result<NacosContentSearchResult, String>
 where
-    F: Fn(NacosSearchProgress) + Send + Sync,
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
 {
     let admin = get_admin(state, conn_id).await?;
     crate::nacos::search::search_config_content(admin, request, on_progress).await

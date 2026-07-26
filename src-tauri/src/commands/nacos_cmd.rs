@@ -165,6 +165,7 @@ pub async fn nacos_search_config_content(
 ) -> Result<dbx_core::nacos::NacosContentSearchResult, String> {
     dbx_core::nacos::service::nacos_search_config_content_core(&state, &connection_id, req, move |progress| {
         let _ = on_progress.send(progress);
+        std::future::ready(())
     })
     .await
 }

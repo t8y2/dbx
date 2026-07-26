@@ -16,6 +16,7 @@ use crate::state::WebState;
 
 const MAX_NACOS_ARCHIVE_BYTES: usize = 100 * 1024 * 1024;
 const NACOS_IMPORT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const NACOS_SEARCH_PROGRESS_BUFFER: usize = 16;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -335,29 +336,43 @@ pub async fn search_config_content(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ContentSearchReq>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    tokio::spawn(async move {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(NACOS_SEARCH_PROGRESS_BUFFER);
+    let stream = async_stream::stream! {
         let progress_tx = tx.clone();
-        let result = dbx_core::nacos::service::nacos_search_config_content_core(
+        // Keep the channel open until the search future yields its terminal
+        // result so the biased receiver branch never wins with `None`.
+        let _channel_guard = tx;
+        let search = dbx_core::nacos::service::nacos_search_config_content_core(
             &state.app,
             &req.connection_id,
             req.req,
             move |progress| {
+                let progress_tx = progress_tx.clone();
                 let event = serde_json::json!({ "type": "progress", "progress": progress });
-                let _ = progress_tx.send(event.to_string());
+                async move {
+                    let _ = progress_tx.send(event.to_string()).await;
+                }
             },
-        )
-        .await;
-        let event = match result {
-            Ok(result) => serde_json::json!({ "type": "result", "result": result }),
-            Err(error) => serde_json::json!({ "type": "error", "error": error }),
-        };
-        let _ = tx.send(event.to_string());
-    });
+        );
+        tokio::pin!(search);
 
-    let stream = async_stream::stream! {
-        while let Some(data) = rx.recv().await {
-            yield Ok(Event::default().data(data));
+        loop {
+            tokio::select! {
+                biased;
+                data = rx.recv() => {
+                    if let Some(data) = data {
+                        yield Ok(Event::default().data(data));
+                    }
+                }
+                result = &mut search => {
+                    let event = match result {
+                        Ok(result) => serde_json::json!({ "type": "result", "result": result }),
+                        Err(error) => serde_json::json!({ "type": "error", "error": error }),
+                    };
+                    yield Ok(Event::default().data(event.to_string()));
+                    break;
+                }
+            }
         }
     };
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))

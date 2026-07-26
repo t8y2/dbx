@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::{stream, StreamExt};
@@ -14,11 +15,6 @@ const SEARCH_PAGE_SIZE: u32 = 500;
 const SEARCH_CONCURRENCY: usize = 8;
 const SEARCH_RESULT_BATCH_SIZE: usize = 50;
 const MAX_SEARCH_RESULTS: usize = 10_000;
-
-struct CandidateCollection {
-    items: Vec<NacosConfigItem>,
-    incomplete_reason: Option<String>,
-}
 
 fn operations() -> &'static Mutex<HashMap<String, CancellationToken>> {
     static OPERATIONS: OnceLock<Mutex<HashMap<String, CancellationToken>>> = OnceLock::new();
@@ -43,7 +39,7 @@ pub fn cancel_operation(operation_id: &str) -> bool {
     let Ok(operations) = operations().lock() else {
         return false;
     };
-    let Some(token) = operations.get(operation_id) else {
+    let Some(token) = operations.get(operation_id.trim()) else {
         return false;
     };
     token.cancel();
@@ -52,7 +48,7 @@ pub fn cancel_operation(operation_id: &str) -> bool {
 
 pub(crate) fn finish_operation(operation_id: &str) {
     if let Ok(mut operations) = operations().lock() {
-        operations.remove(operation_id);
+        operations.remove(operation_id.trim());
     }
 }
 
@@ -64,13 +60,14 @@ impl Drop for OperationGuard {
     }
 }
 
-pub async fn search_config_content<F>(
+pub async fn search_config_content<F, Fut>(
     admin: Arc<dyn NacosAdmin>,
-    request: NacosContentSearchRequest,
+    mut request: NacosContentSearchRequest,
     on_progress: F,
 ) -> Result<NacosContentSearchResult, String>
 where
-    F: Fn(NacosSearchProgress) + Send + Sync,
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
 {
     let query = request.query.clone();
     if query.is_empty() {
@@ -79,6 +76,7 @@ where
     if query.chars().count() > 1_024 {
         return Err("Nacos configuration content search query exceeds the 1024 character limit".to_string());
     }
+    request.operation_id = request.operation_id.trim().to_string();
     let token = begin_operation(&request.operation_id)?;
     let _guard = OperationGuard(request.operation_id.clone());
     let namespaces = resolve_namespaces(admin.as_ref(), &request).await?;
@@ -99,23 +97,25 @@ where
         if token.is_cancelled() || result.truncated {
             break;
         }
-        let candidates = if literal_requires_scan {
-            enumerate_namespace(admin.as_ref(), &namespace, &request, &token, &on_progress, &result).await
-        } else {
-            native_or_enumerated_candidates(admin.as_ref(), &namespace, &request, &token, &on_progress, &result).await
-        };
-        let candidates = match candidates {
-            Ok(mut candidates) => {
-                if let Some(error) = candidates.incomplete_reason.take() {
-                    result.failures.push(NacosSearchFailure { namespace: namespace.clone(), error });
-                    result.incomplete = true;
-                }
-                let mut seen = HashSet::new();
-                candidates
-                    .items
-                    .retain(|item| seen.insert((item.namespace.clone(), item.group.clone(), item.data_id.clone())));
-                candidates.items
+        let namespace_result = search_namespace(
+            &admin,
+            &namespace,
+            &request,
+            &query,
+            literal_requires_scan,
+            result_limit,
+            &token,
+            &on_progress,
+            &mut result,
+            &mut pending_matches,
+        )
+        .await;
+        match namespace_result {
+            Ok(Some(error)) => {
+                result.failures.push(NacosSearchFailure { namespace: namespace.clone(), error });
+                result.incomplete = true;
             }
+            Ok(None) => {}
             Err(error) => {
                 result.failures.push(NacosSearchFailure { namespace: namespace.clone(), error });
                 result.incomplete = true;
@@ -127,70 +127,9 @@ where
                     &result,
                     std::mem::take(&mut pending_matches),
                     false,
-                );
+                )
+                .await;
                 continue;
-            }
-        };
-        let request_group = request.group.as_deref().map(str::trim).filter(|value| !value.is_empty());
-        let request_data_id = request.data_id.as_deref().map(str::trim).filter(|value| !value.is_empty());
-        let details = stream::iter(candidates.into_iter().filter(|item| {
-            request_group.is_none_or(|group| item.group.contains(group))
-                && request_data_id.is_none_or(|data_id| item.data_id.contains(data_id))
-        }))
-        .map(|item| {
-            let admin = admin.clone();
-            let token = token.clone();
-            async move {
-                if token.is_cancelled() {
-                    return None;
-                }
-                let key = NacosConfigKey {
-                    namespace: Some(item.namespace.clone()),
-                    data_id: item.data_id,
-                    group: item.group,
-                };
-                Some((key.clone(), admin.get_config(key).await))
-            }
-        })
-        .buffer_unordered(SEARCH_CONCURRENCY);
-        futures::pin_mut!(details);
-
-        while let Some(detail) = details.next().await {
-            if token.is_cancelled() || result.truncated {
-                break;
-            }
-            let Some((key, detail)) = detail else {
-                continue;
-            };
-            result.scanned += 1;
-            match detail {
-                Ok(item) => {
-                    if let Some(content_match) = find_first_match(&item, &query) {
-                        result.matches.push(content_match.clone());
-                        pending_matches.push(content_match);
-                        if result.matches.len() >= result_limit {
-                            result.truncated = true;
-                        }
-                    }
-                }
-                Err(error) => {
-                    result.failures.push(NacosSearchFailure {
-                        namespace: key.namespace.unwrap_or_default(),
-                        error: format!("{} / {}: {error}", key.group, key.data_id),
-                    });
-                    result.incomplete = true;
-                }
-            }
-            if pending_matches.len() >= SEARCH_RESULT_BATCH_SIZE {
-                emit_progress(
-                    &on_progress,
-                    &request.operation_id,
-                    "searching",
-                    Some(namespace.clone()),
-                    &result,
-                    std::mem::take(&mut pending_matches),
-                    false,
-                );
             }
         }
     }
@@ -204,7 +143,8 @@ where
         &result,
         pending_matches,
         true,
-    );
+    )
+    .await;
     Ok(result)
 }
 
@@ -221,94 +161,158 @@ async fn resolve_namespaces(
     }
 }
 
-async fn native_or_enumerated_candidates<F>(
-    admin: &dyn NacosAdmin,
+#[allow(clippy::too_many_arguments)]
+async fn search_namespace<F, Fut>(
+    admin: &Arc<dyn NacosAdmin>,
     namespace: &str,
     request: &NacosContentSearchRequest,
+    query: &str,
+    literal_requires_scan: bool,
+    result_limit: usize,
     token: &CancellationToken,
     on_progress: &F,
-    result: &NacosContentSearchResult,
-) -> Result<CandidateCollection, String>
+    result: &mut NacosContentSearchResult,
+    pending_matches: &mut Vec<NacosContentMatch>,
+) -> Result<Option<String>, String>
 where
-    F: Fn(NacosSearchProgress) + Send + Sync,
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
 {
-    let first = admin.search_config_content_page(namespace, &request.query, 1, SEARCH_PAGE_SIZE).await?;
+    if literal_requires_scan {
+        return search_enumerated_pages(
+            admin,
+            namespace,
+            request,
+            query,
+            result_limit,
+            token,
+            on_progress,
+            result,
+            pending_matches,
+        )
+        .await;
+    }
+    let first = admin.search_config_content_page(namespace, query, 1, SEARCH_PAGE_SIZE).await?;
     let Some(first) = first else {
-        return enumerate_namespace(admin, namespace, request, token, on_progress, result).await;
+        return search_enumerated_pages(
+            admin,
+            namespace,
+            request,
+            query,
+            result_limit,
+            token,
+            on_progress,
+            result,
+            pending_matches,
+        )
+        .await;
     };
-    collect_native_pages(admin, namespace, &request.query, first, token, on_progress, request, result).await
+    search_native_pages(
+        admin,
+        namespace,
+        request,
+        query,
+        first,
+        result_limit,
+        token,
+        on_progress,
+        result,
+        pending_matches,
+    )
+    .await
 }
 
-async fn collect_native_pages<F>(
-    admin: &dyn NacosAdmin,
+#[allow(clippy::too_many_arguments)]
+async fn search_native_pages<F, Fut>(
+    admin: &Arc<dyn NacosAdmin>,
     namespace: &str,
+    request: &NacosContentSearchRequest,
     query: &str,
     first: crate::nacos::types::NacosConfigList,
+    result_limit: usize,
     token: &CancellationToken,
     on_progress: &F,
-    request: &NacosContentSearchRequest,
-    result: &NacosContentSearchResult,
-) -> Result<CandidateCollection, String>
+    result: &mut NacosContentSearchResult,
+    pending_matches: &mut Vec<NacosContentMatch>,
+) -> Result<Option<String>, String>
 where
-    F: Fn(NacosSearchProgress) + Send + Sync,
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
 {
     let total = first.total_count;
-    let mut items = first.items;
-    let mut seen: HashSet<_> =
-        items.iter().map(|item| (item.namespace.clone(), item.group.clone(), item.data_id.clone())).collect();
-    let mut page_no = 2;
-    let mut incomplete_reason = None;
-    while (items.len() as u64) < total {
-        if token.is_cancelled() {
+    let mut page = first;
+    let mut next_page_no = 2u32;
+    let mut seen = HashSet::new();
+    loop {
+        if token.is_cancelled() || result.matches.len() >= result_limit {
             break;
         }
-        emit_candidate_progress(on_progress, request, namespace, result, items.len() as u64, Some(total));
-        let Some(page) = admin.search_config_content_page(namespace, query, page_no, SEARCH_PAGE_SIZE).await? else {
-            return Err("Nacos native content-search endpoint became unavailable during pagination".to_string());
-        };
-        if page.items.is_empty() {
+        let empty = page.items.is_empty();
+        let before = seen.len();
+        let candidates = page
+            .items
+            .into_iter()
+            .filter(|item| seen.insert((item.namespace.clone(), item.group.clone(), item.data_id.clone())))
+            .collect();
+        emit_candidate_progress(on_progress, request, namespace, result, seen.len() as u64, Some(total)).await;
+        process_candidate_page(
+            admin,
+            namespace,
+            request,
+            query,
+            candidates,
+            result_limit,
+            token,
+            on_progress,
+            result,
+            pending_matches,
+        )
+        .await;
+        if token.is_cancelled() || result.matches.len() >= result_limit {
             break;
         }
-        let before = items.len();
-        items.extend(
-            page.items
-                .into_iter()
-                .filter(|item| seen.insert((item.namespace.clone(), item.group.clone(), item.data_id.clone()))),
-        );
-        if items.len() == before {
-            incomplete_reason =
-                Some("Nacos content-search pagination stopped because the server repeated a page".to_string());
+        if empty || total == 0 || seen.len() as u64 >= total {
             break;
         }
-        page_no = match page_no.checked_add(1) {
+        if seen.len() == before {
+            return Ok(Some("Nacos content-search pagination stopped because the server repeated a page".to_string()));
+        }
+        let page_no = next_page_no;
+        next_page_no = match next_page_no.checked_add(1) {
             Some(next) => next,
             None => {
-                incomplete_reason =
-                    Some("Nacos content-search pagination exceeded the supported page range".to_string());
-                break;
+                return Ok(Some("Nacos content-search pagination exceeded the supported page range".to_string()));
             }
         };
+        let Some(next_page) = admin.search_config_content_page(namespace, query, page_no, SEARCH_PAGE_SIZE).await?
+        else {
+            return Err("Nacos native content-search endpoint became unavailable during pagination".to_string());
+        };
+        page = next_page;
     }
-    Ok(CandidateCollection { items, incomplete_reason })
+    Ok(None)
 }
 
-async fn enumerate_namespace<F>(
-    admin: &dyn NacosAdmin,
+#[allow(clippy::too_many_arguments)]
+async fn search_enumerated_pages<F, Fut>(
+    admin: &Arc<dyn NacosAdmin>,
     namespace: &str,
     request: &NacosContentSearchRequest,
+    query: &str,
+    result_limit: usize,
     token: &CancellationToken,
     on_progress: &F,
-    result: &NacosContentSearchResult,
-) -> Result<CandidateCollection, String>
+    result: &mut NacosContentSearchResult,
+    pending_matches: &mut Vec<NacosContentMatch>,
+) -> Result<Option<String>, String>
 where
-    F: Fn(NacosSearchProgress) + Send + Sync,
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
 {
-    let mut page_no = 1;
-    let mut items = Vec::new();
+    let mut page_no = 1u32;
     let mut seen = HashSet::new();
-    let mut incomplete_reason = None;
     loop {
-        if token.is_cancelled() {
+        if token.is_cancelled() || result.matches.len() >= result_limit {
             break;
         }
         let page = admin
@@ -324,34 +328,131 @@ where
             .await?;
         let total = page.total_count;
         let empty = page.items.is_empty();
-        let before = items.len();
-        items.extend(
-            page.items
-                .into_iter()
-                .filter(|item| seen.insert((item.namespace.clone(), item.group.clone(), item.data_id.clone()))),
-        );
-        emit_candidate_progress(on_progress, request, namespace, result, items.len() as u64, Some(total));
-        if empty || total == 0 || items.len() as u64 >= total {
+        let before = seen.len();
+        let candidates = page
+            .items
+            .into_iter()
+            .filter(|item| seen.insert((item.namespace.clone(), item.group.clone(), item.data_id.clone())))
+            .collect();
+        emit_candidate_progress(on_progress, request, namespace, result, seen.len() as u64, Some(total)).await;
+        process_candidate_page(
+            admin,
+            namespace,
+            request,
+            query,
+            candidates,
+            result_limit,
+            token,
+            on_progress,
+            result,
+            pending_matches,
+        )
+        .await;
+        if token.is_cancelled() || result.matches.len() >= result_limit {
             break;
         }
-        if items.len() == before {
-            incomplete_reason =
-                Some("Nacos configuration pagination stopped because the server repeated a page".to_string());
+        if empty || total == 0 || seen.len() as u64 >= total {
             break;
+        }
+        if seen.len() == before {
+            return Ok(Some("Nacos configuration pagination stopped because the server repeated a page".to_string()));
         }
         page_no = match page_no.checked_add(1) {
             Some(next) => next,
             None => {
-                incomplete_reason =
-                    Some("Nacos configuration pagination exceeded the supported page range".to_string());
-                break;
+                return Ok(Some("Nacos configuration pagination exceeded the supported page range".to_string()));
             }
         };
     }
-    Ok(CandidateCollection { items, incomplete_reason })
+    Ok(None)
 }
 
-fn emit_candidate_progress<F>(
+#[allow(clippy::too_many_arguments)]
+async fn process_candidate_page<F, Fut>(
+    admin: &Arc<dyn NacosAdmin>,
+    namespace: &str,
+    request: &NacosContentSearchRequest,
+    query: &str,
+    candidates: Vec<NacosConfigItem>,
+    result_limit: usize,
+    token: &CancellationToken,
+    on_progress: &F,
+    result: &mut NacosContentSearchResult,
+    pending_matches: &mut Vec<NacosContentMatch>,
+) where
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
+{
+    let remaining_results = result_limit.saturating_sub(result.matches.len());
+    if remaining_results == 0 {
+        return;
+    }
+    let request_group = request.group.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let request_data_id = request.data_id.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let details = stream::iter(candidates.into_iter().filter(|item| {
+        request_group.is_none_or(|group| item.group.contains(group))
+            && request_data_id.is_none_or(|data_id| item.data_id.contains(data_id))
+    }))
+    .map(|item| {
+        let admin = admin.clone();
+        let token = token.clone();
+        async move {
+            if token.is_cancelled() {
+                return None;
+            }
+            let key =
+                NacosConfigKey { namespace: Some(item.namespace.clone()), data_id: item.data_id, group: item.group };
+            Some((key.clone(), admin.get_config(key).await))
+        }
+    })
+    .buffer_unordered(SEARCH_CONCURRENCY.min(remaining_results));
+    futures::pin_mut!(details);
+
+    loop {
+        if token.is_cancelled() || result.matches.len() >= result_limit {
+            break;
+        }
+        let Some(detail) = details.next().await else {
+            break;
+        };
+        let Some((key, detail)) = detail else {
+            continue;
+        };
+        result.scanned += 1;
+        match detail {
+            Ok(item) => {
+                if let Some(content_match) = find_first_match(&item, query) {
+                    result.matches.push(content_match.clone());
+                    pending_matches.push(content_match);
+                    if result.matches.len() >= result_limit {
+                        result.truncated = true;
+                    }
+                }
+            }
+            Err(error) => {
+                result.failures.push(NacosSearchFailure {
+                    namespace: key.namespace.unwrap_or_default(),
+                    error: format!("{} / {}: {error}", key.group, key.data_id),
+                });
+                result.incomplete = true;
+            }
+        }
+        if pending_matches.len() >= SEARCH_RESULT_BATCH_SIZE {
+            emit_progress(
+                on_progress,
+                &request.operation_id,
+                "searching",
+                Some(namespace.to_string()),
+                result,
+                std::mem::take(pending_matches),
+                false,
+            )
+            .await;
+        }
+    }
+}
+
+async fn emit_candidate_progress<F, Fut>(
     on_progress: &F,
     request: &NacosContentSearchRequest,
     namespace: &str,
@@ -359,7 +460,8 @@ fn emit_candidate_progress<F>(
     enumerated: u64,
     total: Option<u64>,
 ) where
-    F: Fn(NacosSearchProgress) + Send + Sync,
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
 {
     on_progress(NacosSearchProgress {
         operation_id: request.operation_id.clone(),
@@ -373,10 +475,11 @@ fn emit_candidate_progress<F>(
         truncated: result.truncated,
         cancelled: false,
         done: false,
-    });
+    })
+    .await;
 }
 
-fn emit_progress<F>(
+async fn emit_progress<F, Fut>(
     on_progress: &F,
     operation_id: &str,
     phase: &str,
@@ -385,7 +488,8 @@ fn emit_progress<F>(
     matches: Vec<NacosContentMatch>,
     done: bool,
 ) where
-    F: Fn(NacosSearchProgress) + Send + Sync,
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
 {
     on_progress(NacosSearchProgress {
         operation_id: operation_id.to_string(),
@@ -399,7 +503,8 @@ fn emit_progress<F>(
         truncated: result.truncated,
         cancelled: result.cancelled,
         done,
-    });
+    })
+    .await;
 }
 
 fn find_first_match(item: &NacosConfigItem, query: &str) -> Option<NacosContentMatch> {
@@ -444,9 +549,13 @@ mod tests {
         ordered: Vec<NacosConfigItem>,
         details: HashMap<(String, String, String), NacosConfigItem>,
         native_error: Option<String>,
+        native_items: Option<Vec<NacosConfigItem>>,
+        native_calls: AtomicUsize,
         list_calls: AtomicUsize,
+        detail_calls: AtomicUsize,
         repeated_pages: bool,
         reported_total: Option<u64>,
+        pending_details: bool,
     }
 
     impl MockAdmin {
@@ -460,9 +569,13 @@ mod tests {
                 ordered: items,
                 details,
                 native_error: None,
+                native_items: None,
+                native_calls: AtomicUsize::new(0),
                 list_calls: AtomicUsize::new(0),
+                detail_calls: AtomicUsize::new(0),
                 repeated_pages: false,
                 reported_total: None,
+                pending_details: false,
             }
         }
     }
@@ -473,7 +586,21 @@ mod tests {
             Err("unused".to_string())
         }
         async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
-            Ok(vec![])
+            let mut seen = HashSet::new();
+            Ok(self
+                .ordered
+                .iter()
+                .filter_map(|item| {
+                    seen.insert(item.namespace.clone()).then(|| NacosNamespaceInfo {
+                        namespace: item.namespace.clone(),
+                        namespace_show_name: item.namespace.clone(),
+                        namespace_desc: None,
+                        config_count: None,
+                        quota: None,
+                        namespace_type: None,
+                    })
+                })
+                .collect())
         }
         async fn create_namespace(&self, _: NacosNamespaceCreate) -> Result<(), String> {
             Err("unused".to_string())
@@ -485,29 +612,58 @@ mod tests {
             self.list_calls.fetch_add(1, Ordering::SeqCst);
             let page_no = query.page_no.unwrap_or(1);
             let page_size = query.page_size.unwrap_or(500);
+            let filtered: Vec<_> = self
+                .ordered
+                .iter()
+                .filter(|item| query.namespace.as_deref().is_none_or(|namespace| item.namespace == namespace))
+                .filter(|item| {
+                    query
+                        .group
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|group| !group.is_empty())
+                        .is_none_or(|group| item.group.contains(group))
+                })
+                .cloned()
+                .collect();
             let start = if self.repeated_pages { 0 } else { ((page_no - 1) * page_size) as usize };
-            let end = (start + page_size as usize).min(self.ordered.len());
-            let items = if start < self.ordered.len() { self.ordered[start..end].to_vec() } else { Vec::new() };
+            let end = (start + page_size as usize).min(filtered.len());
+            let items = if start < filtered.len() { filtered[start..end].to_vec() } else { Vec::new() };
             Ok(NacosConfigList {
                 page_no,
                 page_size,
-                total_count: self.reported_total.unwrap_or(self.ordered.len() as u64),
+                total_count: self.reported_total.unwrap_or(filtered.len() as u64),
                 items,
             })
         }
         async fn search_config_content_page(
             &self,
+            namespace: &str,
             _: &str,
-            _: &str,
-            _: u32,
-            _: u32,
+            page_no: u32,
+            page_size: u32,
         ) -> Result<Option<NacosConfigList>, String> {
+            self.native_calls.fetch_add(1, Ordering::SeqCst);
             match &self.native_error {
                 Some(error) => Err(error.clone()),
-                None => Ok(None),
+                None => {
+                    let Some(native_items) = &self.native_items else {
+                        return Ok(None);
+                    };
+                    let filtered: Vec<_> =
+                        native_items.iter().filter(|item| item.namespace == namespace).cloned().collect();
+                    let start = ((page_no - 1) * page_size) as usize;
+                    let end = (start + page_size as usize).min(filtered.len());
+                    let items = if start < filtered.len() { filtered[start..end].to_vec() } else { Vec::new() };
+                    Ok(Some(NacosConfigList { page_no, page_size, total_count: filtered.len() as u64, items }))
+                }
             }
         }
         async fn get_config(&self, key: NacosConfigKey) -> Result<NacosConfigItem, String> {
+            self.detail_calls.fetch_add(1, Ordering::SeqCst);
+            if self.pending_details {
+                std::future::pending::<()>().await;
+            }
             self.details
                 .get(&(key.namespace.unwrap_or_default(), key.group, key.data_id))
                 .cloned()
@@ -549,10 +705,14 @@ mod tests {
     }
 
     fn config_item(index: usize, content: &str) -> NacosConfigItem {
+        config_item_in_namespace(index, "prod", content)
+    }
+
+    fn config_item_in_namespace(index: usize, namespace: &str, content: &str) -> NacosConfigItem {
         NacosConfigItem {
             data_id: format!("config-{index}"),
             group: "DEFAULT_GROUP".to_string(),
-            namespace: "prod".to_string(),
+            namespace: namespace.to_string(),
             app_name: None,
             desc: None,
             tags: None,
@@ -619,6 +779,48 @@ mod tests {
         assert!(found.snippet.starts_with('…'));
     }
 
+    #[test]
+    fn operation_registry_normalizes_ids_for_cancel_and_cleanup() {
+        let operation_id = format!("whitespace-{}", uuid::Uuid::new_v4());
+        let token = begin_operation(&format!(" \t{operation_id}\n")).unwrap();
+
+        assert!(cancel_operation(&format!("\n{operation_id} ")));
+        assert!(token.is_cancelled());
+        finish_operation(&format!(" {operation_id}\t"));
+        assert!(!cancel_operation(&operation_id));
+    }
+
+    #[tokio::test]
+    async fn search_uses_the_normalized_operation_id_everywhere() {
+        let operation_id = format!("normalized-{}", uuid::Uuid::new_v4());
+        let progress_ids = Arc::new(Mutex::new(Vec::new()));
+        let captured_progress_ids = progress_ids.clone();
+        let result = search_config_content(
+            Arc::new(MockAdmin::new(vec![config_item(0, "needle")])),
+            NacosContentSearchRequest {
+                operation_id: format!(" \t{operation_id}\n"),
+                namespace: Some("prod".to_string()),
+                scope: NacosNamespaceScope::CurrentNamespace,
+                query: "needle".to_string(),
+                group: None,
+                data_id: None,
+                max_results: Some(10),
+            },
+            move |progress| {
+                let captured_progress_ids = captured_progress_ids.clone();
+                async move {
+                    captured_progress_ids.lock().unwrap().push(progress.operation_id);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.operation_id, operation_id);
+        assert!(progress_ids.lock().unwrap().iter().all(|value| value == &operation_id));
+        assert!(!cancel_operation(&operation_id));
+    }
+
     #[tokio::test]
     async fn fallback_search_scans_beyond_ten_pages() {
         let mut items: Vec<_> = (0..5_000).map(|index| config_item(index, "ordinary")).collect();
@@ -633,15 +835,122 @@ mod tests {
                 query: "needle".to_string(),
                 group: None,
                 data_id: None,
-                max_results: None,
+                max_results: Some(1),
             },
-            |_| {},
+            |_| std::future::ready(()),
         )
         .await
         .unwrap();
         assert_eq!(result.scanned, 5_001);
         assert_eq!(result.matches.len(), 1);
         assert_eq!(admin.list_calls.load(Ordering::SeqCst), 11);
+    }
+
+    #[tokio::test]
+    async fn fallback_search_stops_before_the_next_page_when_the_result_budget_is_exhausted() {
+        let items: Vec<_> = (0..1_000).map(|index| config_item(index, "needle")).collect();
+        let admin = Arc::new(MockAdmin::new(items));
+        let result = search_config_content(
+            admin.clone(),
+            NacosContentSearchRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                namespace: Some("prod".to_string()),
+                scope: NacosNamespaceScope::CurrentNamespace,
+                query: "needle".to_string(),
+                group: None,
+                data_id: None,
+                max_results: Some(1),
+            },
+            |_| std::future::ready(()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.matches.len(), 1);
+        assert!(result.truncated);
+        assert_eq!(admin.list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.detail_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_search_stops_before_the_next_page_when_the_result_budget_is_exhausted() {
+        let items: Vec<_> = (0..1_000).map(|index| config_item(index, "needle")).collect();
+        let mut mock = MockAdmin::new(items.clone());
+        mock.native_items = Some(items);
+        let admin = Arc::new(mock);
+        let result = search_config_content(
+            admin.clone(),
+            NacosContentSearchRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                namespace: Some("prod".to_string()),
+                scope: NacosNamespaceScope::CurrentNamespace,
+                query: "needle".to_string(),
+                group: None,
+                data_id: None,
+                max_results: Some(1),
+            },
+            |_| std::future::ready(()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.matches.len(), 1);
+        assert!(result.truncated);
+        assert_eq!(admin.native_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.list_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(admin.detail_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn all_namespace_search_stops_before_opening_the_next_namespace() {
+        let mut items = vec![config_item_in_namespace(0, "prod", "needle")];
+        items.extend((1..=500).map(|index| config_item_in_namespace(index, "staging", "needle")));
+        let admin = Arc::new(MockAdmin::new(items));
+        let result = search_config_content(
+            admin.clone(),
+            NacosContentSearchRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                namespace: None,
+                scope: NacosNamespaceScope::AllNamespaces,
+                query: "needle".to_string(),
+                group: None,
+                data_id: None,
+                max_results: Some(1),
+            },
+            |_| std::future::ready(()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].namespace, "prod");
+        assert_eq!(admin.native_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.list_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_running_search_cleans_the_operation_registry() {
+        let operation_id = format!("drop-{}", uuid::Uuid::new_v4());
+        let mut mock = MockAdmin::new(vec![config_item(0, "needle")]);
+        mock.pending_details = true;
+        let mut search = Box::pin(search_config_content(
+            Arc::new(mock),
+            NacosContentSearchRequest {
+                operation_id: operation_id.clone(),
+                namespace: Some("prod".to_string()),
+                scope: NacosNamespaceScope::CurrentNamespace,
+                query: "needle".to_string(),
+                group: None,
+                data_id: None,
+                max_results: Some(1),
+            },
+            |_| std::future::ready(()),
+        ));
+
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), search.as_mut()).await.is_err());
+        assert!(cancel_operation(&operation_id));
+        drop(search);
+        assert!(!cancel_operation(&operation_id));
     }
 
     #[tokio::test]
@@ -660,7 +969,7 @@ mod tests {
                 data_id: None,
                 max_results: None,
             },
-            |_| {},
+            |_| std::future::ready(()),
         )
         .await
         .unwrap();
@@ -686,7 +995,7 @@ mod tests {
                 data_id: None,
                 max_results: None,
             },
-            |_| {},
+            |_| std::future::ready(()),
         )
         .await
         .unwrap();

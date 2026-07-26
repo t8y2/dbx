@@ -852,6 +852,7 @@ export default withEnglishFallback({
     fixedTabs: "Abas fixadas",
     openDataTabs: "Tabelas abertas",
     gridfs: "GridFS",
+    etcdDashboard: "painel etcd",
   },
   executionSummary: {
     empty: "Nenhum resumo",

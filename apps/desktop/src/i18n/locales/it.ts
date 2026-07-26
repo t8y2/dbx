@@ -850,6 +850,7 @@ export default withEnglishFallback({
     fixedTabs: "Schede bloccate",
     openDataTabs: "Tabelle aperte",
     gridfs: "GridFS",
+    etcdDashboard: "etcd dashboard",
   },
   executionSummary: {
     empty: "Nessun riepilogo",

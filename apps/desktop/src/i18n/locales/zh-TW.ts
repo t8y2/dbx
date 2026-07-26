@@ -851,6 +851,7 @@ export default withEnglishFallback({
     fixedTabs: "固定分頁",
     openDataTabs: "已開啟的資料表",
     gridfs: "GridFS",
+    etcdDashboard: "etcd 儀表板",
   },
   executionSummary: {
     empty: "無摘要",

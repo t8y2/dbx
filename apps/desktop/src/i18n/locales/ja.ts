@@ -851,6 +851,7 @@ export default withEnglishFallback({
     zookeeper: "ZooKeeper",
     vector: "ベクター",
     gridfs: "GridFS",
+    etcdDashboard: "etcd ダッシュボード",
   },
   executionSummary: {
     empty: "サマリーはありません",

@@ -345,6 +345,7 @@ export const nacosLoginRNacosConsole = forward("nacosLoginRNacosConsole");
 export const nacosListServices = forward("nacosListServices");
 export const nacosListInstances = forward("nacosListInstances");
 export const nacosUpdateInstance = forward("nacosUpdateInstance");
+export const nacosGetDashboard = forward("nacosGetDashboard");
 export const nacosRawRequest = forward("nacosRawRequest");
 
 // Data Transfer

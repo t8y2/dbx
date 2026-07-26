@@ -473,6 +473,7 @@ async fn main() {
         .route("/nacos/services/list", post(routes::nacos::list_services))
         .route("/nacos/instances/list", post(routes::nacos::list_instances))
         .route("/nacos/instances/update", post(routes::nacos::update_instance))
+        .route("/nacos/dashboard", post(routes::nacos::get_dashboard))
         .route("/nacos/raw", post(routes::nacos::raw_request))
         .route("/nacos/configs/search", post(routes::nacos::search_config_content))
         .route("/nacos/configs/search/cancel", post(routes::nacos::cancel_operation))

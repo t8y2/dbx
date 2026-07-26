@@ -1569,6 +1569,7 @@ pub fn run() {
             commands::nacos_cmd::nacos_list_services,
             commands::nacos_cmd::nacos_list_instances,
             commands::nacos_cmd::nacos_update_instance,
+            commands::nacos_cmd::nacos_get_dashboard,
             commands::nacos_cmd::nacos_raw_request,
             commands::nacos_cmd::nacos_search_config_content,
             commands::nacos_cmd::nacos_cancel_operation,

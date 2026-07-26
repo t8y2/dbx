@@ -981,6 +981,7 @@ export interface QueryTab {
     | "mq"
     | "nacos"
     | "nacos-dashboard"
+    | "ssh"
     | "objects"
     | "structure"
     | "users"
@@ -990,6 +991,7 @@ export interface QueryTab {
     | "postgres-dashboard";
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
+  sshProfileId?: string;
   mqTenant?: string;
   mqInitialTab?: "topics";
   nacosNamespace?: string;

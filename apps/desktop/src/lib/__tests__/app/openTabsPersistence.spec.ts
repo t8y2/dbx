@@ -57,4 +57,27 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.database).toBe("dbx_catalog_completion");
     expect(restored.catalog).toBe("dbx_mysql_catalog");
   });
+
+  it("restores an SSH terminal tab without database state", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        id: "ssh-tab",
+        title: "Development",
+        connectionId: "",
+        database: "",
+        mode: "ssh",
+        sshProfileId: "ssh-profile-1",
+      }),
+    ]);
+
+    expect(restored).toMatchObject({
+      id: "ssh-tab",
+      title: "Development",
+      mode: "ssh",
+      sshProfileId: "ssh-profile-1",
+      connectionId: "",
+      database: "",
+      sql: "",
+    });
+  });
 });

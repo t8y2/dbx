@@ -43,6 +43,7 @@ export interface SavedOpenTab {
   mqInitialTab?: QueryTab["mqInitialTab"];
   nacosNamespace?: string;
   nacosNamespaceName?: string;
+  sshProfileId?: string;
   structureTableName?: string;
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
@@ -116,6 +117,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.mqInitialTab !== undefined ? { mqInitialTab: tab.mqInitialTab } : {}),
     ...(tab.nacosNamespace !== undefined ? { nacosNamespace: tab.nacosNamespace } : {}),
     ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
+    ...(tab.sshProfileId !== undefined ? { sshProfileId: tab.sshProfileId } : {}),
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,

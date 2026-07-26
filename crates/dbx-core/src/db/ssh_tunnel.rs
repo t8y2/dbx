@@ -45,7 +45,7 @@ const TOFU_PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// SSH client handler. Holds a host-key verifier so that
 /// [`client::Handler::check_server_key`] can reject untrusted/changed server
 /// keys *before* any credential is sent.
-struct SshClient {
+pub(crate) struct SshClient {
     host_key_verifier: Arc<HostKeyVerifier>,
     host: String,
     port: u16,
@@ -184,7 +184,7 @@ fn server_offers_password(remaining_methods: &MethodSet) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn connect_and_authenticate(
+pub(crate) async fn connect_and_authenticate(
     connect_host: &str,
     connect_port: u16,
     host_key_host: &str,

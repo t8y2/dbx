@@ -1305,6 +1305,24 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
+  function openSshTerminal(profileId: string, title: string) {
+    const id = uuid();
+    tabs.value.push({
+      id,
+      title,
+      connectionId: "",
+      database: "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "ssh",
+      sshProfileId: profileId,
+    });
+    activeTabId.value = id;
+    return id;
+  }
+
   function showExecutedQueryResults(connectionId: string, database: string, sql: string, queryResults: QueryResult[]) {
     const id = createTab(connectionId, database, undefined, "query", undefined, sql);
     const tab = tabs.value.find((item) => item.id === id);
@@ -5083,6 +5101,7 @@ export const useQueryStore = defineStore("query", () => {
     hasDirtyTabs,
     isConfirmingAppClose,
     createTab,
+    openSshTerminal,
     showExecutedQueryResults,
     switchTab,
     closeTab,

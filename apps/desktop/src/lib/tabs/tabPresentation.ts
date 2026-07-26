@@ -127,6 +127,9 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
 }
 
 export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; value: string }[] {
+  if (tab.mode === "ssh") {
+    return [{ label: t("tabs.tooltipTitle"), value: tab.title }];
+  }
   const connName = connectionDisplayName(tab.connectionId);
   const groupName = connectionGroupDisplayName(tab.connectionId, t);
   const database = databaseDisplayNameForTab(tab.connectionId, tab.database, t);

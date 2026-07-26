@@ -6,10 +6,10 @@ export interface KvKeyTreeLeafNode {
   label: string;
   key: string;
   pathSegments: string[];
-  createRevision?: number | null;
-  modRevision?: number | null;
-  version?: number | null;
-  lease?: number | null;
+  createRevision?: string | number | null;
+  modRevision?: string | number | null;
+  version?: string | number | null;
+  lease?: string | number | null;
   valueSize?: number | null;
 }
 
@@ -19,6 +19,12 @@ export interface KvKeyTreeGroupNode {
   label: string;
   pathSegments: string[];
   children: KvKeyTreeNode[];
+  key?: string;
+  createRevision?: string | number | null;
+  modRevision?: string | number | null;
+  version?: string | number | null;
+  lease?: string | number | null;
+  valueSize?: number | null;
 }
 
 export type KvKeyTreeNode = KvKeyTreeLeafNode | KvKeyTreeGroupNode;
@@ -78,11 +84,36 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
       const id = groupId(groupSegments);
       let group = groups.get(id);
       if (!group) {
-        group = { kind: "group", id, label: segment, pathSegments: [...groupSegments], children: [] };
+        const leafIndex = current.findIndex((candidate) => candidate.kind === "leaf" && candidate.pathSegments.join("\u0000") === groupSegments.join("\u0000"));
+        const existingLeaf = leafIndex >= 0 ? (current.splice(leafIndex, 1)[0] as KvKeyTreeLeafNode) : null;
+        group = {
+          kind: "group",
+          id,
+          label: segment,
+          pathSegments: [...groupSegments],
+          children: [],
+          key: existingLeaf?.key,
+          createRevision: existingLeaf?.createRevision,
+          modRevision: existingLeaf?.modRevision,
+          version: existingLeaf?.version,
+          lease: existingLeaf?.lease,
+          valueSize: existingLeaf?.valueSize,
+        };
         groups.set(id, group);
         current.push(group);
       }
       current = group.children;
+    }
+
+    const existingGroup = groups.get(groupId(segments));
+    if (existingGroup) {
+      existingGroup.key = key.key;
+      existingGroup.createRevision = key.createRevision;
+      existingGroup.modRevision = key.modRevision;
+      existingGroup.version = key.version;
+      existingGroup.lease = key.lease;
+      existingGroup.valueSize = key.valueSize;
+      continue;
     }
 
     current.push({
@@ -133,4 +164,23 @@ export function flattenVisibleKvKeyTree(nodes: KvKeyTreeNode[], expandedGroupIds
     }
   }
   return rows;
+}
+
+export function kvKeyTreeNodePath(node: KvKeyTreeNode): string {
+  if (node.kind === "leaf") return node.key;
+  if (node.key) return node.key;
+
+  const descendantKey = firstDescendantKey(node);
+  const joined = node.pathSegments.join("/");
+  return descendantKey?.startsWith("/") ? `/${joined}` : joined;
+}
+
+function firstDescendantKey(node: KvKeyTreeGroupNode): string | null {
+  for (const child of node.children) {
+    if (child.kind === "leaf") return child.key;
+    if (child.key) return child.key;
+    const nested = firstDescendantKey(child);
+    if (nested) return nested;
+  }
+  return null;
 }

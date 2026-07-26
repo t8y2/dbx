@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KvGetResponse } from "@/lib/backend/api";
-import { decideKvMetadataRefresh, knownKvLeaseKeys, KvListRequestGuard, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
+import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseKeys, KvListRequestGuard, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
 
 function found(metadata: NonNullable<KvGetResponse["metadata"]>): KvGetResponse {
   return {
@@ -83,10 +83,17 @@ describe("decideKvMetadataRefresh", () => {
   });
 
   it("tracks only known leased keys and excludes the selected key", () => {
-    const keys = [{ key: "/no-lease", lease: 0 }, { key: "/leased", lease: 10 }, { key: "/selected", lease: 20 }, { key: "/unknown" }];
+    const keys = [{ key: "/no-lease", lease: 0 }, { key: "/leased", lease: "10" }, { key: "/selected", lease: 20 }, { key: "/unknown" }];
 
     expect(knownKvLeaseKeys(keys, "/selected")).toEqual(["/leased"]);
     expect(knownKvLeaseKeys(keys, null)).toEqual(["/leased", "/selected"]);
+  });
+
+  it("recognizes positive lease IDs in the string-based int64 transport", () => {
+    expect(hasPositiveKvLease("9007199254740993")).toBe(true);
+    expect(hasPositiveKvLease(10)).toBe(true);
+    expect(hasPositiveKvLease("0")).toBe(false);
+    expect(hasPositiveKvLease("")).toBe(false);
   });
 
   it("merges refreshed metadata without replacing the known value size and removes expired keys", () => {

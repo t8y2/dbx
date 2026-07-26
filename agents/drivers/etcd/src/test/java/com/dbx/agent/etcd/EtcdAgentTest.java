@@ -18,6 +18,7 @@ import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -34,6 +35,10 @@ final class EtcdAgentTest {
         Assertions.assertEquals(1, result.get("protocolVersion").getAsInt());
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_ttl\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_cas\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_list_values\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_status\"")));
+        Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"kv_history\"")));
         Assertions.assertTrue(result.getAsJsonArray("capabilities").contains(JsonParser.parseString("\"connect\"")));
     }
 
@@ -68,6 +73,38 @@ final class EtcdAgentTest {
 
         Assertions.assertEquals(-1, error.get("code").getAsInt());
         Assertions.assertEquals("Not connected", error.get("message").getAsString());
+    }
+
+    @Test
+    void historyMethodIsRegistered() {
+        String response = EtcdAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"kv_history\",\"params\":{\"key\":\"/app/name\",\"limit\":100}}"
+        );
+
+        JsonObject error = JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("error");
+
+        Assertions.assertEquals(-1, error.get("code").getAsInt());
+        Assertions.assertEquals("Not connected", error.get("message").getAsString());
+    }
+
+    @Test
+    void historyDefaultsToABoundedRevisionWindow() {
+        Assertions.assertEquals(1L, EtcdAgent.historyStartRevision(null, 100L));
+        Assertions.assertEquals(10_001L, EtcdAgent.historyStartRevision(null, 20_000L));
+        Assertions.assertEquals(42L, EtcdAgent.historyStartRevision(42L, 20_000L));
+    }
+
+    @Test
+    void historyRetainsOnlyTheNewestRequestedEvents() {
+        Deque<Integer> events = new ArrayDeque<>();
+        AtomicBoolean truncated = new AtomicBoolean();
+
+        for (int value = 1; value <= 5; value++) {
+            EtcdAgent.appendBoundedHistory(events, value, 3, truncated);
+        }
+
+        Assertions.assertEquals(List.of(3, 4, 5), List.copyOf(events));
+        Assertions.assertTrue(truncated.get());
     }
 
     @Test

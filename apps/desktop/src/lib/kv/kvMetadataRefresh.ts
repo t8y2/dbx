@@ -49,8 +49,13 @@ export function removeMissingKvKey(keys: readonly KvKeySummary[], missingKey: st
   return keys.filter((key) => key.key !== missingKey);
 }
 
+export function hasPositiveKvLease(lease: string | number | null | undefined): boolean {
+  if (typeof lease === "number") return Number.isInteger(lease) && lease > 0;
+  return typeof lease === "string" && /^[1-9]\d*$/.test(lease.trim());
+}
+
 export function knownKvLeaseKeys(keys: readonly KvKeySummary[], selectedKey: string | null): string[] {
-  return keys.filter((key) => key.key !== selectedKey && typeof key.lease === "number" && key.lease > 0).map((key) => key.key);
+  return keys.filter((key) => key.key !== selectedKey && hasPositiveKvLease(key.lease)).map((key) => key.key);
 }
 
 export function mergeKvKeyMetadata(keys: readonly KvKeySummary[], key: string, incoming: KvGetResponse): KvKeySummary[] {

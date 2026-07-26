@@ -16,12 +16,22 @@ vi.mock("@/lib/backend/api", () => ({
   etcdGet: vi.fn(),
   etcdPut: vi.fn(),
   etcdDelete: vi.fn(),
+  etcdRename: vi.fn(),
+  etcdHistory: vi.fn(),
   etcdSupportsTtl: backend.etcdSupportsTtl,
+}));
+
+vi.mock("@/stores/connectionStore", () => ({
+  useConnectionStore: () => ({
+    connections: [],
+    getConfig: () => undefined,
+  }),
 }));
 
 vi.mock("@/components/kv/KvKeyBrowser.vue", () => ({
   default: defineComponent({
     name: "KvKeyBrowserStub",
+    inheritAttrs: false,
     props: {
       supportsTtl: { type: Boolean, default: false },
       ttlCapabilityKnown: { type: Boolean, default: true },

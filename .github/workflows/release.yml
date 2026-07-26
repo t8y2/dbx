@@ -424,9 +424,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dbx-web") | .version')"
+          if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "Release tag version $VERSION does not match dbx-web package version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          SOURCE="dist-web-static/dbx-linux-${{ matrix.arch }}-browser-static.tar.gz"
           ASSET="DBX_${VERSION}_${{ matrix.arch }}-browser-static.tar.gz"
-          cp "dist-web-static/dbx-linux-${{ matrix.arch }}-browser-static.tar.gz" "$ASSET"
-          gh release upload "${GITHUB_REF_NAME}" "$ASSET" \
+          CHECKSUM="${ASSET}.sha256"
+          cp "$SOURCE" "$ASSET"
+          sha256sum "$ASSET" | tee "$CHECKSUM"
+          gh release upload "${GITHUB_REF_NAME}" "$ASSET" "$CHECKSUM" \
             --repo "${GITHUB_REPOSITORY}" --clobber
 
   cleanup-release-signatures:

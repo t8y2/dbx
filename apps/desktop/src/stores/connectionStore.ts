@@ -1170,8 +1170,8 @@ export const useConnectionStore = defineStore("connection", () => {
     loadedTreeNodeChildrenIds.value.add(parent.id);
   }
 
-  function removePinnedTreeNodes(nodes: readonly TreeNode[], canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): boolean {
-    const nextPinnedOrder = removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, nodes, canonicalize);
+  function removePinnedTreeNodes(nodes: readonly TreeNode[], canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity, legacyKeys: readonly string[] = []): boolean {
+    const nextPinnedOrder = removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, nodes, canonicalize, legacyKeys);
     if (nextPinnedOrder.length === pinnedTreeNodeOrder.value.length && nextPinnedOrder.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
     setPinnedTreeNodeOrder(nextPinnedOrder);
     syncPinnedTreeState(treeNodes.value);
@@ -1179,13 +1179,13 @@ export const useConnectionStore = defineStore("connection", () => {
     return true;
   }
 
-  function replacePinnedTreeNode(oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): boolean {
+  function replacePinnedTreeNode(oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity, legacyKeys: readonly string[] = []): boolean {
     // Use the freshly loaded sidebar node when available so the persisted key
     // carries its real id, not the id of the pre-rename object.
     const loadedReplacement = findTreeNodes(treeNodes.value, (node) => pinnedTreeNodeIdentityMatches(treeNodePinIdentity(node), treeNodePinIdentity(newNode), canonicalize))[0];
     // A caller may provide a virtual row while the sidebar object is unloaded;
     // persisting that row id would create a pin that the sidebar cannot restore.
-    const nextPinnedOrder = loadedReplacement ? replacePinnedTreeNodeInOrder(pinnedTreeNodeOrder.value, oldNode, loadedReplacement, canonicalize) : removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, [oldNode], canonicalize);
+    const nextPinnedOrder = loadedReplacement ? replacePinnedTreeNodeInOrder(pinnedTreeNodeOrder.value, oldNode, loadedReplacement, canonicalize, legacyKeys) : removePinnedTreeNodesFromOrder(pinnedTreeNodeOrder.value, [oldNode], canonicalize, legacyKeys);
     if (nextPinnedOrder.length === pinnedTreeNodeOrder.value.length && nextPinnedOrder.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
     setPinnedTreeNodeOrder(nextPinnedOrder);
     syncPinnedTreeState(treeNodes.value);

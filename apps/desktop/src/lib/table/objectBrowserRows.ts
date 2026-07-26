@@ -1,6 +1,6 @@
-import type { ObjectInfo, TreeNodeType } from "@/types/database";
+import type { ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
-import { compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
+import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
 export type ObjectBrowserRow = {
@@ -32,6 +32,7 @@ export type ObjectBrowserPinnedTreeNodeContext = {
   database: string;
   schema?: string;
   catalog?: string;
+  sidebarParentId?: string;
 };
 
 export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): TreeNodeType {
@@ -74,6 +75,64 @@ export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, co
 
 export function objectBrowserRowMatchesPinnedTreeNode(row: ObjectBrowserRow, identity: PinnedTreeNodeIdentity, context: ObjectBrowserPinnedTreeNodeContext): boolean {
   return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
+}
+
+function flattenTreeNodeIds(nodes: readonly TreeNode[]): string[] {
+  return nodes.flatMap((node) => [node.id, ...(node.children ? flattenTreeNodeIds(node.children) : [])]);
+}
+
+function objectBrowserRowObjectInfo(row: ObjectBrowserRow, schema?: string): ObjectInfo {
+  return {
+    name: row.name,
+    object_type: row.type,
+    schema,
+    signature: row.signature || undefined,
+    parent_schema: row.partitionParentSchema,
+    parent_name: row.partitionParentName,
+  };
+}
+
+function legacySchemaCandidates(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): Array<string | undefined> {
+  const identity = objectBrowserRowPinnedTreeNodeIdentity(row, context);
+  const canonicalIdentity = canonicalizeObjectBrowserPinnedTreeNodeIdentity(context)(identity);
+  return [...new Set([row.schema, context.schema, canonicalIdentity.schema, undefined].map((schema) => schema?.trim() || undefined))];
+}
+
+/**
+ * Builds the historical bare IDs emitted by each sidebar layout. The current
+ * v2 key is identity-based, but old persisted pins contain only these IDs.
+ */
+export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): string[] {
+  const parentId = context.sidebarParentId || `${context.connectionId}:${context.database}`;
+  const legacyIds = new Set<string>();
+  for (const schema of legacySchemaCandidates(row, context)) {
+    const object = objectBrowserRowObjectInfo(row, schema);
+    const simpleNodes =
+      row.type === "TABLE" || row.type === "VIEW" || row.type === "MATERIALIZED_VIEW"
+        ? buildTableTreeNodes({
+            nodeId: parentId,
+            connectionId: context.connectionId,
+            database: context.database,
+            schema,
+            tables: [
+              {
+                name: row.name,
+                table_type: row.type,
+                comment: row.comment,
+                parent_schema: row.partitionParentSchema,
+                parent_name: row.partitionParentName,
+              },
+            ],
+          })
+        : buildSimpleObjectTreeNodes({ nodeId: parentId, connectionId: context.connectionId, database: context.database, schema, objects: [object] });
+    for (const id of flattenTreeNodeIds(simpleNodes)) legacyIds.add(id);
+
+    const groupedNodes = buildGroupedObjectTreeNodes({ nodeId: parentId, connectionId: context.connectionId, database: context.database, schema, objects: [object] });
+    for (const group of groupedNodes) {
+      for (const id of flattenTreeNodeIds(group.children || [])) legacyIds.add(id);
+    }
+  }
+  return [...legacyIds];
 }
 
 export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {

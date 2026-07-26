@@ -91,6 +91,7 @@ import {
   formatObjectBrowserTimestamp,
   canonicalizeObjectBrowserPinnedTreeNodeIdentity,
   initialObjectBrowserSortDirection,
+  objectBrowserRowLegacyPinnedTreeNodeIds,
   objectBrowserRowMatchesPinnedTreeNode,
   objectBrowserRowPinnedTreeNodeIdentity,
   sortObjectBrowserRows,
@@ -666,6 +667,11 @@ function objectBrowserPinnedTreeNodeContext() {
     database: props.database,
     schema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
     catalog: props.catalog,
+    sidebarParentId: props.catalog
+      ? `${props.connection.id}:doris-catalog:${encodeURIComponent(props.catalog)}:${encodeURIComponent(props.database)}`
+      : needsSchema.value && selectedSchema.value
+        ? `${props.connection.id}:${props.database}:${selectedSchema.value}`
+        : `${props.connection.id}:${props.database}`,
   };
 }
 
@@ -694,8 +700,14 @@ function pinnedTreeNodeForObjectBrowserRow(row: ObjectBrowserRow): TreeNode {
   };
 }
 
+function legacyPinnedTreeNodesForObjectBrowserRow(row: ObjectBrowserRow): TreeNode[] {
+  const baseNode = pinnedTreeNodeForObjectBrowserRow(row);
+  return objectBrowserRowLegacyPinnedTreeNodeIds(row, objectBrowserPinnedTreeNodeContext()).map((id) => ({ ...baseNode, id }));
+}
+
 function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
-  connectionStore.removePinnedTreeNodes(rows.map(pinnedTreeNodeForObjectBrowserRow), canonicalizeObjectBrowserPinnedIdentity);
+  const nodes = rows.flatMap((row) => [pinnedTreeNodeForObjectBrowserRow(row), ...legacyPinnedTreeNodesForObjectBrowserRow(row)]);
+  connectionStore.removePinnedTreeNodes(nodes, canonicalizeObjectBrowserPinnedIdentity);
 }
 
 function groupedFilteredRows() {
@@ -1194,6 +1206,7 @@ async function confirmRename() {
   if (!row || !newName || newName === row.name) return;
   renameError.value = "";
   const oldPinnedNode = pinnedTreeNodeForObjectBrowserRow(row);
+  const oldLegacyPinnedNodes = legacyPinnedTreeNodesForObjectBrowserRow(row);
   let renameApplied = false;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
@@ -1234,17 +1247,22 @@ async function confirmRename() {
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
     const renamedRow = rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
     if (renamedRow) {
-      connectionStore.replacePinnedTreeNode(oldPinnedNode, pinnedTreeNodeForObjectBrowserRow(renamedRow), canonicalizeObjectBrowserPinnedIdentity);
+      connectionStore.replacePinnedTreeNode(
+        oldPinnedNode,
+        pinnedTreeNodeForObjectBrowserRow(renamedRow),
+        canonicalizeObjectBrowserPinnedIdentity,
+        oldLegacyPinnedNodes.map((node) => node.id),
+      );
     } else {
       // The database mutation succeeded, so never leave the old name pinned if
       // metadata refresh cannot resolve its replacement.
-      connectionStore.removePinnedTreeNodes([oldPinnedNode], canonicalizeObjectBrowserPinnedIdentity);
+      connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
     }
   } catch (e: any) {
     if (renameApplied) {
       // The database mutation succeeded even when metadata refresh did not;
       // remove the old pin instead of allowing it to revive later.
-      connectionStore.removePinnedTreeNodes([oldPinnedNode], canonicalizeObjectBrowserPinnedIdentity);
+      connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
     }
     renameError.value = e?.message || String(e);
   }

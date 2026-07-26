@@ -94,14 +94,14 @@ export function pinnedTreeNodeIdentityMatches(left: PinnedTreeNodeIdentity, righ
   );
 }
 
-function pinnedTreeNodeOrderKeyMatchesNode(key: string, node: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer): boolean {
-  if (key === treeNodePinKey(node) || key === node.id) return true;
+function pinnedTreeNodeOrderKeyMatchesNode(key: string, node: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer, legacyKeys: ReadonlySet<string> = new Set()): boolean {
+  if (key === treeNodePinKey(node) || key === node.id || legacyKeys.has(key)) return true;
   const identity = parseTreeNodePinKey(key);
   return !!identity && pinnedTreeNodeIdentityMatches(identity, treeNodePinIdentity(node), canonicalize);
 }
 
-export function removePinnedTreeNodesFromOrder(order: readonly string[], nodes: readonly TreeNode[], canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): string[] {
-  const removedKeys = new Set<string>();
+export function removePinnedTreeNodesFromOrder(order: readonly string[], nodes: readonly TreeNode[], canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity, legacyKeys: readonly string[] = []): string[] {
+  const removedKeys = new Set(legacyKeys);
   const removedIdentities: PinnedTreeNodeIdentity[] = [];
   const visited = new WeakSet<TreeNode>();
   const visit = (items: readonly TreeNode[]) => {
@@ -127,12 +127,13 @@ export function removePinnedTreeNodesFromOrder(order: readonly string[], nodes: 
 }
 
 /** Replaces a pinned object identity in place after a successful rename. */
-export function replacePinnedTreeNodeInOrder(order: readonly string[], oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity): string[] {
+export function replacePinnedTreeNodeInOrder(order: readonly string[], oldNode: TreeNode, newNode: TreeNode, canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity, legacyKeys: readonly string[] = []): string[] {
   const normalized = normalizePinnedTreeNodeOrder(order);
-  const oldIndex = normalized.findIndex((key) => pinnedTreeNodeOrderKeyMatchesNode(key, oldNode, canonicalize));
+  const legacyKeySet = new Set(legacyKeys);
+  const oldIndex = normalized.findIndex((key) => pinnedTreeNodeOrderKeyMatchesNode(key, oldNode, canonicalize, legacyKeySet));
   if (oldIndex < 0) return normalized;
 
-  const shouldRemove = (key: string) => pinnedTreeNodeOrderKeyMatchesNode(key, oldNode, canonicalize) || pinnedTreeNodeOrderKeyMatchesNode(key, newNode, canonicalize);
+  const shouldRemove = (key: string) => pinnedTreeNodeOrderKeyMatchesNode(key, oldNode, canonicalize, legacyKeySet) || pinnedTreeNodeOrderKeyMatchesNode(key, newNode, canonicalize);
   const replacementIndex = normalized.slice(0, oldIndex).filter((key) => !shouldRemove(key)).length;
   const next = normalized.filter((key) => !shouldRemove(key));
   next.splice(replacementIndex, 0, treeNodePinKey(newNode));

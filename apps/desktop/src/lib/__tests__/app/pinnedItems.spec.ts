@@ -261,6 +261,21 @@ describe("sidebar pinned tree nodes", () => {
     expect(migrated.order).toEqual(["before", treeNodePinKey(node), "after"]);
   });
 
+  it("removes explicitly supplied legacy keys for an unloaded node", () => {
+    const node: TreeNode = { id: "object-browser:app:events", label: "events", type: "table", connectionId: "conn", database: "app", schema: "public" };
+    const legacyKey = "conn:app:public:__tables:public:events";
+
+    expect(removePinnedTreeNodesFromOrder([legacyKey, "unrelated"], [node], undefined, [legacyKey])).toEqual(["unrelated"]);
+  });
+
+  it("replaces an explicitly supplied legacy key without losing its position", () => {
+    const oldNode: TreeNode = { id: "object-browser:app:events", label: "events", type: "table", connectionId: "conn", database: "app", schema: "public" };
+    const newNode: TreeNode = { id: "conn:app:public:__tables:public:renamed", label: "renamed", type: "table", connectionId: "conn", database: "app", schema: "public" };
+    const legacyKey = "conn:app:public:__tables:public:events";
+
+    expect(replacePinnedTreeNodeInOrder(["before", legacyKey, "after"], oldNode, newNode, undefined, [legacyKey])).toEqual(["before", treeNodePinKey(newNode), "after"]);
+  });
+
   it("applies pinned state to connection groups when rebuilding from layout", () => {
     const layout: SidebarLayout = {
       groups: [

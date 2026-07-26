@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { orderItemsByPinnedTreeNodeOrder, removePinnedTreeNodesFromOrder, treeNodePinIdentity, treeNodePinKey } from "@/lib/app/pinnedItems";
-import { buildObjectBrowserRows, canonicalizeObjectBrowserPinnedTreeNodeIdentity, objectBrowserRowMatchesPinnedTreeNode, sortObjectBrowserRows, type ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
+import { buildObjectBrowserRows, canonicalizeObjectBrowserPinnedTreeNodeIdentity, objectBrowserRowLegacyPinnedTreeNodeIds, objectBrowserRowMatchesPinnedTreeNode, sortObjectBrowserRows, type ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 import type { TreeNode } from "@/types/database";
 
 describe("buildObjectBrowserRows", () => {
@@ -90,6 +90,13 @@ describe("Object Browser pinned ordering", () => {
     const remainingOrder = removePinnedTreeNodesFromOrder([treeNodePinKey(sidebarNode)], [objectBrowserNode], canonicalize);
 
     expect(remainingOrder).toEqual([]);
+  });
+
+  it("reconstructs legacy sidebar IDs for an unloaded Object Browser row", () => {
+    const row: ObjectBrowserRow = { id: "object-browser:events:0", name: "events", displayName: "events", schema: "public", type: "TABLE" };
+    const ids = objectBrowserRowLegacyPinnedTreeNodeIds(row, { connectionId: "conn", database: "app", schema: "public", sidebarParentId: "conn:app:public" });
+
+    expect(ids).toEqual(expect.arrayContaining(["conn:app:public:events", "conn:app:public:__tables:public:events"]));
   });
 
   it("does not confuse same-name objects across schemas or routine overloads", () => {

@@ -50,6 +50,21 @@ function oracleConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function genericJdbcConnection(): ConnectionConfig {
+  return {
+    id: "jdbc-1",
+    name: "Generic JDBC",
+    db_type: "jdbc",
+    host: "127.0.0.1",
+    port: 0,
+    username: "app",
+    password: "",
+    database: "testdb",
+    driver_profile: "jdbc",
+    connection_string: "jdbc:example://127.0.0.1/testdb",
+  } as ConnectionConfig;
+}
+
 function procedure(name: string): ObjectInfo {
   return {
     name,
@@ -158,6 +173,77 @@ describe("connectionStore metadata loading", () => {
 
     expect(listDatabases).toHaveBeenCalledTimes(1);
     expect(node.isExpanded).toBe(true);
+  });
+
+  it("discovers schema nodes for unknown generic JDBC databases", async () => {
+    const listSchemaInfos = vi.fn().mockResolvedValue([
+      { name: "app", comment: null },
+      { name: "reporting", comment: null },
+    ]);
+    const listTables = vi.fn().mockResolvedValue([]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listSchemaInfos,
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = genericJdbcConnection();
+    const databaseNode: TreeNode = { id: "jdbc-1:testdb", label: "testdb", type: "database", connectionId: connection.id, database: "testdb", isExpanded: false, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, isExpanded: true, children: [databaseNode] }];
+
+    await store.loadTreeNodeChildren(databaseNode, { force: true });
+
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
+    expect(listTables).not.toHaveBeenCalled();
+    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
+      ["schema", "app", "app"],
+      ["schema", "reporting", "reporting"],
+    ]);
+  });
+
+  it("keeps the flat object tree for unknown generic JDBC databases without schemas", async () => {
+    const listSchemaInfos = vi.fn().mockResolvedValue([]);
+    const listTables = vi.fn().mockResolvedValue([{ name: "t", table_type: "TABLE", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listObjects: vi.fn().mockResolvedValue([]),
+      listSchemaInfos,
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    const connection = genericJdbcConnection();
+    const databaseNode: TreeNode = { id: "jdbc-1:testdb", label: "testdb", type: "database", connectionId: connection.id, database: "testdb", isExpanded: false, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, isExpanded: true, children: [databaseNode] }];
+
+    await store.loadTreeNodeChildren(databaseNode, { force: true });
+
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
+    expect(listTables).toHaveBeenCalled();
+    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "t", undefined]]);
   });
 
   it("renders simple-mode table children without waiting for supplemental objects", async () => {

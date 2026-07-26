@@ -8,6 +8,7 @@ use crate::db::vector_driver;
 use crate::models::connection::DatabaseType;
 use crate::query::QueryExecutionOptions;
 use crate::query_execution_sql::{build_explain_sql, supports_explain_plan, supports_sql_query, ExplainSqlOptions};
+use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions};
 use crate::sql_risk::SqlRisk;
 use crate::types::QueryResult;
 
@@ -545,7 +546,7 @@ async fn execute_get_sample_data(
         return Err(format!("Table name contains invalid characters: '{}'", table));
     }
 
-    let schema = tool_call.arguments.get("schema").and_then(|v| v.as_str());
+    let schema = tool_call.arguments.get("schema").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
     let limit = tool_call
         .arguments
         .get("limit")
@@ -553,9 +554,9 @@ async fn execute_get_sample_data(
         .map(|l| (l as usize).min(MAX_ALLOWED_ROWS))
         .unwrap_or(SAMPLE_DATA_LIMIT);
 
-    // Build SELECT * FROM table LIMIT N
-    let schema_prefix = schema.filter(|s| !s.is_empty()).map(|s| format!("\"{}\".", s)).unwrap_or_default();
-    let sql = format!("SELECT * FROM {}\"{}\" LIMIT {}", schema_prefix, table, limit);
+    // Reuse the table-data builder so identifier quoting and row limiting follow
+    // the active database instead of assuming PostgreSQL syntax.
+    let sql = build_sample_data_sql(db_type, schema, table, limit);
 
     // Delegate to execute_execute_query with a synthetic tool call
     let synthetic_call = ToolCall {
@@ -565,6 +566,16 @@ async fn execute_get_sample_data(
     };
     execute_execute_query(&synthetic_call, state, connection_id, database, db_type, AgentSqlPermissions::default())
         .await
+}
+
+fn build_sample_data_sql(db_type: &DatabaseType, schema: Option<&str>, table: &str, limit: usize) -> String {
+    build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(*db_type),
+        schema: schema.map(str::to_owned),
+        table_name: table.to_string(),
+        limit: Some(limit),
+        ..Default::default()
+    })
 }
 
 /// Execute an EXPLAIN query via the explain_query tool.
@@ -851,6 +862,26 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
         assert!(names.contains(&"explain_query"));
+    }
+
+    #[test]
+    fn sample_data_sql_uses_database_identifier_and_limit_syntax() {
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Mysql, Some("app"), "sys_tenant", 20),
+            "SELECT * FROM `app`.`sys_tenant` LIMIT 20;"
+        );
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Postgres, Some("public"), "sys_tenant", 20),
+            "SELECT * FROM \"public\".\"sys_tenant\" LIMIT 20;"
+        );
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::SqlServer, Some("dbo"), "sys_tenant", 20),
+            "SELECT TOP (20) * FROM [dbo].[sys_tenant]"
+        );
+        assert_eq!(
+            build_sample_data_sql(&DatabaseType::Oracle, Some("APP"), "SYS_TENANT", 20),
+            "SELECT * FROM (SELECT * FROM \"APP\".\"SYS_TENANT\") WHERE ROWNUM <= 20"
+        );
     }
 
     #[test]

@@ -573,6 +573,8 @@ export interface QueryResult {
   mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
+  /** Whether a backend-reported result total is exact. */
+  total_is_exact?: boolean;
   truncated?: boolean;
   session_id?: string | null;
   has_more?: boolean;

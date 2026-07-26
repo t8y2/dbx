@@ -4887,6 +4887,70 @@ test("query execution keeps automatically counting total rows in the background"
   }
 });
 
+test("inexact backend totals do not become query pagination bounds", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  settingsStore.updateEditorSettings({ autoCalculateTotalRows: false });
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "db", "Query", "query", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  globalThis.fetch = withConnectionHealthMock(async (input) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      return new Response(
+        JSON.stringify({
+          sqlToExecute: "select id from users limit 100",
+          pageSql: "select id from users limit 100",
+          pageLimit: 100,
+          pageOffset: 0,
+          useAgentResultSession: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["id"],
+            rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+            affected_rows: 10_000_000,
+            execution_time_ms: 1,
+            total_is_exact: false,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "select id from users");
+
+    assert.equal(tab.result?.total_is_exact, false);
+    assert.equal(tab.result?.affected_rows, 10_000_000);
+    assert.equal(tab.resultTotalRowCount, undefined);
+    assert.equal(tab.resultTotalRowCountLoading, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 for (const resultState of [
   { label: "truncated", result: { truncated: true, has_more: false } },
   { label: "ambiguous exhaustion", result: {} },

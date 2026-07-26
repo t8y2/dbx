@@ -3131,7 +3131,7 @@ export const useQueryStore = defineStore("query", () => {
               case "find": {
                 queryExecutionLog("info", "mongo-find:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.skip, mongoCommand.limit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, executionId);
-                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents)));
+                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false)));
                 allResults.push(queryResult);
                 mongoEditTarget = mongoCommands.length === 1 && !mongoCommand.projection && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
                 queryExecutionLog("info", "mongo-find:done", {
@@ -3147,7 +3147,7 @@ export const useQueryStore = defineStore("query", () => {
               case "findOne": {
                 queryExecutionLog("info", "mongo-find-one:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const result = await api.mongoFindOne(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.projection, mongoCommand.options, executionId);
-                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents)));
+                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false)));
                 allResults.push(queryResult);
                 mongoEditTarget = mongoCommands.length === 1 && !mongoCommand.projection && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
                 queryExecutionLog("info", "mongo-find-one:done", {
@@ -3194,7 +3194,7 @@ export const useQueryStore = defineStore("query", () => {
                 queryExecutionLog("info", "mongo-aggregate:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
                 const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, mongoCommand.options, executionId);
-                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents))));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false))));
                 mongoEditTarget = undefined;
                 queryExecutionLog("info", "mongo-aggregate:done", {
                   traceId,
@@ -3273,7 +3273,7 @@ export const useQueryStore = defineStore("query", () => {
                     : mongoCommand.kind === "findOneAndReplace"
                       ? await api.mongoFindOneAndReplace(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.replacement, mongoCommand.options)
                       : await api.mongoFindOneAndDelete(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.options);
-                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents))));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false))));
                 mongoEditTarget = undefined;
                 queryExecutionLog("info", "mongo-find-and-modify:done", {
                   traceId,
@@ -3620,7 +3620,7 @@ export const useQueryStore = defineStore("query", () => {
         // affected_rows. Use it directly so the result-grid can compute the
         // page count without issuing a separate COUNT query.
         let totalRowCountResolved = false;
-        if (current.result && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
+        if (current.result && current.result.total_is_exact !== false && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
           current.resultTotalRowCount = current.result.affected_rows;
           current.resultTotalRowCountLoading = false;
           totalRowCountResolved = true;

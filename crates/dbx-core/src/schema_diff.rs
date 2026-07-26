@@ -1116,9 +1116,31 @@ fn drop_index_sql(table_name: &str, index_name: &str, db_type: DatabaseType, sch
     }
 }
 
+fn mysql_index_column_sql(column: &str) -> String {
+    let trimmed = column.trim();
+    // MySQL metadata represents a functional key part as an expression wrapped for CREATE INDEX.
+    if trimmed.starts_with("((") && trimmed.ends_with("))") {
+        trimmed.to_string()
+    } else {
+        quote_id(column, DatabaseType::Mysql)
+    }
+}
+
 fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseType, schema: Option<&str>) -> String {
     let table = qualified_name(table_name, db_type, schema);
-    let columns = index.columns.iter().map(|column| quote_id(column, db_type)).collect::<Vec<_>>().join(", ");
+    let columns =
+        index
+            .columns
+            .iter()
+            .map(|column| {
+                if db_type == DatabaseType::Mysql {
+                    mysql_index_column_sql(column)
+                } else {
+                    quote_id(column, db_type)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
     let unique = if index.is_unique { "UNIQUE " } else { "" };
     let index_type = index.index_type.as_deref().unwrap_or_default();
     let using_clause = if !index_type.is_empty() && db_type == DatabaseType::Postgres {
@@ -1752,6 +1774,66 @@ mod tests {
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].diff_type, "modified");
         assert_eq!(diffs[0].changes, vec!["unique: YES → NO", "columns: status → status, created_at"]);
+    }
+
+    #[test]
+    fn detects_mysql_functional_index_changes_and_preserves_expression_ddl() {
+        let functional_key_part = "((case when (`STATUS` = _utf8mb4'online') then _utf8mb4'online' else NULL end))";
+        let source_index = index(IndexInfo {
+            name: "test_UNIQUE".to_string(),
+            columns: vec!["attr".to_string(), "attr2".to_string(), functional_key_part.to_string()],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+        });
+        let target_index = index(IndexInfo {
+            name: "test_UNIQUE".to_string(),
+            columns: vec!["attr".to_string(), "attr2".to_string()],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+        });
+
+        let diffs = diff_indexes(std::slice::from_ref(&source_index), &[target_index]);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].diff_type, "modified");
+        assert_eq!(diffs[0].changes, vec![format!("columns: attr, attr2 → attr, attr2, {functional_key_part}")]);
+
+        let sql = generate_schema_sync_sql(
+            &[TableDiff {
+                diff_type: "modified".to_string(),
+                object_type: Some("table".to_string()),
+                name: "test".to_string(),
+                columns: None,
+                indexes: Some(diffs),
+                foreign_keys: None,
+                triggers: None,
+                ddl: None,
+                target_ddl: None,
+                source_table_comment: None,
+                target_table_comment: None,
+                sync_sql: None,
+            }],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("dbx_issue_4114"),
+            false,
+        );
+
+        assert!(sql.contains("DROP INDEX `test_UNIQUE` ON `dbx_issue_4114`.`test`;"));
+        assert!(sql.contains(&format!(
+            "CREATE UNIQUE INDEX `test_UNIQUE` ON `dbx_issue_4114`.`test` (`attr`, `attr2`, {functional_key_part});"
+        )));
+        assert!(!sql.contains("`((case"));
     }
 
     #[test]

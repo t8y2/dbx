@@ -1,0 +1,67 @@
+/* Keep these classic media queries outside the Vite/Tailwind transform pipeline.
+ * Older WebKit ignores the range syntax emitted by the production CSS build. */
+@media (min-width: 640px) {
+  [data-slot="dialog-content"].connection-dialog-content--picker {
+    width: calc(100vw - 2rem) !important;
+    height: 720px !important;
+    max-width: 880px !important;
+  }
+
+  [data-slot="dialog-content"].connection-dialog-content--standard {
+    max-width: 560px !important;
+  }
+
+  [data-slot="dialog-content"].connection-dialog-content--wide {
+    max-width: 660px !important;
+  }
+
+  .connection-db-picker-toolbar {
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+  }
+
+  .connection-db-picker-search {
+    width: 16rem !important;
+  }
+
+  .connection-db-picker-body {
+    flex-direction: row !important;
+    gap: 1rem !important;
+  }
+
+  [data-connection-category-nav] {
+    width: 10rem !important;
+    flex-direction: column !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    border-right: 1px solid rgb(229, 229, 229) !important;
+    border-bottom-width: 0 !important;
+    padding-top: 0.125rem !important;
+    padding-right: 0.875rem !important;
+    padding-bottom: 0.125rem !important;
+  }
+
+  .connection-db-category-option {
+    width: 100% !important;
+  }
+
+  .connection-db-picker-results {
+    min-width: 0 !important;
+    flex: 1 1 0% !important;
+  }
+
+  .dark [data-connection-category-nav] {
+    border-right-color: rgb(63, 63, 70) !important;
+  }
+
+  .connection-db-picker-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  .connection-db-picker-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  }
+}

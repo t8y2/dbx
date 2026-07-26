@@ -892,6 +892,13 @@ impl ConnectionConfig {
 
     pub fn canonicalized(&self) -> Self {
         let mut config = self.clone();
+        if config.db_type == DatabaseType::SqlServer
+            && sqlserver_legacy_compatibility_param(config.url_params.as_deref())
+        {
+            config.driver_profile = Some("sqlserver-legacy".to_string());
+            config.driver_label = Some("SQL Server legacy compatibility component".to_string());
+            config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
+        }
         if config.db_type == DatabaseType::Mysql
             && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("tdengine"))
         {
@@ -1382,6 +1389,68 @@ fn redis_url_params_enable_insecure(params: Option<&str>) -> bool {
         matches!(key.to_ascii_lowercase().as_str(), "insecure" | "tls_insecure" | "accept_invalid_certs")
             && matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "insecure")
     })
+}
+
+fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> {
+    let source = params.unwrap_or("").trim().trim_start_matches('?');
+    let mut parts = Vec::new();
+    let mut separator = None;
+    let mut start = 0;
+    let mut in_braces = false;
+    let mut chars = source.char_indices().peekable();
+
+    // SQL Server JDBC values use braces to contain separators and `}}` to escape a closing brace.
+    while let Some((index, char)) = chars.next() {
+        if in_braces {
+            if char == '}' && chars.peek().is_some_and(|(_, next)| *next == '}') {
+                chars.next();
+            } else if char == '}' {
+                in_braces = false;
+            }
+        } else if char == '{' {
+            in_braces = true;
+        } else if matches!(char, '&' | ';') {
+            parts.push((separator, &source[start..index]));
+            separator = Some(char);
+            start = index + char.len_utf8();
+        }
+    }
+
+    parts.push((separator, &source[start..]));
+    parts
+}
+
+fn sqlserver_legacy_compatibility_part(part: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    let disabled =
+        matches!(value.trim().to_ascii_lowercase().as_str(), "disabled" | "disable" | "false" | "0" | "off" | "no");
+    key.trim().eq_ignore_ascii_case("sqlserverEncryption") && disabled
+}
+
+fn sqlserver_legacy_compatibility_param(params: Option<&str>) -> bool {
+    sqlserver_url_param_parts(params).into_iter().any(|(_, part)| sqlserver_legacy_compatibility_part(part))
+}
+
+fn without_sqlserver_legacy_compatibility_param(params: Option<&str>) -> Option<String> {
+    let retained = sqlserver_url_param_parts(params)
+        .into_iter()
+        .filter(|(_, part)| !part.trim().is_empty())
+        .filter(|(_, part)| !sqlserver_legacy_compatibility_part(part))
+        .collect::<Vec<_>>();
+    if retained.is_empty() {
+        return None;
+    }
+
+    let mut output = String::new();
+    for (index, (separator, part)) in retained.into_iter().enumerate() {
+        if index > 0 {
+            output.extend(separator);
+        }
+        output.push_str(part);
+    }
+    Some(output)
 }
 
 fn url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
@@ -2003,8 +2072,9 @@ fn bracket_ipv6(host: &str) -> String {
 mod tests {
     use super::{
         database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
-        default_ssh_connect_timeout_secs, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType,
-        IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
+        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo,
+        DatabaseType, IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
     use std::str::FromStr;
 
@@ -2489,6 +2559,49 @@ mod tests {
         assert_eq!(canonical.driver_profile.as_deref(), Some("tdengine"));
         assert_eq!(canonical.driver_label.as_deref(), Some("TDengine"));
         assert!(!canonical.needs_bare_mysql());
+    }
+
+    #[test]
+    fn historical_sqlserver_legacy_setting_is_canonicalized_to_driver_profile() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_string());
+        config.driver_label = Some("SQL Server".to_string());
+        config.url_params =
+            Some("applicationName={DBX; Client};password=50%;sqlserverEncryption=disabled;encrypt=false".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver-legacy"));
+        assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server legacy compatibility component"));
+        assert_eq!(canonical.url_params.as_deref(), Some("applicationName={DBX; Client};password=50%;encrypt=false"));
+        assert_eq!(without_sqlserver_legacy_compatibility_param(Some("sqlserverEncryption=disabled")), None);
+    }
+
+    #[test]
+    fn sqlserver_legacy_migration_respects_escaped_braces() {
+        let params = "applicationName={DBX}}; Client};sqlserverEncryption=disabled;encrypt=false";
+
+        assert!(sqlserver_legacy_compatibility_param(Some(params)));
+        assert_eq!(
+            without_sqlserver_legacy_compatibility_param(Some(params)).as_deref(),
+            Some("applicationName={DBX}}; Client};encrypt=false")
+        );
+    }
+
+    #[test]
+    fn sqlserver_auto_profile_without_historical_setting_stays_native() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_string());
+        config.driver_label = Some("SQL Server".to_string());
+        config.url_params = Some("applicationName=dbx&encrypt=false".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver"));
+        assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server"));
+        assert_eq!(canonical.url_params.as_deref(), Some("applicationName=dbx&encrypt=false"));
     }
 
     #[test]

@@ -2688,8 +2688,8 @@ const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || 
 const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLegacyCompatibility(form.value) ? "legacy" : "auto"));
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
-  if (dialogStep.value === "select") return "sm:h-[720px] sm:max-w-[880px]";
-  return shouldUseWideConnectionDialog.value ? "sm:max-w-[660px]" : "sm:max-w-[560px]";
+  if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
+  return shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
 });
 const connectionLabelClass = "justify-self-start text-left";
 const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
@@ -4528,7 +4528,7 @@ function openExternalUrl(url: string) {
 
       <template v-if="dialogStep === 'select'">
         <div class="flex min-h-0 flex-1 flex-col gap-4">
-          <div class="flex flex-col gap-3 p-0.5 sm:flex-row sm:items-center sm:justify-between">
+          <div class="connection-db-picker-toolbar flex flex-col gap-3 p-0.5 sm:flex-row sm:items-center sm:justify-between">
             <div class="flex items-center gap-2">
               <div class="flex shrink-0 rounded-lg border bg-muted/40 p-0.5">
                 <Button
@@ -4556,7 +4556,7 @@ function openExternalUrl(url: string) {
                   <List class="h-3.5 w-3.5" />
                 </Button>
               </div>
-              <div class="relative w-full sm:w-64">
+              <div class="connection-db-picker-search relative w-full sm:w-64">
                 <Search class="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input v-model="dbSearchQuery" v-connection-dialog-auto-focus class="h-9 pl-8" :placeholder="t('connection.searchDatabasePlaceholder')" />
               </div>
@@ -4567,14 +4567,14 @@ function openExternalUrl(url: string) {
             </Button>
           </div>
 
-          <div class="min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-4">
+          <div class="connection-db-picker-body min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-4">
             <nav data-connection-category-nav class="flex shrink-0 gap-1 overflow-x-auto border-b px-0.5 pt-0.5 pb-2.5 sm:w-40 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:py-0.5 sm:pr-3.5" :aria-label="t('connection.databaseCategories')">
               <button
                 v-for="category in dbCategories"
                 :key="category.key"
                 type="button"
-                class="shrink-0 whitespace-nowrap rounded-[4px] px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-full"
-                :class="!isDbSearchActive && selectedDbCategory === category.key ? 'bg-primary/10 font-medium text-primary hover:bg-primary/10' : 'text-muted-foreground hover:bg-muted/70'"
+                class="connection-db-category-option shrink-0 whitespace-nowrap rounded-[4px] px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-full"
+                :class="!isDbSearchActive && selectedDbCategory === category.key ? 'connection-db-category-option--selected bg-primary/10 font-medium text-primary hover:bg-primary/10' : 'text-muted-foreground hover:bg-muted/70'"
                 :aria-current="!isDbSearchActive && selectedDbCategory === category.key ? 'page' : undefined"
                 @click="selectDbCategory(category.key)"
               >
@@ -4582,7 +4582,7 @@ function openExternalUrl(url: string) {
               </button>
             </nav>
 
-            <div class="min-w-0 flex-1 space-y-5 overflow-y-auto p-0.5 pr-2">
+            <div class="connection-db-picker-results min-w-0 flex-1 space-y-5 overflow-y-auto p-0.5 pr-2">
               <div v-if="isDbSearchActive" class="text-sm font-medium">{{ t("connection.searchResults") }}</div>
 
               <section v-for="category in visibleDbCategories" :key="category.key" class="space-y-2">
@@ -6898,15 +6898,27 @@ function openExternalUrl(url: string) {
   max-height: calc(var(--dbx-viewport-height) - 2rem);
 }
 
-@media (min-width: 640px) {
-  .connection-db-picker-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+/* Legacy responsive layout rules live in public/connection-dialog-legacy.css
+ * so the production build cannot rewrite their classic media queries. */
+@supports not (color: oklch(0.5 0.1 180)) {
+  .connection-db-category-option--selected {
+    color: rgb(23, 23, 23) !important;
+    background-color: rgba(23, 23, 23, 0.08) !important;
   }
-}
 
-@media (min-width: 1024px) {
-  .connection-db-picker-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  .connection-db-category-option--selected:hover {
+    color: rgb(23, 23, 23) !important;
+    background-color: rgba(23, 23, 23, 0.12) !important;
+  }
+
+  .dark .connection-db-category-option--selected {
+    color: rgb(244, 244, 245) !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+  }
+
+  .dark .connection-db-category-option--selected:hover {
+    color: rgb(244, 244, 245) !important;
+    background-color: rgba(255, 255, 255, 0.14) !important;
   }
 }
 

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, inferJdbcDialect, sqlSnippetDatabaseTypeForConnection } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
+import { codeMirrorSqlDialectForConnection, connectionShouldDiscoverJdbcSchemas, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect, sqlSnippetDatabaseTypeForConnection } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
 test("infers GoldenDB for generic JDBC connections", () => {
   assert.equal(
@@ -27,6 +27,29 @@ test("infers JDBC dialect from driver profile", () => {
     }),
     "sqlserver",
   );
+});
+
+test("infers GaussDB-compatible JDBC connections as schema-aware", () => {
+  const gaussdbConnection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:gaussdb://127.0.0.1:8000/testdb",
+    jdbc_driver_class: "com.huawei.gaussdb.jdbc.Driver",
+  };
+  const opengaussConnection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:opengauss://127.0.0.1:5432/postgres",
+    jdbc_driver_class: "org.opengauss.Driver",
+  };
+
+  assert.equal(inferJdbcDialect(gaussdbConnection), "gaussdb");
+  assert.equal(connectionUsesDatabaseObjectTreeMode(gaussdbConnection), false);
+  assert.equal(inferJdbcDialect(opengaussConnection), "opengauss");
+  assert.equal(connectionUsesDatabaseObjectTreeMode(opengaussConnection), false);
+});
+
+test("discovers schemas only for unknown generic JDBC connections", () => {
+  assert.equal(connectionShouldDiscoverJdbcSchemas({ db_type: "jdbc", driver_profile: "jdbc" }), true);
+  assert.equal(connectionShouldDiscoverJdbcSchemas({ db_type: "jdbc", connection_string: "jdbc:mysql://127.0.0.1:3306/app" }), false);
 });
 
 test("uses SQL Server editor syntax for ASE without changing its effective JDBC type", () => {

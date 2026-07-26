@@ -1020,6 +1020,15 @@ test("mongoDocumentsToQueryResult keeps aligned extended documents for copying",
   assert.equal(mongoDocumentsToQueryResult(documents, 5, 1, []).mongo_copy_documents, undefined);
 });
 
+test("mongoDocumentsToQueryResult preserves an inexact total marker", () => {
+  const result = mongoDocumentsToQueryResult([{ _id: "1" }], 5, 10_000_000, undefined, false);
+
+  assert.equal(result.total_is_exact, false);
+  assert.equal(result.affected_rows, 10_000_000);
+  assert.equal(result.truncated, true);
+  assert.equal(mongoDocumentsToQueryResult([{ _id: "1" }], 5, 1).total_is_exact, undefined);
+});
+
 test("mongoDocumentsToQueryResult displays ids without losing raw type metadata", () => {
   const documents = [
     { _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" }, name: "object id" },

@@ -47,14 +47,14 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionShouldDiscoverJdbcSchemas, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
-import { requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
+import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 import {
@@ -910,6 +910,8 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function normalizeConnection(config: ConnectionConfig): ConnectionConfig {
+    config = { ...config };
+    migrateSqlServerLegacyCompatibilityConfig(config);
     const labelMap: Record<string, string> = {
       mysql: "MySQL",
       postgres: "PostgreSQL",
@@ -3146,6 +3148,13 @@ export const useConnectionStore = defineStore("connection", () => {
                 children: [],
               };
             });
+          if (schemas.length === 0 && connectionShouldDiscoverJdbcSchemas(getConfig(connectionId))) {
+            // Generic JDBC drivers vary widely: prefer schema navigation when the
+            // driver reports schemas, but keep the legacy flat object tree when it
+            // reports none so non-schema engines do not expand into an empty node.
+            await loadTables(connectionId, database, undefined, options);
+            return;
+          }
           if (isPostgresLikeForExtensions(getConfig(connectionId)?.db_type)) {
             children.push(buildExtensionManagementNode(connectionId, database));
           }
@@ -4393,7 +4402,7 @@ export const useConnectionStore = defineStore("connection", () => {
         const effectiveDbType = effectiveDatabaseTypeForConnection(config);
         if (config?.db_type === "sqlserver") {
           await loadSqlServerDatabaseObjects(node.connectionId, node.database, options);
-        } else if (usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) {
+        } else if ((usesTreeSchemaMode(effectiveDbType) && !connectionUsesDatabaseObjectTreeMode(config)) || connectionShouldDiscoverJdbcSchemas(config)) {
           await loadSchemas(node.connectionId, node.database, options);
         } else {
           await loadTables(node.connectionId, node.database, undefined, options);
@@ -4535,7 +4544,12 @@ export const useConnectionStore = defineStore("connection", () => {
     return `${connectionId}:${database}:${catalog?.toLowerCase() ?? ""}:${schema?.toLowerCase() ?? ""}`;
   }
 
-  function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string, catalog?: string): string {
+  function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string, catalog?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): string {
+    if (getConfig(connectionId)?.db_type === "oracle") {
+      const normalizedTable = context?.tableQuoted === false ? table.toUpperCase() : table;
+      const normalizedSchema = schema && context?.schemaQuoted === false ? schema.toUpperCase() : (schema ?? "");
+      return `${connectionId}:${database}:${catalog ?? ""}:${normalizedSchema}:${normalizedTable}`;
+    }
     return `${completionTableScopeKey(connectionId, database, schema, catalog)}:${table.toLowerCase()}`;
   }
 
@@ -4905,8 +4919,8 @@ export const useConnectionStore = defineStore("connection", () => {
     return result;
   }
 
-  function lookupLocalCompletionColumns(connectionId: string, database: string, table: string, schema?: string, catalog?: string): SqlCompletionColumn[] {
-    return completionColumnIndex.get(completionColumnsKey(connectionId, database, table, schema, catalog))?.columns ?? [];
+  function lookupLocalCompletionColumns(connectionId: string, database: string, table: string, schema?: string, catalog?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): SqlCompletionColumn[] {
+    return completionColumnIndex.get(completionColumnsKey(connectionId, database, table, schema, catalog, context))?.columns ?? [];
   }
 
   function lookupLocalCompletionForeignKeys(connectionId: string, database: string, table: string, schema?: string): SqlCompletionForeignKey[] {
@@ -5255,15 +5269,18 @@ export const useConnectionStore = defineStore("connection", () => {
     return deduped;
   }
 
-  async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number }, catalog?: string): Promise<SqlCompletionColumn[]> {
+  async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean }, catalog?: string): Promise<SqlCompletionColumn[]> {
     const config = getConfig(connectionId);
-    const completionSchema = schema?.trim() || undefined;
+    const oracleIdentifier = config?.db_type === "oracle";
+    const completionTable = oracleIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
+    const rawCompletionSchema = schema?.trim() || undefined;
+    const completionSchema = oracleIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
     const usesOracleCurrentSchema = config?.db_type === "oracle" && !completionSchema;
     if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !completionSchema && !usesOracleCurrentSchema) {
       return [];
     }
     const sessionCacheScope = usesOracleCurrentSchema && context?.clientSessionId ? `:${context.clientSessionId}:${context.version ?? 0}` : "";
-    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${schema || ""}:${table}${sessionCacheScope}`;
+    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${completionSchema || ""}:${completionTable}${sessionCacheScope}`;
     if (!completionColumnsCache.value[cacheKey]) {
       await withCompletionInFlight(
         `${cacheKey}:columns`,
@@ -5271,7 +5288,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (!usesOracleCurrentSchema && !catalog) {
             try {
-              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, table, completionSchema);
+              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema);
               if (assistantColumns.length > 0) {
                 completionColumnsCache.value[cacheKey] = assistantColumns.map((column) => ({
                   name: column.name,
@@ -5293,7 +5310,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
           const querySchema = usesOracleCurrentSchema ? "" : metadataQuerySchema(connectionId, database, completionSchema);
-          completionColumnsCache.value[cacheKey] = await api.getColumns(connectionId, database, querySchema, table, catalog, usesOracleCurrentSchema ? context?.clientSessionId : undefined);
+          completionColumnsCache.value[cacheKey] = await api.getColumns(connectionId, database, querySchema, completionTable, catalog, usesOracleCurrentSchema ? context?.clientSessionId : undefined);
           evictOldestCacheEntries(completionColumnsCache.value, COMPLETION_CACHE_MAX);
         },
         { scope: completionLimiterScope(connectionId, database), kind: "columns" },
@@ -5302,13 +5319,13 @@ export const useConnectionStore = defineStore("connection", () => {
 
     const columns = completionColumnsCache.value[cacheKey].map((column) => ({
       name: column.name,
-      table,
+      table: completionTable,
       schema: completionSchema,
       dataType: column.data_type,
       isNullable: column.is_nullable,
       comment: column.comment,
     }));
-    if (!usesOracleCurrentSchema) indexCompletionColumns(connectionId, database, table, schema, columns, catalog);
+    if (!usesOracleCurrentSchema) indexCompletionColumns(connectionId, database, completionTable, completionSchema, columns, catalog);
     return columns;
   }
 
@@ -5354,7 +5371,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return listCompletionDatabases(connectionId);
   }
 
-  function refreshCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number }, catalog?: string): Promise<SqlCompletionColumn[]> {
+  function refreshCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean }, catalog?: string): Promise<SqlCompletionColumn[]> {
     return listCompletionColumns(connectionId, database, table, schema, context, catalog);
   }
 

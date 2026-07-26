@@ -512,6 +512,8 @@ pub struct AgentConnectionInfo {
     #[serde(default)]
     pub identifier_quote: String,
     #[serde(default)]
+    pub compatibility_mode: Option<String>,
+    #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
 }
 

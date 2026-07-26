@@ -71,6 +71,26 @@ export interface SidebarCommentAlignmentItem {
   labelWidth: number;
 }
 
+export interface SidebarTreeNaturalWidthItem {
+  depth: number;
+  label: string;
+  usesNaturalWidth: boolean;
+  trailingWidth?: number;
+}
+
+// Right padding, expander/icon widths and the two flex gaps before the label.
+const sidebarTreeRowChromeWidth = 54;
+
+export function sidebarTreeNaturalContentWidth(items: readonly SidebarTreeNaturalWidthItem[], measureText: (text: string) => number): number {
+  let width = 0;
+  for (const item of items) {
+    if (!item.usesNaturalWidth) continue;
+    const paddingLeft = item.depth * 16 + 8;
+    width = Math.max(width, Math.ceil(paddingLeft + sidebarTreeRowChromeWidth + measureText(item.label) + (item.trailingWidth ?? 0)));
+  }
+  return width;
+}
+
 export function alignedSidebarCommentLabelWidths(items: readonly SidebarCommentAlignmentItem[]): Map<string, number> {
   const ancestorIds: string[] = [];
   const parentIdByCommentId = new Map<string, string>();

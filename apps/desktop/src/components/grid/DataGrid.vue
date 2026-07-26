@@ -133,7 +133,7 @@ import { applyColumnFormatter, buildColumnFormatterKey, getSupportedTimeZoneOpti
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
-import { canGoNextDataGridPage, hasCompleteLocalDataGridResult } from "@/lib/dataGrid/dataGridPagination";
+import { canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, dataGridSearchMatchKey, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
@@ -2398,7 +2398,13 @@ const displayedTotalRowCount = computed(() => serverKnownTotalRowCount.value ?? 
 const totalRowCountIsExact = computed(() => props.totalRowCountIsExact !== false);
 // A backend can expose an exact display total while deliberately restricting
 // offset pagination to a smaller safe range.
-const paginationTotalRowCount = computed(() => props.paginationTotalRowCount ?? serverKnownTotalRowCount.value);
+const paginationTotalRowCount = computed(() =>
+  resolveDataGridPaginationTotal({
+    paginationTotalRowCount: props.paginationTotalRowCount,
+    serverKnownTotalRowCount: serverKnownTotalRowCount.value,
+    totalRowCountIsExact: totalRowCountIsExact.value,
+  }),
+);
 // Only a server-confirmed total drives pagination — an inferred total means
 // rows exist that we never fetched, so navigation must stay inside rows.length.
 const hasKnownPaginationTotalRowCount = computed(() => typeof paginationTotalRowCount.value === "number" && paginationTotalRowCount.value >= 0);
@@ -2763,6 +2769,8 @@ const {
   isSaving,
   saveError,
   useTransaction,
+  beginBatch,
+  commitBatch,
   exitTransaction,
   startEdit,
   commitEdit,
@@ -5468,28 +5476,33 @@ function fillSelectionWithValue(value: string | null): boolean {
   const range = selectedRange.value;
   let applied = false;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
-  if (range) {
-    for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+  beginBatch();
+  try {
+    if (range) {
+      for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+        const item = displayItemAt(rowIndex);
+        if (!item) continue;
+        for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
+          applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue) || applied;
+        }
+      }
+      return applied;
+    }
+
+    if (!hasColumnSelection.value) return false;
+    const visibleColumnIndexes = selectedVisibleColumnIndexes();
+    if (!visibleColumnIndexes.length) return false;
+    for (let rowIndex = 0; rowIndex < displayRowCount.value; rowIndex++) {
       const item = displayItemAt(rowIndex);
       if (!item) continue;
-      for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
-        applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue) || applied;
+      for (const visibleCol of visibleColumnIndexes) {
+        applied = applyVisibleSelectedCellValue(item, visibleCol, value) || applied;
       }
     }
     return applied;
+  } finally {
+    commitBatch();
   }
-
-  if (!hasColumnSelection.value) return false;
-  const visibleColumnIndexes = selectedVisibleColumnIndexes();
-  if (!visibleColumnIndexes.length) return false;
-  for (let rowIndex = 0; rowIndex < displayRowCount.value; rowIndex++) {
-    const item = displayItemAt(rowIndex);
-    if (!item) continue;
-    for (const visibleCol of visibleColumnIndexes) {
-      applied = applyVisibleSelectedCellValue(item, visibleCol, value) || applied;
-    }
-  }
-  return applied;
 }
 
 function selectionHasEditableCells(): boolean {
@@ -5572,9 +5585,14 @@ function applyGeneratedSelectionValue(kind: CellValueGenerationKind, startValue 
   const values = generateCellValues(kind, cells.length, { startValue });
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
   let applied = false;
-  cells.forEach((cell, index) => {
-    applied = applyVisibleSelectedCellValue(cell.item, cell.visibleCol, values[index] ?? null, allowDraftSelectionValue, { preserveEmptyString: kind === "empty" }) || applied;
-  });
+  beginBatch();
+  try {
+    cells.forEach((cell, index) => {
+      applied = applyVisibleSelectedCellValue(cell.item, cell.visibleCol, values[index] ?? null, allowDraftSelectionValue, { preserveEmptyString: kind === "empty" }) || applied;
+    });
+  } finally {
+    commitBatch();
+  }
   if (applied) toast(t("grid.generatedValuesApplied", { count: cells.length }));
   return applied;
 }
@@ -5628,12 +5646,17 @@ function cutSelection() {
   copySelectionTsv();
   const range = selectedRange.value;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
-  for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
-    const item = displayItemAt(rowIndex);
-    if (!item) continue;
-    for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
-      applyVisibleSelectedCellValue(item, visibleCol, null, allowDraftSelectionValue);
+  beginBatch();
+  try {
+    for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+      const item = displayItemAt(rowIndex);
+      if (!item) continue;
+      for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
+        applyVisibleSelectedCellValue(item, visibleCol, null, allowDraftSelectionValue);
+      }
     }
+  } finally {
+    commitBatch();
   }
 }
 

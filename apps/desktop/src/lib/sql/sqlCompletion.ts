@@ -1204,8 +1204,10 @@ export type SqlKeywordCase = "preserve" | "upper" | "lower";
 
 export interface SqlCompletionReferencedTable {
   name: string;
+  nameQuoted?: boolean;
   database?: string;
   schema?: string;
+  schemaQuoted?: boolean;
   alias?: string;
   columns?: string[];
   columnAliases?: string[];
@@ -2504,13 +2506,16 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
       referenced.push({ name: unquoteIdentifier(rawName), alias: cleanAlias });
       continue;
     }
-    const parts = splitQualifiedNameParts(rawName);
+    const rawParts = splitQualifiedNameRawParts(rawName);
+    const parts = rawParts.map((part) => unquoteIdentifier(part)).filter(Boolean);
     const name = parts[parts.length - 1];
     if (!name) continue;
     const table: SqlCompletionReferencedTable = {
       name,
+      nameQuoted: isQuotedIdentifier(rawParts[rawParts.length - 1]),
       database: parts.length >= 3 ? parts[parts.length - 3] : undefined,
       schema: parts.length >= 2 ? parts[parts.length - 2] : undefined,
+      schemaQuoted: parts.length >= 2 ? isQuotedIdentifier(rawParts[rawParts.length - 2]) : undefined,
       alias: cleanAlias,
     };
     referenced.push(table);
@@ -2771,6 +2776,12 @@ function splitQualifiedName(input: string): [string | undefined, string | undefi
 }
 
 function splitQualifiedNameParts(input: string): string[] {
+  return splitQualifiedNameRawParts(input)
+    .map((part) => unquoteIdentifier(part))
+    .filter(Boolean);
+}
+
+function splitQualifiedNameRawParts(input: string): string[] {
   const parts: string[] = [];
   let current = "";
   let inDoubleQuote = false;
@@ -2800,7 +2811,12 @@ function splitQualifiedNameParts(input: string): string[] {
   }
   if (current.trim()) parts.push(current.trim());
 
-  return parts.map((p) => unquoteIdentifier(p)).filter(Boolean);
+  return parts;
+}
+
+function isQuotedIdentifier(value: string | undefined): boolean {
+  if (!value) return false;
+  return (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("`") && value.endsWith("`")) || (value.startsWith("[") && value.endsWith("]"));
 }
 
 function unquoteIdentifier(value: string): string {
@@ -2942,13 +2958,26 @@ function buildTableItems(
   const { prefix } = context;
   const qualifierSchema = context.qualifier?.split(".").filter(Boolean).pop();
   const existingAliases = new Set(referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
-  return tables
-    .filter((table) => matchesPrefix(table.name, prefix))
+  const matchingTables = tables.filter((table) => matchesPrefix(table.name, prefix));
+  const schemasByTableName = new Map<string, Set<string>>();
+  for (const table of matchingTables) {
+    const tableName = normalizeIdentifierPart(table.name);
+    const schemas = schemasByTableName.get(tableName) ?? new Set<string>();
+    schemas.add(normalizeIdentifierPart(table.schema ?? ""));
+    schemasByTableName.set(tableName, schemas);
+  }
+  return matchingTables
     .map((table) => {
       const qualifiedByContext = !!qualifierSchema && !!table.schema && normalizeIdentifierPart(qualifierSchema) === normalizeIdentifierPart(table.schema);
       const oracleSchemaQualification = databaseType === "oracle" && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
-      const defaultApplyName = oracleSchemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
-      const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : (table.applyName ?? defaultApplyName);
+      // A bare table name is ambiguous when metadata contains the same name in multiple schemas.
+      // Keep Oracle's current-schema behavior, but qualify the generic/PostgreSQL/SQL Server paths.
+      const ambiguousTableName = databaseType !== "oracle" && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
+      const schemaQualification = !!table.schema && (oracleSchemaQualification || ambiguousTableName);
+      const defaultApplyName = schemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
+      const suppliedApplyName = table.applyName?.trim();
+      const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
+      const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
       return {
         label: table.name,
@@ -2956,7 +2985,7 @@ function buildTableItems(
         detail: table.detail ?? (table.schema ? `${table.schema}.${table.name}` : table.type),
         apply: formatTableAliasApply(applyName, alias, databaseType),
         boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
-        dedupeKey: table.applyName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
+        dedupeKey: table.applyName || ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
       };
     })
     .sort(compareCompletionItems)

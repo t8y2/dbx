@@ -3799,38 +3799,75 @@ fn skip_sql_whitespace_and_comments(bytes: &[u8], mut i: usize) -> usize {
     }
 }
 
-pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
-    let sql = format!(
-        "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns, \
-         MIN(NON_UNIQUE) = 0 AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary, \
-         INDEX_TYPE, MAX(NULLIF(INDEX_COMMENT, '')) AS INDEX_COMMENT \
+fn mysql_list_indexes_sql(database: &str, table: &str, include_expression: bool) -> String {
+    let expression_column = if include_expression { "EXPRESSION, " } else { "" };
+    format!(
+        "SELECT INDEX_NAME, COLUMN_NAME, {expression_column}SEQ_IN_INDEX, NON_UNIQUE, INDEX_TYPE, INDEX_COMMENT \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-         GROUP BY INDEX_NAME, INDEX_TYPE \
-         ORDER BY INDEX_NAME",
+         ORDER BY INDEX_NAME, SEQ_IN_INDEX",
         quote_value(database),
         quote_value(table),
-    );
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    )
+}
 
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let cols_str = get_str_by_name(row, "columns");
-            IndexInfo {
-                name: get_str_by_name(row, "INDEX_NAME"),
-                columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
-                is_unique: row.get::<bool, &str>("is_unique").unwrap_or(false),
-                is_primary: row.get::<bool, &str>("is_primary").unwrap_or(false),
-                filter: None,
-                index_type: Some(get_str_by_name(row, "INDEX_TYPE")),
-                included_columns: None,
-                comment: get_opt_str(row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
+fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> bool {
+    matches!(error, mysql_async::Error::Server(server_error) if server_error.code == 1054)
+}
+
+pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let expression_sql = mysql_list_indexes_sql(database, table, true);
+    let legacy_sql = mysql_list_indexes_sql(database, table, false);
+    let (result, include_expression) = match conn.query_iter(&expression_sql).await {
+        Ok(result) => (result, true),
+        Err(error) if mysql_statistics_expression_is_unsupported(&error) => {
+            // MySQL 5.7 and older compatible servers do not expose EXPRESSION; keep the legacy metadata path.
+            log::debug!("MySQL index expressions are unavailable, retrying without EXPRESSION: {error}");
+            (conn.query_iter(&legacy_sql).await.map_err(|e| e.to_string())?, false)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut indexes = Vec::new();
+    let mut index_positions = HashMap::new();
+
+    result
+        .for_each_and_drop(|row| {
+            let name = get_str_by_name(&row, "INDEX_NAME");
+            let index_position = if let Some(index_position) = index_positions.get(&name) {
+                *index_position
+            } else {
+                let index_position = indexes.len();
+                index_positions.insert(name.clone(), index_position);
+                indexes.push(IndexInfo {
+                    name: name.clone(),
+                    columns: Vec::new(),
+                    is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
+                    is_primary: name == "PRIMARY",
+                    filter: None,
+                    index_type: Some(get_str_by_name(&row, "INDEX_TYPE")),
+                    included_columns: None,
+                    comment: get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
+                });
+                index_position
+            };
+
+            let index_part = if include_expression {
+                get_opt_str(&row, "EXPRESSION")
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|expression| format!("({})", expression.trim()))
+                    .or_else(|| get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty()))
+            } else {
+                get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty())
+            };
+            if let Some(index_part) = index_part {
+                indexes[index_position].columns.push(index_part);
             }
         })
-        .collect())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(indexes)
 }
 
 pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str) -> Result<String, String> {
@@ -4907,6 +4944,33 @@ mod tests {
             mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
             Some(MySqlSetupMode::Compatible)
         );
+    }
+
+    #[test]
+    fn mysql_index_metadata_query_has_expression_compatibility_fallback() {
+        let with_expression = mysql_list_indexes_sql("db", "users", true);
+        assert!(with_expression.contains("EXPRESSION, SEQ_IN_INDEX"));
+
+        let without_expression = mysql_list_indexes_sql("db", "users", false);
+        assert!(!without_expression.contains("EXPRESSION"));
+        assert!(without_expression.contains("ORDER BY INDEX_NAME, SEQ_IN_INDEX"));
+    }
+
+    #[test]
+    fn mysql_index_metadata_falls_back_only_for_unknown_expression_column() {
+        let unsupported = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1054,
+            message: "Unknown column 'EXPRESSION'".to_string(),
+            state: "42S22".to_string(),
+        });
+        let permission_denied = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1044,
+            message: "Access denied".to_string(),
+            state: "42000".to_string(),
+        });
+
+        assert!(mysql_statistics_expression_is_unsupported(&unsupported));
+        assert!(!mysql_statistics_expression_is_unsupported(&permission_denied));
     }
 
     #[test]

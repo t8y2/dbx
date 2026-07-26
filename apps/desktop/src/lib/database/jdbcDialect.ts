@@ -12,6 +12,8 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
   { type: "hive", patterns: [/org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
   { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /kyuubi/i, /hive2/i] },
+  { type: "gaussdb", patterns: [/jdbc:gaussdb:/i, /com\.huawei\.gaussdb/i, /gaussdb/i] },
+  { type: "opengauss", patterns: [/jdbc:opengauss:/i, /org\.opengauss/i, /opengauss/i] },
   { type: "postgres", patterns: [/jdbc:postgresql:/i, /postgres/i] },
   { type: "sqlserver", patterns: [/jdbc:sqlserver:/i, /sqlserver/i, /mssql/i] },
   { type: "oracle", patterns: [/jdbc:oracle:/i, /oracle/i] },
@@ -76,6 +78,10 @@ export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectCon
   return !usesTreeSchemaMode(dialect);
 }
 
+export function connectionShouldDiscoverJdbcSchemas(connection?: JdbcDialectConnection): boolean {
+  return connection?.db_type === "jdbc" && !inferJdbcDialect(connection);
+}
+
 export function connectionUsesSchemaExecutionContext(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): boolean {
   return connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend";
 }
@@ -103,7 +109,6 @@ export function metadataSchemaForConnection(connection: JdbcDialectConnection | 
 }
 
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
-  if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   if (schema) return schema;

@@ -414,25 +414,27 @@ function usesOracleSessionCompletionColumns(schema?: string | null): boolean {
   });
 }
 
-function completionColumnRequestContext() {
+function completionColumnRequestContext(reference?: Pick<SqlCompletionReferencedTable, "nameQuoted" | "schemaQuoted">) {
   return {
     clientSessionId: props.clientSessionId,
     version: props.completionContextVersion,
+    tableQuoted: reference?.nameQuoted,
+    schemaQuoted: reference?.schemaQuoted,
   };
 }
 
-async function listCompletionColumnsForEditor(connectionId: string, database: string, table: string, schema?: string, catalog = props.catalog) {
+async function listCompletionColumnsForEditor(connectionId: string, database: string, table: string, schema?: string, catalog = props.catalog, reference?: Pick<SqlCompletionReferencedTable, "nameQuoted" | "schemaQuoted">) {
   const requestedVersion = props.completionContextVersion;
   const sessionScoped = usesOracleSessionCompletionColumns(schema);
-  const columns = await connectionStore.listCompletionColumns(connectionId, database, table, schema, completionColumnRequestContext(), catalog);
+  const columns = await connectionStore.listCompletionColumns(connectionId, database, table, schema, completionColumnRequestContext(reference), catalog);
   if (sessionScoped && requestedVersion !== props.completionContextVersion) throw new Error("Stale Oracle completion context");
   return columns;
 }
 
-async function refreshCompletionColumnsForEditor(connectionId: string, database: string, table: string, schema?: string, catalog = props.catalog) {
+async function refreshCompletionColumnsForEditor(connectionId: string, database: string, table: string, schema?: string, catalog = props.catalog, reference?: Pick<SqlCompletionReferencedTable, "nameQuoted" | "schemaQuoted">) {
   const requestedVersion = props.completionContextVersion;
   const sessionScoped = usesOracleSessionCompletionColumns(schema);
-  const columns = await connectionStore.refreshCompletionColumns(connectionId, database, table, schema, completionColumnRequestContext(), catalog);
+  const columns = await connectionStore.refreshCompletionColumns(connectionId, database, table, schema, completionColumnRequestContext(reference), catalog);
   if (sessionScoped && requestedVersion !== props.completionContextVersion) throw new Error("Stale Oracle completion context");
   return columns;
 }
@@ -2688,7 +2690,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
       continue;
     }
     const target = completionMetadataTarget(refTable);
-    const localColumns = target && !usesOracleSessionCompletionColumns(target.schema) ? connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, refTable.name, target.schema, target.catalog) : [];
+    const localColumns = target && !usesOracleSessionCompletionColumns(target.schema) ? connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, refTable.name, target.schema, target.catalog, refTable) : [];
     if (localColumns.length > 0) {
       columnsByTable.set(cacheKey, localColumns);
     }
@@ -2795,7 +2797,7 @@ function scheduleCompletionMetadataRefresh(completionContext: ReturnType<typeof 
       if (cachedColumnsByTable.has(cacheKey)) continue;
       const target = completionMetadataTarget(refTable);
       if (!target) continue;
-      void refreshCompletionColumnsForEditor(connectionId, target.database, refTable.name, target.schema, target.catalog)
+      void refreshCompletionColumnsForEditor(connectionId, target.database, refTable.name, target.schema, target.catalog, refTable)
         .then((columns) => {
           if (columns.length > 0) cachedColumnsByTable.set(cacheKey, columns);
         })
@@ -3048,7 +3050,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
         try {
           const target = completionMetadataTarget(refTable);
           if (!target) return;
-          const columns = await listCompletionColumnsForEditor(props.connectionId!, target.database, refTable.name, target.schema, target.catalog);
+          const columns = await listCompletionColumnsForEditor(props.connectionId!, target.database, refTable.name, target.schema, target.catalog, refTable);
           if (epoch !== completionEpoch) return;
           if (columns.length === 0) return;
           cachedColumnsByTable.set(cacheKey, columns);
@@ -3911,7 +3913,7 @@ onMounted(async () => {
                   try {
                     const target = completionMetadataTarget(refTable);
                     if (!target) continue;
-                    cols = await listCompletionColumnsForEditor(props.connectionId!, target.database, refTable.name, target.schema, target.catalog);
+                    cols = await listCompletionColumnsForEditor(props.connectionId!, target.database, refTable.name, target.schema, target.catalog, refTable);
                     cachedColumnsByTable.set(cacheKey, cols);
                   } catch {
                     continue;

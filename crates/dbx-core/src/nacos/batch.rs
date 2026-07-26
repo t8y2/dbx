@@ -23,8 +23,14 @@ pub async fn export_config_archive(
     destination: &Path,
 ) -> Result<NacosBatchReport, String> {
     let configs = resolve_selector(admin, &selector).await?;
-    let bytes = encode_config_archive(&configs)?;
-    std::fs::write(destination, bytes)
+    let (configs, bytes) = tokio::task::spawn_blocking(move || {
+        let bytes = encode_config_archive(&configs)?;
+        Ok::<_, String>((configs, bytes))
+    })
+    .await
+    .map_err(|error| format!("Failed to encode Nacos configuration archive: {error}"))??;
+    tokio::fs::write(destination, bytes)
+        .await
         .map_err(|error| format!("Failed to write Nacos configuration archive {}: {error}", destination.display()))?;
     let items = configs
         .iter()
@@ -56,7 +62,7 @@ pub async fn preview_import(
     target_namespace: &str,
     archive_path: &Path,
 ) -> Result<NacosBatchPreview, String> {
-    let configs = read_archive(archive_path, target_namespace)?;
+    let configs = read_archive(archive_path, target_namespace).await?;
     preview_configs(admin, &configs).await
 }
 
@@ -68,7 +74,7 @@ pub async fn apply_import(
     plan_hash: &str,
     policy: &NacosConflictPolicy,
 ) -> Result<NacosBatchReport, String> {
-    let configs = read_archive(archive_path, target_namespace)?;
+    let configs = read_archive(archive_path, target_namespace).await?;
     apply_configs(admin, configs, operation_id, plan_hash, policy).await
 }
 
@@ -458,15 +464,21 @@ fn batch_result(config: &NacosConfigUpsert, status: &str, message: Option<String
     }
 }
 
-fn read_archive(path: &Path, target_namespace: &str) -> Result<Vec<NacosConfigUpsert>, String> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|error| format!("Failed to inspect Nacos archive {}: {error}", path.display()))?;
-    if metadata.len() > MAX_ARCHIVE_BYTES {
-        return Err("Nacos archive exceeds the 100 MiB limit".to_string());
-    }
-    let bytes =
-        std::fs::read(path).map_err(|error| format!("Failed to read Nacos archive {}: {error}", path.display()))?;
-    decode_config_archive(&bytes, target_namespace)
+async fn read_archive(path: &Path, target_namespace: &str) -> Result<Vec<NacosConfigUpsert>, String> {
+    let path = path.to_path_buf();
+    let target_namespace = target_namespace.to_string();
+    tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::metadata(&path)
+            .map_err(|error| format!("Failed to inspect Nacos archive {}: {error}", path.display()))?;
+        if metadata.len() > MAX_ARCHIVE_BYTES {
+            return Err("Nacos archive exceeds the 100 MiB limit".to_string());
+        }
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("Failed to read Nacos archive {}: {error}", path.display()))?;
+        decode_config_archive(&bytes, &target_namespace)
+    })
+    .await
+    .map_err(|error| format!("Failed to process Nacos configuration archive: {error}"))?
 }
 
 #[cfg(test)]

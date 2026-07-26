@@ -407,11 +407,12 @@ pub async fn export_configs(
     let _ = tokio::fs::remove_file(&archive_path).await;
     let archive = archive?;
     let file_name = sanitize_archive_file_name(req.file_name.as_deref().unwrap_or("nacos-configs.zip"));
+    let content_disposition = archive_content_disposition(&file_name);
 
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{file_name}\""))
+        .header(header::CONTENT_DISPOSITION, content_disposition)
         .body(Body::from(archive))
         .map_err(|error| AppError::from(error.to_string()))
 }
@@ -623,13 +624,13 @@ async fn cleanup_nacos_import(path: &Path) {
 }
 
 async fn cleanup_expired_nacos_imports(state: &WebState, dir: &Path, max_age: Duration) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
         return;
     };
     let now = SystemTime::now();
     let mut expired_tokens = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Ok(metadata) = entry.metadata().await else {
             continue;
         };
         let expired = metadata.modified().ok().and_then(|modified| now.duration_since(modified).ok());
@@ -637,7 +638,7 @@ async fn cleanup_expired_nacos_imports(state: &WebState, dir: &Path, max_age: Du
             if let Some(token) = entry.path().file_stem().and_then(|token| token.to_str()) {
                 expired_tokens.push(token.to_string());
             }
-            let _ = std::fs::remove_file(entry.path());
+            let _ = tokio::fs::remove_file(entry.path()).await;
         }
     }
     if !expired_tokens.is_empty() {
@@ -660,6 +661,30 @@ fn sanitize_archive_file_name(value: &str) -> String {
     }
 }
 
+fn archive_content_disposition(file_name: &str) -> String {
+    let fallback = file_name
+        .chars()
+        .map(|character| if character.is_ascii_graphic() { character } else { '_' })
+        .collect::<String>();
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{}", encode_rfc5987_value(file_name))
+}
+
+fn encode_rfc5987_value(value: &str) -> String {
+    use std::fmt::Write;
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+        {
+            encoded.push(char::from(byte));
+        } else {
+            write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod batch_tests {
     use super::*;
@@ -676,6 +701,10 @@ mod batch_tests {
         assert_eq!(sanitize_archive_file_name("../../prod\r\n\".zip"), "prod___.zip");
         assert_eq!(sanitize_archive_file_name("configs"), "configs.zip");
         assert_eq!(sanitize_archive_file_name(""), "nacos-configs.zip");
+        assert_eq!(
+            archive_content_disposition("配置.zip"),
+            "attachment; filename=\"__.zip\"; filename*=UTF-8''%E9%85%8D%E7%BD%AE.zip"
+        );
     }
 
     #[test]

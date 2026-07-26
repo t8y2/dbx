@@ -144,15 +144,15 @@ watch(targetNamespaces, () => {
         <div v-if="mode !== 'import'" class="space-y-2">
           <div class="text-sm font-medium">{{ t("nacos.exportScope") }}</div>
           <label class="flex items-center gap-2 text-sm">
-            <input v-model="scope" type="radio" value="selected" @change="emit('reset')" />
+            <input v-model="scope" type="radio" name="nacos-batch-scope" value="selected" @change="emit('reset')" />
             <span>{{ t("nacos.selectedConfigs", { count: selectedCount }) }}</span>
           </label>
           <label class="flex items-center gap-2 text-sm">
-            <input v-model="scope" type="radio" value="filtered" @change="emit('reset')" />
+            <input v-model="scope" type="radio" name="nacos-batch-scope" value="filtered" @change="emit('reset')" />
             <span>{{ t("nacos.filteredConfigs", { count: filteredCount }) }}</span>
           </label>
           <label class="flex items-center gap-2 text-sm">
-            <input v-model="scope" type="radio" value="namespace" @change="emit('reset')" />
+            <input v-model="scope" type="radio" name="nacos-batch-scope" value="namespace" @change="emit('reset')" />
             <span>{{ t("nacos.namespaceAllConfigs") }}</span>
           </label>
         </div>
@@ -208,7 +208,7 @@ watch(targetNamespaces, () => {
           <div class="text-sm font-medium">{{ t("nacos.conflictPolicy") }}</div>
           <div class="grid gap-2 sm:grid-cols-3">
             <label v-for="value in ['ABORT', 'SKIP', 'OVERWRITE'] as NacosConflictPolicy[]" :key="value" class="flex cursor-pointer items-start gap-2 rounded-md border p-2 text-sm" :class="{ 'border-primary bg-primary/5': policy === value }">
-              <input v-model="policy" type="radio" :value="value" />
+              <input v-model="policy" type="radio" name="nacos-batch-policy" :value="value" />
               <span>
                 <span class="block font-medium">{{ t(`nacos.policy${value}`) }}</span>
                 <span class="block text-xs text-muted-foreground">{{ t(`nacos.policy${value}Hint`) }}</span>

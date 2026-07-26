@@ -932,6 +932,56 @@ func TestListSessionUserObjectsQueryUsesUserDictionary(t *testing.T) {
 	}
 }
 
+func TestOracleListTriggersSQLLoadsSourceWithoutLongColumns(t *testing.T) {
+	sqlText := strings.ToUpper(oracleListTriggersSQL)
+
+	if !strings.Contains(sqlText, "FROM ALL_TRIGGERS") || !strings.Contains(sqlText, "LEFT JOIN ALL_SOURCE") {
+		t.Fatalf("trigger listing should join metadata with line-based source, got: %s", oracleListTriggersSQL)
+	}
+	if !strings.Contains(sqlText, "T.DESCRIPTION") || !strings.Contains(sqlText, "S.TEXT") {
+		t.Fatalf("trigger listing should load the declaration and source text, got: %s", oracleListTriggersSQL)
+	}
+	if strings.Contains(sqlText, "TRIGGER_BODY") {
+		t.Fatalf("trigger listing should avoid Oracle LONG trigger bodies, got: %s", oracleListTriggersSQL)
+	}
+	if !strings.Contains(sqlText, "T.OWNER = :1") || !strings.Contains(sqlText, "T.TABLE_NAME = :2") {
+		t.Fatalf("trigger listing should stay scoped to the selected schema and table, got: %s", oracleListTriggersSQL)
+	}
+}
+
+func TestOracleTriggerBodyStripsDictionaryDeclaration(t *testing.T) {
+	source := "TRIGGER DBX_TRIGGER_4320_AUDIT\n" +
+		"AFTER INSERT OR UPDATE OR DELETE ON DBX_TRIGGER_4320\n" +
+		"FOR EACH ROW\n" +
+		"DECLARE\n" +
+		"  V_EVENT VARCHAR2(10);\n" +
+		"BEGIN\n" +
+		"  V_EVENT := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\n" +
+		"END;\n"
+	description := "DBX_TRIGGER_4320_AUDIT\n" +
+		"AFTER INSERT OR UPDATE OR DELETE ON DBX_TRIGGER_4320\n" +
+		"FOR EACH ROW\n"
+
+	body, ok := oracleTriggerBody(source, description)
+	if !ok {
+		t.Fatal("expected Oracle trigger source to produce a body")
+	}
+	want := "DECLARE\n  V_EVENT VARCHAR2(10);\nBEGIN\n  V_EVENT := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\nEND;"
+	if body != want {
+		t.Fatalf("trigger body = %q, want %q", body, want)
+	}
+}
+
+func TestOracleTriggerBodyFallsBackToVisibleSource(t *testing.T) {
+	body, ok := oracleTriggerBody("TRIGGER APP.AUDIT\nBEGIN\n  NULL;\nEND;\n", "differently formatted declaration")
+	if !ok {
+		t.Fatal("expected differently formatted Oracle source to remain visible")
+	}
+	if body != "TRIGGER APP.AUDIT\nBEGIN\n  NULL;\nEND;" {
+		t.Fatalf("unexpected fallback source: %q", body)
+	}
+}
+
 func TestOracleFuzzyLikePatternEscapesSpecialCharacters(t *testing.T) {
 	got := oracleFuzzyLikePattern(`a_%\b`)
 	want := `%a%\_%\%%\\%b%`
@@ -1154,7 +1204,6 @@ func contains(values []string, target string) bool {
 	return false
 }
 
-
 // -- fake drivers for timeout tests --
 
 func init() {
@@ -1174,7 +1223,7 @@ type oracleDMLConn struct{}
 func (c *oracleDMLConn) Prepare(query string) (driver.Stmt, error) {
 	return nil, errors.New("use ExecContext directly")
 }
-func (c *oracleDMLConn) Close() error { return nil }
+func (c *oracleDMLConn) Close() error              { return nil }
 func (c *oracleDMLConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
 
 var _ driver.ExecerContext = (*oracleDMLConn)(nil)
@@ -1196,13 +1245,13 @@ type oracleFastConn struct{}
 func (c *oracleFastConn) Prepare(query string) (driver.Stmt, error) {
 	return &oracleFastStmt{}, nil
 }
-func (c *oracleFastConn) Close() error { return nil }
+func (c *oracleFastConn) Close() error              { return nil }
 func (c *oracleFastConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
 
 type oracleFastStmt struct{}
 
-func (s *oracleFastStmt) Close() error      { return nil }
-func (s *oracleFastStmt) NumInput() int      { return -1 }
+func (s *oracleFastStmt) Close() error  { return nil }
+func (s *oracleFastStmt) NumInput() int { return -1 }
 func (s *oracleFastStmt) Exec(args []driver.Value) (driver.Result, error) {
 	return driver.ResultNoRows, nil
 }

@@ -110,4 +110,35 @@ describe("DatabaseUserAdmin MySQL grant loading", () => {
     expect(privilegeButton?.className).toContain("border-primary");
     expect(grantOptionInput?.checked).toBe(true);
   });
+
+  it("falls back to the current Doris user when SHOW ALL GRANTS requires GRANT_PRIV", async () => {
+    const dorisConnection: ConnectionConfig = {
+      ...connection,
+      id: "doris-limited",
+      name: "Doris limited",
+      db_type: "doris",
+      driver_profile: "doris",
+      port: 9030,
+      username: "dbx_limited",
+    };
+    const currentUserGrant = {
+      columns: ["UserIdentity", "Comment", "Password", "Roles", "GlobalPrivs", "DatabasePrivs", "TablePrivs"],
+      rows: [["'dbx_limited'@'%'", "", "Yes", null, null, "internal.analytics: Select_priv", null]],
+    };
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockRejectedValueOnce(new Error("Access denied; you need the (GRANT) privilege"));
+    mocks.executeQuery.mockResolvedValueOnce(currentUserGrant).mockResolvedValueOnce(currentUserGrant);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: dorisConnection });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(3));
+    await nextTick();
+
+    expect(mocks.executeQuery.mock.calls.map((call) => call[2])).toEqual(["SHOW ALL GRANTS;", "SHOW GRANTS;", "SHOW GRANTS FOR 'dbx_limited'@'%';"]);
+    expect(root.textContent).toContain("dbx_limited@%");
+    expect(root.textContent).not.toContain("Access denied");
+  });
 });

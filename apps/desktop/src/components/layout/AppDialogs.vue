@@ -33,6 +33,7 @@ const props = defineProps<{
   showDangerDialog: boolean;
   dangerSql: string;
   suppressDangerConfirm: boolean;
+  activeDatabaseType?: DatabaseType;
   showSqlParameterDialog: boolean;
   sqlParameterSourceSql: string;
   sqlParameterNames: SqlParameterDescriptor[];
@@ -144,7 +145,7 @@ watch(
     v-if="showDangerDialog"
     :open="showDangerDialog"
     :sql="dangerSql"
-    :show-suppress-toggle="true"
+    :show-suppress-toggle="activeDatabaseType !== 'redis'"
     :suppress-future-prompts="suppressDangerConfirm"
     @update:open="emit('update:showDangerDialog', $event)"
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"

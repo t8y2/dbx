@@ -23,8 +23,14 @@ async function main() {
     return;
   }
 
+  const localAssetPaths = localAssets(args.assetsDir);
+  const localAssetNames = new Set(localAssetPaths.map((assetPath) => basename(assetPath)));
+  if (args.pruneAssets) {
+    await pruneReleaseAssets(client, release, localAssetNames);
+  }
+
   const existingAssets = new Set((release.assets || []).map((asset) => asset.name));
-  const assets = localAssets(args.assetsDir).filter((assetPath) => {
+  const assets = localAssetPaths.filter((assetPath) => {
     const name = basename(assetPath);
     if (existingAssets.has(name) && !args.overwriteExisting) {
       console.log(`Skipping existing CNB asset: ${name}`);
@@ -49,6 +55,7 @@ function parseArgs(argv) {
     githubReleasePath: "",
     assetsDir: "",
     metadataOnly: false,
+    pruneAssets: false,
   };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -56,18 +63,29 @@ function parseArgs(argv) {
     else if (arg === "--assets-dir") args.assetsDir = argv[++index];
     else if (arg === "--metadata-only") args.metadataOnly = true;
     else if (arg === "--overwrite-existing") args.overwriteExisting = true;
+    else if (arg === "--prune-assets") args.pruneAssets = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.token) throw new Error("CNB_TOKEN is required.");
   if (!args.githubReleasePath || (!args.metadataOnly && !args.assetsDir)) {
     throw new Error(
-      "Usage: sync-cnb-release.mjs --github-release <release.json> (--assets-dir <dir> | --metadata-only)",
+      "Usage: sync-cnb-release.mjs --github-release <release.json> (--assets-dir <dir> | --metadata-only) [--prune-assets]",
     );
   }
   if (!Number.isInteger(args.concurrency) || args.concurrency < 1) {
     throw new Error("CNB_UPLOAD_CONCURRENCY must be a positive integer.");
   }
   return args;
+}
+
+export async function pruneReleaseAssets(client, release, localAssetNames) {
+  for (const asset of release.assets || []) {
+    if (localAssetNames.has(asset.name)) continue;
+    if (!asset.id) throw new Error(`CNB asset ${asset.name} is missing its id.`);
+    // Mutable release aliases must not retain files removed from the source release.
+    await client.deleteAsset(release.id, asset.id);
+    console.log(`Deleted stale CNB asset: ${asset.name}`);
+  }
 }
 
 async function uploadWithRetry(client, releaseId, filePath, overwriteExisting) {
@@ -137,6 +155,13 @@ export class CnbClient {
     if (!verifyResponse.ok) {
       throw new Error(`CNB upload confirmation failed with ${verifyResponse.status}: ${await verifyResponse.text()}`);
     }
+  }
+
+  async deleteAsset(releaseId, assetId) {
+    await this.request(
+      "DELETE",
+      `/${this.repository}/-/releases/${encodeURIComponent(releaseId)}/assets/${encodeURIComponent(assetId)}`,
+    );
   }
 
   async request(method, path, body = null, allow404 = false) {

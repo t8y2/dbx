@@ -28,6 +28,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.BeforeAll;
@@ -149,6 +150,53 @@ class MongoAgentTest {
     }
 
     @Test
+    void collectionTotalUsesEstimatedCountForEmptyFilter() {
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(collection, new Document());
+
+        assertEquals(10_000_000L, total.value());
+        assertFalse(total.exact());
+        assertEquals(List.of("estimatedDocumentCount"), calls);
+    }
+
+    @Test
+    void collectionTotalUsesExactCountForNonEmptyFilter() {
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+        Document filter = new Document("status", "active");
+
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(collection, filter);
+
+        assertEquals(42L, total.value());
+        assertTrue(total.exact());
+        assertEquals(List.of("countDocuments:{\"status\": \"active\"}"), calls);
+    }
+
+    @Test
+    void estimatedDocumentQueryResultMarksTotalAsInexact() {
+        Map<String, Object> result = MongoAgent.documentQueryResult(
+            List.of(new Document("_id", 1)),
+            new MongoAgent.CollectionTotal(10_000_000L, false)
+        );
+
+        assertEquals(10_000_000L, result.get("total"));
+        assertEquals(false, result.get("total_is_exact"));
+    }
+
+    @Test
+    void exactDocumentQueryResultKeepsExistingWireShape() {
+        Map<String, Object> result = MongoAgent.documentQueryResult(
+            List.of(new Document("_id", 1)),
+            new MongoAgent.CollectionTotal(42L, true)
+        );
+
+        assertEquals(42L, result.get("total"));
+        assertFalse(result.containsKey("total_is_exact"));
+    }
+
+    @Test
     void parsesOptionalDocumentParameters() {
         JsonObject params = new JsonObject();
         params.addProperty("projection", "{\"title\":1,\"_id\":0}");
@@ -179,10 +227,12 @@ class MongoAgentTest {
     void preservesLongDocumentIdTypeForGridUpdates() {
         Object id = MongoAgent.convertDocumentFieldValue("_id", 2_048_938_405_781_032_962L);
         Object value = MongoAgent.convertDocumentFieldValue("snowflake", 2_048_938_405_781_032_962L);
+        ObjectId objectId = new ObjectId("507f1f77bcf86cd799439011");
 
         assertEquals(Collections.singletonMap("$numberLong", "2048938405781032962"), id);
         assertEquals("2048938405781032962", value);
         assertEquals(2_048_938_405_781_032_962L, MongoAgent.parseId("{\"$numberLong\":\"2048938405781032962\"}"));
+        assertEquals(objectId, MongoAgent.parseId("{\"$oid\":\"507f1f77bcf86cd799439011\"}"));
     }
 
     @Test
@@ -194,6 +244,23 @@ class MongoAgentTest {
             MongoAgent.parseId("{\"$numberLong\":\"2048938405781032962\",\"tenant\":1}")
         );
         assertEquals("{\"$numberLong\":\"invalid\"}", MongoAgent.parseId("{\"$numberLong\":\"invalid\"}"));
+    }
+
+    @Test
+    void documentUpdateDistinguishesNoMatchFromUnchangedValue() {
+        MongoAgent.requireMatchedDocument(
+            "{\"$oid\":\"507f1f77bcf86cd799439011\"}",
+            UpdateResult.acknowledged(1, 0L, null)
+        );
+
+        IllegalStateException error = assertThrows(
+            IllegalStateException.class,
+            () -> MongoAgent.requireMatchedDocument(
+                "{\"$oid\":\"507f1f77bcf86cd799439012\"}",
+                UpdateResult.acknowledged(0, 0L, null)
+            )
+        );
+        assertTrue(error.getMessage().startsWith("No document matched _id"));
     }
 
     @Test
@@ -650,6 +717,26 @@ class MongoAgentTest {
     }
 
     // ─── helpers ───
+
+    @SuppressWarnings("unchecked")
+    private static MongoCollection<Document> recordingCountCollection(List<String> calls) {
+        return (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("estimatedDocumentCount".equals(method.getName())) {
+                    calls.add("estimatedDocumentCount");
+                    return 10_000_000L;
+                }
+                if ("countDocuments".equals(method.getName())) {
+                    Document filter = (Document) args[0];
+                    calls.add("countDocuments:" + filter.toJson());
+                    return 42L;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
 
     private static void assertRpcModifiedCount(MongoClient client, int id, String updateJson, boolean many) {
         JsonObject params = new JsonObject();

@@ -90,7 +90,7 @@ const xuguTableConstraintsSQL = `
 SELECT c.CONS_NAME, c.CONS_TYPE, c.DEFINE,
        rs.SCHEMA_NAME, rt.TABLE_NAME,
        c.MATCH_TYPE, c.UPDATE_ACTION, c.DELETE_ACTION,
-       c.DEFERRABLE, c.INITDEFERRED, c.ENABLE
+       c.DEFERRABLE, c.INITDEFERRED, c.ENABLE, c.VALID
 FROM ALL_CONSTRAINTS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
@@ -98,9 +98,11 @@ LEFT JOIN ALL_TABLES rt ON rt.DB_ID = c.DB_ID AND rt.TABLE_ID = c.REF_TABLE_ID
 LEFT JOIN ALL_SCHEMAS rs ON rs.DB_ID = rt.DB_ID AND rs.SCHEMA_ID = rt.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND UPPER(t.TABLE_NAME) = UPPER(?)
+  AND c.CONS_TYPE <> 'F'
 ORDER BY c.CONS_NAME`
 const xuguTablePartitionsSQL = `
-SELECT p.PARTI_NAME, p.PARTI_VAL
+SELECT p.PARTI_NO, p.PARTI_NAME, p.PARTI_VAL, p.ONLINE,
+       t.PARTI_TYPE, t.PARTI_KEY, t.AUTO_PARTI_TYPE, t.AUTO_PARTI_SPAN
 FROM ALL_PARTIS p
 JOIN ALL_TABLES t ON t.DB_ID = p.DB_ID AND t.TABLE_ID = p.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
@@ -108,7 +110,8 @@ WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND UPPER(t.TABLE_NAME) = UPPER(?)
 ORDER BY p.PARTI_NO`
 const xuguTableSubpartitionsSQL = `
-SELECT p.SUBPARTI_NAME, p.SUBPARTI_VAL
+SELECT p.SUBPARTI_NO, p.SUBPARTI_NAME, p.SUBPARTI_VAL,
+       t.SUBPARTI_TYPE, t.SUBPARTI_KEY
 FROM ALL_SUBPARTIS p
 JOIN ALL_TABLES t ON t.DB_ID = p.DB_ID AND t.TABLE_ID = p.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
@@ -310,10 +313,51 @@ func (i indexInfo) MarshalJSON() ([]byte, error) {
 }
 
 type foreignKeyInfo struct {
-	Name      string `json:"name"`
-	Column    string `json:"column"`
-	RefTable  string `json:"ref_table"`
-	RefColumn string `json:"ref_column"`
+	Name      string  `json:"name"`
+	Column    string  `json:"column"`
+	RefSchema *string `json:"ref_schema,omitempty"`
+	RefTable  string  `json:"ref_table"`
+	RefColumn string  `json:"ref_column"`
+	OnUpdate  *string `json:"on_update,omitempty"`
+	OnDelete  *string `json:"on_delete,omitempty"`
+}
+
+// constraintInfo represents the user-visible ALL_CONSTRAINTS metadata that
+// DBeaver's Xugu extension exposes below a table.
+type constraintInfo struct {
+	Name              string   `json:"name"`
+	ConstraintType    string   `json:"constraint_type"`
+	Definition        string   `json:"definition"`
+	Columns           []string `json:"columns"`
+	RefSchema         *string  `json:"ref_schema,omitempty"`
+	RefTable          *string  `json:"ref_table,omitempty"`
+	RefColumns        []string `json:"ref_columns"`
+	MatchType         *string  `json:"match_type,omitempty"`
+	OnUpdate          *string  `json:"on_update,omitempty"`
+	OnDelete          *string  `json:"on_delete,omitempty"`
+	Deferrable        bool     `json:"deferrable"`
+	InitiallyDeferred bool     `json:"initially_deferred"`
+	Enabled           bool     `json:"enabled"`
+	Valid             bool     `json:"valid"`
+}
+
+type partitionInfo struct {
+	Name              string  `json:"name"`
+	Position          int     `json:"position"`
+	Value             string  `json:"value"`
+	PartitionType     string  `json:"partition_type"`
+	PartitionKey      string  `json:"partition_key"`
+	Online            *bool   `json:"online,omitempty"`
+	AutoPartitionType *string `json:"auto_partition_type,omitempty"`
+	AutoPartitionSpan *int    `json:"auto_partition_span,omitempty"`
+}
+
+type subpartitionInfo struct {
+	Name          string `json:"name"`
+	Position      int    `json:"position"`
+	Value         string `json:"value"`
+	PartitionType string `json:"partition_type"`
+	PartitionKey  string `json:"partition_key"`
 }
 
 // xuguTableMetadata mirrors the ALL_TABLES properties that affect a CREATE
@@ -353,6 +397,7 @@ type xuguConstraintInfo struct {
 	Deferrable        bool
 	InitiallyDeferred bool
 	Enabled           bool
+	Valid             bool
 }
 
 type xuguPartitionInfo struct {
@@ -819,6 +864,12 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		table := stringParam(params, "table")
 		result, err := s.listForeignKeys(schema, table)
 		return result, false, err
+	case "list_constraints":
+		if err := s.useDatabase(stringParam(params, "database")); err != nil {
+			return nil, false, err
+		}
+		result, err := s.listConstraints(stringParam(params, "schema"), stringParam(params, "table"))
+		return result, false, err
 	case "list_triggers":
 		if err := s.useDatabase(stringParam(params, "database")); err != nil {
 			return nil, false, err
@@ -826,6 +877,18 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
 		result, err := s.listTriggers(schema, table)
+		return result, false, err
+	case "list_partitions":
+		if err := s.useDatabase(stringParam(params, "database")); err != nil {
+			return nil, false, err
+		}
+		result, err := s.listPartitions(stringParam(params, "schema"), stringParam(params, "table"))
+		return result, false, err
+	case "list_subpartitions":
+		if err := s.useDatabase(stringParam(params, "database")); err != nil {
+			return nil, false, err
+		}
+		result, err := s.listSubpartitions(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_explain_info":
 		sqlText := stringParam(params, "sql")
@@ -1009,12 +1072,16 @@ func newXuguDatabaseSession(
 
 func buildDSN(params connectParams) string {
 	connectionString := strings.TrimSpace(params.ConnectionString)
+	selectedDatabase := strings.TrimSpace(params.Database)
 	if looksLikeXuguDSN(connectionString) {
+		if selectedDatabase != "" {
+			return overrideXuguDSNDatabase(connectionString, selectedDatabase)
+		}
 		return connectionString
 	}
 	if parsed := parseXuguURL(connectionString); parsed.Host != "" {
-		if parsed.Database == "" {
-			parsed.Database = params.Database
+		if selectedDatabase != "" {
+			parsed.Database = selectedDatabase
 		}
 		if parsed.Username == "" {
 			parsed.Username = params.Username
@@ -1026,6 +1093,9 @@ func buildDSN(params connectParams) string {
 	}
 
 	if jdbc := parseXuguJDBCURL(connectionString); jdbc.Host != "" {
+		if selectedDatabase != "" {
+			jdbc.Database = selectedDatabase
+		}
 		return buildXuguDSN(jdbc.Host, jdbc.Port, jdbc.Database, params.Username, params.Password, params.URLParams)
 	}
 
@@ -1035,6 +1105,49 @@ func buildDSN(params connectParams) string {
 func looksLikeXuguDSN(value string) bool {
 	upper := strings.ToUpper(value)
 	return strings.Contains(upper, "IP=") && strings.Contains(upper, "DB=") && strings.Contains(upper, "USER=")
+}
+
+func overrideXuguDSNDatabase(dsn, database string) string {
+	var result strings.Builder
+	result.Grow(len(dsn) + len(database))
+
+	segmentStart := 0
+	inQuotes := false
+	for index := 0; index < len(dsn); index++ {
+		switch dsn[index] {
+		case '\'':
+			if inQuotes && index+1 < len(dsn) && dsn[index+1] == '\'' {
+				index++
+				continue
+			}
+			inQuotes = !inQuotes
+		case ';':
+			if !inQuotes {
+				result.WriteString(overrideXuguDSNSegmentDatabase(dsn[segmentStart:index], database))
+				result.WriteByte(';')
+				segmentStart = index + 1
+			}
+		}
+	}
+	result.WriteString(overrideXuguDSNSegmentDatabase(dsn[segmentStart:], database))
+	return result.String()
+}
+
+func overrideXuguDSNSegmentDatabase(segment, database string) string {
+	separator := strings.IndexByte(segment, '=')
+	if separator < 0 || !strings.EqualFold(strings.TrimSpace(segment[:separator]), "DB") {
+		return segment
+	}
+
+	// Xugu DSN values may quote semicolons and escape quotes by doubling them.
+	return segment[:separator+1] + encodeXuguDSNValue(database)
+}
+
+func encodeXuguDSNValue(value string) string {
+	if !strings.ContainsAny(value, ";'") {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 type xuguURLInfo struct {
@@ -1732,11 +1845,12 @@ func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error)
 	}
 	table = strings.ToUpper(strings.TrimSpace(table))
 	rows, err := s.queryRows(`
-SELECT c.CONS_NAME, c.DEFINE, rt.TABLE_NAME
-FROM SYS_CONSTRAINTS c
-JOIN SYS_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
-JOIN SYS_TABLES rt ON rt.DB_ID = c.DB_ID AND rt.TABLE_ID = c.REF_TABLE_ID
-JOIN SYS_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+SELECT c.CONS_NAME, c.DEFINE, rs.SCHEMA_NAME, rt.TABLE_NAME, c.UPDATE_ACTION, c.DELETE_ACTION
+FROM ALL_CONSTRAINTS c
+JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+LEFT JOIN ALL_TABLES rt ON rt.DB_ID = c.DB_ID AND rt.TABLE_ID = c.REF_TABLE_ID
+LEFT JOIN ALL_SCHEMAS rs ON rs.DB_ID = rt.DB_ID AND rs.SCHEMA_ID = rt.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND UPPER(t.TABLE_NAME) = UPPER(?)
   AND c.CONS_TYPE = 'F'
@@ -1750,13 +1864,18 @@ ORDER BY c.CONS_NAME`, []any{schema, table})
 	defer s.closeRows(rows)
 	var result []foreignKeyInfo
 	for rows.Next() {
-		var name, define, refTable string
-		if err := rows.Scan(&name, &define, &refTable); err != nil {
+		var name, define, refSchema, refTable, updateAction, deleteAction any
+		if err := rows.Scan(&name, &define, &refSchema, &refTable, &updateAction, &deleteAction); err != nil {
 			return nil, err
 		}
-		local, ref := parseForeignKeyColumns(define)
+		local, ref := parseForeignKeyColumns(xuguString(define))
 		for i, column := range local {
-			item := foreignKeyInfo{Name: name, Column: column, RefTable: refTable}
+			item := foreignKeyInfo{
+				Name: xuguString(name), Column: column, RefTable: xuguString(refTable),
+				RefSchema: optionalString(xuguString(refSchema)),
+				OnUpdate:  optionalString(xuguReferentialAction(xuguString(updateAction))),
+				OnDelete:  optionalString(xuguReferentialAction(xuguString(deleteAction))),
+			}
 			if i < len(ref) {
 				item.RefColumn = ref[i]
 			}
@@ -1774,9 +1893,9 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	table = strings.ToUpper(strings.TrimSpace(table))
 	rows, err := s.queryRows(`
 SELECT tr.TRIG_NAME, tr.TRIG_EVENT, tr.TRIG_TIME
-FROM SYS_TRIGGERS tr
-JOIN SYS_TABLES t ON t.DB_ID = tr.DB_ID AND t.TABLE_ID = tr.OBJ_ID
-JOIN SYS_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+FROM ALL_TRIGGERS tr
+JOIN ALL_TABLES t ON t.DB_ID = tr.DB_ID AND t.TABLE_ID = tr.OBJ_ID
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
   AND UPPER(t.TABLE_NAME) = UPPER(?)
 ORDER BY tr.TRIG_NAME`, []any{schema, table})
@@ -1799,6 +1918,65 @@ ORDER BY tr.TRIG_NAME`, []any{schema, table})
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
+}
+
+func (s *server) listConstraints(schema, table string) ([]constraintInfo, error) {
+	schema, err := s.normalizeSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	table = strings.ToUpper(strings.TrimSpace(table))
+	rows, err := s.queryRows(xuguTableConstraintsSQL, []any{schema, table})
+	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			return []constraintInfo{}, nil
+		}
+		return nil, err
+	}
+	defer s.closeRows(rows)
+
+	var result []constraintInfo
+	for rows.Next() {
+		var name, kind, definition, refSchema, refTable any
+		var matchType, updateAction, deleteAction, deferrable, initiallyDeferred, enabled, valid any
+		if err := rows.Scan(&name, &kind, &definition, &refSchema, &refTable, &matchType, &updateAction, &deleteAction,
+			&deferrable, &initiallyDeferred, &enabled, &valid); err != nil {
+			return nil, err
+		}
+		item := constraintInfo{
+			Name: xuguString(name), ConstraintType: xuguConstraintTypeName(xuguString(kind)), Definition: xuguString(definition),
+			Columns: []string{}, RefColumns: []string{}, Deferrable: truthy(deferrable), InitiallyDeferred: truthy(initiallyDeferred),
+			Enabled: truthy(enabled), Valid: truthy(valid),
+		}
+		if xuguString(kind) == "F" {
+			item.Columns, item.RefColumns = parseForeignKeyColumns(item.Definition)
+			item.RefSchema = optionalString(xuguString(refSchema))
+			item.RefTable = optionalString(xuguString(refTable))
+			item.MatchType = optionalString(xuguMatchTypeName(xuguString(matchType)))
+			item.OnUpdate = optionalString(xuguReferentialAction(xuguString(updateAction)))
+			item.OnDelete = optionalString(xuguReferentialAction(xuguString(deleteAction)))
+		} else if xuguString(kind) != "C" {
+			item.Columns = parseQuotedIdentifiers(item.Definition)
+		}
+		result = append(result, item)
+	}
+	return emptyIfNil(result), rows.Err()
+}
+
+func (s *server) listPartitions(schema, table string) ([]partitionInfo, error) {
+	schema, err := s.normalizeSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	return s.listPartitionMetadata(schema, strings.ToUpper(strings.TrimSpace(table)))
+}
+
+func (s *server) listSubpartitions(schema, table string) ([]subpartitionInfo, error) {
+	schema, err := s.normalizeSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	return s.listSubpartitionMetadata(schema, strings.ToUpper(strings.TrimSpace(table)))
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
@@ -2409,9 +2587,9 @@ func (s *server) tableConstraints(schema, table string) ([]xuguConstraintInfo, e
 	for rows.Next() {
 		var item xuguConstraintInfo
 		var name, constraintType, definition, referenceSchema, referenceTable any
-		var matchType, updateAction, deleteAction, deferrable, initiallyDeferred, enabled any
+		var matchType, updateAction, deleteAction, deferrable, initiallyDeferred, enabled, valid any
 		if err := rows.Scan(&name, &constraintType, &definition, &referenceSchema, &referenceTable,
-			&matchType, &updateAction, &deleteAction, &deferrable, &initiallyDeferred, &enabled); err != nil {
+			&matchType, &updateAction, &deleteAction, &deferrable, &initiallyDeferred, &enabled, &valid); err != nil {
 			return nil, err
 		}
 		item.Name = xuguString(name)
@@ -2425,6 +2603,7 @@ func (s *server) tableConstraints(schema, table string) ([]xuguConstraintInfo, e
 		item.Deferrable = truthy(deferrable)
 		item.InitiallyDeferred = truthy(initiallyDeferred)
 		item.Enabled = truthy(enabled)
+		item.Valid = truthy(valid)
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
@@ -2442,11 +2621,68 @@ func (s *server) tablePartitions(schema, table string, subpartition bool) ([]xug
 	defer s.closeRows(rows)
 	var result []xuguPartitionInfo
 	for rows.Next() {
-		var name, value any
-		if err := rows.Scan(&name, &value); err != nil {
+		var position, name, value, ignored1, ignored2, ignored3, ignored4, ignored5 any
+		if subpartition {
+			if err := rows.Scan(&position, &name, &value, &ignored1, &ignored2); err != nil {
+				return nil, err
+			}
+		} else if err := rows.Scan(&position, &name, &value, &ignored1, &ignored2, &ignored3, &ignored4, &ignored5); err != nil {
 			return nil, err
 		}
 		result = append(result, xuguPartitionInfo{Name: xuguString(name), Value: xuguString(value)})
+	}
+	return emptyIfNil(result), rows.Err()
+}
+
+func (s *server) listPartitionMetadata(schema, table string) ([]partitionInfo, error) {
+	rows, err := s.queryRows(xuguTablePartitionsSQL, []any{schema, table})
+	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			return []partitionInfo{}, nil
+		}
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var result []partitionInfo
+	for rows.Next() {
+		var no, name, value, online, partitionType, partitionKey, autoType, autoSpan any
+		if err := rows.Scan(&no, &name, &value, &online, &partitionType, &partitionKey, &autoType, &autoSpan); err != nil {
+			return nil, err
+		}
+		item := partitionInfo{Name: xuguString(name), Position: xuguInt(no), Value: xuguString(value),
+			PartitionType: xuguPartitionType(xuguInt(partitionType)), PartitionKey: xuguString(partitionKey)}
+		if value := xuguString(online); value != "" {
+			isOnline := truthy(online)
+			item.Online = &isOnline
+		}
+		if name := xuguAutoPartitionUnit(xuguInt(autoType)); name != "" {
+			item.AutoPartitionType = &name
+		}
+		if span := xuguInt(autoSpan); span > 0 {
+			item.AutoPartitionSpan = &span
+		}
+		result = append(result, item)
+	}
+	return emptyIfNil(result), rows.Err()
+}
+
+func (s *server) listSubpartitionMetadata(schema, table string) ([]subpartitionInfo, error) {
+	rows, err := s.queryRows(xuguTableSubpartitionsSQL, []any{schema, table})
+	if err != nil {
+		if isXuguMetadataAccessError(err) {
+			return []subpartitionInfo{}, nil
+		}
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var result []subpartitionInfo
+	for rows.Next() {
+		var no, name, value, partitionType, partitionKey any
+		if err := rows.Scan(&no, &name, &value, &partitionType, &partitionKey); err != nil {
+			return nil, err
+		}
+		result = append(result, subpartitionInfo{Name: xuguString(name), Position: xuguInt(no), Value: xuguString(value),
+			PartitionType: xuguPartitionType(xuguInt(partitionType)), PartitionKey: xuguString(partitionKey)})
 	}
 	return emptyIfNil(result), rows.Err()
 }
@@ -2727,6 +2963,52 @@ func xuguMatchClause(value string) string {
 	default:
 		return ""
 	}
+}
+
+func xuguMatchTypeName(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "A":
+		return "FULL"
+	case "P":
+		return "PARTIAL"
+	case "U":
+		return "SIMPLE"
+	default:
+		return ""
+	}
+}
+
+func xuguConstraintTypeName(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "P":
+		return "PRIMARY KEY"
+	case "U":
+		return "UNIQUE"
+	case "C":
+		return "CHECK"
+	case "F":
+		return "FOREIGN KEY"
+	case "N":
+		return "NOT NULL"
+	case "D":
+		return "DEFAULT"
+	case "R":
+		return "REFERENCED KEY"
+	default:
+		return strings.TrimSpace(value)
+	}
+}
+
+func xuguAutoPartitionUnit(value int) string {
+	return map[int]string{1: "YEAR", 2: "MONTH", 3: "DAY", 4: "HOUR"}[value]
+}
+
+func optionalString(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func xuguPartitionType(value int) string {

@@ -89,7 +89,6 @@ jobs:
           name: agent-jars
           path: |
             agents/drivers/*/build/libs/dbx-agent-*.jar
-            !agents/drivers/kingbase/build/libs/dbx-agent-kingbase.jar
 
   build-oracle-native:
     needs: [bump-versions]
@@ -283,7 +282,22 @@ jobs:
     needs: [bump-versions, build-agents, build-oracle-native, build-xugu-native, build-kingbase-native, build-jre]
     runs-on: ubuntu-latest
     steps:
+      - name: Create DBX bot release token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.DBX_BOT_APP_ID }}
+          private-key: ${{ secrets.DBX_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: dbx
+          permission-contents: write
+          # Moving agents-latest across commits that modify workflow files
+          # requires the GitHub App's dedicated Workflows permission.
+          permission-workflows: write
+
       - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.release-token.outputs.token }}
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -291,7 +305,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find artifacts/agent-jars -name '*.jar' ! -name 'dbx-agent-kingbase.jar' -exec cp {} release/ \;
+          find artifacts/agent-jars -name '*.jar' -exec cp {} release/ \;
           find artifacts/oracle-native -type f -name 'dbx-agent-oracle-*' -exec cp {} release/ \;
           find artifacts/xugu-native -type f -name 'dbx-agent-xugu-*' -exec cp {} release/ \;
           find artifacts/kingbase-native -type f -name 'dbx-agent-kingbase-*' -exec cp {} release/ \;
@@ -537,39 +551,37 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ steps.release-token.outputs.token }}
           files: release/*
           body_path: RELEASE_NOTES.md
           make_latest: false
 
       - name: Update agents-latest GitHub release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
         run: |
           git tag -f agents-latest "$GITHUB_SHA"
           git push origin refs/tags/agents-latest --force
 
           if gh release view agents-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # Versioned driver assets change names every release, so remove the
-            # previous set before uploading to keep agents-latest unambiguous.
+            # agents-latest is only the stable registry entry point. Actual artifacts
+            # stay on the immutable agents-v* release referenced by the registry.
             gh release view agents-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
               while IFS= read -r asset; do
-                case "$asset" in
-                  dbx-agent-*.jar|dbx-agent-*.zip|dbx-agent-oracle-*|dbx-agent-xugu-*|dbx-agent-kingbase-*)
-                    gh release delete-asset agents-latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
-                    ;;
-                esac
+                [ "$asset" = "agent-registry.json" ] && continue
+                gh release delete-asset agents-latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
               done
-            gh release upload agents-latest release/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload agents-latest release/agent-registry.json --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit agents-latest \
               --repo "$GITHUB_REPOSITORY" \
               --title "Agents latest" \
-              --notes "Moving release for the latest DBX agent registry, driver artifacts, managed JRE archives, and offline bundles." \
+              --notes "Moving entry point for the latest DBX agent registry. Artifacts are stored on the referenced versioned agents release." \
               --latest=false
           else
-            gh release create agents-latest release/* \
+            gh release create agents-latest release/agent-registry.json \
               --repo "$GITHUB_REPOSITORY" \
               --title "Agents latest" \
-              --notes "Moving release for the latest DBX agent registry, driver artifacts, managed JRE archives, and offline bundles." \
+              --notes "Moving entry point for the latest DBX agent registry. Artifacts are stored on the referenced versioned agents release." \
               --latest=false
           fi
 
@@ -674,6 +686,6 @@ jobs:
           )
           # agents-latest is mutable, so its stable asset names must replace the previous release contents.
           if [[ "$OVERWRITE_EXISTING" == "true" ]]; then
-            args+=(--overwrite-existing)
+            args+=(--overwrite-existing --prune-assets)
           fi
           node .github/scripts/sync-cnb-release.mjs "${args[@]}"

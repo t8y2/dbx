@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency } from "@/lib/schema/schemaDiffMetadataLoad";
+import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, shouldFetchSchemaDiffDdl } from "@/lib/schema/schemaDiffMetadataLoad";
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -15,6 +15,13 @@ describe("schemaDiffMetadataLoad", () => {
     expect(schemaDiffMetadataConcurrency("postgres")).toBe(6);
     expect(schemaDiffMetadataConcurrency("postgres", 100)).toBe(6);
     expect(schemaDiffMetadataConcurrency(undefined)).toBe(6);
+  });
+
+  it("skips view DDL when views are disabled while preserving table DDL options", () => {
+    expect(shouldFetchSchemaDiffDdl(true, { tables: true, views: false })).toBe(false);
+    expect(shouldFetchSchemaDiffDdl(true, { tables: false, views: true })).toBe(true);
+    expect(shouldFetchSchemaDiffDdl(false, { tables: false, views: true })).toBe(false);
+    expect(shouldFetchSchemaDiffDdl(false, { tables: true, views: false })).toBe(true);
   });
 
   it("maps items with limited concurrency and preserves output order", async () => {

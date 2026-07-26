@@ -17,10 +17,10 @@ test("offline download catalog includes the JDBC plugin ZIP", () => {
   });
 });
 
-test("release assets expose GitHub and CNB download links", () => {
-  assert.deepEqual(downloadLinksFor("https://github.com/t8y2/dbx/releases/download/agents-latest/dbx-agents-offline-macos-aarch64.zip"), [
-    { source: "github", url: "https://github.com/t8y2/dbx/releases/download/agents-latest/dbx-agents-offline-macos-aarch64.zip" },
-    { source: "cnb", url: "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/dbx-agents-offline-macos-aarch64.zip" },
+test("versioned release assets expose GitHub and CNB download links", () => {
+  assert.deepEqual(downloadLinksFor("https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agents-offline-macos-aarch64.zip"), [
+    { source: "github", url: "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agents-offline-macos-aarch64.zip" },
+    { source: "cnb", url: "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-v0.2.64/dbx-agents-offline-macos-aarch64.zip" },
   ]);
 });
 
@@ -37,15 +37,34 @@ test("catalog falls back from GitHub to CNB", async () => {
     vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       requestedUrls.push(url);
-      if (url.includes("api.github.com")) return new Response("rate limited", { status: 403 });
+      if (url.includes("api.github.com")) {
+        return Response.json({
+          assets: [
+            {
+              name: "agent-registry.json",
+              size: 1,
+              browser_download_url: "https://github.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json",
+            },
+          ],
+        });
+      }
       return Response.json({
         drivers: {
-          access: { jar: { url: "https://dl.dbxio.com/agents/dbx-agent-access.jar", size: 1 } },
+          access: {
+            version: "0.1.30",
+            jar: {
+              url: "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agent-access-0.1.30.jar",
+              size: 1,
+            },
+          },
         },
         jres: {
           "21": {
             platforms: {
-              "macos-aarch64": { url: "https://dl.dbxio.com/jres/dbx-jre-21-macos-aarch64.tar.gz", size: 1 },
+              "macos-aarch64": {
+                url: "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-jre-21-macos-aarch64.tar.gz",
+                size: 1,
+              },
             },
           },
         },
@@ -62,6 +81,10 @@ test("catalog falls back from GitHub to CNB", async () => {
   assert.equal(catalog?.drivers[0]?.key, "access");
   assert.equal(catalog?.jres[0]?.platformKey, "macos-aarch64");
   assert.equal(catalog?.bundles[0]?.platformKey, "macos-aarch64");
+  assert.equal(
+    catalog?.bundles[0]?.url,
+    "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agents-offline-macos-aarch64.zip",
+  );
 });
 
 test("unknown fallback asset sizes render as unavailable", () => {

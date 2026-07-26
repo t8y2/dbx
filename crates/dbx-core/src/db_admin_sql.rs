@@ -258,6 +258,7 @@ pub fn supports_create_schema_target(database_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Kwdb
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
+                | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
                 | DatabaseType::Yashandb
                 | DatabaseType::Dameng
@@ -294,6 +295,7 @@ pub fn supports_database_property_comment(database_type: Option<DatabaseType>) -
                 | DatabaseType::Kwdb
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
+                | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
                 | DatabaseType::OpenGauss
                 | DatabaseType::Yashandb
@@ -369,6 +371,7 @@ fn supports_drop_table_cascade(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Kwdb
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
+                | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
                 | DatabaseType::OpenGauss
         )
@@ -397,6 +400,7 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
                         | DatabaseType::OpenGauss
                         | DatabaseType::Questdb
                         | DatabaseType::Highgo
+                        | DatabaseType::Uxdb
                         | DatabaseType::Vastbase
                         | DatabaseType::Kingbase
                         | DatabaseType::Oracle
@@ -429,6 +433,7 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
                         | DatabaseType::OpenGauss
                         | DatabaseType::Questdb
                         | DatabaseType::Highgo
+                        | DatabaseType::Uxdb
                         | DatabaseType::Vastbase
                         | DatabaseType::Kingbase
                 )
@@ -488,6 +493,7 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
                 | DatabaseType::Kwdb
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
+                | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
                 | DatabaseType::OpenGauss
         )
@@ -706,6 +712,7 @@ fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
             | DatabaseType::Kwdb
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
     )
 }

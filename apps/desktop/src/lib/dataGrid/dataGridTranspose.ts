@@ -168,6 +168,13 @@ export interface TransposeRecordIndexesForModeOptions {
   visibleRecordIndexes: number[];
 }
 
+export interface AutoTransposeSingleRowOptions {
+  enabled: boolean;
+  preserveTranspose: boolean;
+  rowCount: number;
+  columnCount: number;
+}
+
 export function nextTransposeState(showTranspose: boolean, transposeRowIndex: number | null, requestedRowIndex: number): DataGridTransposeState {
   if (showTranspose && transposeRowIndex === requestedRowIndex) {
     return { showTranspose: false, transposeRowIndex: null };
@@ -207,6 +214,10 @@ export function nextTransposeStateForRecordCount(showTranspose: boolean, transpo
     showTranspose: true,
     transposeRowIndex: Math.max(0, Math.min(totalRecords - 1, requestedRowIndex)),
   };
+}
+
+export function shouldAutoTransposeSingleRow(options: AutoTransposeSingleRowOptions): boolean {
+  return options.enabled && !options.preserveTranspose && options.rowCount === 1 && options.columnCount > 1;
 }
 
 export function buildTransposeRows<T>(options: BuildTransposeRowsOptions<T>): Array<DataGridTransposeRow<T>> {

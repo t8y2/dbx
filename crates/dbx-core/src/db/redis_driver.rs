@@ -1683,7 +1683,7 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
         | "SPOP" | "SREM" | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN"
         | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT"
         | "SDIFFSTORE" | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE"
-        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" => RedisCommandSafety::Confirm,
+        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
         "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
         | "GETEX" | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX"
         | "SETRANGE" | "MSET" | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX"
@@ -3924,13 +3924,47 @@ mod tests {
         assert_eq!(classify_command("GETEX"), RedisCommandSafety::Write);
         assert_eq!(classify_command("XREADGROUP"), RedisCommandSafety::Write);
         assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
-        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.DEL"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.FORGET"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.CLEAR"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("KEYS"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("flushall"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("eval"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("FCALL"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("XGROUP"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("VENDOR.WRITE"), RedisCommandSafety::Blocked);
+    }
+
+    // Regression for review feedback: an unknown command (e.g. FCALL) inside a
+    // multi-statement batch must still raise the batch to Blocked regardless
+    // of its position, so "DEL victim\nFCALL wipe 0" cannot execute the
+    // destructive command after the frontend scan would otherwise have
+    // stopped the run.
+    #[test]
+    fn classify_command_batch_blocks_on_any_unknown_member() {
+        for batch in [
+            // destructive first, unknown second
+            ["DEL victim", "FCALL wipe 0"],
+            // unknown first, destructive second
+            ["FCALL wipe 0", "DEL victim"],
+        ] {
+            let mut highest = RedisCommandSafety::Allowed;
+            for cmd in batch.iter() {
+                let safety = classify_command(cmd);
+                if matches!(safety, RedisCommandSafety::Blocked) {
+                    highest = safety;
+                    break;
+                }
+                if matches!(safety, RedisCommandSafety::Confirm) && !matches!(highest, RedisCommandSafety::Blocked) {
+                    highest = safety;
+                }
+            }
+            assert!(
+                matches!(highest, RedisCommandSafety::Blocked),
+                "batch {batch:?} must be Blocked because it contains FCALL, got {highest:?}"
+            );
+        }
     }
 
     #[test]

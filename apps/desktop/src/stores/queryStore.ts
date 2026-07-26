@@ -72,6 +72,10 @@ const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
 const SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS = 500;
 type CloseConfirmContext = "tab" | "batch" | "app";
 
+function hasHiddenPhysicalRowKey(databaseType: DatabaseType | undefined, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[]): boolean {
+  return hiddenPrimaryKeys.some((projection) => !usesSyntheticRowIdKey(databaseType, [projection.sourceName]));
+}
+
 function cloneTabDraft<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -123,6 +127,7 @@ function droppedTableObjectSchemaCandidates(target: DroppedTableObjectTarget): S
 function markQueryResultRowsRaw(result: QueryResult): QueryResult {
   markRaw(result.rows);
   if (result.mongo_documents) markRaw(result.mongo_documents);
+  if (result.mongo_copy_documents) markRaw(result.mongo_copy_documents);
   return result;
 }
 
@@ -147,8 +152,9 @@ function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, m
   const remainingRows = Math.max(0, maxRows - previous.rows.length);
   const appendedRowCount = Math.min(remainingRows, segment.rows.length);
   const appendParallelValues = <T>(existing: T[] | undefined, next: T[] | undefined): T[] | undefined => {
-    if (!existing && !next) return undefined;
-    return [...(existing ?? []), ...(next ?? []).slice(0, appendedRowCount)];
+    if (!existing || !next) return undefined;
+    if (existing.length !== previous.rows.length || next.length !== segment.rows.length) return undefined;
+    return [...existing, ...next.slice(0, appendedRowCount)];
   };
   // Keep prior row objects intact so source-index based dirty/new/deleted state
   // remains valid, while bounding the in-memory result by the configured cap.
@@ -169,6 +175,7 @@ function markQueryResultRunsRowsRaw(resultRuns: NonNullable<QueryTab["resultRuns
     if (run.results) markQueryResultsRowsRaw(run.results);
     if (run.resultLocalSortOriginalRows) markRaw(run.resultLocalSortOriginalRows);
     if (run.resultLocalSortOriginalMongoDocuments) markRaw(run.resultLocalSortOriginalMongoDocuments);
+    if (run.resultLocalSortOriginalMongoCopyDocuments) markRaw(run.resultLocalSortOriginalMongoCopyDocuments);
   }
   return resultRuns;
 }
@@ -596,6 +603,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEditorFingerprint = undefined;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
+    tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     tab.resultSortMode = undefined;
     tab.resultSessionId = undefined;
     tab.resultAccessedAt = undefined;
@@ -624,6 +632,7 @@ export const useQueryStore = defineStore("query", () => {
     run.results = undefined;
     run.resultLocalSortOriginalRows = undefined;
     run.resultLocalSortOriginalMongoDocuments = undefined;
+    run.resultLocalSortOriginalMongoCopyDocuments = undefined;
     run.resultSessionId = undefined;
     run.resultEstimatedBytes = undefined;
     run.queryAnalysis = undefined;
@@ -650,6 +659,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortMode = run.resultSortMode;
     tab.resultLocalSortOriginalRows = run.resultLocalSortOriginalRows;
     tab.resultLocalSortOriginalMongoDocuments = run.resultLocalSortOriginalMongoDocuments;
+    tab.resultLocalSortOriginalMongoCopyDocuments = run.resultLocalSortOriginalMongoCopyDocuments;
     tab.orderByInput = run.orderByInput;
     tab.resultPageSql = run.resultPageSql;
     tab.resultPageLimit = run.resultPageLimit;
@@ -802,6 +812,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortMode: tab.resultSortMode,
       resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows,
       resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments,
+      resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments,
       orderByInput: tab.orderByInput,
       resultPageSql: tab.resultPageSql,
       resultPageLimit: tab.resultPageLimit,
@@ -855,6 +866,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortMode: tab.resultSortMode,
       resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows,
       resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments,
+      resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments,
       orderByInput: tab.orderByInput,
       resultPageSql: tab.resultPageSql,
       resultPageLimit: tab.resultPageLimit,
@@ -904,6 +916,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab.resultLocalSortOriginalRows) {
       tab.resultLocalSortOriginalRows = tab.result.rows.slice();
       tab.resultLocalSortOriginalMongoDocuments = tab.result.mongo_documents?.slice();
+      tab.resultLocalSortOriginalMongoCopyDocuments = tab.result.mongo_copy_documents?.slice();
     }
 
     const originalRows = tab.resultLocalSortOriginalRows;
@@ -911,7 +924,9 @@ export const useQueryStore = defineStore("query", () => {
     const rows = rowIndexes.map((index) => originalRows[index]!);
     const originalMongoDocuments = tab.resultLocalSortOriginalMongoDocuments;
     const mongo_documents = originalMongoDocuments ? rowIndexes.map((index) => originalMongoDocuments[index]) : undefined;
-    assignDisplayedResult(tab, { ...tab.result, rows, mongo_documents });
+    const originalMongoCopyDocuments = tab.resultLocalSortOriginalMongoCopyDocuments;
+    const mongo_copy_documents = originalMongoCopyDocuments ? rowIndexes.map((index) => originalMongoCopyDocuments[index]) : undefined;
+    assignDisplayedResult(tab, { ...tab.result, rows, mongo_documents, mongo_copy_documents });
 
     tab.resultSortColumn = direction ? column : undefined;
     tab.resultSortColumnIndex = direction ? columnIndex : undefined;
@@ -921,6 +936,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!direction) {
       tab.resultLocalSortOriginalRows = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
+      tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     }
 
     // 本地排序只是重排既有行/文档，字节规模不变，可复用估算值
@@ -1824,6 +1840,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortMode: undefined,
       resultLocalSortOriginalRows: undefined,
       resultLocalSortOriginalMongoDocuments: undefined,
+      resultLocalSortOriginalMongoCopyDocuments: undefined,
       orderByInput: undefined,
       resultPageSql: undefined,
       resultPageLimit: undefined,
@@ -2781,13 +2798,13 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function analyzeQueryMetadataInBackground(tabId: string, sql: string, result: QueryResult, executionDatabase: string, traceId: string, elapsed: () => string, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = []) {
+  function analyzeQueryMetadataInBackground(tabId: string, sql: string, result: QueryResult, executionDatabase: string, traceId: string, elapsed: () => string, databaseType: DatabaseType | undefined, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = []) {
     void (async () => {
       const tab = tabs.value.find((t) => t.id === tabId);
       if (!tab || tab.result !== result) return;
       queryExecutionLog("info", "metadata:start", { traceId, elapsed: elapsed() });
       const patch = await buildQueryMetadataPatch(tab, sql, executionDatabase, traceId, elapsed, hiddenPrimaryKeys);
-      if (patch?.queryAnalysis && hiddenPrimaryKeys.length > 0) {
+      if (patch?.queryAnalysis && hasHiddenPhysicalRowKey(databaseType, hiddenPrimaryKeys)) {
         patch.queryAnalysis = { ...patch.queryAnalysis, allowInsert: false };
       }
       const current = tabs.value.find((t) => t.id === tabId);
@@ -2929,6 +2946,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.lastExecutedSql = sql;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
+    tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     const updateActiveResultRun = !!tab.activeResultRunId && options?.preserveResultDuringExecution === true;
     if (!updateActiveResultRun) {
       tab.activeResultRunId = undefined;
@@ -3095,9 +3113,9 @@ export const useQueryStore = defineStore("query", () => {
               case "find": {
                 queryExecutionLog("info", "mongo-find:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.skip, mongoCommand.limit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, executionId);
-                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total)));
+                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false)));
                 allResults.push(queryResult);
-                mongoEditTarget = mongoCommands.length === 1 && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
+                mongoEditTarget = mongoCommands.length === 1 && !mongoCommand.projection && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
                 queryExecutionLog("info", "mongo-find:done", {
                   traceId,
                   collection: mongoCommand.collection,
@@ -3111,9 +3129,9 @@ export const useQueryStore = defineStore("query", () => {
               case "findOne": {
                 queryExecutionLog("info", "mongo-find-one:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const result = await api.mongoFindOne(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.projection, mongoCommand.options, executionId);
-                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total)));
+                const queryResult = markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false)));
                 allResults.push(queryResult);
-                mongoEditTarget = mongoCommands.length === 1 && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
+                mongoEditTarget = mongoCommands.length === 1 && !mongoCommand.projection && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
                 queryExecutionLog("info", "mongo-find-one:done", {
                   traceId,
                   collection: mongoCommand.collection,
@@ -3158,7 +3176,7 @@ export const useQueryStore = defineStore("query", () => {
                 queryExecutionLog("info", "mongo-aggregate:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
                 const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, mongoCommand.options, executionId);
-                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total))));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false))));
                 mongoEditTarget = undefined;
                 queryExecutionLog("info", "mongo-aggregate:done", {
                   traceId,
@@ -3237,7 +3255,7 @@ export const useQueryStore = defineStore("query", () => {
                     : mongoCommand.kind === "findOneAndReplace"
                       ? await api.mongoFindOneAndReplace(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.replacement, mongoCommand.options)
                       : await api.mongoFindOneAndDelete(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.options);
-                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total))));
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false))));
                 mongoEditTarget = undefined;
                 queryExecutionLog("info", "mongo-find-and-modify:done", {
                   traceId,
@@ -3584,7 +3602,7 @@ export const useQueryStore = defineStore("query", () => {
         // affected_rows. Use it directly so the result-grid can compute the
         // page count without issuing a separate COUNT query.
         let totalRowCountResolved = false;
-        if (current.result && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
+        if (current.result && current.result.total_is_exact !== false && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
           current.resultTotalRowCount = current.result.affected_rows;
           current.resultTotalRowCountLoading = false;
           totalRowCountResolved = true;
@@ -3623,7 +3641,7 @@ export const useQueryStore = defineStore("query", () => {
           elapsed: elapsed(),
         });
         if (current.mode === "query" && current.result) {
-          analyzeQueryMetadataInBackground(id, displayedQueryMetadataSql(current, queryMetadataSql), current.result, executionDatabase, traceId, elapsed, hiddenPrimaryKeys);
+          analyzeQueryMetadataInBackground(id, displayedQueryMetadataSql(current, queryMetadataSql), current.result, executionDatabase, traceId, elapsed, effectiveDbType, hiddenPrimaryKeys);
         }
       } else {
         queryExecutionLog("warn", "stale-result", {
@@ -4056,6 +4074,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.result = tab.results[index];
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
+    tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     tab.resultSortColumn = undefined;
     tab.resultSortColumnIndex = undefined;
     tab.resultSortDirection = undefined;
@@ -4073,7 +4092,7 @@ export const useQueryStore = defineStore("query", () => {
       const metadataStartedAt = performance.now();
       const connection = useConnectionStore().getConfig(tab.connectionId);
       const executionDatabase = dataTabExecutionDatabase(connection, tab.database, tab.catalog);
-      analyzeQueryMetadataInBackground(id, sourceStatement, tab.result, executionDatabase, uuid().slice(0, 8), () => `${Math.round(performance.now() - metadataStartedAt)}ms`);
+      analyzeQueryMetadataInBackground(id, sourceStatement, tab.result, executionDatabase, uuid().slice(0, 8), () => `${Math.round(performance.now() - metadataStartedAt)}ms`, effectiveDatabaseTypeForConnection(connection));
     }
   }
 
@@ -4178,6 +4197,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.result = snapshot.result ? markQueryResultRowsRaw(snapshot.result) : results?.[activeIndex] ? markQueryResultRowsRaw(results[activeIndex]) : undefined;
     tab.resultLocalSortOriginalRows = snapshot.resultLocalSortOriginalRows ? markRaw(snapshot.resultLocalSortOriginalRows) : undefined;
     tab.resultLocalSortOriginalMongoDocuments = snapshot.resultLocalSortOriginalMongoDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoDocuments) : undefined;
+    tab.resultLocalSortOriginalMongoCopyDocuments = snapshot.resultLocalSortOriginalMongoCopyDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoCopyDocuments) : undefined;
     // 快照编解码会重建负载，落盘前的各 run 估算值不再对应恢复后的对象，
     // 置空让 projectResultRun 按需重算
     tab.resultRuns = snapshot.resultRuns ? markQueryResultRunsRowsRaw(snapshot.resultRuns).map((run) => ({ ...run, resultEstimatedBytes: undefined })) : tab.resultRuns;

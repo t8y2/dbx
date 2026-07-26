@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { CnbClient } from "./sync-cnb-release.mjs";
+import { CnbClient, pruneReleaseAssets } from "./sync-cnb-release.mjs";
 
 const scriptPath = fileURLToPath(new URL("./sync-cnb-release.mjs", import.meta.url));
 
@@ -123,5 +123,61 @@ test("metadata-only sync updates release without reading an assets directory", a
   assert.deepEqual(requests, [
     { method: "GET", url: "/dbxio.com/dbx/-/releases/tags/v1.2.3" },
     { method: "PATCH", url: "/dbxio.com/dbx/-/releases/release-2" },
+  ]);
+});
+
+test("pruneReleaseAssets deletes files missing from the source release", async () => {
+  const deleted = [];
+  const client = {
+    async deleteAsset(releaseId, assetId) {
+      deleted.push({ releaseId, assetId });
+    },
+  };
+
+  await pruneReleaseAssets(
+    client,
+    {
+      id: "release-latest",
+      assets: [
+        { id: "registry", name: "agent-registry.json" },
+        { id: "old-jre", name: "dbx-jre-8-linux-x64.tar.gz" },
+        { id: "old-driver", name: "dbx-agent-h2-0.1.0.jar" },
+      ],
+    },
+    new Set(["agent-registry.json"]),
+  );
+
+  assert.deepEqual(deleted, [
+    { releaseId: "release-latest", assetId: "old-jre" },
+    { releaseId: "release-latest", assetId: "old-driver" },
+  ]);
+});
+
+test("deleteAsset accepts CNB's empty successful response", async (t) => {
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push({ method: request.method, url: request.url });
+    response.statusCode = 204;
+    response.end();
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = new CnbClient({
+    apiBase: `http://127.0.0.1:${address.port}`,
+    repository: "dbxio.com/dbx",
+    token: "test-token",
+  });
+
+  await client.deleteAsset("release/latest", "asset old");
+
+  assert.deepEqual(requests, [
+    {
+      method: "DELETE",
+      url: "/dbxio.com/dbx/-/releases/release%2Flatest/assets/asset%20old",
+    },
   ]);
 });

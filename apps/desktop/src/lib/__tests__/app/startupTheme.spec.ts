@@ -66,8 +66,8 @@ describe("startup theme", () => {
   });
 
   it.each([
-    [null, "small"],
-    ["invalid", "small"],
+    [null, "large"],
+    ["invalid", "large"],
     ["none", "none"],
     ["small", "small"],
     ["large", "large"],
@@ -82,6 +82,7 @@ describe("startup theme", () => {
 
     expect(toggle).toHaveBeenCalledWith("dark", false);
     expect(root.style.colorScheme).toBe("light");
+    expect(root.dataset.cornerStyle).toBe("large");
   });
 
   it("falls back to light for an invalid persisted mode", () => {

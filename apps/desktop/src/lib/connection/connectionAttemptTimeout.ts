@@ -10,6 +10,7 @@ const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "dameng",
   "kingbase",
   "highgo",
+  "uxdb",
   "vastbase",
   "goldendb",
   "yashandb",

@@ -116,6 +116,10 @@ export function dorisListUsersSql(): string {
   return "SHOW ALL GRANTS;";
 }
 
+export function dorisListCurrentUserSql(): string {
+  return "SHOW GRANTS;";
+}
+
 export function dorisUsersResult(result: QueryResult): DatabaseUserIdentity[] {
   const userIndex = columnIndex(result, "UserIdentity");
   if (userIndex < 0) return [];
@@ -398,6 +402,9 @@ ORDER BY r.rolname;`.trim();
 
 export function kingbaseShowGrantsSql(user: DatabaseUserIdentity): string {
   const role = quoteSqlString(user.user);
+  // SQL Server-compatible Kingbase omits role_table_grants, while
+  // table_privileges is available across modes; concat also avoids MySQL
+  // compatibility mode interpreting || as boolean OR.
   return `
 WITH target AS (
   SELECT oid, rolname, rolsuper, rolcreatedb, rolcreaterole, rolcanlogin, rolreplication, rolbypassrls
@@ -406,46 +413,46 @@ WITH target AS (
 )
 SELECT line
 FROM (
-  SELECT 1 AS sort, 'Role: ' || quote_ident(rolname) AS line
+  SELECT 1 AS sort, concat('Role: ', quote_ident(rolname)) AS line
   FROM target
   UNION ALL
-  SELECT 2, 'Attributes: ' || COALESCE(NULLIF(concat_ws(', ',
+  SELECT 2, concat('Attributes: ', COALESCE(NULLIF(concat_ws(', ',
     CASE WHEN rolsuper THEN 'SUPERUSER' END,
     CASE WHEN rolcreatedb THEN 'CREATEDB' END,
     CASE WHEN rolcreaterole THEN 'CREATEROLE' END,
     CASE WHEN rolcanlogin THEN 'LOGIN' ELSE 'NOLOGIN' END,
     CASE WHEN rolreplication THEN 'REPLICATION' END,
     CASE WHEN rolbypassrls THEN 'BYPASSRLS' END
-  ), ''), 'none')
+  ), ''), 'none'))
   FROM target
   UNION ALL
-  SELECT 10, 'Member of: ' || quote_ident(parent.rolname) || CASE WHEN m.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END
+  SELECT 10, concat('Member of: ', quote_ident(parent.rolname), CASE WHEN m.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END)
   FROM sys_catalog.sys_auth_members m
   JOIN target t ON t.oid = m.member
   JOIN sys_catalog.sys_roles parent ON parent.oid = m.roleid
   UNION ALL
-  SELECT 20, 'Has member: ' || quote_ident(member.rolname) || CASE WHEN m.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END
+  SELECT 20, concat('Has member: ', quote_ident(member.rolname), CASE WHEN m.admin_option THEN ' WITH ADMIN OPTION' ELSE '' END)
   FROM sys_catalog.sys_auth_members m
   JOIN target t ON t.oid = m.roleid
   JOIN sys_catalog.sys_roles member ON member.oid = m.member
   UNION ALL
-  SELECT 30, 'Database: ' || quote_ident(d.datname) || ' = ' ||
+  SELECT 30, concat('Database: ', quote_ident(d.datname), ' = ',
     concat_ws(', ',
       CASE WHEN has_database_privilege(t.rolname, d.oid, 'CONNECT') THEN 'CONNECT' END,
       CASE WHEN has_database_privilege(t.rolname, d.oid, 'CREATE') THEN 'CREATE' END,
       CASE WHEN has_database_privilege(t.rolname, d.oid, 'TEMPORARY') THEN 'TEMPORARY' END
-    )
+    ))
   FROM target t
   CROSS JOIN sys_catalog.sys_database d
   WHERE has_database_privilege(t.rolname, d.oid, 'CONNECT')
      OR has_database_privilege(t.rolname, d.oid, 'CREATE')
      OR has_database_privilege(t.rolname, d.oid, 'TEMPORARY')
   UNION ALL
-  SELECT 40, 'Schema: ' || quote_ident(n.nspname) || ' = ' ||
+  SELECT 40, concat('Schema: ', quote_ident(n.nspname), ' = ',
     concat_ws(', ',
       CASE WHEN has_schema_privilege(t.rolname, n.oid, 'USAGE') THEN 'USAGE' END,
       CASE WHEN has_schema_privilege(t.rolname, n.oid, 'CREATE') THEN 'CREATE' END
-    )
+    ))
   FROM target t
   CROSS JOIN sys_catalog.sys_namespace n
   WHERE UPPER(n.nspname) <> 'INFORMATION_SCHEMA'
@@ -453,9 +460,9 @@ FROM (
     AND UPPER(n.nspname) NOT LIKE 'XLOG%'
     AND (has_schema_privilege(t.rolname, n.oid, 'USAGE') OR has_schema_privilege(t.rolname, n.oid, 'CREATE'))
   UNION ALL
-  SELECT 50, 'Table: ' || quote_ident(table_schema) || '.' || quote_ident(table_name) || ' = ' ||
-    string_agg(privilege_type || CASE WHEN is_grantable = 'YES' THEN ' WITH GRANT OPTION' ELSE '' END, ', ' ORDER BY privilege_type)
-  FROM information_schema.role_table_grants
+  SELECT 50, concat('Table: ', quote_ident(table_schema), '.', quote_ident(table_name), ' = ',
+    string_agg(concat(CAST(privilege_type AS text), CASE WHEN CAST(is_grantable AS text) = 'YES' THEN ' WITH GRANT OPTION' ELSE '' END), ', ' ORDER BY CAST(privilege_type AS text)))
+  FROM information_schema.table_privileges
   WHERE grantee = ${role}
     AND UPPER(table_schema) <> 'INFORMATION_SCHEMA'
     AND UPPER(table_schema) NOT LIKE 'SYS%'
@@ -634,7 +641,9 @@ export const dorisUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "mysql",
   defaultScope: "table",
   listUsersSql: dorisListUsersSql,
+  fallbackListUsersSql: dorisListCurrentUserSql,
   parseUsers: dorisUsersResult,
+  parseFallbackUsers: dorisUsersResult,
   showGrantsSql: mysqlShowGrantsSql,
   parseGrants: dorisGrantsResult,
   createUserSql: mysqlCreateUserSql,

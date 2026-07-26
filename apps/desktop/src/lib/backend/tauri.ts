@@ -22,6 +22,9 @@ import type {
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
+  ConstraintInfo,
+  PartitionInfo,
+  SubpartitionInfo,
   FunctionInfo,
   SequenceInfo,
   RuleInfo,
@@ -315,6 +318,7 @@ export interface DroppedFilePreviewSqlOptions {
 export type XlsxCellValue = string | number | boolean | null;
 
 export interface DriverInstallProgress {
+  operation_id?: string;
   step: string;
   downloaded?: number;
   total?: number;
@@ -808,8 +812,8 @@ export async function deleteSchemaCachePrefix(prefix: string): Promise<void> {
   return invoke("delete_schema_cache_prefix", { prefix });
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string): Promise<TableInfo[]> {
-  return invoke("list_tables", { connectionId, database, schema, filter, limit, offset, objectTypes, catalog });
+export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string, tableNameFilter?: import("@/types/database").TableNameFilter): Promise<TableInfo[]> {
+  return invoke("list_tables", { connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter });
 }
 
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<string | null> {
@@ -1177,6 +1181,18 @@ export async function listTriggers(connectionId: string, database: string, schem
   return invoke("list_triggers", { connectionId, database, schema, table, catalog });
 }
 
+export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ConstraintInfo[]> {
+  return invoke("list_constraints", { connectionId, database, schema, table, catalog });
+}
+
+export async function listPartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<PartitionInfo[]> {
+  return invoke("list_partitions", { connectionId, database, schema, table, catalog });
+}
+
+export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
+  return invoke("list_subpartitions", { connectionId, database, schema, table, catalog });
+}
+
 export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
   return invoke("get_table_ddl", { connectionId, database, schema, table, objectType, catalog });
 }
@@ -1349,12 +1365,12 @@ export async function restartDriverRuntime(runtimeId: string): Promise<void> {
   return invoke("restart_driver_runtime", { runtimeId });
 }
 
-export async function installAgent(dbType: string, source?: UpdateDownloadSource): Promise<void> {
-  return invoke("install_agent", { dbType, source });
+export async function installAgent(dbType: string, source?: UpdateDownloadSource, operationId?: string): Promise<void> {
+  return invoke("install_agent", { dbType, source, operationId });
 }
 
-export async function upgradeAllAgents(source?: UpdateDownloadSource): Promise<UpgradeAllAgentDriversResult> {
-  return invoke("upgrade_all_agents", { source });
+export async function upgradeAllAgents(source?: UpdateDownloadSource, operationId?: string): Promise<UpgradeAllAgentDriversResult> {
+  return invoke("upgrade_all_agents", { source, operationId });
 }
 
 export async function checkAgentUpdateBlockers(dbTypes: string[]): Promise<AgentUpdateBlocker[]> {
@@ -1377,11 +1393,11 @@ export async function invalidateAgentRegistryCache(): Promise<void> {
   return invoke("invalidate_agent_registry_cache");
 }
 
-export async function importAgentsFromZip(path: string | File): Promise<number> {
+export async function importAgentsFromZip(path: string | File, operationId?: string): Promise<number> {
   if (typeof path !== "string") {
     throw new Error("Desktop offline ZIP import requires a local file path");
   }
-  return invoke("import_agents_from_zip", { path });
+  return invoke("import_agents_from_zip", { path, operationId });
 }
 
 export async function importAgentDriver(dbType: string, path: string | File): Promise<void> {
@@ -1393,8 +1409,8 @@ export async function importAgentDriver(dbType: string, path: string | File): Pr
 
 export const importAgentJar = importAgentDriver;
 
-export async function reinstallJre(jreKey?: string, source?: UpdateDownloadSource): Promise<void> {
-  return invoke("reinstall_jre", { jreKey, source });
+export async function reinstallJre(jreKey?: string, source?: UpdateDownloadSource, operationId?: string): Promise<void> {
+  return invoke("reinstall_jre", { jreKey, source, operationId });
 }
 
 export async function uninstallJre(jreKey: string): Promise<void> {
@@ -2188,6 +2204,7 @@ export interface SqlFilePreview {
   sizeBytes: number;
   preview: string;
   canExecuteWithoutSelectedDatabase: boolean;
+  establishesDatabaseContext?: boolean;
 }
 
 export interface SqlFileProgress {
@@ -2208,6 +2225,10 @@ export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> 
 
 export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
   return invoke("execute_sql_file", { request });
+}
+
+export async function executeSqlFiles(request: SqlFileRequest, filePaths: string[]): Promise<void> {
+  return invoke("execute_sql_files", { request, filePaths });
 }
 
 export async function cancelSqlFileExecution(executionId: string): Promise<boolean> {
@@ -2451,6 +2472,7 @@ export interface DatabaseExportRequest {
   includeStructure: boolean;
   includeData: boolean;
   includeObjects: boolean;
+  includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
   failOnError?: boolean;

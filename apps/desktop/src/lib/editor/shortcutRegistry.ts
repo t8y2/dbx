@@ -68,8 +68,8 @@ export type ShortcutSettings = Record<ShortcutActionId, string>;
 
 // closeOtherTabs 的平台相关默认键。Windows/Linux 不用 Alt+Mod（= Ctrl+Alt，
 // 与国际键盘 AltGr 字符输入冲突），也不用 Ctrl+Shift+W（浏览器保留的关窗键，
-// Web 形态不可拦截，closeTab 默认 Meta+W 同理）；Shift+Alt+W 无浏览器保留
-// 冲突（Firefox accesskey 同为 Alt+Shift+字母，属正常应用快捷键区）。
+// Web 形态不可拦截）；Shift+Alt+W 无浏览器保留冲突（Firefox accesskey
+// 同为 Alt+Shift+字母，属正常应用快捷键区）。
 // 已知取舍：Windows 的 Alt+Shift 布局切换只在单独按下并释放时触发，
 // Alt+Shift+字母会正常送达应用，多语言用户如遇干扰可自定义改键。
 // macOS 的 ⌥⌘W 无上述问题
@@ -78,6 +78,7 @@ export function closeOtherTabsDefaultShortcut(platform = globalThis.navigator?.p
 }
 
 const CLOSE_OTHER_TABS_PLATFORM_DEFAULTS = new Set(["Alt+Mod+W", "Shift+Alt+W"]);
+const LEGACY_CLOSE_TAB_DEFAULT = "Meta+W";
 
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
@@ -222,7 +223,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: "closeTab",
     labelKey: "settings.shortcutCloseTab",
     scope: "global",
-    defaultShortcut: "Meta+W",
+    defaultShortcut: "Mod+W",
   },
   {
     id: "closeOtherTabs",
@@ -414,6 +415,11 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>):
       // Windows 上会还原成 Ctrl+Alt+W）。凡是平台默认集合内的值都视为"未
       // 自定义"，按本机平台重新解析；用户真正自定义的其他组合原样保留
       if (definition.id === "closeOtherTabs" && CLOSE_OTHER_TABS_PLATFORM_DEFAULTS.has(configured)) {
+        configured = definition.defaultShortcut;
+      }
+      // Meta+W was the old macOS-only default. Treat that exact value as a
+      // legacy default so existing Windows/Linux settings adopt Ctrl+W.
+      if (definition.id === "closeTab" && configured === LEGACY_CLOSE_TAB_DEFAULT) {
         configured = definition.defaultShortcut;
       }
       const normalized = definition.inputKind === "modifier-only" ? normalizeModifierOnlyShortcut(configured, definition.defaultShortcut) : configured;

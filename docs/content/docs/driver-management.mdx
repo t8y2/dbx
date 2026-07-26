@@ -11,7 +11,7 @@ DBX uses a hybrid driver architecture: built-in Rust drivers, standalone native 
 | ----------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Native (built-in) | Rust drivers compiled into DBX       | MySQL, PostgreSQL, SQLite, SQL Server, Redis, MongoDB, DuckDB, ClickHouse, and more                                                                              |
 | Native Agent      | Standalone Go/Rust process managed by DBX | Oracle, KingBase, XuguDB, and databases with a mature native driver                                                                                          |
-| JDBC Agent        | Java subprocess managed by DBX       | Databases that require JDBC: GaussDB, openGauss, DM, HighGo, Vastbase, Trino, Hive, DB2, Informix, Neo4j, TDengine, YashanDB, GoldenDB, Kylin, SunDB, and more |
+| JDBC Agent        | Java subprocess managed by DBX       | Databases that require JDBC: GaussDB, openGauss, DM, HighGo, Vastbase, UXDB, Trino, Hive, DB2, Informix, Neo4j, TDengine, YashanDB, GoldenDB, Kylin, SunDB, and more |
 
 <Callout type="info">Built-in drivers work immediately. Native Agents require only a platform-specific executable, while JDBC Agents also require a JRE. DBX handles the matching installation when you first create a connection.</Callout>
 

@@ -311,6 +311,7 @@ const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColu
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
+const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
 const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
 const editInfiniteScrollMaxRows = ref(settingsStore.editorSettings.infiniteScrollMaxRows);
@@ -450,6 +451,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
+    dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
     tableOpenPageSize: editTableOpenPageSize.value,
     infiniteScroll: editInfiniteScroll.value,
     infiniteScrollMaxRows: editInfiniteScrollMaxRows.value,
@@ -701,6 +703,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
+  editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
   editInfiniteScroll.value = settingsStore.editorSettings.infiniteScroll;
   editInfiniteScrollMaxRows.value = settingsStore.editorSettings.infiniteScrollMaxRows;
@@ -927,6 +930,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
+    editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
     editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
@@ -986,6 +990,7 @@ function resetAllDefaults() {
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
+  editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
   editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
   editInfiniteScrollMaxRows.value = DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
@@ -3875,6 +3880,17 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="data-grid-auto-transpose-single-row">
+                      {{ t("settings.dataGridAutoTransposeSingleRow") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridAutoTransposeSingleRowDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-auto-transpose-single-row" v-model="editDataGridAutoTransposeSingleRow" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="infinite-scroll">
                       {{ t("settings.infiniteScroll") }}
                     </Label>
@@ -5379,15 +5395,15 @@ onUnmounted(cleanupPreviewEditor);
               <div class="space-y-2">
                 <Label>{{ t("settings.mcpConfig") }}</Label>
                 <Tabs v-model="mcpConfigTab" class="space-y-3">
-                  <TabsList class="grid h-auto w-full grid-cols-2 gap-1 overflow-visible group-data-horizontal/tabs:h-auto sm:grid-cols-4 xl:grid-cols-8">
-                    <TabsTrigger value="claude" class="h-8 min-w-0 px-2">Claude Code</TabsTrigger>
-                    <TabsTrigger value="cursor" class="h-8 min-w-0 px-2">Cursor</TabsTrigger>
-                    <TabsTrigger value="trae" class="h-8 min-w-0 px-2">TRAE</TabsTrigger>
-                    <TabsTrigger value="vscode" class="h-8 min-w-0 px-2">VS Code</TabsTrigger>
-                    <TabsTrigger value="windsurf" class="h-8 min-w-0 px-2">Windsurf</TabsTrigger>
-                    <TabsTrigger value="codex" class="h-8 min-w-0 px-2">Codex</TabsTrigger>
-                    <TabsTrigger value="opencode" class="h-8 min-w-0 px-2">OpenCode</TabsTrigger>
-                    <TabsTrigger value="cherry-studio" class="h-8 min-w-0 px-2">Cherry Studio</TabsTrigger>
+                  <TabsList class="h-auto min-h-8 w-full min-w-0 max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain group-data-horizontal/tabs:h-auto">
+                    <TabsTrigger value="claude" class="h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
+                    <TabsTrigger value="cursor" class="h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
+                    <TabsTrigger value="trae" class="h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
+                    <TabsTrigger value="vscode" class="h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>
+                    <TabsTrigger value="windsurf" class="h-7 flex-none shrink-0 px-2.5">Windsurf</TabsTrigger>
+                    <TabsTrigger value="codex" class="h-7 flex-none shrink-0 px-2.5">Codex</TabsTrigger>
+                    <TabsTrigger value="opencode" class="h-7 flex-none shrink-0 px-2.5">OpenCode</TabsTrigger>
+                    <TabsTrigger value="cherry-studio" class="h-7 flex-none shrink-0 px-2.5">Cherry Studio</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="claude" class="m-0">

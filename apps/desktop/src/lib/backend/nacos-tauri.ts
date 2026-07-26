@@ -10,6 +10,7 @@ import type {
   NacosConfigRollbackRequest,
   NacosConfigUpsert,
   NacosConnectionInfo,
+  NacosRNacosConsoleCaptcha,
   NacosInstanceInfo,
   NacosInstanceQuery,
   NacosInstanceUpdate,
@@ -64,6 +65,14 @@ export async function nacosGetConfigHistory(connectionId: string, key: NacosConf
 
 export async function nacosRollbackConfig(connectionId: string, req: NacosConfigRollbackRequest): Promise<void> {
   return invoke("nacos_rollback_config", { connectionId, req });
+}
+
+export async function nacosGetRNacosConsoleCaptcha(connectionId: string): Promise<NacosRNacosConsoleCaptcha> {
+  return invoke("nacos_get_rnacos_console_captcha", { connectionId });
+}
+
+export async function nacosLoginRNacosConsole(connectionId: string, captcha?: string): Promise<void> {
+  return invoke("nacos_login_rnacos_console", { connectionId, captcha });
 }
 
 export async function nacosListServices(connectionId: string, query: NacosServiceQuery): Promise<NacosServiceList> {

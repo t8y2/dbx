@@ -14,11 +14,17 @@ const props = withDefaults(
     saveDisabled?: boolean;
     readOnly?: boolean;
     wordWrap?: boolean;
+    /**
+     * When false, Mod+F is left to a parent find surface (RedisValueViewer).
+     * Default true so DocumentBrowser and other callers keep CodeMirror find.
+     */
+    enableBuiltinFind?: boolean;
   }>(),
   {
     saveDisabled: false,
     readOnly: false,
     wordWrap: false,
+    enableBuiltinFind: true,
   },
 );
 
@@ -37,6 +43,7 @@ const editor = useCellDetailEditor({
   folding: true,
   lineWrapping: () => props.wordWrap,
   readOnly: () => props.readOnly,
+  enableBuiltinFind: props.enableBuiltinFind,
   onChange(value) {
     emit("update:modelValue", value);
   },
@@ -65,6 +72,16 @@ watch(
     if (editor.getValue() !== value) editor.setValue(value, "json");
   },
 );
+
+function openSearch(): boolean {
+  return editor.openSearch();
+}
+
+function selectRange(from: number, to: number, options?: { focus?: boolean }): boolean {
+  return editor.selectRange(from, to, options);
+}
+
+defineExpose({ openSearch, selectRange });
 </script>
 
 <template>

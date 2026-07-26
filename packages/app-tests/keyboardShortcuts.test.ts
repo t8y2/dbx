@@ -129,12 +129,10 @@ test("ignores composing input events", () => {
   assert.equal(isExecuteSqlShortcut({ key: "Enter", metaKey: true, isComposing: true }), false);
 });
 
-test("matches Cmd+W for closing query tabs", () => {
+test("matches the platform modifier for closing query tabs", () => {
   assert.equal(isCloseTabShortcut({ key: "w", metaKey: true }), true);
-});
-
-test("ignores Ctrl+W for closing query tabs", () => {
-  assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }), false);
+  assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }), true);
+  assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }, { closeTab: "Meta+W" } as any), true);
 });
 
 test("matches platform shortcuts for closing other tabs", () => {

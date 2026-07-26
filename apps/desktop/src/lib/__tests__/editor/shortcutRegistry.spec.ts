@@ -44,6 +44,15 @@ describe("shortcutRegistry editor actions", () => {
     expect(normalizeShortcutSettings({ closeOtherTabs: "Shift+Mod+O" }).closeOtherTabs).toBe("Shift+Mod+O");
   });
 
+  it("uses the platform modifier for closing tabs and migrates the legacy Meta default", () => {
+    expect(DEFAULT_SHORTCUT_SETTINGS.closeTab).toBe("Mod+W");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeTab, "Win32")).toBe("Ctrl+W");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeTab, "MacIntel")).toBe("Cmd+W");
+    expect(normalizeShortcutSettings({ closeTab: "Meta+W" }).closeTab).toBe("Mod+W");
+    expect(normalizeShortcutSettings({ closeTab: "Shift+Mod+W" }).closeTab).toBe("Shift+Mod+W");
+    expect(normalizeShortcutSettings({ closeTab: "" }).closeTab).toBe("");
+  });
+
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {
     expect(normalizeShortcutSettings({ openDataInNewTab: "Shift" }).openDataInNewTab).toBe("Shift");
     expect(normalizeShortcutSettings({ openDataInNewTab: "" }).openDataInNewTab).toBe("");

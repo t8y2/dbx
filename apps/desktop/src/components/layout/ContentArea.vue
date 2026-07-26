@@ -77,7 +77,7 @@ import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatab
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
 import * as api from "@/lib/backend/api";
-import { applyMongoGridChangesToDocument, buildMongoUpdateDocument, formatMongoShellLiteral, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, buildMongoUpdateDocument, formatMongoShellLiteral, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
@@ -440,16 +440,22 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
 
     // Replace the raw array only after every backend update succeeds, keeping
     // the grid and JSON preview atomic when a multi-row save partially fails.
-    const replacements = new Map<unknown, unknown>();
+    if (tab.resultLocalSortOriginalMongoDocuments) {
+      tab.resultLocalSortOriginalMongoDocuments = applyMongoGridChangesToDocumentBaseline(tab.resultLocalSortOriginalMongoDocuments, documents, dirtyRows, columns);
+    }
     tab.result!.mongo_documents = documents.map((document, rowIdx) => {
       const changes = dirtyRows.get(rowIdx);
-      if (!changes) return document;
-      const updated = applyMongoGridChangesToDocument(document, changes, columns);
-      replacements.set(document, updated);
-      return updated;
+      return changes ? applyMongoGridChangesToDocument(document, changes, columns) : document;
     });
-    if (tab.resultLocalSortOriginalMongoDocuments) {
-      tab.resultLocalSortOriginalMongoDocuments = tab.resultLocalSortOriginalMongoDocuments.map((document) => replacements.get(document) ?? document);
+    const copyDocuments = tab.result!.mongo_copy_documents;
+    if (copyDocuments) {
+      if (tab.resultLocalSortOriginalMongoCopyDocuments) {
+        tab.resultLocalSortOriginalMongoCopyDocuments = applyMongoGridChangesToDocumentBaseline(tab.resultLocalSortOriginalMongoCopyDocuments, copyDocuments, dirtyRows, columns);
+      }
+      tab.result!.mongo_copy_documents = copyDocuments.map((document, rowIdx) => {
+        const changes = dirtyRows.get(rowIdx);
+        return changes ? applyMongoGridChangesToDocument(document, changes, columns) : document;
+      });
     }
   };
 
@@ -826,6 +832,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               auto-focus
               :model-value="activeTab.sql"
               :connection-id="activeTab.connectionId"
+              :catalog="activeTab.catalog"
               :database="activeTab.database"
               :schema="activeTab.schema"
               :client-session-id="activeTab.id"
@@ -1167,10 +1174,12 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
+                :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
                 :query-editability-reason="activeTab.queryEditabilityReason"
                 :allow-insert-rows="activeTab.queryAnalysis?.allowInsert !== false && activeTab.queryAnalysis?.allowInsertDelete !== false"
                 :allow-delete-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
                 context="results"
+                :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
                 :database-type="activeEffectiveDatabaseType"
                 :connection-id="activeTab.connectionId"
                 :database="activeTab.database"
@@ -1181,6 +1190,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :page-limit="activeTab.resultPageLimit"
                 :count-sql="activeTab.resultCountSql"
                 :total-row-count="activeTab.resultTotalRowCount"
+                :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
                 :total-row-count-loading="activeTab.resultTotalRowCountLoading"
                 :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
@@ -1508,6 +1518,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           :page-offset="activeTab.resultPageOffset"
           :page-limit="activeTab.resultPageLimit"
           :total-row-count="activeTab.resultTotalRowCount"
+          :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
           :total-row-count-loading="activeTab.resultTotalRowCountLoading"
           :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
           :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"

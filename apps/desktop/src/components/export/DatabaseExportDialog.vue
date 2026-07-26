@@ -59,6 +59,7 @@ const tableError = ref<string | null>(null);
 const includeStructure = ref(true);
 const includeData = ref(true);
 const includeObjects = ref(true);
+const includeCreateDatabase = ref(false);
 const dropTableIfExists = ref(false);
 const omitAutoIncrement = ref(false);
 // `AUTO_INCREMENT` stripping is a MySQL-only DDL transform (backend gates on
@@ -77,6 +78,7 @@ const pendingPrefillTables = ref<string[]>([]);
 const exportAllDatabases = ref(false);
 const batchDatabaseIndex = ref(0);
 const batchDatabaseTotal = ref(0);
+const batchRowsExported = ref(0);
 const activeDatabaseExportId = ref("");
 
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
@@ -108,11 +110,6 @@ function sanitizeFileName(value: string): string {
 function joinExportPath(directory: string, fileName: string): string {
   const separator = directory.includes("\\") ? "\\" : "/";
   return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
-}
-
-function currentRowsExported(): number {
-  const progress: ExportProgress | null = exportProgress.value;
-  return progress?.rowsExported ?? 0;
 }
 
 async function loadDatabases(connId: string) {
@@ -276,6 +273,7 @@ async function startExport() {
     includeStructure: includeStructure.value,
     includeData: includeData.value,
     includeObjects: includeObjects.value,
+    includeCreateDatabase: includeCreateDatabase.value,
     dropTableIfExists: dropTableIfExists.value,
     omitAutoIncrement: omitAutoIncrement.value,
     batchSize: 1000,
@@ -343,6 +341,7 @@ async function startAllDatabasesExport() {
   exportCancelled.value = false;
   exportProgress.value = null;
   batchDatabaseIndex.value = 0;
+  batchRowsExported.value = 0;
 
   const dbs = [...selectedDatabases.value];
   const batchId = generateDatabaseExportId();
@@ -370,19 +369,30 @@ async function startAllDatabasesExport() {
         includeStructure: includeStructure.value,
         includeData: includeData.value,
         includeObjects: includeObjects.value,
+        includeCreateDatabase: includeCreateDatabase.value,
         dropTableIfExists: dropTableIfExists.value,
         omitAutoIncrement: omitAutoIncrement.value,
         batchSize: 1000,
       };
+      let currentDatabaseRowsExported = 0;
 
       await runDatabaseExportUntilTerminal(request, (progress) => {
-        exportProgress.value = { ...progress, exportId: batchId, currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}` };
+        const nextRowsExported = Math.max(0, progress.rowsExported);
+        batchRowsExported.value += Math.max(0, nextRowsExported - currentDatabaseRowsExported);
+        currentDatabaseRowsExported = nextRowsExported;
+        exportProgress.value = {
+          ...progress,
+          exportId: batchId,
+          currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}`,
+          rowsExported: batchRowsExported.value,
+        };
         updateDatabaseExportTask(batchId, {
           ...progress,
           exportId: batchId,
           currentObject: item.displayName,
           objectIndex: index,
           totalObjects: exportPlan.length,
+          rowsExported: batchRowsExported.value,
         });
         if (progress.status === "Error") {
           exportError.value = progress.error;
@@ -400,16 +410,18 @@ async function startAllDatabasesExport() {
     if (!exportError.value && !exportCancelled.value) {
       exportDone.value = true;
       isExporting.value = false;
-      updateDatabaseExportTask(batchId, {
+      const finalProgress: api.ExportProgress = {
         exportId: batchId,
         currentObject: t("databaseExport.allDatabasesTask", { count: dbs.length }),
         objectIndex: exportPlan.length,
         totalObjects: exportPlan.length,
-        rowsExported: currentRowsExported(),
+        rowsExported: batchRowsExported.value,
         totalRows: null,
         status: "Done",
         error: null,
-      });
+      };
+      exportProgress.value = finalProgress;
+      updateDatabaseExportTask(batchId, finalProgress);
       toast(t("databaseExport.exportAllSuccess", { count: dbs.length }), 3000);
     }
   } catch (e: any) {
@@ -419,7 +431,7 @@ async function startAllDatabasesExport() {
       currentObject: t("databaseExport.allDatabasesTask", { count: dbs.length }),
       objectIndex: Math.max(0, batchDatabaseIndex.value - 1),
       totalObjects: batchDatabaseTotal.value || dbs.length,
-      rowsExported: currentRowsExported(),
+      rowsExported: batchRowsExported.value,
       totalRows: null,
       status: "Error",
       error: exportError.value,
@@ -459,6 +471,7 @@ function resetState() {
   includeStructure.value = true;
   includeData.value = true;
   includeObjects.value = true;
+  includeCreateDatabase.value = false;
   dropTableIfExists.value = false;
   omitAutoIncrement.value = false;
   isExporting.value = false;
@@ -469,10 +482,17 @@ function resetState() {
   exportId.value = "";
   batchDatabaseIndex.value = 0;
   batchDatabaseTotal.value = 0;
+  batchRowsExported.value = 0;
   activeDatabaseExportId.value = "";
 }
 
 const progressPercent = computed(() => {
+  if (exportAllDatabases.value && batchDatabaseTotal.value > 0) {
+    if (exportDone.value) return 100;
+    const current = exportProgress.value;
+    const currentDatabaseProgress = current && current.totalObjects > 0 ? current.objectIndex / current.totalObjects : 0;
+    return Math.round(Math.min(1, (Math.max(0, batchDatabaseIndex.value - 1) + currentDatabaseProgress) / batchDatabaseTotal.value) * 100);
+  }
   const p = exportProgress.value;
   if (!p || p.totalObjects === 0) return 0;
   return Math.round((p.objectIndex / p.totalObjects) * 100);
@@ -679,6 +699,11 @@ watch(
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.includeStructure") }}
             </div>
+            <div v-if="isMysqlFamily" class="flex items-center gap-2 cursor-pointer text-xs" @click="includeCreateDatabase = !includeCreateDatabase">
+              <CheckSquare v-if="includeCreateDatabase" class="w-3.5 h-3.5 text-primary shrink-0" />
+              <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+              {{ t("databaseExport.includeCreateDatabase") }}
+            </div>
             <div class="flex items-center gap-2 text-xs" :class="includeStructure ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground/50'" @click="includeStructure && (dropTableIfExists = !dropTableIfExists)">
               <CheckSquare v-if="dropTableIfExists && includeStructure" class="w-3.5 h-3.5 text-primary shrink-0" />
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
@@ -708,7 +733,7 @@ watch(
             {{ t("databaseExport.currentDatabase", { current: batchDatabaseIndex, total: batchDatabaseTotal }) }}
           </div>
           <div v-if="exportProgress" class="space-y-2">
-            <div class="text-xs text-muted-foreground">
+            <div v-if="!exportAllDatabases || !exportDone" class="text-xs text-muted-foreground">
               {{
                 t("databaseExport.currentTable", {
                   table: exportProgress.currentObject,
@@ -723,7 +748,7 @@ watch(
             </div>
 
             <div class="text-xs text-muted-foreground">
-              {{ t("databaseExport.rowsExported", { count: exportProgress.rowsExported.toLocaleString() }) }}
+              {{ exportAllDatabases ? t("databaseExport.allRowsExported", { count: exportProgress.rowsExported.toLocaleString() }) : t("databaseExport.rowsExported", { current: exportProgress.objectIndex, total: exportProgress.totalObjects, count: exportProgress.rowsExported.toLocaleString() }) }}
             </div>
           </div>
 

@@ -53,6 +53,15 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: Zap, colorClass: "text-orange-400" };
     case "trigger":
       return { icon: Zap, colorClass: "text-orange-300" };
+    case "group-constraints":
+    case "constraint":
+      return { icon: Key, colorClass: "text-amber-500" };
+    case "group-table-partitions":
+    case "group-table-subpartitions":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
+    case "partition":
+    case "subpartition":
+      return { icon: TableProperties, colorClass: "text-green-400" };
     case "object-browser":
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":

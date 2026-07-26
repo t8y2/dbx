@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -45,6 +45,24 @@ describe("jdbc dialect inference", () => {
         driver_profile: "sqlserver",
       }),
     ).toBe("sqlserver");
+  });
+
+  it("detects GaussDB-compatible JDBC connections as schema-aware", () => {
+    const gaussdbConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:gaussdb://localhost:8000/testdb",
+      jdbc_driver_class: "com.huawei.gaussdb.jdbc.Driver",
+    };
+    const opengaussConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:opengauss://localhost:5432/postgres",
+      jdbc_driver_class: "org.opengauss.Driver",
+    };
+
+    expect(inferJdbcDialect(gaussdbConnection)).toBe("gaussdb");
+    expect(connectionUsesDatabaseObjectTreeMode(gaussdbConnection)).toBe(false);
+    expect(inferJdbcDialect(opengaussConnection)).toBe("opengauss");
+    expect(connectionUsesDatabaseObjectTreeMode(opengaussConnection)).toBe(false);
   });
 });
 

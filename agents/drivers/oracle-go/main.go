@@ -149,6 +149,22 @@ const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   ELSE 5
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
+const oracleListTriggersSQL = `
+SELECT t.TRIGGER_NAME,
+       t.TRIGGERING_EVENT,
+       t.TRIGGER_TYPE,
+       t.DESCRIPTION,
+       s.LINE,
+       s.TEXT
+FROM ALL_TRIGGERS t
+LEFT JOIN ALL_SOURCE s
+  ON s.OWNER = t.OWNER
+ AND s.NAME = t.TRIGGER_NAME
+ AND s.TYPE = 'TRIGGER'
+WHERE t.OWNER = :1
+  AND t.TABLE_NAME = :2
+  AND t.BASE_OBJECT_TYPE IN ('TABLE', 'VIEW')
+ORDER BY t.TRIGGER_NAME, s.LINE`
 
 type request struct {
 	ID     json.RawMessage            `json:"id"`
@@ -352,9 +368,10 @@ type foreignKeyInfo struct {
 }
 
 type triggerInfo struct {
-	Name   string `json:"name"`
-	Event  string `json:"event"`
-	Timing string `json:"timing"`
+	Name      string  `json:"name"`
+	Event     string  `json:"event"`
+	Timing    string  `json:"timing"`
+	Statement *string `json:"statement,omitempty"`
 }
 
 type server struct {
@@ -806,10 +823,12 @@ func openDB(params connectParams) (*sql.DB, error) {
 }
 
 func openDBWithStringConverter(params connectParams, stringConverter converters.IStringConverter) (*sql.DB, error) {
-	dsn := buildDSN(params)
+	dsn, err := buildDSNForConnect(params)
+	if err != nil {
+		return nil, err
+	}
 	var db *sql.DB
 	if stringConverter == nil {
-		var err error
 		db, err = sql.Open("oracle", dsn)
 		if err != nil {
 			return nil, err
@@ -2008,24 +2027,76 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 		return nil, err
 	}
 	table = strings.ToUpper(strings.TrimSpace(table))
-	rows, err := s.queryRows(`
-SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE
-FROM ALL_TRIGGERS
-WHERE OWNER = :1 AND TABLE_NAME = :2
-ORDER BY TRIGGER_NAME`, []any{schema, table})
+	rows, err := s.queryRows(oracleListTriggersSQL, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
 	defer s.closeRows(rows)
 	var result []triggerInfo
+	var currentName string
+	var currentDescription string
+	var source strings.Builder
+	flush := func() {
+		if len(result) == 0 || currentName == "" {
+			return
+		}
+		if body, ok := oracleTriggerBody(source.String(), currentDescription); ok {
+			result[len(result)-1].Statement = &body
+		}
+	}
 	for rows.Next() {
-		var item triggerInfo
-		if err := rows.Scan(&item.Name, &item.Event, &item.Timing); err != nil {
+		var name, event, timing string
+		var description, lineText sql.NullString
+		var line sql.NullInt64
+		if err := rows.Scan(&name, &event, &timing, &description, &line, &lineText); err != nil {
 			return nil, err
 		}
-		result = append(result, item)
+		if name != currentName {
+			flush()
+			currentName = name
+			currentDescription = description.String
+			source.Reset()
+			result = append(result, triggerInfo{Name: name, Event: event, Timing: timing})
+		}
+		if line.Valid && lineText.Valid {
+			source.WriteString(lineText.String)
+		}
 	}
+	flush()
 	return emptyIfNil(result), rows.Err()
+}
+
+func oracleTriggerBody(source, description string) (string, bool) {
+	source = strings.ReplaceAll(source, "\r\n", "\n")
+	description = strings.ReplaceAll(description, "\r\n", "\n")
+	if strings.TrimSpace(source) == "" {
+		return "", false
+	}
+
+	sourceLines := strings.Split(source, "\n")
+	descriptionLines := strings.Split(strings.TrimSpace(description), "\n")
+	for len(descriptionLines) > 0 && strings.TrimSpace(descriptionLines[len(descriptionLines)-1]) == "" {
+		descriptionLines = descriptionLines[:len(descriptionLines)-1]
+	}
+	if len(descriptionLines) > 0 && len(sourceLines) >= len(descriptionLines) {
+		matches := true
+		for index, descriptionLine := range descriptionLines {
+			sourceLine := strings.TrimSpace(sourceLines[index])
+			if index == 0 && len(sourceLine) >= len("TRIGGER") && strings.EqualFold(sourceLine[:len("TRIGGER")], "TRIGGER") {
+				sourceLine = strings.TrimSpace(sourceLine[len("TRIGGER"):])
+			}
+			if !strings.EqualFold(sourceLine, strings.TrimSpace(descriptionLine)) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return strings.TrimSpace(strings.Join(sourceLines[len(descriptionLines):], "\n")), true
+		}
+	}
+
+	// ALL_SOURCE is still more useful than an empty editor if a database version formats DESCRIPTION differently.
+	return strings.TrimSpace(source), true
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {

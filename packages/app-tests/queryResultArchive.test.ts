@@ -38,6 +38,10 @@ test("query result archives round-trip query tab metadata and result runs", asyn
             { _id: "1", profile: { role: "admin" } },
             { _id: "2", profile: { role: "maintainer" } },
           ],
+          mongo_copy_documents: [
+            { _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } },
+            { _id: { $oid: "507f1f77bcf86cd799439012" }, counter: { $numberLong: "9007199254740993" } },
+          ],
           affected_rows: 0,
           execution_time_ms: 3,
           session_id: "live-session",
@@ -66,6 +70,7 @@ test("query result archives round-trip query tab metadata and result runs", asyn
     },
     resultLocalSortOriginalRows: [[1, "pending"]],
     resultLocalSortOriginalMongoDocuments: [{ _id: "1", status: "pending" }],
+    resultLocalSortOriginalMongoCopyDocuments: [{ _id: { $oid: "507f1f77bcf86cd799439011" }, status: "pending" }],
   });
   const snapshot = buildTabResultSnapshot(tab);
   assert.ok(snapshot);
@@ -80,7 +85,10 @@ test("query result archives round-trip query tab metadata and result runs", asyn
   assert.equal(decoded?.tab.schema, "public");
   assert.equal(decoded?.tab.sql, "select * from revenue");
   assert.equal(decoded?.snapshot.activeResultRunId, "run-2");
-  assert.deepEqual(decoded?.snapshot.resultRuns?.map((run) => run.sequence), [1, 2]);
+  assert.deepEqual(
+    decoded?.snapshot.resultRuns?.map((run) => run.sequence),
+    [1, 2],
+  );
   assert.deepEqual(decoded?.snapshot.resultRuns?.[0]?.result?.rows, [
     [1, "Ada"],
     [2, "Linus"],
@@ -89,9 +97,14 @@ test("query result archives round-trip query tab metadata and result runs", asyn
     { _id: "1", profile: { role: "admin" } },
     { _id: "2", profile: { role: "maintainer" } },
   ]);
+  assert.deepEqual(decoded?.snapshot.resultRuns?.[0]?.result?.mongo_copy_documents, [
+    { _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } },
+    { _id: { $oid: "507f1f77bcf86cd799439012" }, counter: { $numberLong: "9007199254740993" } },
+  ]);
   assert.equal(decoded?.snapshot.resultRuns?.[0]?.result?.session_id, undefined);
   assert.deepEqual(decoded?.snapshot.resultLocalSortOriginalRows, [[1, "pending"]]);
   assert.deepEqual(decoded?.snapshot.resultLocalSortOriginalMongoDocuments, [{ _id: "1", status: "pending" }]);
+  assert.deepEqual(decoded?.snapshot.resultLocalSortOriginalMongoCopyDocuments, [{ _id: { $oid: "507f1f77bcf86cd799439011" }, status: "pending" }]);
 });
 
 test("query result archives reject invalid files", async () => {

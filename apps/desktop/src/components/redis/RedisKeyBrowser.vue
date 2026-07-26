@@ -76,6 +76,7 @@ const isFetchingAll = ref(false);
 const fetchAllStopRequested = ref(false);
 const fetchAllLoadedCount = ref(0);
 const rootRef = ref<HTMLElement>();
+const valueViewerRef = ref<{ focusSearch: () => boolean } | null>(null);
 const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
 const searchMode = ref<RedisSearchMode>("key");
@@ -994,6 +995,9 @@ function getCommandInput(): HTMLInputElement | null {
 }
 
 function focusSearch(): boolean {
+  if (activeSidePanel.value === "detail" && valueViewerRef.value?.focusSearch()) {
+    return true;
+  }
   const input = getSearchInput();
   if (!input) return false;
   input.focus();
@@ -1313,7 +1317,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             </div>
 
             <TabsContent value="detail" class="m-0 min-h-0 flex-1 flex flex-col">
-              <RedisValueViewer v-if="selectedKey" :key="selectedKey.key_raw" :connection-id="connectionId" :db="db" :key-display="selectedKey.key_display" :key-raw="selectedKey.key_raw" :metadata="selectedKey" @deleted="onKeyDeleted" @loaded="onKeyLoaded" />
+              <RedisValueViewer v-if="selectedKey" ref="valueViewerRef" :key="selectedKey.key_raw" :connection-id="connectionId" :db="db" :key-display="selectedKey.key_display" :key-raw="selectedKey.key_raw" :metadata="selectedKey" @deleted="onKeyDeleted" @loaded="onKeyLoaded" />
               <div v-else class="flex-1 flex items-center justify-center text-xs text-muted-foreground">
                 {{ t("redis.selectKeyForDetail") }}
               </div>

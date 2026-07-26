@@ -28,6 +28,7 @@ export interface TabResultSnapshot {
    */
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
+  resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   resultRuns?: QueryTab["resultRuns"];
   activeResultRunId?: string;
   queryAnalysis?: QueryTab["queryAnalysis"];
@@ -51,6 +52,7 @@ interface ColumnarQueryResult {
   columnValues: CellValue[][];
   rowCount: number;
   mongo_documents?: unknown[];
+  mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
   truncated?: boolean;
@@ -324,6 +326,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     column_types: result.column_types ? [...result.column_types] : undefined,
     rows: result.rows.map((row) => [...row]),
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
+    mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
     truncated: result.truncated,
@@ -347,6 +350,7 @@ function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab[
     results: stripResultSessionIds(run.results),
     resultLocalSortOriginalRows: run.resultLocalSortOriginalRows?.map((row) => [...row]),
     resultLocalSortOriginalMongoDocuments: run.resultLocalSortOriginalMongoDocuments ? clonePlain(run.resultLocalSortOriginalMongoDocuments) : undefined,
+    resultLocalSortOriginalMongoCopyDocuments: run.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(run.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultSessionId: undefined,
   }));
 }
@@ -362,6 +366,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     columnValues,
     rowCount: result.rows.length,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
+    mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
     truncated: result.truncated,
@@ -383,6 +388,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     column_types: result.column_types ? [...result.column_types] : undefined,
     rows,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
+    mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
     truncated: result.truncated,
@@ -702,6 +708,7 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     resultEditorFingerprint: tab.resultEditorFingerprint,
     resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows?.map((row) => [...row]),
     resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments ? clonePlain(tab.resultLocalSortOriginalMongoDocuments) : undefined,
+    resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(tab.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultRuns: stripResultRunSessionIds(tab.resultRuns),
     activeResultRunId: tab.activeResultRunId,
     queryAnalysis: tab.queryAnalysis ? clonePlain(tab.queryAnalysis) : undefined,

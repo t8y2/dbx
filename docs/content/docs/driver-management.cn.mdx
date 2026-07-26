@@ -11,7 +11,7 @@ DBX 使用混合驱动架构：内置 Rust 驱动、独立原生 Agent，以及 
 | ------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | 原生（内置） | Rust 驱动编译进 DBX         | MySQL、PostgreSQL、SQLite、SQL Server、Redis、MongoDB、DuckDB、ClickHouse 等                                                               |
 | 原生 Agent   | DBX 管理的 Go/Rust 独立进程 | Oracle、KingBase、虚谷 XuguDB，以及存在成熟原生驱动的数据库                                                                                |
-| JDBC Agent   | DBX 管理的 Java 子进程      | 需要 JDBC 的数据库：GaussDB、openGauss、DM、HighGo、Vastbase、Trino、Hive、DB2、Informix、Neo4j、TDengine、YashanDB、GoldenDB、Kylin、SunDB 等 |
+| JDBC Agent   | DBX 管理的 Java 子进程      | 需要 JDBC 的数据库：GaussDB、openGauss、DM、HighGo、Vastbase、UXDB、Trino、Hive、DB2、Informix、Neo4j、TDengine、YashanDB、GoldenDB、Kylin、SunDB 等 |
 
 <Callout type="info">内置驱动可直接使用；原生 Agent 只需对应平台的可执行文件，JDBC Agent 还需要 JRE。首次创建连接时 DBX 会自动安装匹配的组件。</Callout>
 

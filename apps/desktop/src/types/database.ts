@@ -25,6 +25,7 @@ export type DatabaseType =
   | "gaussdb"
   | "kingbase"
   | "highgo"
+  | "uxdb"
   | "vastbase"
   | "goldendb"
   | "kwdb"
@@ -140,7 +141,7 @@ export interface ConnectionConfig {
   client_cert_path?: string;
   client_key_path?: string;
   sysdba?: boolean;
-  oracle_connection_type?: "service_name" | "sid";
+  oracle_connection_type?: "service_name" | "sid" | "tns";
   connection_string?: string;
   jdbc_driver_class?: string;
   jdbc_driver_paths?: string[];
@@ -467,6 +468,42 @@ export interface TriggerInfo {
   statement?: string | null;
 }
 
+export interface ConstraintInfo {
+  name: string;
+  constraint_type: string;
+  definition: string;
+  columns: string[];
+  ref_schema?: string | null;
+  ref_table?: string | null;
+  ref_columns: string[];
+  match_type?: string | null;
+  on_update?: string | null;
+  on_delete?: string | null;
+  deferrable: boolean;
+  initially_deferred: boolean;
+  enabled: boolean;
+  valid: boolean;
+}
+
+export interface PartitionInfo {
+  name: string;
+  position: number;
+  value: string;
+  partition_type: string;
+  partition_key: string;
+  online?: boolean | null;
+  auto_partition_type?: string | null;
+  auto_partition_span?: number | null;
+}
+
+export interface SubpartitionInfo {
+  name: string;
+  position: number;
+  value: string;
+  partition_type: string;
+  partition_key: string;
+}
+
 export interface FunctionInfo {
   name: string;
   function_type: string;
@@ -536,6 +573,8 @@ export interface QueryResult {
   mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
+  /** Whether a backend-reported result total is exact. */
+  total_is_exact?: boolean;
   truncated?: boolean;
   session_id?: string | null;
   has_more?: boolean;
@@ -565,6 +604,7 @@ export interface QueryResultRun {
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
+  resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;
@@ -643,6 +683,9 @@ export type TreeNodeType =
   | "group-indexes"
   | "group-fkeys"
   | "group-triggers"
+  | "group-constraints"
+  | "group-table-partitions"
+  | "group-table-subpartitions"
   | "group-tables"
   | "group-views"
   | "group-materialized-views"
@@ -666,6 +709,9 @@ export type TreeNodeType =
   | "index"
   | "fkey"
   | "trigger"
+  | "constraint"
+  | "partition"
+  | "subpartition"
   | "redis-db"
   | "mq-tenant"
   | "nacos-namespace"
@@ -729,12 +775,17 @@ export interface TreeNode {
   tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;
   loadMore?: {
     parentId: string;
     offset: number;
     pageSize: number;
   };
+}
+
+export interface TableNameFilter {
+  includePatterns: string[];
+  excludePatterns: string[];
 }
 
 export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
@@ -754,6 +805,7 @@ export interface TableStructureEditorDraft {
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
+  triggersLoaded?: boolean;
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   initialized: boolean;
 }
@@ -795,6 +847,7 @@ export interface QueryTab {
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
+  resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;

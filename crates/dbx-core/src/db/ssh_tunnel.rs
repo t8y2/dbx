@@ -163,11 +163,11 @@ async fn connect_and_authenticate(
 async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
-    ssh_agent_sock_path: &str,
+    _ssh_agent_sock_path: &str,
     connect_timeout: &Duration,
 ) -> Result<(), String> {
     #[cfg(unix)]
-    let mut agent = if ssh_agent_sock_path.is_empty() {
+    let mut agent = if _ssh_agent_sock_path.is_empty() {
         match AgentClient::connect_env().await {
             Ok(a) => a,
             Err(e) => {
@@ -175,12 +175,12 @@ async fn try_authenticate_with_agent(
             }
         }
     } else {
-        match AgentClient::connect_uds(ssh_agent_sock_path).await {
+        match AgentClient::connect_uds(_ssh_agent_sock_path).await {
             Ok(a) => a,
             Err(e) => {
                 return Err(format!(
                     "No SSH password or key provided, and ssh-agent at '{}' is unavailable: {e}",
-                    ssh_agent_sock_path
+                    _ssh_agent_sock_path
                 ));
             }
         }

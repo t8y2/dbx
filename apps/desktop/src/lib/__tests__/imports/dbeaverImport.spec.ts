@@ -81,3 +81,36 @@ describe("DBeaver folder import", () => {
     expect(layoutLabels(result.layout!, names)).toEqual([{ group: "Ad hoc", children: [{ group: "Production", children: ["Nested"] }] }]);
   });
 });
+
+describe("DBeaver Cloudberry import", () => {
+  it("preserves Cloudberry while reusing the PostgreSQL backend", async () => {
+    const connections = await parseDbeaverConnections(
+      payload({
+        connections: {
+          cloudberry: {
+            id: "cloudberry",
+            name: "analytics",
+            provider: "cloudberry",
+            driver: "cloudberry-jdbc",
+            configuration: {
+              host: "cb.example.com",
+              port: 5432,
+              database: "warehouse",
+              user: "analyst",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(connections[0]).toMatchObject({
+      db_type: "postgres",
+      driver_profile: "cloudberry",
+      driver_label: "Apache Cloudberry",
+      host: "cb.example.com",
+      port: 5432,
+      database: "warehouse",
+      username: "analyst",
+    });
+  });
+});

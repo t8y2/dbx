@@ -31,6 +31,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   mariadb: { type: "mysql", profile: "mariadb", label: "MariaDB", defaultPort: 3306 },
   postgres: { type: "postgres", profile: "postgres", label: "PostgreSQL", defaultPort: 5432 },
   postgresql: { type: "postgres", profile: "postgres", label: "PostgreSQL", defaultPort: 5432 },
+  cloudberry: { type: "postgres", profile: "cloudberry", label: "Apache Cloudberry", defaultPort: 5432 },
   redshift: { type: "redshift", profile: "redshift", label: "Redshift", defaultPort: 5439 },
   redis: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
   rediss: { type: "redis", profile: "redis", label: "Redis", defaultPort: 6379 },
@@ -247,6 +248,10 @@ function isTidbCloudHost(host: string): boolean {
 export function connectionProfileForScheme(scheme: string, preferredProfile?: string): ConnectionProfile | undefined {
   if ((scheme === "http" || scheme === "https") && preferredProfile) {
     return HTTP_SELECTED_PROFILES[preferredProfile];
+  }
+  // Cloudberry uses PostgreSQL URLs, so keep the selected product profile when parsing a pasted URL.
+  if ((scheme === "postgres" || scheme === "postgresql") && preferredProfile === "cloudberry") {
+    return SCHEME_PROFILES.cloudberry;
   }
   return SCHEME_PROFILES[scheme];
 }

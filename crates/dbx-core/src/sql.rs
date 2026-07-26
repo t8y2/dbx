@@ -69,6 +69,8 @@ pub struct SqlFilePreview {
     pub size_bytes: u64,
     pub preview: String,
     pub can_execute_without_selected_database: bool,
+    #[serde(default)]
+    pub establishes_database_context: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -213,6 +213,7 @@ async fn resolve_transfer_target_table_name(
         Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
         None,
         None,
+        None,
     )
     .await
     .unwrap_or_else(|error| {
@@ -501,6 +502,7 @@ fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
             | DatabaseType::Redshift
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Kwdb
             | DatabaseType::Vastbase
     )
@@ -4139,6 +4141,7 @@ where
         &request.source_schema,
         Some(table),
         Some(1),
+        None,
         None,
         None,
     )

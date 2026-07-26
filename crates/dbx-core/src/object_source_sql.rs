@@ -302,6 +302,7 @@ fn is_postgres_like(database_type: DatabaseType) -> bool {
             | DatabaseType::Questdb
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
     )
 }

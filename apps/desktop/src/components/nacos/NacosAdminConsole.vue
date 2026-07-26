@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
@@ -85,6 +86,12 @@ const historyCompareLoading = ref(false);
 const historyCompareItem = ref<NacosConfigHistoryItem | null>(null);
 const pendingHistoryRollback = ref<NacosConfigHistoryItem | null>(null);
 const rollingBackHistory = ref(false);
+const rnacosConsoleAuthOpen = ref(false);
+const rnacosConsoleCaptchaImage = ref("");
+const rnacosConsoleCaptcha = ref("");
+const rnacosConsoleAuthError = ref("");
+const rnacosConsoleAuthLoading = ref(false);
+const rnacosConsoleRetryAction = shallowRef<(() => Promise<void>) | null>(null);
 const configFormatOptions = ["text", "json", "xml", "yaml", "html", "properties", "toml"];
 const configEditorHost = ref<HTMLDivElement | null>(null);
 const configEditorView = shallowRef<EditorView | null>(null);
@@ -117,6 +124,15 @@ const CONNECTION_NOT_FOUND_RETRY_DELAYS_MS = [150, 350, 700];
 const { gridTemplateColumns: configListGridTemplate, minWidth: configListMinWidth, resizingColumnIndex: configListResizingColumnIndex, onResizeStart: onConfigListColumnResizeStart } = useNacosConfigListColumnResize();
 
 const namespace = computed(() => props.namespace ?? connectionInfo.value?.namespace ?? "");
+const supportsConfigHistory = computed(() => connectionInfo.value?.capabilities.supportsConfigHistory !== false);
+const configHistoryUnavailableTitle = computed(() => {
+  if (supportsConfigHistory.value) return undefined;
+  const reason = connectionInfo.value?.capabilities.historyUnavailableReason;
+  if (reason === "historyDisabled") return t("nacos.historyDisabled");
+  if (reason === "consoleUrlMissing") return t("nacos.historyConsoleUrlMissing");
+  if (reason === "consoleCredentialsMissing") return t("nacos.historyConsoleCredentialsMissing");
+  return t("nacos.historyUnavailable");
+});
 const namespaceLabel = computed(() => props.namespaceName || namespace.value || "public");
 const namespaceIdLabel = computed(() => {
   if (!namespace.value || namespace.value === namespaceLabel.value) return "";
@@ -537,7 +553,7 @@ function historyKeyFor(item: NacosConfigHistoryItem) {
 }
 
 async function openConfigHistory() {
-  if (!selectedConfigOriginalKey.value || !selectedConfig.value) return;
+  if (!selectedConfigOriginalKey.value || !selectedConfig.value || !supportsConfigHistory.value) return;
   historyOpen.value = true;
   await loadConfigHistory(1);
 }
@@ -556,9 +572,73 @@ async function loadConfigHistory(page = historyPageNo.value) {
     historyItems.value = result.items;
     historyTotal.value = result.totalCount;
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : String(error);
+    await handleRNacosHistoryError(error, () => loadConfigHistory(historyPageNo.value));
   } finally {
     historyLoading.value = false;
+  }
+}
+
+async function handleRNacosHistoryError(error: unknown, retryAction: () => Promise<void>) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.includes("[rnacosConsoleCaptchaRequired]")) {
+    historyError.value = message;
+    return false;
+  }
+  rnacosConsoleRetryAction.value = retryAction;
+  await requestRNacosConsoleAuthentication();
+  return true;
+}
+
+function retryRNacosConsoleAction() {
+  const retryAction = rnacosConsoleRetryAction.value;
+  rnacosConsoleRetryAction.value = null;
+  // Run after the failed action has finished its own catch/finally cleanup;
+  // otherwise that stale cleanup can close or clear the successfully retried UI.
+  setTimeout(() => void (retryAction ? retryAction() : loadConfigHistory(historyPageNo.value)), 0);
+}
+
+function rnacosCaptchaImageSource(image: string) {
+  return image.startsWith("data:") ? image : `data:image/png;base64,${image}`;
+}
+
+async function requestRNacosConsoleAuthentication() {
+  rnacosConsoleAuthError.value = "";
+  rnacosConsoleCaptcha.value = "";
+  rnacosConsoleAuthLoading.value = true;
+  try {
+    const challenge = await api.nacosGetRNacosConsoleCaptcha(props.connectionId);
+    if (!challenge.required) {
+      await api.nacosLoginRNacosConsole(props.connectionId);
+      void loadInfo();
+      retryRNacosConsoleAction();
+      return;
+    }
+    if (!challenge.image) throw new Error(t("nacos.rnacosCaptchaUnavailable"));
+    rnacosConsoleCaptchaImage.value = rnacosCaptchaImageSource(challenge.image);
+    rnacosConsoleAuthOpen.value = true;
+  } catch (error) {
+    historyError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    rnacosConsoleAuthLoading.value = false;
+  }
+}
+
+async function submitRNacosConsoleAuthentication() {
+  if (!rnacosConsoleCaptcha.value.trim()) {
+    rnacosConsoleAuthError.value = t("nacos.rnacosCaptchaRequired");
+    return;
+  }
+  rnacosConsoleAuthLoading.value = true;
+  rnacosConsoleAuthError.value = "";
+  try {
+    await api.nacosLoginRNacosConsole(props.connectionId, rnacosConsoleCaptcha.value);
+    rnacosConsoleAuthOpen.value = false;
+    void loadInfo();
+    retryRNacosConsoleAction();
+  } catch (error) {
+    rnacosConsoleAuthError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    rnacosConsoleAuthLoading.value = false;
   }
 }
 
@@ -566,7 +646,7 @@ async function loadHistoryDetail(item: NacosConfigHistoryItem): Promise<NacosCon
   try {
     return await api.nacosGetConfigHistory(props.connectionId, historyKeyFor(item));
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : String(error);
+    await handleRNacosHistoryError(error, () => viewConfigHistory(item));
     return null;
   }
 }
@@ -600,7 +680,7 @@ async function compareConfigHistory(item: NacosConfigHistoryItem) {
     historyCompareCurrent.value = current.content || "";
     historyCompareContent.value = history.content || "";
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : String(error);
+    await handleRNacosHistoryError(error, () => compareConfigHistory(item));
     historyCompareOpen.value = false;
   } finally {
     historyCompareLoading.value = false;
@@ -636,7 +716,7 @@ async function rollbackConfigHistory() {
     }
     await Promise.all([loadConfigs(configPageNo.value), loadConfigHistory(historyPageNo.value)]);
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : String(error);
+    await handleRNacosHistoryError(error, () => rollbackConfigHistory());
   } finally {
     rollingBackHistory.value = false;
   }
@@ -1028,10 +1108,12 @@ onBeforeUnmount(() => {
                   <Download class="h-3.5 w-3.5" />
                   {{ t("nacos.export") }}
                 </Button>
-                <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="!selectedConfigOriginalKey" @click="openConfigHistory">
-                  <FileClock class="h-3.5 w-3.5" />
-                  {{ t("nacos.history") }}
-                </Button>
+                <span class="inline-flex" :title="configHistoryUnavailableTitle">
+                  <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="!selectedConfigOriginalKey || !supportsConfigHistory" @click="openConfigHistory">
+                    <FileClock class="h-3.5 w-3.5" />
+                    {{ t("nacos.history") }}
+                  </Button>
+                </span>
                 <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly" @click="saveConfigAsCopy">
                   <Save class="h-3.5 w-3.5" />
                   {{ t("nacos.saveAs") }}
@@ -1187,6 +1269,30 @@ onBeforeUnmount(() => {
       @compare="compareConfigHistory"
       @rollback="requestRollbackHistory"
     />
+
+    <Dialog v-model:open="rnacosConsoleAuthOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{{ t("nacos.rnacosConsoleAuthTitle") }}</DialogTitle>
+          <DialogDescription>{{ t("nacos.rnacosConsoleAuthDescription") }}</DialogDescription>
+        </DialogHeader>
+        <div class="space-y-3">
+          <img v-if="rnacosConsoleCaptchaImage" :src="rnacosConsoleCaptchaImage" :alt="t('nacos.rnacosCaptchaLabel')" class="h-28 w-full rounded-md border bg-muted/30 object-contain" />
+          <div class="space-y-1.5">
+            <Label for="rnacos-console-captcha">{{ t("nacos.rnacosCaptchaLabel") }}</Label>
+            <Input id="rnacos-console-captcha" v-model="rnacosConsoleCaptcha" autocomplete="off" :placeholder="t('nacos.rnacosCaptchaPlaceholder')" @keyup.enter="submitRNacosConsoleAuthentication" />
+          </div>
+          <p v-if="rnacosConsoleAuthError" class="text-xs text-destructive">{{ rnacosConsoleAuthError }}</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" :disabled="rnacosConsoleAuthLoading" @click="requestRNacosConsoleAuthentication">{{ t("nacos.rnacosRefreshCaptcha") }}</Button>
+          <Button :disabled="rnacosConsoleAuthLoading" @click="submitRNacosConsoleAuthentication">
+            <Loader2 v-if="rnacosConsoleAuthLoading" class="mr-2 h-4 w-4 animate-spin" />
+            {{ t("nacos.rnacosConsoleAuthSubmit") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <NacosConfigDiffDialog
       v-model:open="historyCompareOpen"

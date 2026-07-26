@@ -11,7 +11,7 @@ use crate::ai::{AiChatMessage, AiConfig, AiConfigItem, AiConversation, AiProvide
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
-    NACOS_AUTH_SECRET_PREFIX,
+    NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{
@@ -659,11 +659,15 @@ fn scrub_nacos_auth_secrets(config: &mut ConnectionConfig) {
     if config.db_type != DatabaseType::Nacos {
         return;
     }
-    let Some(auth) = nacos_auth_object_mut(config.external_config.as_mut()) else {
-        return;
-    };
-    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
-        scrub_json_secret(auth, "password");
+    if let Some(auth) = nacos_auth_object_mut(config.external_config.as_mut()) {
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            scrub_json_secret(auth, "password");
+        }
+    }
+    if let Some(auth) = nacos_console_auth_object_mut(config.external_config.as_mut()) {
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            scrub_json_secret(auth, "password");
+        }
     }
 }
 
@@ -2320,14 +2324,21 @@ impl Storage {
         if config.db_type != DatabaseType::Nacos {
             return Ok(false);
         }
-        let Some(auth) = nacos_auth_object_mut(config.external_config.as_mut()) else {
-            return Ok(false);
-        };
-        if auth.get("kind").and_then(serde_json::Value::as_str) != Some("usernamePassword") {
-            return Ok(false);
+        let mut rewritten = false;
+        if let Some(auth) = nacos_auth_object_mut(config.external_config.as_mut()) {
+            if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+                rewritten |=
+                    hydrate_mq_json_secret(self, connection_id, NACOS_AUTH_PASSWORD_KEY, auth, "password").await?;
+            }
         }
-
-        hydrate_mq_json_secret(self, connection_id, NACOS_AUTH_PASSWORD_KEY, auth, "password").await
+        if let Some(auth) = nacos_console_auth_object_mut(config.external_config.as_mut()) {
+            if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+                rewritten |=
+                    hydrate_mq_json_secret(self, connection_id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, auth, "password")
+                        .await?;
+            }
+        }
+        Ok(rewritten)
     }
 }
 
@@ -3280,37 +3291,35 @@ fn persist_nacos_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &Con
         return Ok(());
     }
 
-    let Some(auth) = nacos_auth_object(config.external_config.as_ref()) else {
-        delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
-        return Ok(());
-    };
-
-    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
-        replace_nacos_auth_secret_in_tx(tx, &config.id, NACOS_AUTH_PASSWORD_KEY, auth, "password")?;
+    let primary_auth = nacos_auth_object(config.external_config.as_ref())
+        .filter(|auth| auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword"));
+    let primary = primary_auth
+        .and_then(|auth| auth.get("password").and_then(serde_json::Value::as_str))
+        .filter(|secret| !secret.is_empty());
+    let console_auth = nacos_console_auth_object(config.external_config.as_ref())
+        .filter(|auth| auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword"));
+    let console = console_auth
+        .and_then(|auth| auth.get("password").and_then(serde_json::Value::as_str))
+        .filter(|secret| !secret.is_empty());
+    let existing_primary = if primary.is_none() && primary_auth.is_some() {
+        get_secret_in_tx(tx, &config.id, NACOS_AUTH_PASSWORD_KEY)?
     } else {
-        delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
+        None
+    };
+    let existing_console = if console.is_none() && console_auth.is_some() {
+        get_secret_in_tx(tx, &config.id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY)?
+    } else {
+        None
+    };
+    delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
+    if let Some(secret) = primary.or(existing_primary.as_deref()) {
+        persist_secret_in_tx(tx, &config.id, NACOS_AUTH_PASSWORD_KEY, secret)?;
+    }
+    if let Some(secret) = console.or(existing_console.as_deref()) {
+        persist_secret_in_tx(tx, &config.id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, secret)?;
     }
 
     Ok(())
-}
-
-fn replace_nacos_auth_secret_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    connection_id: &str,
-    key: &str,
-    auth: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Result<(), String> {
-    let current = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
-    let existing = if current.is_none() { get_secret_in_tx(tx, connection_id, key)? } else { None };
-    delete_secret_prefix_in_tx(tx, connection_id, NACOS_AUTH_SECRET_PREFIX)?;
-    match current {
-        Some(secret) => persist_secret_in_tx(tx, connection_id, key, secret),
-        None => match existing {
-            Some(secret) => persist_secret_in_tx(tx, connection_id, key, &secret),
-            None => Ok(()),
-        },
-    }
 }
 
 fn persist_json_secret_if_present_in_tx(
@@ -3384,6 +3393,16 @@ fn nacos_auth_object_mut(
     value?.get_mut("auth")?.as_object_mut()
 }
 
+fn nacos_console_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("rnacosConsoleAuth")?.as_object()
+}
+
+fn nacos_console_auth_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("rnacosConsoleAuth")?.as_object_mut()
+}
+
 fn is_api_key_auth_kind(kind: &str) -> bool {
     matches!(kind, "apiKey" | "api_key" | "apikey")
 }
@@ -3417,6 +3436,7 @@ mod tests {
         maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
         McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
     };
+    use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
@@ -4095,6 +4115,39 @@ mod tests {
         let loaded = storage.load_connections().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(nacos_auth_password(&loaded[0]), Some("nacos-secret"));
+    }
+
+    #[tokio::test]
+    async fn save_connections_moves_separate_rnacos_console_password_to_secret_table() {
+        let path = temp_db_path("rnacos-console-auth-secret");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = nacos_connection("rnacos", "");
+        config.external_config = Some(serde_json::json!({
+            "implementation": "rnacos",
+            "serverAddr": "http://127.0.0.1:8848",
+            "rnacosConsoleAddr": "http://127.0.0.1:10848/rnacos",
+            "rnacosHistoryEnabled": true,
+            "auth": { "kind": "none" },
+            "rnacosConsoleAuth": { "kind": "usernamePassword", "username": "console", "password": "console-secret" }
+        }));
+
+        storage.save_connections(&[config]).await.unwrap();
+        let raw_json = raw_connection_json(&storage, "rnacos").await;
+        assert!(!raw_json.contains("console-secret"));
+        assert_eq!(
+            storage.get_secret("rnacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("console-secret")
+        );
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(
+            loaded[0]
+                .external_config
+                .as_ref()
+                .and_then(|value| value.get("rnacosConsoleAuth"))
+                .and_then(|auth| auth.get("password"))
+                .and_then(serde_json::Value::as_str),
+            Some("console-secret")
+        );
     }
 
     #[tokio::test]

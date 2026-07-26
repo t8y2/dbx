@@ -28,6 +28,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showColumnTypesInHeader",
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
+  "dataGridAutoTransposeSingleRow",
   "tableOpenPageSize",
   "infiniteScroll",
   "infiniteScrollMaxRows",

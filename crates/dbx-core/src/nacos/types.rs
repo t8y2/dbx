@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct NacosCapabilities {
     pub supports_config_management: bool,
     pub supports_config_history: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_unavailable_reason: Option<String>,
     pub supports_service_management: bool,
     pub supports_instance_update: bool,
     pub supports_raw_api: bool,
@@ -15,11 +17,23 @@ impl Default for NacosCapabilities {
         Self {
             supports_config_management: true,
             supports_config_history: true,
+            history_unavailable_reason: None,
             supports_service_management: true,
             supports_instance_update: true,
             supports_raw_api: true,
         }
     }
+}
+
+/// A short-lived challenge returned by the authenticated r-nacos console.
+/// The corresponding server-side CAPTCHA token stays in the adapter process;
+/// only the image is returned to the desktop client.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosRNacosConsoleCaptcha {
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

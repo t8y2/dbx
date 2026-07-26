@@ -406,6 +406,9 @@ pub enum AgentMethod {
     ListIndexes,
     ListForeignKeys,
     ListTriggers,
+    ListConstraints,
+    ListPartitions,
+    ListSubpartitions,
     GetTableDdl,
     ExecuteQuery,
     ExecuteQueryPage,
@@ -422,7 +425,7 @@ pub enum AgentMethod {
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 36] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -444,6 +447,9 @@ impl AgentMethod {
         Self::ListIndexes,
         Self::ListForeignKeys,
         Self::ListTriggers,
+        Self::ListConstraints,
+        Self::ListPartitions,
+        Self::ListSubpartitions,
         Self::ExecuteQuery,
         Self::ExecuteQueryPage,
         Self::FetchQueryPage,
@@ -481,6 +487,9 @@ impl AgentMethod {
             Self::ListIndexes => "list_indexes",
             Self::ListForeignKeys => "list_foreign_keys",
             Self::ListTriggers => "list_triggers",
+            Self::ListConstraints => "list_constraints",
+            Self::ListPartitions => "list_partitions",
+            Self::ListSubpartitions => "list_subpartitions",
             Self::ExecuteQuery => "execute_query",
             Self::ExecuteQueryPage => "execute_query_page",
             Self::FetchQueryPage => "fetch_query_page",
@@ -502,6 +511,8 @@ impl AgentMethod {
 pub struct AgentConnectionInfo {
     #[serde(default)]
     pub identifier_quote: String,
+    #[serde(default)]
+    pub compatibility_mode: Option<String>,
     #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
 }
@@ -1192,6 +1203,51 @@ impl AgentDriverClient {
         .await
     }
 
+    pub async fn list_constraints<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::ListConstraints,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn list_partitions<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::ListPartitions,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn list_subpartitions<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::ListSubpartitions,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
     pub async fn get_table_ddl<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: &str,
@@ -1656,7 +1712,7 @@ fn agent_java_args_with_extra_opts(
     .map(str::to_string)
     .collect::<Vec<_>>();
 
-    if agent_jar_path_matches_key(jar_path, "kingbase") || agent_jar_path_matches_key(jar_path, "informix") {
+    if agent_jar_path_matches_key(jar_path, "informix") {
         args.push("-Djava.net.preferIPv4Stack=true".to_string());
     }
 
@@ -1921,13 +1977,6 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "-Dhttp.proxyHost="));
         assert!(args.iter().any(|arg| arg == "-Dhttps.proxyHost="));
         assert!(args.iter().any(|arg| arg == "-DsocksProxyHost="));
-    }
-
-    #[test]
-    fn agent_java_args_prefer_ipv4_for_kingbase() {
-        let args = agent_java_args("/tmp/dbx/drivers/kingbase/agent.jar");
-
-        assert!(args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
     }
 
     #[test]
@@ -2278,6 +2327,9 @@ for line in sys.stdin:
         assert_eq!(AgentMethod::ListIndexes.as_str(), "list_indexes");
         assert_eq!(AgentMethod::ListForeignKeys.as_str(), "list_foreign_keys");
         assert_eq!(AgentMethod::ListTriggers.as_str(), "list_triggers");
+        assert_eq!(AgentMethod::ListConstraints.as_str(), "list_constraints");
+        assert_eq!(AgentMethod::ListPartitions.as_str(), "list_partitions");
+        assert_eq!(AgentMethod::ListSubpartitions.as_str(), "list_subpartitions");
         assert_eq!(AgentMethod::GetTableDdl.as_str(), "get_table_ddl");
         assert_eq!(AgentMethod::ExecuteQuery.as_str(), "execute_query");
         assert_eq!(AgentMethod::ExecuteQueryPage.as_str(), "execute_query_page");
@@ -2330,6 +2382,9 @@ for line in sys.stdin:
         let _list_indexes = AgentDriverClient::list_indexes::<serde_json::Value>;
         let _list_foreign_keys = AgentDriverClient::list_foreign_keys::<serde_json::Value>;
         let _list_triggers = AgentDriverClient::list_triggers::<serde_json::Value>;
+        let _list_constraints = AgentDriverClient::list_constraints::<serde_json::Value>;
+        let _list_partitions = AgentDriverClient::list_partitions::<serde_json::Value>;
+        let _list_subpartitions = AgentDriverClient::list_subpartitions::<serde_json::Value>;
         let _get_table_ddl = AgentDriverClient::get_table_ddl::<serde_json::Value>;
         let _execute_query = AgentDriverClient::execute_query::<serde_json::Value>;
         let _execute_query_page = AgentDriverClient::execute_query_page::<serde_json::Value>;

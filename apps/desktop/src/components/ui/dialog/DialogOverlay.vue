@@ -26,8 +26,16 @@ async function startWindowDrag(event: PointerEvent) {
 </script>
 
 <template>
-  <DialogOverlay data-slot="dialog-overlay" v-bind="delegatedProps" :class="cn('data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-open:supports-backdrop-filter:backdrop-blur-xs bg-black/10 duration-100 fixed inset-0 isolate z-50', props.class)">
+  <DialogOverlay data-slot="dialog-overlay" v-bind="delegatedProps" :class="cn('dbx-dialog-overlay-backdrop data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 bg-black/10 duration-100 fixed inset-0 isolate z-50', props.class)">
     <div v-if="isDesktop" aria-hidden="true" class="fixed inset-x-0 top-0 h-10 pointer-events-auto" data-tauri-drag-region @pointerdown="startWindowDrag" />
     <slot />
   </DialogOverlay>
 </template>
+
+<style scoped>
+.dbx-dialog-overlay-backdrop[data-state="open"],
+.dbx-dialog-overlay-backdrop[data-open]:not([data-open="false"]) {
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+</style>

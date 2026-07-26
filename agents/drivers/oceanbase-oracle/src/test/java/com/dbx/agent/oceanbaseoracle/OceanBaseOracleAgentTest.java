@@ -5,6 +5,7 @@ import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.TestSupport;
@@ -17,6 +18,7 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
@@ -162,6 +164,89 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void readsViewDdlWithDbmsMetadataForSchemaCompare() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(
+            sql,
+            params,
+            resultSet(
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE OR REPLACE VIEW \"APP\".\"ACTIVE_USERS\" AS SELECT ID FROM USERS"}}
+            )
+        ));
+
+        ObjectSource source = agent.getObjectSource("app", "ACTIVE_USERS", "VIEW");
+
+        Assertions.assertEquals("VIEW", source.getObject_type());
+        Assertions.assertEquals("app", source.getSchema());
+        Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE VIEW"), source.getSource());
+        Assertions.assertEquals(List.of("VIEW", "ACTIVE_USERS", "app"), params);
+        Assertions.assertTrue(sql.get(0).contains("DBMS_METADATA.GET_DDL"), sql.get(0));
+    }
+
+    @Test
+    void fallsBackToAllViewsWhenDbmsMetadataIsUnavailable() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(
+            sql,
+            params,
+            resultSet(new String[]{"TEXT"}, new Object[][]{{"SELECT ID FROM USERS"}})
+        ));
+
+        ObjectSource source = agent.getObjectSource("APP", "ACTIVE_USERS", "VIEW");
+
+        Assertions.assertEquals("SELECT ID FROM USERS", source.getSource());
+        Assertions.assertEquals(List.of("VIEW", "ACTIVE_USERS", "APP", "APP", "ACTIVE_USERS"), params);
+        Assertions.assertTrue(sql.get(1).contains("ALL_VIEWS"), sql.get(1));
+    }
+
+    @Test
+    void fallsBackToAllSourceForOracleRoutineAndPackageTypes() {
+        for (String[] object : new String[][]{
+            {"PROCEDURE", "PROCEDURE"},
+            {"FUNCTION", "FUNCTION"},
+            {"PACKAGE", "PACKAGE"},
+            {"PACKAGE_BODY", "PACKAGE BODY"}
+        }) {
+            List<String> sql = new ArrayList<>();
+            List<String> params = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(
+                sql,
+                params,
+                resultSet(
+                    new String[]{"TEXT"},
+                    new Object[][]{{object[1] + " ACCOUNT_API AS\n"}, {"END ACCOUNT_API;\n"}}
+                )
+            ));
+
+            ObjectSource source = agent.getObjectSource("APP", "ACCOUNT_API", object[0]);
+
+            Assertions.assertEquals(object[0], source.getObject_type());
+            Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE " + object[1]), source.getSource());
+            Assertions.assertEquals(object[1], params.get(params.size() - 1));
+            Assertions.assertTrue(sql.get(1).contains("ALL_SOURCE"), sql.get(1));
+            Assertions.assertTrue(sql.get(1).contains("ORDER BY LINE"), sql.get(1));
+        }
+    }
+
+    @Test
+    void rejectsUnsupportedObjectSourceTypesBeforeQuerying() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+
+        IllegalArgumentException error = Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> agent.getObjectSource("APP", "USERS", "TABLE")
+        );
+
+        Assertions.assertTrue(error.getMessage().contains("Unsupported object type: TABLE"), error.getMessage());
+    }
+
+    @Test
     void getColumnsIncludesDefaultAndCommentMetadata() {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
@@ -256,6 +341,54 @@ class OceanBaseOracleAgentTest {
             }
             if ("isClosed".equals(method.getName())) {
                 return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection objectSourceConnection(List<String> sql, List<String> params, ResultSet resultSet) {
+        PreparedStatement statement = objectSourceStatement(params, resultSet, false);
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection objectSourceFallbackConnection(List<String> sql, List<String> params, ResultSet fallbackResultSet) {
+        int[] statementIndex = {0};
+        return proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                boolean fail = statementIndex[0]++ == 0;
+                return objectSourceStatement(params, fallbackResultSet, fail);
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement objectSourceStatement(List<String> params, ResultSet resultSet, boolean fail) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                if (fail) {
+                    throw new SQLException("DBMS_METADATA is unavailable");
+                }
+                return resultSet;
+            }
+            if ("setString".equals(method.getName())) {
+                params.add(String.valueOf(args[1]));
+                return null;
+            }
+            if ("close".equals(method.getName())) {
+                return null;
             }
             return defaultValue(method.getReturnType());
         });

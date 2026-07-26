@@ -3,9 +3,9 @@ import { normalizeAppCornerStyle } from "@/lib/app/appTheme";
 
 describe("app corner style", () => {
   it.each([
-    [null, "small"],
-    ["", "small"],
-    ["invalid", "small"],
+    [null, "large"],
+    ["", "large"],
+    ["invalid", "large"],
     ["none", "none"],
     ["small", "small"],
     ["large", "large"],

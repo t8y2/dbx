@@ -64,6 +64,8 @@ vi.mock("@/components/ui/select", async () => {
   return { Select: createPassthroughStub("Select"), SelectContent: createPassthroughStub("SelectContent"), SelectItem: createPassthroughStub("SelectItem"), SelectTrigger: createPassthroughStub("SelectTrigger"), SelectValue: createPassthroughStub("SelectValue") };
 });
 vi.mock("@/components/ui/tabs", async () => ({ TabsContent: (await import("./vueHostHarness")).createPassthroughStub("TabsContent") }));
+vi.mock("@/components/ui/switch", async () => ({ Switch: (await import("./vueHostHarness")).createPassthroughStub("Switch", "button") }));
+vi.mock("@/components/ui/label", async () => ({ Label: (await import("./vueHostHarness")).createPassthroughStub("Label", "label") }));
 vi.mock("@/components/ui/LightDropdown.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("LightDropdown") }));
 vi.mock("@/components/ui/LightTooltip.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("LightTooltip") }));
 vi.mock("@/components/grid/TemporalCellEditor.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("TemporalCellEditor") }));
@@ -84,6 +86,7 @@ vi.mock("@/composables/useDataGridCellDetail", async () => {
 import DataGridCellDetailDialog from "@/components/grid/DataGridCellDetailDialog.vue";
 import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
+import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
@@ -614,5 +617,55 @@ describe("cell detail surfaces", () => {
     expect(cancel).toHaveBeenCalledOnce();
     mounted.exposed.value.openSearch();
     expect(mocks.panelOpenSearch).toHaveBeenCalledOnce();
+  });
+});
+
+describe("DataGridCopyColumnNamesDialog", () => {
+  beforeEach(() => {
+    localStorage.removeItem("dbx-copy-column-names-separator");
+  });
+
+  function previewText(mounted: ReturnType<typeof mountComponent>) {
+    return hostText(findOne(mounted.root, (node) => node.props["data-copy-column-names-preview"] === ""));
+  }
+
+  it("previews the formatted names and copies with the chosen separator and quoting", async () => {
+    const copy = vi.fn();
+    const openChange = vi.fn();
+    const mounted = mountComponent(DataGridCopyColumnNamesDialog, {
+      open: true,
+      columnNames: ["id", "type"],
+      databaseType: "mysql",
+      onCopy: copy,
+      "onUpdate:open": openChange,
+    });
+    expect(previewText(mounted)).toBe("id\ttype");
+
+    findOne(mounted.root, (node) => node.props["data-stub"] === "Select").props["onUpdate:modelValue"]("comma-newline");
+    findOne(mounted.root, (node) => node.props["data-stub"] === "Switch").props["onUpdate:modelValue"](true);
+    await nextTick();
+    expect(previewText(mounted)).toBe("`id`,\n`type`");
+
+    dispatch(
+      findOne(mounted.root, (node) => node.props["data-stub"] === "Button" && hostText(node) === "grid.copy"),
+      "click",
+    );
+    expect(copy).toHaveBeenCalledWith("`id`,\n`type`");
+    expect(openChange).toHaveBeenCalledWith(false);
+    expect(localStorage.getItem("dbx-copy-column-names-separator")).toBe("comma-newline");
+  });
+
+  it("hides the quote option for non-SQL databases and ignores invalid separators", async () => {
+    const mounted = mountComponent(DataGridCopyColumnNamesDialog, {
+      open: true,
+      columnNames: ["id", "type"],
+      databaseType: "mongodb",
+      onCopy: vi.fn(),
+    });
+    expect(findAll(mounted.root, (node) => node.props["data-stub"] === "Switch")).toHaveLength(0);
+
+    findOne(mounted.root, (node) => node.props["data-stub"] === "Select").props["onUpdate:modelValue"]("bogus");
+    await nextTick();
+    expect(previewText(mounted)).toBe("id\ttype");
   });
 });

@@ -269,8 +269,7 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         && options.database_type != Some(DatabaseType::DuckDb)
         && options.database_type != Some(DatabaseType::Dameng)
         && options.database_type != Some(DatabaseType::Oracle)
-        && options.database_type != Some(DatabaseType::OceanbaseOracle)
-        && options.database_type != Some(DatabaseType::Jdbc);
+        && options.database_type != Some(DatabaseType::OceanbaseOracle);
     let sort_alias = if use_derived_column_aliases {
         aliases
             .get(options.column_index)
@@ -286,7 +285,22 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     } else {
         options.result_columns.get(options.column_index).cloned().unwrap_or_else(|| options.column.clone())
     };
-    let quoted_column = quote_table_identifier(options.database_type, &sort_alias);
+    // Oracle-compatible derived tables do not accept a PostgreSQL-style
+    // column alias list. Use the selected column position when duplicate
+    // labels would otherwise make ORDER BY ambiguous.
+    let use_sort_ordinal = !use_derived_column_aliases
+        && matches!(
+            options.database_type,
+            Some(DatabaseType::Dameng | DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+        )
+        && options.result_columns.get(options.column_index).is_some_and(|column| {
+            options.result_columns.iter().filter(|candidate| candidate.eq_ignore_ascii_case(column)).count() > 1
+        });
+    let sort_reference = if use_sort_ordinal {
+        (options.column_index + 1).to_string()
+    } else {
+        quote_table_identifier(options.database_type, &sort_alias)
+    };
     let wrapped_statement = if options.database_type == Some(DatabaseType::SqlServer) {
         sql_server_statement_for_derived_table(&statement)
     } else {
@@ -300,11 +314,11 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
             .collect::<Vec<_>>()
             .join(", ");
         ok(format!(
-            "SELECT * FROM ({wrapped_statement}) t({alias_list}) ORDER BY {quoted_column} {};",
+            "SELECT * FROM ({wrapped_statement}) t({alias_list}) ORDER BY {sort_reference} {};",
             options.direction.as_sql()
         ))
     } else {
-        ok(format!("SELECT * FROM ({wrapped_statement}) t ORDER BY {quoted_column} {};", options.direction.as_sql()))
+        ok(format!("SELECT * FROM ({wrapped_statement}) t ORDER BY {sort_reference} {};", options.direction.as_sql()))
     }
 }
 
@@ -2520,7 +2534,41 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn builds_jdbc_sorted_query_without_alias_list() {
+    fn builds_dameng_sorted_query_by_ordinal_for_duplicate_columns() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id".to_string(),
+            database_type: Some(DatabaseType::Dameng),
+            result_columns: vec!["ID".to_string(), "id".to_string()],
+            column_index: 1,
+            column: "id".to_string(),
+            direction: QuerySortDirection::Desc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 2 DESC;"
+        );
+    }
+
+    #[test]
+    fn builds_oracle_sorted_query_by_ordinal_for_duplicate_columns() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            result_columns: vec!["ID".to_string(), "ID".to_string()],
+            column_index: 0,
+            column: "ID".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 1 ASC;"
+        );
+    }
+
+    #[test]
+    fn preserves_derived_column_aliases_for_generic_jdbc() {
         let result = build_sorted_query_sql(SortedQuerySqlOptions {
             original_sql: "SELECT id, name FROM users".to_string(),
             database_type: Some(DatabaseType::Jdbc),
@@ -2530,7 +2578,7 @@ WHERE u.id = picked.id;
             direction: QuerySortDirection::Asc,
         });
 
-        assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t ORDER BY id ASC;");
+        assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t(id, name) ORDER BY id ASC;");
     }
 
     #[test]

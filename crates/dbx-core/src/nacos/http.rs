@@ -2362,7 +2362,7 @@ mod tests {
             assert_eq!(request.split_whitespace().next(), Some("POST"));
             assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v3/console/core/namespace"));
             assert!(request.contains("customNamespaceId=team-dev"));
-            write_json_response(&mut socket, r#"{\"code\":0,\"message\":\"success\",\"data\":true}"#).await;
+            write_json_response(&mut socket, r#"{"code":0,"message":"success","data":true}"#).await;
         });
         let mut config = test_admin_config(format!("http://{address}"));
         config.context_path = "/nacos".to_string();

@@ -2143,18 +2143,22 @@ export async function nacosSearchConfigContent(connectionId: string, req: NacosC
     else throw new Error(event.error);
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) consumeLine(line);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) consumeLine(line);
+    }
+    buffer += decoder.decode();
+    if (buffer) consumeLine(buffer);
+    if (!result) throw new Error("Nacos content search stream ended without a final result");
+    return result;
+  } finally {
+    await reader.cancel().catch(() => {});
   }
-  buffer += decoder.decode();
-  if (buffer) consumeLine(buffer);
-  if (!result) throw new Error("Nacos content search stream ended without a final result");
-  return result;
 }
 
 export async function nacosCancelConfigContentSearch(operationId: string): Promise<boolean> {
@@ -2175,7 +2179,7 @@ export async function nacosExportConfigs(connectionId: string, selector: NacosCo
   anchor.href = url;
   anchor.download = fileName;
   anchor.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export async function nacosPreviewConfigImport(connectionId: string, targetNamespace: string, archivePath: string | File): Promise<NacosBatchPreview> {

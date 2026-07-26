@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::body::Body;
 use axum::extract::{Multipart, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
 use axum::Json;
@@ -12,7 +12,7 @@ use futures::Stream;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
-use crate::state::WebState;
+use crate::state::{NacosImportContext, WebState};
 
 const MAX_NACOS_ARCHIVE_BYTES: usize = 100 * 1024 * 1024;
 const NACOS_IMPORT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -418,11 +418,12 @@ pub async fn export_configs(
 
 pub async fn preview_config_import(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let import_dir = nacos_import_dir(&state.data_dir);
     tokio::fs::create_dir_all(&import_dir).await.map_err(|error| AppError::from(error.to_string()))?;
-    cleanup_expired_nacos_imports(&import_dir, NACOS_IMPORT_TTL);
+    cleanup_expired_nacos_imports(&state, &import_dir, NACOS_IMPORT_TTL).await;
 
     let archive_token = uuid::Uuid::new_v4().to_string();
     let archive_path = import_dir.join(format!("{archive_token}.zip"));
@@ -481,17 +482,49 @@ pub async fn preview_config_import(
         }
     };
 
+    let plan_hash = preview.plan_hash.clone();
     let mut value = serde_json::to_value(preview).map_err(|error| AppError::from(error.to_string()))?;
     let object = value.as_object_mut().ok_or_else(|| AppError::from("Invalid Nacos import preview".to_string()))?;
-    object.insert("archiveToken".to_string(), serde_json::Value::String(archive_token));
+    object.insert("archiveToken".to_string(), serde_json::Value::String(archive_token.clone()));
+    state.nacos_imports.write().await.insert(
+        archive_token,
+        NacosImportContext {
+            owner_session: crate::auth::session_token_from_headers(&headers),
+            connection_id,
+            target_namespace,
+            plan_hash,
+        },
+    );
     Ok(Json(value))
 }
 
 pub async fn apply_config_import(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(req): Json<ConfigImportApplyReq>,
 ) -> Result<Json<dbx_core::nacos::NacosBatchReport>, AppError> {
-    let archive_path = nacos_import_path(&state.data_dir, &req.archive_token)?;
+    let archive_path = match nacos_import_path(&state.data_dir, &req.archive_token) {
+        Ok(path) => path,
+        Err(error) => {
+            state.nacos_imports.write().await.remove(&req.archive_token);
+            return Err(error);
+        }
+    };
+    let import_context = match state.nacos_imports.write().await.remove(&req.archive_token) {
+        Some(context) => context,
+        None => {
+            cleanup_nacos_import(&archive_path).await;
+            return Err(AppError::from("Nacos import preview token is missing or expired".to_string()));
+        }
+    };
+    if let Err(error) = validate_nacos_import_context(
+        &import_context,
+        crate::auth::session_token_from_headers(&headers).as_deref(),
+        &req,
+    ) {
+        cleanup_nacos_import(&archive_path).await;
+        return Err(error);
+    }
     let result = dbx_core::nacos::batch::nacos_apply_config_import_core(
         &state.app,
         &req.connection_id,
@@ -552,6 +585,21 @@ fn archive_is_expired(modified: SystemTime, now: SystemTime, max_age: Duration) 
     now.duration_since(modified).is_ok_and(|age| age > max_age)
 }
 
+fn validate_nacos_import_context(
+    context: &NacosImportContext,
+    owner_session: Option<&str>,
+    req: &ConfigImportApplyReq,
+) -> Result<(), AppError> {
+    if context.owner_session.as_deref() != owner_session
+        || context.connection_id != req.connection_id
+        || context.target_namespace != req.target_namespace
+        || context.plan_hash != req.plan_hash
+    {
+        return Err(AppError::from("Nacos import preview token does not match this apply request".to_string()));
+    }
+    Ok(())
+}
+
 async fn write_nacos_archive(
     field: &mut axum::extract::multipart::Field<'_>,
     archive_path: &Path,
@@ -574,18 +622,28 @@ async fn cleanup_nacos_import(path: &Path) {
     let _ = tokio::fs::remove_file(path).await;
 }
 
-fn cleanup_expired_nacos_imports(dir: &Path, max_age: Duration) {
+async fn cleanup_expired_nacos_imports(state: &WebState, dir: &Path, max_age: Duration) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let now = SystemTime::now();
+    let mut expired_tokens = Vec::new();
     for entry in entries.flatten() {
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
         let expired = metadata.modified().ok().and_then(|modified| now.duration_since(modified).ok());
         if expired.is_some_and(|age| age > max_age) {
+            if let Some(token) = entry.path().file_stem().and_then(|token| token.to_str()) {
+                expired_tokens.push(token.to_string());
+            }
             let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    if !expired_tokens.is_empty() {
+        let mut imports = state.nacos_imports.write().await;
+        for token in expired_tokens {
+            imports.remove(&token);
         }
     }
 }
@@ -626,5 +684,28 @@ mod batch_tests {
         assert!(!archive_is_expired(now - NACOS_IMPORT_TTL, now, NACOS_IMPORT_TTL));
         assert!(archive_is_expired(now - NACOS_IMPORT_TTL - Duration::from_secs(1), now, NACOS_IMPORT_TTL));
         assert!(!archive_is_expired(now + Duration::from_secs(1), now, NACOS_IMPORT_TTL));
+    }
+
+    #[test]
+    fn import_tokens_require_the_preview_session_and_context() {
+        let context = NacosImportContext {
+            owner_session: Some("preview-session".to_string()),
+            connection_id: "connection-a".to_string(),
+            target_namespace: "namespace-a".to_string(),
+            plan_hash: "preview-plan".to_string(),
+        };
+        let mut request = ConfigImportApplyReq {
+            connection_id: "connection-a".to_string(),
+            operation_id: "operation".to_string(),
+            target_namespace: "namespace-a".to_string(),
+            archive_token: uuid::Uuid::new_v4().to_string(),
+            plan_hash: "preview-plan".to_string(),
+            conflict_policy: Default::default(),
+        };
+
+        assert!(validate_nacos_import_context(&context, Some("preview-session"), &request).is_ok());
+        assert!(validate_nacos_import_context(&context, Some("other-session"), &request).is_err());
+        request.connection_id = "connection-b".to_string();
+        assert!(validate_nacos_import_context(&context, Some("preview-session"), &request).is_err());
     }
 }

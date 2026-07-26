@@ -1231,9 +1231,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 @cancel="emit('cancel')"
               />
               <div v-else-if="activeTab.resultEvicted && activeTab.resultCacheState === 'missing'" class="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-                <div>{{ t("editor.cachedResultUnavailable") }}</div>
+                <div>{{ t("grid.cachedResultUnavailable") }}</div>
                 <Button v-if="(activeTab.lastExecutedSql ?? activeTab.sql)?.trim()" variant="secondary" size="sm" @click="queryStore.reloadEvictedTab(activeTab.id, { reexecuteOnMissing: true })">
-                  {{ t("editor.reexecuteQuery") }}
+                  {{ t("grid.reexecuteQuery") }}
                 </Button>
               </div>
               <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-muted-foreground text-sm">

@@ -3537,11 +3537,12 @@ export const useConnectionStore = defineStore("connection", () => {
             children = [...children, buildLoadMoreNode(node, pageSize, pageSize)];
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
+          if (!tableNameFilterRevisionMatches(options)) return;
           const targetNode = treeNodeForMetadataApply(node);
           if (!targetNode) return;
           targetNode.objectCount = children.filter((child) => child.type !== "load-more").length;
           setChildren(targetNode, children);
-          if (!searchFilter && !options?.sidebarTableSearchParentId) {
+          if (!searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
           }
           targetNode.isExpanded = true;
@@ -3636,11 +3637,12 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
+          if (!tableNameFilterRevisionMatches(options)) return;
           const targetNode = treeNodeForMetadataApply(node);
           if (!targetNode) return;
           if (nextObjectCount !== undefined) targetNode.objectCount = nextObjectCount;
           setChildren(targetNode, children);
-          if (!searchFilter && !isSidebarTableSearch) {
+          if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
           }
           targetNode.isExpanded = true;
@@ -3753,9 +3755,10 @@ export const useConnectionStore = defineStore("connection", () => {
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
           if (!tableNameFilterRevisionMatches(options)) return;
-          if (!canApplyTreeMetadataResult(node)) return;
-          node.objectCount = nextObjectCount;
-          setChildren(node, children);
+          const targetNode = treeNodeForMetadataApply(node);
+          if (!targetNode) return;
+          targetNode.objectCount = nextObjectCount;
+          setChildren(targetNode, children);
           if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
           }

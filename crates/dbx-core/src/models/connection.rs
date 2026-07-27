@@ -1762,10 +1762,11 @@ fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
             }
         } else if key.eq_ignore_ascii_case("charset")
             || key.eq_ignore_ascii_case("require_ssl")
+            || key.eq_ignore_ascii_case("stringtype")
             || key.eq_ignore_ascii_case("verify_ca")
             || key.eq_ignore_ascii_case("verify_identity")
         {
-            // These MySQL-style parameters may be present in older/imported
+            // Driver-specific parameters may be present in older/imported
             // saved connections. tokio-postgres rejects unknown URL keys.
         } else {
             parts.push(part.to_string());
@@ -2873,6 +2874,20 @@ mod tests {
         );
         let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
         assert_eq!(pg_config.get_options(), Some("-c search_path=app"));
+    }
+
+    #[test]
+    fn postgres_url_ignores_jdbc_stringtype_param() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("currentSchema=public&stringtype=unspecified".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=%2Dc%20search%5Fpath%3Dpublic"
+        );
+        let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
+        assert_eq!(pg_config.get_options(), Some("-c search_path=public"));
     }
 
     #[test]

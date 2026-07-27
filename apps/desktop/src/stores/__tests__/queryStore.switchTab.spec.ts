@@ -113,6 +113,20 @@ describe("queryStore switchTab", () => {
     expect(tab.result).toBeUndefined();
   });
 
+  it("reuses the existing terminal when the same SSH profile is opened again", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+
+    const firstId = queryStore.openSshTerminal("ssh-local", "Local");
+    queryStore.createTab("pg-1", "app");
+    const reopenedId = queryStore.openSshTerminal("ssh-local", "Local renamed");
+
+    expect(reopenedId).toBe(firstId);
+    expect(queryStore.activeTabId).toBe(firstId);
+    expect(queryStore.tabs.filter((tab) => tab.sshProfileId === "ssh-local")).toHaveLength(1);
+    expect(queryStore.tabs.find((tab) => tab.id === firstId)?.title).toBe("Local renamed");
+  });
+
   it("stores local data-grid column filters on the tab result", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();

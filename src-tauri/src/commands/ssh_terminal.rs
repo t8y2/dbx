@@ -27,6 +27,17 @@ pub fn list_ssh_terminal_drivers(state: State<'_, Arc<AppState>>) -> Vec<SshTerm
 }
 
 #[tauri::command]
+pub async fn test_ssh_terminal_profile(state: State<'_, Arc<AppState>>, profile: SshProfile) -> Result<(), String> {
+    let known_hosts_path = state.storage.data_dir().join("known_hosts");
+    let started = state
+        .ssh_terminal
+        .start(&profile, known_hosts_path, SshTerminalSize { columns: 80, rows: 24, pixel_width: 0, pixel_height: 0 })
+        .await?;
+    state.ssh_terminal.close(&started.id).await?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn open_ssh_terminal(
     state: State<'_, Arc<AppState>>,
     profile_id: String,

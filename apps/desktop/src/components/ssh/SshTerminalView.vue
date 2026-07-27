@@ -13,6 +13,9 @@ import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { closeSshTerminal, openSshTerminal, resizeSshTerminal, writeSshTerminal } from "@/lib/backend/ssh-terminal-tauri";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { decodeSshTerminalData } from "@/lib/ssh/terminalData";
+import { listSshProfiles } from "@/lib/backend/ssh-terminal-tauri";
+import { setSshTerminalProfile, setSshTerminalStatus, setSshTerminalTranscript } from "@/lib/ssh/terminalRegistry";
+import { useTheme } from "@/composables/useTheme";
 import type { SshTerminalEvent, SshTerminalSize } from "@/types/ssh";
 
 const props = defineProps<{
@@ -21,6 +24,7 @@ const props = defineProps<{
 }>();
 
 const { t } = useI18n();
+const { isDark, themePalette } = useTheme();
 const host = ref<HTMLElement | null>(null);
 const searchInput = ref<ComponentPublicInstance | null>(null);
 const status = ref<"connecting" | "connected" | "disconnected" | "error">("connecting");
@@ -52,30 +56,48 @@ function cssColor(name: string, fallback: string) {
 
 function syncTheme() {
   if (!terminal) return;
+  const dark = isDark.value;
   terminal.options.theme = {
-    background: cssColor("--background", "rgb(19 20 22)"),
-    foreground: cssColor("--foreground", "rgb(215 215 219)"),
+    background: cssColor("--background", dark ? "rgb(19 20 22)" : "rgb(255 255 255)"),
+    foreground: cssColor("--foreground", dark ? "rgb(215 215 219)" : "rgb(32 33 36)"),
     cursor: cssColor("--primary", "rgb(82 82 91)"),
     cursorAccent: cssColor("--primary-foreground", "rgb(250 250 250)"),
     selectionBackground: cssColor("--accent", "rgb(63 63 70)"),
     selectionForeground: cssColor("--accent-foreground", "rgb(250 250 250)"),
-    black: "#202124",
-    red: "#d95555",
-    green: "#3f9f67",
-    yellow: "#c18d2c",
-    blue: "#4b7fc7",
-    magenta: "#9b67b4",
-    cyan: "#39969c",
-    white: "#d5d7db",
-    brightBlack: "#74777d",
-    brightRed: "#ed7171",
-    brightGreen: "#63bd82",
-    brightYellow: "#d9aa52",
-    brightBlue: "#73a0df",
-    brightMagenta: "#bc87d0",
-    brightCyan: "#62b8bc",
-    brightWhite: "#f1f2f4",
+    black: dark ? "#202124" : "#30343b",
+    red: dark ? "#e06c75" : "#b4232f",
+    green: dark ? "#67b97a" : "#237a3b",
+    yellow: dark ? "#d7a84f" : "#8a6200",
+    blue: dark ? "#72a7e8" : "#245fa8",
+    magenta: dark ? "#bc82cf" : "#7d3c98",
+    cyan: dark ? "#5db8bd" : "#1d7378",
+    white: dark ? "#d5d7db" : "#e5e7eb",
+    brightBlack: dark ? "#74777d" : "#59616c",
+    brightRed: dark ? "#f07b83" : "#d13a45",
+    brightGreen: dark ? "#7dcc91" : "#2f914a",
+    brightYellow: dark ? "#e5bd68" : "#a87800",
+    brightBlue: dark ? "#8ab8ef" : "#3478c5",
+    brightMagenta: dark ? "#ce9add" : "#9651ad",
+    brightCyan: dark ? "#78c9cd" : "#278c91",
+    brightWhite: dark ? "#f1f2f4" : "#ffffff",
   };
+}
+
+function publishTranscript() {
+  if (!terminal) return;
+  const buffer = terminal.buffer.active;
+  const firstLine = Math.max(0, buffer.length - 200);
+  const lines: string[] = [];
+  for (let index = firstLine; index < buffer.length; index++) {
+    lines.push(buffer.getLine(index)?.translateToString(true) ?? "");
+  }
+  setSshTerminalTranscript(props.profileId, lines.join("\n").slice(-20_000));
+}
+
+function updateStatus(nextStatus: typeof status.value, detail = "") {
+  status.value = nextStatus;
+  statusDetail.value = detail;
+  setSshTerminalStatus(props.profileId, nextStatus, detail);
 }
 
 function currentSize(): SshTerminalSize {
@@ -91,25 +113,22 @@ function currentSize(): SshTerminalSize {
 function handleEvent(event: SshTerminalEvent, generation: number) {
   if (generation !== connectGeneration || !terminal) return;
   if (event.type === "ready") {
-    status.value = "connected";
-    statusDetail.value = "";
+    updateStatus("connected");
     if (active) terminal.focus();
     return;
   }
   if (event.type === "data") {
-    terminal.write(decodeSshTerminalData(event.data));
+    terminal.write(decodeSshTerminalData(event.data), publishTranscript);
     return;
   }
   if (event.type === "error") {
-    status.value = "error";
-    statusDetail.value = event.message;
+    updateStatus("error", event.message);
     terminal.writeln(`\r\n\x1b[31m${event.message}\x1b[0m`);
     return;
   }
-  status.value = "disconnected";
+  updateStatus("disconnected", event.signal || "");
   sessionId = null;
   const suffix = event.exitCode == null ? "" : ` (${event.exitCode})`;
-  statusDetail.value = event.signal || "";
   terminal.writeln(`\r\n\x1b[90m${t("sshTerminal.sessionEnded", { suffix })}\x1b[0m`);
 }
 
@@ -121,8 +140,7 @@ async function connect() {
   sessionId = null;
   if (previousSession) void closeSshTerminal(previousSession).catch(() => undefined);
   terminal.reset();
-  status.value = "connecting";
-  statusDetail.value = "";
+  updateStatus("connecting");
   await nextTick();
   fitAddon.fit();
   try {
@@ -135,8 +153,7 @@ async function connect() {
   } catch (error) {
     if (generation !== connectGeneration) return;
     const message = error instanceof Error ? error.message : String(error);
-    status.value = "error";
-    statusDetail.value = message;
+    updateStatus("error", message);
     terminal.writeln(`\x1b[31m${message}\x1b[0m`);
   }
 }
@@ -166,7 +183,7 @@ async function disconnect() {
   sessionId = null;
   ++connectGeneration;
   if (targetSession) await closeSshTerminal(targetSession).catch(() => false);
-  status.value = "disconnected";
+  updateStatus("disconnected");
 }
 
 async function copySelection() {
@@ -212,6 +229,10 @@ function clearPendingInput() {
 }
 
 onMounted(() => {
+  void listSshProfiles()
+    .then((profiles) => profiles.find((profile) => profile.id === props.profileId))
+    .then((profile) => profile && setSshTerminalProfile(profile))
+    .catch(() => undefined);
   terminal = new Terminal({
     allowProposedApi: false,
     convertEol: false,
@@ -237,6 +258,8 @@ onMounted(() => {
   void connect();
 });
 
+watch([isDark, themePalette], () => nextTick(syncTheme));
+
 watch(
   () => props.active,
   (value) => {
@@ -258,6 +281,7 @@ onBeforeUnmount(() => {
   const targetSession = sessionId;
   sessionId = null;
   if (targetSession) void closeSshTerminal(targetSession).catch(() => undefined);
+  setSshTerminalStatus(props.profileId, "disconnected");
   terminal?.dispose();
 });
 </script>

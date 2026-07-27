@@ -119,6 +119,14 @@ pub struct ExecuteRedisCommandRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExecuteSshCommandRequest {
+    #[schemars(description = "Non-interactive shell command to execute on the scoped SSH host")]
+    pub command: String,
+    #[schemars(description = "Timeout in seconds (default 30, max 300)")]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SchemaContextRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
@@ -160,6 +168,7 @@ pub struct McpScope {
     pub connection_ids: Vec<String>,
     pub connection_name: Option<String>,
     pub database: Option<String>,
+    pub target_kind: Option<String>,
 }
 
 struct ResolvedConnection {
@@ -179,6 +188,7 @@ impl McpScope {
             connection_ids,
             connection_name: non_empty_env("DBX_MCP_SCOPE_CONNECTION_NAME"),
             database: non_empty_env("DBX_MCP_SCOPE_DATABASE"),
+            target_kind: non_empty_env("DBX_MCP_SCOPE_KIND"),
         }
     }
 
@@ -213,6 +223,24 @@ impl DbxMcpServer {
         if web_mode || scope.enabled() {
             tool_router.disable_route("dbx_open_table");
             tool_router.disable_route("dbx_execute_and_show");
+        }
+        if scope.target_kind.as_deref() == Some("ssh") {
+            for route in [
+                "dbx_list_connections",
+                "dbx_list_tables",
+                "dbx_describe_table",
+                "dbx_execute_query",
+                "dbx_execute_redis_command",
+                "dbx_get_schema_context",
+                "dbx_add_connection",
+                "dbx_remove_connection",
+                "dbx_open_table",
+                "dbx_execute_and_show",
+            ] {
+                tool_router.disable_route(route);
+            }
+        } else {
+            tool_router.disable_route("dbx_execute_ssh_command");
         }
         Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
     }
@@ -509,6 +537,34 @@ impl DbxMcpServer {
         {
             Ok(result) => text(format_redis_result(&result)),
             Err(error) => backend_tool_error("REDIS_COMMAND_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_execute_ssh_command",
+        description = "Execute one non-interactive command on the SSH host scoped by DBX Desktop"
+    )]
+    async fn execute_ssh_command(&self, Parameters(request): Parameters<ExecuteSshCommandRequest>) -> CallToolResult {
+        if self.scope.target_kind.as_deref() != Some("ssh") {
+            return tool_error("SSH_SCOPE_REQUIRED", "This MCP session is not scoped to an SSH host.");
+        }
+        let Some(profile_id) = self.scope.connection_ids.first() else {
+            return tool_error("SSH_PROFILE_REQUIRED", "No SSH profile is scoped for this MCP session.");
+        };
+        match self
+            .backend
+            .bridge_request_text(
+                "/ssh/execute-command",
+                json!({
+                    "profile_id": profile_id,
+                    "command": request.command,
+                    "timeout_secs": request.timeout_secs.unwrap_or(30).clamp(1, 300),
+                }),
+            )
+            .await
+        {
+            Ok(result) => text(result),
+            Err(error) => backend_tool_error("SSH_COMMAND_ERROR", error),
         }
     }
 
@@ -1342,6 +1398,22 @@ mod tests {
     }
 
     #[test]
+    fn ssh_scoped_server_exposes_the_remote_command_tool() {
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections: Vec::new() }),
+            McpScope {
+                connection_ids: vec!["ssh-local".to_string()],
+                target_kind: Some("ssh".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+        let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["dbx_execute_ssh_command"]);
+    }
+
+    #[test]
     fn scoped_connection_ids_are_deduplicated_and_take_precedence_over_name() {
         assert_eq!(scoped_connection_ids(Some(" first, second,first ,, ")), vec!["first", "second"]);
 
@@ -1351,6 +1423,7 @@ mod tests {
             connection_ids: vec!["first".to_string()],
             connection_name: Some("scope-name".to_string()),
             database: None,
+            target_kind: None,
         };
 
         assert!(scope.matches(&first));

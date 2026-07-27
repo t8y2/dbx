@@ -1306,6 +1306,12 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function openSshTerminal(profileId: string, title: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "ssh" && tab.sshProfileId === profileId);
+    if (existing) {
+      existing.title = title;
+      switchTab(existing.id);
+      return existing.id;
+    }
     const id = uuid();
     tabs.value.push({
       id,

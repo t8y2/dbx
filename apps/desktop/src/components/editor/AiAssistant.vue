@@ -54,8 +54,8 @@ import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.v
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
-import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
-import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { buildAiContext, buildSshAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
+import { getAiConfigModelIds, isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
 import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
@@ -86,6 +86,7 @@ import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/
 import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
+import { sshTerminalRuntimeContext } from "@/lib/ssh/terminalRegistry";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -145,6 +146,11 @@ const emit = defineEmits<{
   close: [];
 }>();
 
+const sshRuntime = computed(() => (props.tab?.mode === "ssh" ? sshTerminalRuntimeContext(props.tab.sshProfileId) : undefined));
+const sshProfile = computed(() => sshRuntime.value?.profile);
+const isSshTarget = computed(() => props.tab?.mode === "ssh" && !!sshProfile.value);
+const hasAiTarget = computed(() => !!props.connection || isSshTarget.value);
+
 const prompt = ref("");
 const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
@@ -182,7 +188,7 @@ watch(
   // previous one, so a getter returning `[id, database]` fires on every dependency
   // invalidation (e.g. the 30s backup scheduler replacing connection objects) even when the
   // id/database values are unchanged — spuriously clearing the selection mid agent-run.
-  () => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}`,
+  () => `${props.connection?.id ?? sshProfile.value?.id ?? ""}::${props.tab?.database ?? ""}`,
   () => {
     activeTemplateIds.value = [];
   },
@@ -277,7 +283,7 @@ function submitEdit(visibleIndex: number) {
   if (!content && !editingMentions.value.length) return;
   const actualIndex = visibleToActualIndex(messages.value, visibleIndex);
   if (actualIndex < 0) return;
-  if (!props.connection || !props.tab) return;
+  if (!hasAiTarget.value || !props.tab) return;
   if (!settings.isConfigured) {
     toast(t("ai.noConfig"));
     return;
@@ -604,12 +610,16 @@ const agentActionButtons: AiActionButton[] = [
   { action: "generate", icon: Wand2, key: "ai.actions.generateNoExec" },
 ];
 
-const actionButtons = computed<AiActionButton[]>(() => (assistantMode.value === "agent" ? agentActionButtons : askActionButtons));
+const actionButtons = computed<AiActionButton[]>(() => {
+  if (isSshTarget.value) return askActionButtons.slice(0, 1);
+  return assistantMode.value === "agent" ? agentActionButtons : askActionButtons;
+});
 const isRedisConnection = computed(() => props.connection?.db_type === "redis");
 
 // Vector DBs hide the action menu and only expose collection tools.
 // Keep their action at `generate` so the task contract doesn't tell the LLM to call execute_query.
 function resolveDefaultAction(mode: AiAssistantMode): AiAction {
+  if (isSshTarget.value) return "general";
   if (props.connection && isVectorDbType(props.connection.db_type)) return "generate";
   return defaultActionForMode(mode);
 }
@@ -630,12 +640,14 @@ watch(assistantMode, (mode) => {
 });
 
 watch(
-  () => props.connection?.db_type,
+  () => [props.connection?.db_type, sshProfile.value?.id],
   () => {
     // Vector DBs hide the action picker, so keep the hidden action aligned with
     // the collection-oriented prompt contract on initial render and connection changes.
     if (props.connection && isVectorDbType(props.connection.db_type)) {
       activeAction.value = "generate";
+    } else if (isSshTarget.value) {
+      activeAction.value = "general";
     }
   },
   { immediate: true },
@@ -766,10 +778,33 @@ function sendProposalReply(positive: boolean) {
   send();
 }
 
-const activePlaceholder = computed(() => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
+const activePlaceholder = computed(() => (isSshTarget.value ? t("sshTerminal.aiPlaceholder") : `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`));
+const activeModeHint = computed(() => t(`ai.modeHints.${assistantMode.value}`));
+const assistantModeItems = computed(() => [
+  {
+    value: "ask",
+    label: t("ai.modes.ask"),
+    title: t("ai.modeHints.ask"),
+    icon: MessageSquarePlus,
+  },
+  {
+    value: "agent",
+    label: t("ai.modes.agent"),
+    title: t("ai.modeHints.agent"),
+    icon: Bot,
+  },
+]);
+const actionMenuItems = computed(() =>
+  actionButtons.value.map((button) => ({
+    value: button.action,
+    label: t(button.key),
+    icon: button.icon,
+  })),
+);
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
 
 const showActionButtons = computed(() => {
+  if (isSshTarget.value) return false;
   if (!props.connection) return true;
   return !isVectorDbType(props.connection.db_type);
 });
@@ -1640,7 +1675,10 @@ async function send() {
   // suspension points during context loading cannot cause a TOCTOU target switch.
   const connection = props.connection;
   const tab = props.tab;
-  if (!connection || !tab) {
+  const sshTarget = isSshTarget.value;
+  const sshProfileSnapshot = sshProfile.value;
+  const sshRuntimeSnapshot = sshRuntime.value;
+  if (!tab || (!connection && !sshTarget) || (sshTarget && (!sshProfileSnapshot || !sshRuntimeSnapshot))) {
     clearPendingWriteGrant();
     return;
   }
@@ -1689,7 +1727,7 @@ async function send() {
   // Detect user-typed short confirmation (e.g. "可以"/"go ahead") as an alternative
   // path to the proposal ✅ button. Delegates to the shared pure function so the
   // component and its unit tests share the same gating logic.
-  if (!allowWriteSqlForNextRun) {
+  if (!sshTarget && !allowWriteSqlForNextRun) {
     allowWriteSqlForNextRun = shouldGrantWriteSqlOnShortAffirmative({
       mode: requestedMode,
       alreadyGranted: false,
@@ -1707,7 +1745,7 @@ async function send() {
         if (msg.kind === "contextSummary") continue;
         if (msg.role === "assistant" && msg.content) {
           confirmedWriteSqlText = extractSingleSqlCodeBlock(msg.content);
-          confirmedConnectionId = connection.id;
+          confirmedConnectionId = connection!.id;
           confirmedDatabase = tab.database || "";
           break;
         }
@@ -1721,14 +1759,14 @@ async function send() {
   // Verify the connection/database haven't changed since the user confirmed
   // the write operation. If the user switched connections or databases between
   // confirmation and execution, the grant is void.
-  if (allowWriteSqlForNextRun && confirmedWriteSqlText) {
-    if (confirmedConnectionId !== connection.id || confirmedDatabase !== (tab.database || "")) {
+  if (!sshTarget && allowWriteSqlForNextRun && confirmedWriteSqlText) {
+    if (confirmedConnectionId !== connection!.id || confirmedDatabase !== (tab.database || "")) {
       allowWriteSqlForNextRun = false;
       confirmedWriteSqlText = undefined;
     }
   }
   // Agent confirmation cannot grant autonomous writes while the active database is production.
-  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
+  const allowWriteSql = !sshTarget && requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
   const confirmedWriteSql = allowWriteSql ? confirmedWriteSqlText : undefined;
   // Capture the confirmed target snapshot before clearing the one-shot grant
   // state, so the values survive to be passed through to the backend.
@@ -1746,10 +1784,16 @@ async function send() {
   agentTokens.value = null;
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
-    const context = await buildAiContext(tab, connection, {
-      mentionedTables,
-      sqlFiles,
-    });
+    const context = sshTarget
+      ? buildSshAiContext(sshProfileSnapshot!, {
+          status: sshRuntimeSnapshot!.status,
+          statusDetail: sshRuntimeSnapshot!.statusDetail,
+          transcript: sshRuntimeSnapshot!.transcript,
+        })
+      : await buildAiContext(tab, connection!, {
+          mentionedTables,
+          sqlFiles,
+        });
     const history: AiMessage[] = messagesForAgentHistory(messages.value.slice(0, -2));
     await runAgentStream(
       {
@@ -1820,16 +1864,18 @@ async function send() {
     }
     // Fallback: use aiAgentPlan for backward compatibility
     if (msg && !msg.agentSteps?.length) {
-      const agentPlan = buildAiAgentPlan({
-        mode: requestedMode,
-        action: requestedAction,
-        instruction: modelInstruction,
-        assistantContent: msg?.content || "",
-        connection: connection,
-        database: tab.database,
-      });
-      if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
-      if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
+      if (!sshTarget) {
+        const agentPlan = buildAiAgentPlan({
+          mode: requestedMode,
+          action: requestedAction,
+          instruction: modelInstruction,
+          assistantContent: msg?.content || "",
+          connection: connection!,
+          database: tab.database,
+        });
+        if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
+        if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
+      }
     }
     currentSessionId.value = "";
     // Apply deferred context compaction after streaming so assistantIdx stays stable.
@@ -1905,13 +1951,13 @@ function clearMessages() {
 }
 
 async function persistConversation() {
-  if (!messages.value.length || !props.connection) return;
+  if (!messages.value.length || !hasAiTarget.value) return;
   if (!conversationId.value) conversationId.value = uuid();
   const first = messages.value.find((m) => m.role === "user" && m.kind !== "contextSummary");
   await saveAiConversation({
     id: conversationId.value,
     title: first ? messageTitle(first).slice(0, 50) : "Untitled",
-    connectionName: props.connection.name,
+    connectionName: props.connection?.name || sshProfile.value?.name || "SSH",
     database: props.tab?.database || "",
     messages: messages.value.map((m) => ({
       role: m.role,
@@ -2336,7 +2382,12 @@ async function openExternalUrl(url: string) {
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
           <div class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
-            <template v-if="connectionStore.connections.length">
+            <template v-if="isSshTarget">
+              <Terminal class="h-3 w-3 shrink-0" />
+              <span class="truncate">{{ sshProfile?.name }}</span>
+              <span class="truncate text-foreground/45">{{ sshProfile?.username }}@{{ sshProfile?.host }}:{{ sshProfile?.port }}</span>
+            </template>
+            <template v-else-if="connectionStore.connections.length">
               <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <Select

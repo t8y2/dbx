@@ -2088,6 +2088,7 @@ pub fn run() {
             commands::ssh_terminal::save_ssh_profile,
             commands::ssh_terminal::delete_ssh_profile,
             commands::ssh_terminal::list_ssh_terminal_drivers,
+            commands::ssh_terminal::test_ssh_terminal_profile,
             commands::ssh_terminal::open_ssh_terminal,
             commands::ssh_terminal::write_ssh_terminal,
             commands::ssh_terminal::resize_ssh_terminal,

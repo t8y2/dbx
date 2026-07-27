@@ -17,6 +17,10 @@ export function listSshTerminalDrivers(): Promise<SshTerminalDriverManifest[]> {
   return invoke("list_ssh_terminal_drivers");
 }
 
+export function testSshTerminalProfile(profile: SshProfile): Promise<void> {
+  return invoke("test_ssh_terminal_profile", { profile });
+}
+
 export async function openSshTerminal(profileId: string, size: SshTerminalSize, onEvent: (event: SshTerminalEvent) => void): Promise<string> {
   const channel = new Channel<SshTerminalEvent>();
   channel.onmessage = onEvent;

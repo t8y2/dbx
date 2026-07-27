@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, LoaderCircle } from "@lucide/vue";
+import { CircleCheck, FolderOpen, LoaderCircle } from "@lucide/vue";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import { listSshTerminalDrivers, saveSshProfile } from "@/lib/backend/ssh-terminal-tauri";
+import { listSshTerminalDrivers, saveSshProfile, testSshTerminalProfile } from "@/lib/backend/ssh-terminal-tauri";
 import { uuid } from "@/lib/common/utils";
 import type { SshAuthMethod, SshProfile, SshTerminalDriverManifest } from "@/types/ssh";
 
@@ -27,6 +27,8 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const drivers = ref<SshTerminalDriverManifest[]>([]);
 const saving = ref(false);
+const testing = ref(false);
+const testSuccess = ref(false);
 const error = ref("");
 const draft = ref<SshProfile>(newProfile());
 
@@ -57,7 +59,7 @@ function newProfile(): SshProfile {
     host: "",
     port: 22,
     username: "",
-    authMethod: "agent",
+    authMethod: "password",
     password: "",
     keyPath: "",
     keyPassphrase: "",
@@ -76,6 +78,7 @@ watch(
   async (open) => {
     if (!open) return;
     error.value = "";
+    testSuccess.value = false;
     draft.value = props.profile ? cloneProfile(props.profile) : newProfile();
     try {
       drivers.value = await listSshTerminalDrivers();
@@ -90,7 +93,7 @@ watch(
 );
 
 function close() {
-  if (!saving.value) emit("update:open", false);
+  if (!saving.value && !testing.value) emit("update:open", false);
 }
 
 async function chooseKeyPath() {
@@ -98,22 +101,41 @@ async function chooseKeyPath() {
   if (typeof path === "string") draft.value.keyPath = path;
 }
 
+function normalizedDraft(): SshProfile {
+  return {
+    ...draft.value,
+    name: draft.value.name.trim(),
+    host: draft.value.host.trim(),
+    port: Number(draft.value.port),
+    username: draft.value.username.trim(),
+    keyPath: draft.value.keyPath.trim(),
+    sshAgentSockPath: draft.value.sshAgentSockPath.trim(),
+    connectTimeoutSecs: Number(draft.value.connectTimeoutSecs),
+    terminalType: draft.value.terminalType.trim(),
+  };
+}
+
+async function testConnection() {
+  if (!canSave.value || testing.value || saving.value) return;
+  testing.value = true;
+  testSuccess.value = false;
+  error.value = "";
+  try {
+    await testSshTerminalProfile(normalizedDraft());
+    testSuccess.value = true;
+  } catch (testError) {
+    error.value = testError instanceof Error ? testError.message : String(testError);
+  } finally {
+    testing.value = false;
+  }
+}
+
 async function save() {
-  if (!canSave.value || saving.value) return;
+  if (!canSave.value || saving.value || testing.value) return;
   saving.value = true;
   error.value = "";
   try {
-    const saved = await saveSshProfile({
-      ...draft.value,
-      name: draft.value.name.trim(),
-      host: draft.value.host.trim(),
-      port: Number(draft.value.port),
-      username: draft.value.username.trim(),
-      keyPath: draft.value.keyPath.trim(),
-      sshAgentSockPath: draft.value.sshAgentSockPath.trim(),
-      connectTimeoutSecs: Number(draft.value.connectTimeoutSecs),
-      terminalType: draft.value.terminalType.trim(),
-    });
+    const saved = await saveSshProfile(normalizedDraft());
     emit("saved", saved);
     emit("update:open", false);
   } catch (saveError) {
@@ -185,7 +207,7 @@ async function save() {
           <Input id="ssh-profile-agent-socket" v-model="draft.sshAgentSockPath" class="font-mono text-xs" />
         </div>
 
-        <div class="space-y-1.5">
+        <div v-if="drivers.length > 1" class="space-y-1.5">
           <Label>{{ t("sshTerminal.driver") }}</Label>
           <Select :model-value="draft.driverId" @update:model-value="(value: any) => (draft.driverId = String(value))">
             <SelectTrigger class="h-8 w-full"><SelectValue /></SelectTrigger>
@@ -194,17 +216,26 @@ async function save() {
             </SelectContent>
           </Select>
         </div>
-        <div class="space-y-1.5">
+        <div class="space-y-1.5" :class="drivers.length > 1 ? '' : 'col-span-2'">
           <Label for="ssh-profile-terminal-type">{{ t("sshTerminal.terminalType") }}</Label>
           <Input id="ssh-profile-terminal-type" v-model="draft.terminalType" class="font-mono text-xs" />
         </div>
 
         <p v-if="error" class="col-span-2 break-words text-xs text-destructive">{{ error }}</p>
+        <p v-else-if="testSuccess" class="col-span-2 flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+          <CircleCheck class="h-3.5 w-3.5" />
+          {{ t("sshTerminal.testSuccess") }}
+        </p>
       </div>
 
       <DialogFooter>
-        <Button variant="outline" :disabled="saving" @click="close">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="!canSave || saving" @click="save">
+        <Button variant="outline" :disabled="saving || testing" @click="testConnection">
+          <LoaderCircle v-if="testing" class="mr-1.5 h-4 w-4 animate-spin" />
+          {{ t("sshTerminal.testConnection") }}
+        </Button>
+        <span class="flex-1" />
+        <Button variant="outline" :disabled="saving || testing" @click="close">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="!canSave || saving || testing" @click="save">
           <LoaderCircle v-if="saving" class="mr-1.5 h-4 w-4 animate-spin" />
           {{ t("common.save") }}
         </Button>

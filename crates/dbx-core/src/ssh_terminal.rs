@@ -16,6 +16,7 @@ use crate::db::ssh_tunnel::connect_and_authenticate;
 pub const BUILTIN_SSH_TERMINAL_DRIVER_ID: &str = "builtin-russh";
 const SESSION_COMMAND_BUFFER: usize = 128;
 const SESSION_EVENT_BUFFER: usize = 256;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 
 fn default_driver_id() -> String {
     BUILTIN_SSH_TERMINAL_DRIVER_ID.to_string()
@@ -49,7 +50,7 @@ pub enum SshAuthMethod {
 
 impl Default for SshAuthMethod {
     fn default() -> Self {
-        Self::Agent
+        Self::Password
     }
 }
 
@@ -94,6 +95,22 @@ pub struct SshProfile {
 
 impl SshProfile {
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_metadata()?;
+        match self.auth_method {
+            SshAuthMethod::Password if self.password.is_empty() => {
+                Err("SSH password is required for password authentication".to_string())
+            }
+            SshAuthMethod::Key if self.key_path.trim().is_empty() => {
+                Err("SSH private key path is required for key authentication".to_string())
+            }
+            SshAuthMethod::KeyPassword if self.key_path.trim().is_empty() || self.password.is_empty() => {
+                Err("SSH private key and password are required for combined authentication".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn validate_metadata(&self) -> Result<(), String> {
         if self.id.trim().is_empty() {
             return Err("SSH profile id must not be empty".to_string());
         }
@@ -122,18 +139,7 @@ impl SshProfile {
         {
             return Err("SSH terminal type is invalid".to_string());
         }
-        match self.auth_method {
-            SshAuthMethod::Password if self.password.is_empty() => {
-                Err("SSH password is required for password authentication".to_string())
-            }
-            SshAuthMethod::Key if self.key_path.trim().is_empty() => {
-                Err("SSH private key path is required for key authentication".to_string())
-            }
-            SshAuthMethod::KeyPassword if self.key_path.trim().is_empty() || self.password.is_empty() => {
-                Err("SSH private key and password are required for combined authentication".to_string())
-            }
-            _ => Ok(()),
-        }
+        Ok(())
     }
 
     pub fn scrubbed_for_storage(&self) -> Self {
@@ -189,6 +195,16 @@ pub struct SshTerminalDriverManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshCommandResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<u32>,
+    pub signal: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SshTerminalEvent {
     Ready,
@@ -214,6 +230,14 @@ pub trait SshTerminalDriver: Send + Sync {
         size: SshTerminalSize,
         events: mpsc::Sender<SshTerminalEvent>,
     ) -> Result<Arc<dyn SshTerminalSession>, String>;
+
+    async fn execute(
+        &self,
+        profile: &SshProfile,
+        known_hosts_path: &Path,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<SshCommandResult, String>;
 }
 
 #[async_trait]
@@ -265,6 +289,7 @@ impl SshTerminalDriver for RusshTerminalDriver {
                 "private-key".to_string(),
                 "ssh-agent".to_string(),
                 "known-hosts".to_string(),
+                "exec".to_string(),
             ],
         }
     }
@@ -368,7 +393,8 @@ impl SshTerminalDriver for RusshTerminalDriver {
                             Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
                                 exit_signal = Some(format!("{signal_name:?}"));
                             }
-                            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                            Some(ChannelMsg::Eof) => {}
+                            Some(ChannelMsg::Close) | None => break,
                             _ => {}
                         }
                     }
@@ -380,6 +406,92 @@ impl SshTerminalDriver for RusshTerminalDriver {
 
         Ok(Arc::new(RusshTerminalSession { commands: command_tx }))
     }
+
+    async fn execute(
+        &self,
+        profile: &SshProfile,
+        known_hosts_path: &Path,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<SshCommandResult, String> {
+        profile.validate()?;
+        let command = command.trim();
+        if command.is_empty() || command.len() > 8_192 || command.chars().any(|character| character == '\0') {
+            return Err("SSH command must contain between 1 and 8192 characters".to_string());
+        }
+        let timeout_secs = timeout_secs.clamp(1, 300);
+        let session = connect_and_authenticate(
+            profile.host.trim(),
+            profile.port,
+            profile.username.trim(),
+            &profile.password,
+            profile.key_path.trim(),
+            &profile.key_passphrase,
+            profile.auth_method == SshAuthMethod::Agent,
+            profile.ssh_agent_sock_path.trim(),
+            profile.auth_method.as_tunnel_auth_method(),
+            profile.connect_timeout_secs,
+            known_hosts_path,
+        )
+        .await?;
+        let mut channel = session
+            .channel_open_session()
+            .await
+            .map_err(|error| format!("Failed to open SSH command channel: {error}"))?;
+        channel
+            .exec(true, command.as_bytes())
+            .await
+            .map_err(|error| format!("Failed to execute SSH command: {error}"))?;
+        wait_for_channel_request_reply(&mut channel, "SSH command", profile.connect_timeout_secs).await?;
+
+        let collect = async {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut exit_code = None;
+            let mut signal = None;
+            let mut truncated = false;
+            let mut captured_bytes = 0;
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Data { data }) => {
+                        append_command_output(&mut stdout, data.as_ref(), &mut captured_bytes, &mut truncated);
+                    }
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        append_command_output(&mut stderr, data.as_ref(), &mut captured_bytes, &mut truncated);
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => exit_code = Some(exit_status),
+                    Some(ChannelMsg::ExitSignal { signal_name, .. }) => signal = Some(format!("{signal_name:?}")),
+                    Some(ChannelMsg::Eof) => {}
+                    Some(ChannelMsg::Close) | None => break,
+                    _ => {}
+                }
+            }
+            SshCommandResult {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                exit_code,
+                signal,
+                truncated,
+            }
+        };
+
+        let result = timeout(Duration::from_secs(timeout_secs), collect)
+            .await
+            .map_err(|_| format!("SSH command timed out after {timeout_secs} seconds"));
+        let _ = channel.close().await;
+        let _ = session.disconnect(Disconnect::ByApplication, "DBX command completed", "").await;
+        result
+    }
+}
+
+fn append_command_output(target: &mut Vec<u8>, data: &[u8], captured_bytes: &mut usize, truncated: &mut bool) {
+    let remaining = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(*captured_bytes);
+    let captured = data.len().min(remaining);
+    if data.len() > remaining {
+        *truncated = true;
+    }
+    target.extend_from_slice(&data[..captured]);
+    *captured_bytes += captured;
 }
 
 async fn wait_for_channel_request_reply(
@@ -462,6 +574,20 @@ impl SshTerminalService {
         Ok(StartedSshTerminalSession { id, events: event_rx })
     }
 
+    pub async fn execute_command(
+        &self,
+        profile: &SshProfile,
+        known_hosts_path: PathBuf,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<SshCommandResult, String> {
+        let driver = self
+            .drivers
+            .get(profile.driver_id.trim())
+            .ok_or_else(|| format!("SSH terminal driver '{}' is not installed", profile.driver_id))?;
+        driver.execute(profile, &known_hosts_path, command, timeout_secs).await
+    }
+
     pub async fn input(&self, session_id: &str, data: String) -> Result<(), String> {
         let session = self.session(session_id).await?;
         session.input(data.into_bytes()).await
@@ -531,6 +657,11 @@ mod tests {
     }
 
     #[test]
+    fn password_is_the_default_authentication_method() {
+        assert_eq!(SshAuthMethod::default(), SshAuthMethod::Password);
+    }
+
+    #[test]
     fn irrelevant_secrets_are_removed_for_selected_auth_method() {
         let mut profile = profile(SshAuthMethod::Agent);
         profile.password = "password".to_string();
@@ -563,5 +694,23 @@ mod tests {
     fn terminal_size_rejects_zero_and_excessive_dimensions() {
         assert!(SshTerminalSize { columns: 0, rows: 24, pixel_width: 0, pixel_height: 0 }.validate().is_err());
         assert!(SshTerminalSize { columns: 80, rows: 1_001, pixel_width: 0, pixel_height: 0 }.validate().is_err());
+    }
+
+    #[test]
+    fn command_output_limit_is_shared_between_stdout_and_stderr() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut captured_bytes = 0;
+        let mut truncated = false;
+        append_command_output(
+            &mut stdout,
+            &vec![b'o'; MAX_COMMAND_OUTPUT_BYTES - 4],
+            &mut captured_bytes,
+            &mut truncated,
+        );
+        append_command_output(&mut stderr, b"stderr", &mut captured_bytes, &mut truncated);
+        assert_eq!(stdout.len() + stderr.len(), MAX_COMMAND_OUTPUT_BYTES);
+        assert_eq!(stderr, b"stde");
+        assert!(truncated);
     }
 }

@@ -33,6 +33,20 @@ async fn live_ssh_terminal_supports_pty_io_resize_and_exit() {
         connect_timeout_secs: 10,
         terminal_type: "xterm-256color".to_string(),
     };
+    let command_result = service
+        .execute_command(
+            &profile,
+            known_hosts_dir.path().join("known_hosts"),
+            "printf 'DBX_SSH_EXEC_OK\\n'; uname -s; whoami",
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(command_result.exit_code, Some(0));
+    assert!(command_result.stderr.is_empty(), "command stderr was: {:?}", command_result.stderr);
+    assert!(command_result.stdout.contains("DBX_SSH_EXEC_OK"));
+    assert!(!command_result.truncated);
+
     let mut started = service
         .start(
             &profile,

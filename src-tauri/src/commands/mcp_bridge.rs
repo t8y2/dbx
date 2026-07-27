@@ -261,6 +261,8 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
                     handle_mongo_delete_documents_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/redis/execute-command") {
                     handle_redis_execute_command_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /ssh/execute-command") {
+                    handle_ssh_execute_command(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/execute-query") {
                     handle_execute_query_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /execute-query") {
@@ -274,6 +276,63 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
             });
         }
     });
+}
+
+#[derive(Deserialize)]
+struct SshExecuteCommandRequest {
+    profile_id: String,
+    command: String,
+    timeout_secs: Option<u64>,
+}
+
+async fn handle_ssh_execute_command(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let request: SshExecuteCommandRequest = match serde_json::from_str(body) {
+        Ok(request) => request,
+        Err(error) => {
+            respond_error(stream, "400 Bad Request", &error.to_string()).await;
+            return;
+        }
+    };
+    let profile = match state.storage.load_ssh_profiles().await.and_then(|profiles| {
+        profiles
+            .into_iter()
+            .find(|profile| profile.id == request.profile_id)
+            .ok_or_else(|| "SSH profile was not found".to_string())
+    }) {
+        Ok(profile) => profile,
+        Err(error) => {
+            respond_error(stream, "404 Not Found", &error).await;
+            return;
+        }
+    };
+    match state
+        .ssh_terminal
+        .execute_command(
+            &profile,
+            state.storage.data_dir().join("known_hosts"),
+            &request.command,
+            request.timeout_secs.unwrap_or(30),
+        )
+        .await
+    {
+        Ok(result) => {
+            let mut sections = vec![format!(
+                "Exit code: {}",
+                result.exit_code.map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
+            )];
+            if !result.stdout.is_empty() {
+                sections.push(format!("stdout:\n{}", result.stdout));
+            }
+            if !result.stderr.is_empty() {
+                sections.push(format!("stderr:\n{}", result.stderr));
+            }
+            if result.truncated {
+                sections.push("Output was truncated at 1 MiB.".to_string());
+            }
+            respond(stream, "200 OK", &sections.join("\n\n")).await;
+        }
+        Err(error) => respond_error(stream, "500 Internal Server Error", &error).await,
+    }
 }
 
 fn write_port_file(data_dir: &Path, actual_port: u16) -> std::io::Result<PathBuf> {

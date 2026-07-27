@@ -1,8 +1,9 @@
 use crate::agent_events::AgentEvent;
 use crate::ai::{AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortLevel, AiModelInfo, AiTestConnectionResult};
 use crate::ai_cli_agent::{
-    build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env, model_infos, parse_cli_jsonl_event,
-    run_cli_jsonl_agent, CliAgentCommandSpec, CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
+    build_cli_agent_prompt, build_cli_agent_prompt_for_target, cli_command, dbx_mcp_enabled_tools,
+    dbx_mcp_enabled_tools_for_target, dbx_mcp_scope_env, model_infos, parse_cli_jsonl_event, run_cli_jsonl_agent,
+    CliAgentCommandSpec, CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -258,7 +259,10 @@ fn build_claude_code_command_with_mcp_arg(
     options: &ClaudeCodeRunOptions,
     mcp_config_arg: String,
 ) -> ClaudeCodeCommandSpec {
-    let enabled_tools = claude_code_enabled_tools(options.agent_mode);
+    let enabled_tools = dbx_mcp_enabled_tools_for_target(options.agent_mode, options.ssh_target)
+        .into_iter()
+        .map(|tool| format!("mcp__dbx__{tool}"))
+        .collect::<Vec<_>>();
     let mut args = vec![
         "--print".to_string(),
         "--output-format".to_string(),
@@ -302,6 +306,15 @@ pub fn build_claude_code_prompt(
     allow_write_sql: bool,
 ) -> String {
     build_cli_agent_prompt("Claude Code", system_prompt, messages, allow_write_sql)
+}
+
+pub fn build_claude_code_prompt_for_target(
+    system_prompt: &str,
+    messages: &[crate::ai::AiMessage],
+    allow_write_sql: bool,
+    ssh_target: bool,
+) -> String {
+    build_cli_agent_prompt_for_target("Claude Code", system_prompt, messages, allow_write_sql, ssh_target)
 }
 
 pub async fn list_claude_code_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
@@ -592,6 +605,7 @@ mod tests {
             allow_writes: false,
             allow_dangerous: false,
             confirmed_write_sql: None,
+            ssh_target: false,
             mcp_server_command: None,
         }
     }

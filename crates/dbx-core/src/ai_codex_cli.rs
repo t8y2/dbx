@@ -4,9 +4,10 @@ use crate::ai::{
     AiTestConnectionResult,
 };
 use crate::ai_cli_agent::{
-    append_config_overrides, build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env,
-    model_infos, parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec,
-    CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
+    append_config_overrides, build_cli_agent_prompt, build_cli_agent_prompt_for_target, cli_command,
+    dbx_mcp_enabled_tools, dbx_mcp_enabled_tools_for_target, dbx_mcp_scope_env, model_infos, parse_cli_jsonl_event,
+    run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec, CliAgentJsonlDialect,
+    CliAgentProcessSpec, CliAgentRunOptions,
 };
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -473,7 +474,10 @@ fn codex_mcp_config_overrides(options: &CodexRunOptions) -> Vec<String> {
         "mcp_servers.dbx.startup_timeout_sec=20".to_string(),
         "mcp_servers.dbx.tool_timeout_sec=120".to_string(),
         "mcp_servers.dbx.default_tools_approval_mode=\"approve\"".to_string(),
-        format!("mcp_servers.dbx.enabled_tools={}", toml_string_array(&dbx_mcp_enabled_tools(options.agent_mode))),
+        format!(
+            "mcp_servers.dbx.enabled_tools={}",
+            toml_string_array(&dbx_mcp_enabled_tools_for_target(options.agent_mode, options.ssh_target))
+        ),
     ];
     if let Some(command) = options.mcp_server_command.as_ref().filter(|command| !command.args.is_empty()) {
         let args = command.args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -518,6 +522,15 @@ pub fn build_codex_exec_command(config: &AiConfig, _prompt: &str, options: &Code
 
 pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage], allow_write_sql: bool) -> String {
     build_cli_agent_prompt("Codex", system_prompt, messages, allow_write_sql)
+}
+
+pub fn build_codex_prompt_for_target(
+    system_prompt: &str,
+    messages: &[crate::ai::AiMessage],
+    allow_write_sql: bool,
+    ssh_target: bool,
+) -> String {
+    build_cli_agent_prompt_for_target("Codex", system_prompt, messages, allow_write_sql, ssh_target)
 }
 
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
@@ -1048,6 +1061,7 @@ mod tests {
             allow_writes: false,
             allow_dangerous: false,
             confirmed_write_sql: None,
+            ssh_target: false,
             mcp_server_command: None,
         }
     }

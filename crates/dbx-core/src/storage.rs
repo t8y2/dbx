@@ -1448,6 +1448,59 @@ impl Storage {
         .await
     }
 
+    /// Replaces the SSH profile catalog while preserving local secrets when
+    /// the incoming profiles are the scrubbed public half of a sync snapshot.
+    pub async fn save_ssh_profiles_preserving_secrets(&self, profiles: &[SshProfile]) -> Result<(), String> {
+        let existing: HashMap<String, SshProfile> =
+            self.load_ssh_profiles().await?.into_iter().map(|profile| (profile.id.clone(), profile)).collect();
+        let mut merged = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            let mut profile = profile.clone();
+            if let Some(previous) = existing.get(&profile.id) {
+                if profile.password.is_empty() {
+                    profile.password = previous.password.clone();
+                }
+                if profile.key_passphrase.is_empty() {
+                    profile.key_passphrase = previous.key_passphrase.clone();
+                }
+            }
+            let profile = profile.without_irrelevant_secrets();
+            profile.validate_metadata()?;
+            merged.push(profile);
+        }
+
+        self.replace_ssh_profiles(&merged).await
+    }
+
+    /// Replaces SSH profiles including their secrets. Used only after a sync
+    /// secrets payload has been decrypted successfully.
+    pub async fn replace_ssh_profiles(&self, profiles: &[SshProfile]) -> Result<(), String> {
+        let mut rows = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            let profile = profile.without_irrelevant_secrets();
+            profile.validate_metadata()?;
+            let stored_json =
+                serde_json::to_string(&profile.scrubbed_for_storage()).map_err(|error| error.to_string())?;
+            rows.push((profile, stored_json));
+        }
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            tx.execute("DELETE FROM ssh_profiles", []).map_err(|error| error.to_string())?;
+            tx.execute("DELETE FROM ssh_profile_secrets", []).map_err(|error| error.to_string())?;
+            for (profile, stored_json) in &rows {
+                tx.execute(
+                    "INSERT INTO ssh_profiles (id, config_json) VALUES (?1, ?2)",
+                    params![profile.id, stored_json],
+                )
+                .map_err(|error| error.to_string())?;
+                persist_ssh_profile_secret_in_tx(&tx, &profile.id, "password", &profile.password)?;
+                persist_ssh_profile_secret_in_tx(&tx, &profile.id, "key_passphrase", &profile.key_passphrase)?;
+            }
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     pub async fn delete_ssh_profile(&self, profile_id: &str) -> Result<bool, String> {
         let profile_id = profile_id.to_string();
         self.with_conn(move |conn| {

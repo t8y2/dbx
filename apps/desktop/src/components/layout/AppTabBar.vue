@@ -475,6 +475,7 @@ function tabMenuIcon(tab: QueryTab) {
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis") return Table2;
   if (tab.mode === "vector") return TableProperties;
   if (tab.mode === "etcd" || tab.mode === "zookeeper") return KeyRound;
+  if (tab.mode === "etcd-dashboard") return Gauge;
   if (tab.mode === "nacos") return Network;
   if (tab.mode === "objects") return TableProperties;
   if (tab.mode === "structure") return PencilRuler;
@@ -618,6 +619,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
@@ -811,6 +813,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />

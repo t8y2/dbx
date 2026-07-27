@@ -44,6 +44,7 @@ const DataGrid = defineAsyncComponent(loadDataGridComponent);
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const RedisDashboard = defineAsyncComponent(() => import("@/components/redis/RedisDashboard.vue"));
 const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/EtcdKeyBrowser.vue"));
+const EtcdDashboard = defineAsyncComponent(() => import("@/components/etcd/EtcdDashboard.vue"));
 const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
@@ -215,6 +216,7 @@ const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
 const documentBrowserRef = ref<SearchableBrowserHandle>();
 
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
+const etcdDashboardRef = ref<{ refresh?: () => boolean }>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
@@ -711,6 +713,7 @@ function refreshData(): boolean {
   // Reuse ObjectBrowser's reload path so schema reloads and stale object-response guards stay intact.
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "etcd-dashboard") return etcdDashboardRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
@@ -1571,6 +1574,13 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'etcd'">
       <div class="flex-1 min-h-0">
         <EtcdKeyBrowser ref="etcdKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- etcd Dashboard: cluster observation -->
+    <template v-else-if="activeTab.mode === 'etcd-dashboard'">
+      <div class="flex-1 min-h-0">
+        <EtcdDashboard ref="etcdDashboardRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

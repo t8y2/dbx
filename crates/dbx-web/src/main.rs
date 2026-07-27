@@ -451,6 +451,9 @@ async fn main() {
         .route("/etcd/get", post(routes::etcd::get))
         .route("/etcd/put", post(routes::etcd::put))
         .route("/etcd/delete", post(routes::etcd::delete))
+        .route("/etcd/rename", post(routes::etcd::rename))
+        .route("/etcd/history", post(routes::etcd::history))
+        .route("/etcd/status", post(routes::etcd::status))
         // ZooKeeper
         .route("/zookeeper/list-prefix", post(routes::zookeeper::list_prefix))
         .route("/zookeeper/get", post(routes::zookeeper::get))

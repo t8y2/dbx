@@ -14,6 +14,8 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "object-browser",
   "redis-db",
   "mq-tenant",
+  "etcd-root",
+  "etcd-dashboard",
   "zookeeper-root",
   "mongo-gridfs",
   "mongo-bucket",

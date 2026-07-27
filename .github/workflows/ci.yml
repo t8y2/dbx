@@ -311,6 +311,7 @@ jobs:
           filters: |
             frontend:
               - 'apps/desktop/**'
+              - 'docs/**'
               - 'packages/**'
               - 'pnpm-lock.yaml'
               - 'package.json'

@@ -72,6 +72,7 @@ import type {
   RedisCommandResult,
   RedisSlowlogEntry,
   RedisNodeEndpoint,
+  KvInt64,
   KvValue,
   KvListPrefixResponse,
   KvListPrefixOptions,
@@ -79,7 +80,10 @@ import type {
   KvGetOptions,
   KvPutOptions,
   KvPutResponse,
+  KvDeleteOptions,
   KvDeleteResponse,
+  KvHistoryResponse,
+  KvStatusResponse,
   DocumentQueryResult,
   MongoDocumentResult,
   MongoCollectionStatsResult,
@@ -2054,8 +2058,8 @@ export async function redisClusterMasterNodes(connectionId: string): Promise<Red
 // etcd
 // ---------------------------------------------------------------------------
 
-export async function etcdListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
-  return post("/api/etcd/list-prefix", { connectionId, prefix, limit, continuation });
+export async function etcdListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null): Promise<KvListPrefixResponse> {
+  return post("/api/etcd/list-prefix", { connectionId, prefix, limit, continuation, revision: options?.revision ?? null, includeValues: options?.includeValues ?? null });
 }
 
 export async function etcdSupportsTtl(connectionId: string): Promise<boolean> {
@@ -2063,7 +2067,7 @@ export async function etcdSupportsTtl(connectionId: string): Promise<boolean> {
 }
 
 export async function etcdGet(connectionId: string, key: string, options?: KvGetOptions | null): Promise<KvGetResponse> {
-  return post("/api/etcd/get", { connectionId, key, metadataOnly: options?.metadataOnly ?? null });
+  return post("/api/etcd/get", { connectionId, key, keyBytes: options?.keyBytes ?? null, revision: options?.revision ?? null, metadataOnly: options?.metadataOnly ?? null });
 }
 
 export async function etcdPut(connectionId: string, key: string, value: KvValue, options?: KvPutOptions | number | null): Promise<KvPutResponse> {
@@ -2076,11 +2080,26 @@ export async function etcdPut(connectionId: string, key: string, value: KvValue,
     lease: legacyLease ?? putOptions?.lease ?? null,
     ttl: putOptions?.ttl ?? null,
     preserveLease: putOptions?.preserveLease ?? null,
+    keyBytes: putOptions?.keyBytes ?? null,
+    expectedModRevision: putOptions?.expectedModRevision ?? null,
+    expectedCreateRevision: putOptions?.expectedCreateRevision ?? null,
   });
 }
 
-export async function etcdDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
-  return post("/api/etcd/delete", { connectionId, key });
+export async function etcdDelete(connectionId: string, key: string, options?: KvDeleteOptions | null): Promise<KvDeleteResponse> {
+  return post("/api/etcd/delete", { connectionId, key, keyBytes: options?.keyBytes ?? null, expectedModRevision: options?.expectedModRevision ?? null });
+}
+
+export async function etcdRename(connectionId: string, request: { key: string; keyBytes?: KvValue | null; newKey: string; expectedModRevision?: KvInt64 | null }): Promise<{ renamed: boolean; revision?: KvInt64 | null }> {
+  return post("/api/etcd/rename", { connectionId, request });
+}
+
+export async function etcdHistory(connectionId: string, request: { key: string; keyBytes?: KvValue | null; startRevision?: KvInt64 | null; endRevision?: KvInt64 | null; limit: number }): Promise<KvHistoryResponse> {
+  return post("/api/etcd/history", { connectionId, request });
+}
+
+export async function etcdStatus(connectionId: string): Promise<KvStatusResponse> {
+  return post("/api/etcd/status", { connectionId });
 }
 
 // ---------------------------------------------------------------------------

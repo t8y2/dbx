@@ -412,6 +412,9 @@ export const etcdSupportsTtl = forward("etcdSupportsTtl");
 export const etcdGet = forward("etcdGet");
 export const etcdPut = forward("etcdPut");
 export const etcdDelete = forward("etcdDelete");
+export const etcdRename = forward("etcdRename");
+export const etcdHistory = forward("etcdHistory");
+export const etcdStatus = forward("etcdStatus");
 
 // ZooKeeper
 export const zookeeperListPrefix = forward("zookeeperListPrefix");
@@ -620,18 +623,26 @@ export type {
   RedisSlowlogEntry,
   RedisNodeEndpoint,
   KvValueEncoding,
+  KvInt64,
   KvValue,
   KvKeyMetadata,
   KvKeySummary,
   KvListPrefixResponse,
   KvListPrefixOptions,
-  KvGetResponse,
   KvGetOptions,
+  KvGetResponse,
   KvWriteMode,
   KvCreateMode,
   KvPutOptions,
   KvPutResponse,
+  KvDeleteOptions,
   KvDeleteResponse,
+  KvHistoryEventType,
+  KvHistoryEvent,
+  KvHistoryResponse,
+  KvStatusMember,
+  KvPrometheusMetrics,
+  KvStatusResponse,
   DocumentQueryResult,
   MongoDocumentResult,
   HistoryEntry,

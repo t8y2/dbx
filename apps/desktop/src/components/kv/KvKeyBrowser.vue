@@ -18,9 +18,9 @@ import KvValueEditor from "@/components/kv/KvValueEditor.vue";
 import type { KvCreateMode, KvDeleteOptions, KvGetOptions, KvGetResponse, KvHistoryEvent, KvHistoryResponse, KvInt64, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/backend/api";
 import type { KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { buildKvKeyTree, flattenVisibleKvKeyTree, kvKeyTreeNodePath, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
-import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseKeys, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
+import { decideKvMetadataRefresh, knownKvLeaseSummaries, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
 import { classifyKvMutationError, type KvMutationErrorKind } from "@/lib/kv/kvMutationError";
-import { refreshedKvSelectionKey } from "@/lib/kv/kvRefreshSelection";
+import { refreshedKvSelectionSummary } from "@/lib/kv/kvRefreshSelection";
 import { parseKvLeaseId, parseOptionalTtl } from "@/lib/kv/kvTtl";
 import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
 import { formatTtl } from "@/lib/common/ttlFormat";
@@ -106,12 +106,18 @@ interface KvCreateModeOption {
 interface KvKeyBrowserApi {
   listPrefix: (connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null) => Promise<{ keys: KvKeySummary[]; continuation?: string | null; revision?: string | number | null }>;
   get: (connectionId: string, key: string, options?: KvGetOptions | null) => Promise<KvGetResponse>;
-  getMetadata?: (connectionId: string, key: string) => Promise<KvGetResponse>;
+  getMetadata?: (connectionId: string, key: string, options?: KvGetOptions | null) => Promise<KvGetResponse>;
   put: (connectionId: string, key: string, value: KvValue, options?: KvPutOptions | null) => Promise<KvPutResponse>;
   deleteKey: (connectionId: string, key: string, options?: KvDeleteOptions | null) => Promise<{ deleted: number }>;
   rename?: (connectionId: string, request: { key: string; keyBytes?: KvValue | null; newKey: string; expectedModRevision?: KvInt64 | null }) => Promise<{ renamed: boolean }>;
   history?: (connectionId: string, request: { key: string; keyBytes?: KvValue | null; startRevision?: KvInt64 | null; endRevision?: KvInt64 | null; limit: number }) => Promise<KvHistoryResponse>;
   exportScope?: (connectionId: string, request: KvExportScopeRequest) => Promise<void>;
+}
+
+interface KvKeyRoute {
+  key: string;
+  keyIdentity?: string | null;
+  keyBytes?: KvValue | null;
 }
 
 type BrowserTreeNode = KvKeyTreeNode | LazyKvKeyTreeNode;
@@ -176,6 +182,8 @@ const loading = ref(false);
 const loadingMore = ref(false);
 const expandedGroupIds = ref<Set<string>>(new Set());
 const selectedKey = ref<string | null>(null);
+const selectedKeyIdentity = ref<string | null>(null);
+const selectedRouteKeyBytes = ref<KvValue | null>(null);
 const selectedValue = ref<KvGetResponse | null>(null);
 const detailLoading = ref(false);
 const detailError = ref("");
@@ -228,12 +236,41 @@ type LoadKeysOptions = {
   preserveSelection?: boolean;
 };
 
+function summaryIdentity(summary: KvKeySummary): string {
+  return summary.keyIdentity ?? summary.key;
+}
+
+function routeIdentity(route: KvKeyRoute): string {
+  return route.keyIdentity ?? route.key;
+}
+
+function routeFromKey(input: string | KvKeyRoute): KvKeyRoute {
+  return typeof input === "string" ? { key: input } : input;
+}
+
+function routeFromSummary(summary: KvKeySummary): KvKeyRoute {
+  return { key: summary.key, keyIdentity: summary.keyIdentity, keyBytes: summary.keyBytes };
+}
+
+function routeFromNode(node: BrowserTreeNode): KvKeyRoute {
+  if (node.kind === "lazy") return { key: node.key };
+  return { key: kvKeyTreeNodePath(node), keyIdentity: node.keyIdentity, keyBytes: node.keyBytes };
+}
+
+function knownLeaseKeyRoutes(): KvKeyRoute[] {
+  return knownKvLeaseSummaries(keys.value, selectedKeyIdentity.value).map(routeFromSummary);
+}
+
 const tree = computed(() => buildKvKeyTree(keys.value));
 const visibleRows = computed<BrowserTreeRow[]>(() => {
   if (props.lazyHierarchy) return flattenLazyKvKeyTree(lazyTreeState, expandedGroupIds.value);
   return flattenVisibleKvKeyTree(tree.value, expandedGroupIds.value).map((row) => ({ type: "node", node: row.node, depth: row.depth }));
 });
-const selectedMetadata = computed(() => selectedValue.value?.metadata ?? (props.lazyHierarchy && selectedKey.value ? lazyTreeState.nodeByKey.get(selectedKey.value) : keys.value.find((key) => key.key === selectedKey.value)));
+const selectedMetadata = computed(() => {
+  if (selectedValue.value?.metadata) return selectedValue.value.metadata;
+  if (props.lazyHierarchy && selectedKey.value) return lazyTreeState.nodeByKey.get(selectedKey.value);
+  return keys.value.find((key) => summaryIdentity(key) === selectedKeyIdentity.value);
+});
 const selectedTextValue = computed(() => {
   const value = selectedValue.value?.value;
   if (!value) return "";
@@ -241,7 +278,7 @@ const selectedTextValue = computed(() => {
 });
 const displayedSelectedTextValue = computed(() => selectedPrettyValue.value ?? selectedTextValue.value);
 const selectedValueIsBase64 = computed(() => selectedValue.value?.value?.encoding === "base64");
-const selectedKeyBytes = computed(() => selectedValue.value?.keyBytes ?? null);
+const selectedKeyBytes = computed(() => selectedValue.value?.keyBytes ?? selectedRouteKeyBytes.value ?? null);
 const showExpiryControls = computed(() => props.supportsTtl || props.supportsLeaseBinding);
 const showTtlUnavailable = computed(() => props.ttlCapabilityKnown && !props.supportsTtl && !!props.labels.ttlUnavailable);
 const showCreateModeSelect = computed(() => props.supportsCreateModes && isCreating.value && props.createModeOptions.length > 0);
@@ -312,7 +349,7 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
   const connectionId = props.connectionId;
   const searchQuery = prefix.value.trim();
   stopKeyListRefresh();
-  const keyToRestore = options.preserveSelection ? selectedKey.value : null;
+  const keyIdentityToRestore = options.preserveSelection ? selectedKeyIdentity.value : null;
   if (reset) {
     loading.value = true;
     continuation.value = null;
@@ -328,15 +365,15 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
     const result = await props.api.listPrefix(connectionId, searchQuery, pageSize, reset ? null : continuation.value, reset || !listRevision.value ? undefined : { revision: listRevision.value });
     if (generation !== keyLoadGeneration || props.connectionId !== connectionId) return;
     if (reset && result.revision != null) listRevision.value = String(result.revision);
-    const existing = new Set(keys.value.map((key) => key.key));
-    const merged = reset ? result.keys : [...keys.value, ...result.keys.filter((key) => !existing.has(key.key))];
+    const existing = new Set(keys.value.map(summaryIdentity));
+    const merged = reset ? result.keys : [...keys.value, ...result.keys.filter((key) => !existing.has(summaryIdentity(key)))];
     keys.value = merged;
     continuation.value = result.continuation || null;
     preserveExpandedGroups();
     if (reset && options.preserveSelection) {
-      const restoredKey = refreshedKvSelectionKey(keyToRestore, merged);
-      if (restoredKey) {
-        await loadSelectedKey(restoredKey);
+      const restoredSummary = refreshedKvSelectionSummary(keyIdentityToRestore, merged);
+      if (restoredSummary) {
+        await loadSelectedKey(routeFromSummary(restoredSummary));
       } else {
         clearSelectedKey();
       }
@@ -492,22 +529,29 @@ async function refreshLazyParent(parentPath: string) {
   }
 }
 
-async function loadSelectedKey(key: string) {
+async function loadSelectedKey(input: string | KvKeyRoute) {
+  const route = routeFromKey(input);
+  const key = route.key;
+  const keyIdentity = routeIdentity(route);
   stopMetadataRefresh();
   const requestId = ++detailRequestId;
   selectedKey.value = key;
+  selectedKeyIdentity.value = keyIdentity;
+  selectedRouteKeyBytes.value = route.keyBytes ?? null;
   selectedValue.value = null;
   selectedPrettyValue.value = null;
   detailLoading.value = true;
   detailError.value = "";
   try {
-    const result = await props.api.get(props.connectionId, key);
+    const result = await props.api.get(props.connectionId, key, route.keyBytes ? { keyBytes: route.keyBytes } : undefined);
     if (requestId !== detailRequestId || selectedKey.value !== key) return;
     if (!result.found) {
       removeExpiredSelectedKey(key);
       return;
     }
     selectedValue.value = result;
+    selectedKeyIdentity.value = result.keyIdentity ?? selectedKeyIdentity.value;
+    selectedRouteKeyBytes.value = result.keyBytes ?? selectedRouteKeyBytes.value;
     startMetadataRefresh(key);
     startKeyListRefresh();
   } catch (error) {
@@ -522,6 +566,8 @@ function clearSelectedKey() {
   stopMetadataRefresh();
   detailRequestId++;
   selectedKey.value = null;
+  selectedKeyIdentity.value = null;
+  selectedRouteKeyBytes.value = null;
   selectedValue.value = null;
   selectedPrettyValue.value = null;
   detailLoading.value = false;
@@ -553,12 +599,8 @@ function startKeyListRefresh() {
   scheduleKeyListRefresh(keyListRefreshGeneration);
 }
 
-function activeMetadataRefreshKey(): string | null {
-  return metadataRefreshTimer !== null ? selectedKey.value : null;
-}
-
 function scheduleKeyListRefresh(generation: number) {
-  if (generation !== keyListRefreshGeneration || !props.supportsTtl || props.lazyHierarchy || !props.api.getMetadata || knownKvLeaseKeys(keys.value, activeMetadataRefreshKey()).length === 0) {
+  if (generation !== keyListRefreshGeneration || !props.supportsTtl || props.lazyHierarchy || !props.api.getMetadata || knownLeaseKeyRoutes().length === 0) {
     return;
   }
 
@@ -583,11 +625,11 @@ async function refreshKnownLeaseKeys(generation: number) {
   }
 
   const connectionId = props.connectionId;
-  const leaseKeys = knownKvLeaseKeys(keys.value, activeMetadataRefreshKey());
+  const leaseRoutes = knownLeaseKeyRoutes();
   let failed = false;
-  for (const key of leaseKeys) {
+  for (const route of leaseRoutes) {
     try {
-      const result = await getMetadata(connectionId, key);
+      const result = await getMetadata(connectionId, route.key, route.keyBytes ? { keyBytes: route.keyBytes } : undefined);
       if (generation !== keyListRefreshGeneration || props.connectionId !== connectionId) return;
       if (result.found && !result.metadata) {
         failed = true;
@@ -595,7 +637,7 @@ async function refreshKnownLeaseKeys(generation: number) {
       }
 
       const previousLength = keys.value.length;
-      keys.value = mergeKvKeyMetadata(keys.value, key, result);
+      keys.value = mergeKvKeyMetadata(keys.value, route.key, result, route.keyIdentity);
       if (keys.value.length !== previousLength) preserveExpandedGroups();
     } catch {
       if (generation !== keyListRefreshGeneration || props.connectionId !== connectionId) return;
@@ -609,13 +651,13 @@ async function refreshKnownLeaseKeys(generation: number) {
 }
 
 function removeExpiredSelectedKey(key: string) {
-  keys.value = removeMissingKvKey(keys.value, key);
+  keys.value = selectedKeyIdentity.value ? keys.value.filter((item) => summaryIdentity(item) !== selectedKeyIdentity.value) : removeMissingKvKey(keys.value, key);
   preserveExpandedGroups();
   clearSelectedKey();
 }
 
 async function refreshSelectedValueSilently(key: string, generation: number) {
-  const result = await props.api.get(props.connectionId, key);
+  const result = await props.api.get(props.connectionId, key, selectedKeyBytes.value ? { keyBytes: selectedKeyBytes.value } : undefined);
   if (generation !== metadataRefreshGeneration || selectedKey.value !== key) return;
   if (!result.found) {
     removeExpiredSelectedKey(key);
@@ -635,7 +677,7 @@ async function refreshSelectedMetadata(key: string, generation: number) {
 
   metadataRefreshInFlight = true;
   try {
-    const result = await getMetadata(props.connectionId, key);
+    const result = await getMetadata(props.connectionId, key, selectedKeyBytes.value ? { keyBytes: selectedKeyBytes.value } : undefined);
     if (generation !== metadataRefreshGeneration || selectedKey.value !== key) return;
 
     const current = selectedValue.value;
@@ -678,15 +720,15 @@ function nodePath(node: BrowserTreeNode): string {
 function onRowClick(node: BrowserTreeNode) {
   if (nodeIsExpandable(node)) {
     void toggleGroup(node);
-    if (props.enableNodeActions && nodeHasValue(node)) void loadSelectedKey(nodePath(node));
+    if (props.enableNodeActions && nodeHasValue(node)) void loadSelectedKey(routeFromNode(node));
   } else {
-    void loadSelectedKey(nodePath(node));
+    void loadSelectedKey(routeFromNode(node));
   }
 }
 
 function onRowDoubleClick(node: BrowserTreeNode) {
   if (!nodeIsExpandable(node)) {
-    void loadSelectedKey(nodePath(node)).then(() => openEditDialog());
+    void loadSelectedKey(routeFromNode(node)).then(() => openEditDialog());
   }
 }
 
@@ -816,7 +858,7 @@ async function confirmSaveKey() {
     } else {
       await loadKeys(true);
     }
-    await loadSelectedKey(keyToSelect);
+    await loadSelectedKey(options?.keyBytes ? { key: keyToSelect, keyIdentity: selectedKeyIdentity.value, keyBytes: options.keyBytes } : keyToSelect);
     toast(props.labels.saved, 2500);
   } catch (error) {
     const classified = classifyKvMutationError(error, isCreating.value, {
@@ -864,9 +906,13 @@ async function deleteSelectedKey() {
 
 async function selectNodeForAction(node: BrowserTreeNode) {
   if (!nodeHasValue(node)) return;
-  const key = nodePath(node);
-  if (selectedKey.value !== key) await loadSelectedKey(key);
-  else selectedKey.value = key;
+  const route = routeFromNode(node);
+  if (selectedKeyIdentity.value !== routeIdentity(route)) await loadSelectedKey(route);
+  else {
+    selectedKey.value = route.key;
+    selectedKeyIdentity.value = routeIdentity(route);
+    selectedRouteKeyBytes.value = route.keyBytes ?? selectedRouteKeyBytes.value;
+  }
 }
 
 async function openDeleteForNode(node: BrowserTreeNode) {
@@ -923,13 +969,14 @@ async function exportNode(node: BrowserTreeNode) {
   const request: KvExportScopeRequest = {
     path: nodePath(node),
     kind: nodeIsExpandable(node) ? "prefix" : "key",
+    keyBytes: node.kind === "lazy" ? null : node.keyBytes,
   };
   if (props.api.exportScope) {
     await props.api.exportScope(props.connectionId, request);
     return;
   }
   if (!nodeHasValue(node)) return;
-  await loadSelectedKey(request.path);
+  await loadSelectedKey(routeFromNode(node));
   exportSelectedKey();
 }
 
@@ -982,7 +1029,7 @@ async function renameSelectedKey() {
     });
     showRenameDialog.value = false;
     await loadKeys(true);
-    await loadSelectedKey(next);
+    await loadSelectedKey({ key: next, keyIdentity: next, keyBytes: { encoding: "utf8", data: next } });
     toast(props.labels.saved, 2500);
   } catch (error) {
     renameError.value = error instanceof Error ? error.message : String(error);
@@ -1053,19 +1100,19 @@ function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
       {
         label: props.labels.edit,
         icon: Pencil,
-        action: () => void loadSelectedKey(nodePath(node)).then(openEditDialog),
+        action: () => void loadSelectedKey(routeFromNode(node)).then(openEditDialog),
         disabled: props.readOnly,
       },
       {
         label: props.labels.rename || "Rename",
         icon: Pencil,
-        action: () => void loadSelectedKey(nodePath(node)).then(openRenameDialog),
+        action: () => void loadSelectedKey(routeFromNode(node)).then(openRenameDialog),
         disabled: props.readOnly || !props.api.rename,
       },
       {
         label: props.labels.clone || "Clone",
         icon: Copy,
-        action: () => void loadSelectedKey(nodePath(node)).then(openCloneDialog),
+        action: () => void loadSelectedKey(routeFromNode(node)).then(openCloneDialog),
         disabled: props.readOnly,
       },
       {
@@ -1076,7 +1123,7 @@ function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
       {
         label: props.labels.history || "History",
         icon: Clock3,
-        action: () => void loadSelectedKey(nodePath(node)).then(openHistory),
+        action: () => void loadSelectedKey(routeFromNode(node)).then(openHistory),
         disabled: !props.api.history,
       },
     );
@@ -1105,7 +1152,7 @@ function onRowContextMenu(event: MouseEvent, node: BrowserTreeNode, openContextM
 }
 
 function rowIsSelected(node: BrowserTreeNode): boolean {
-  return nodePath(node) === selectedKey.value;
+  return routeIdentity(routeFromNode(node)) === selectedKeyIdentity.value;
 }
 
 function nodeIsExpandable(node: BrowserTreeNode): boolean {
@@ -1220,7 +1267,7 @@ onBeforeUnmount(() => {
 defineExpose({
   focusSearch,
   refresh,
-  selectKey: (key: string) => loadSelectedKey(key),
+  selectKey: (key: string | KvKeyRoute) => loadSelectedKey(key),
   openCreate: (parentPath?: string) => openCreateDialog(parentPath),
   selection: () => ({ key: selectedKey.value, value: selectedValue.value }),
 });

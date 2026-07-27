@@ -21,6 +21,8 @@ describe("KvKeyBrowser node export", () => {
   it("keeps mirror deletes inside the exported directory and compares canonical Key bytes", () => {
     expect(etcdBrowserSource).toContain("if (!isKeyInKvExportScope(shown, mirrorScope)");
     expect(etcdBrowserSource).toContain("sourceKeys.has(kvValueByteIdentity(bytes))");
+    expect(etcdBrowserSource).toContain("id: `source:${kvValueByteIdentity(source.key)}`");
+    expect(etcdBrowserSource).not.toContain("id: source.key.data");
     expect(etcdBrowserSource).toContain('const mirrorDeleteAvailable = computed(() => transferBundle.value?.scopeKind === "prefix")');
     expect(etcdBrowserSource).toContain(':disabled="!mirrorDeleteAvailable || transferLoading || transferApplying"');
   });

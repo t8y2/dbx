@@ -1798,6 +1798,7 @@ export interface KvKeyMetadata {
 
 export interface KvKeySummary extends KvKeyMetadata {
   key: string;
+  keyIdentity?: string | null;
   keyBytes?: KvValue | null;
   value?: KvValue | null;
 }
@@ -1817,6 +1818,7 @@ export interface KvListPrefixOptions {
 export interface KvGetResponse {
   found: boolean;
   key?: string | null;
+  keyIdentity?: string | null;
   keyBytes?: KvValue | null;
   value?: KvValue | null;
   metadata?: KvKeyMetadata | null;

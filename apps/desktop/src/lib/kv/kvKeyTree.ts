@@ -1,10 +1,12 @@
-import type { KvKeySummary } from "@/lib/backend/api";
+import type { KvKeySummary, KvValue } from "@/lib/backend/api";
 
 export interface KvKeyTreeLeafNode {
   kind: "leaf";
   id: string;
   label: string;
   key: string;
+  keyIdentity?: string | null;
+  keyBytes?: KvValue | null;
   pathSegments: string[];
   createRevision?: string | number | null;
   modRevision?: string | number | null;
@@ -20,6 +22,8 @@ export interface KvKeyTreeGroupNode {
   pathSegments: string[];
   children: KvKeyTreeNode[];
   key?: string;
+  keyIdentity?: string | null;
+  keyBytes?: KvValue | null;
   createRevision?: string | number | null;
   modRevision?: string | number | null;
   version?: string | number | null;
@@ -42,8 +46,12 @@ function groupId(pathSegments: string[]): string {
   return `group:${pathSegments.join("\u0000")}`;
 }
 
-function leafId(key: string): string {
-  return `leaf:${key}`;
+function summaryIdentity(key: KvKeySummary): string {
+  return key.keyIdentity ?? key.key;
+}
+
+function leafId(key: KvKeySummary): string {
+  return `leaf:${summaryIdentity(key)}`;
 }
 
 function sortNodes(nodes: KvKeyTreeNode[]): KvKeyTreeNode[] {
@@ -64,9 +72,11 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
     if (segments.length <= 1) {
       root.push({
         kind: "leaf",
-        id: leafId(key.key),
+        id: leafId(key),
         label: segments[0] || key.key || "/",
         key: key.key,
+        keyIdentity: key.keyIdentity,
+        keyBytes: key.keyBytes,
         pathSegments: segments,
         createRevision: key.createRevision,
         modRevision: key.modRevision,
@@ -93,6 +103,8 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
           pathSegments: [...groupSegments],
           children: [],
           key: existingLeaf?.key,
+          keyIdentity: existingLeaf?.keyIdentity,
+          keyBytes: existingLeaf?.keyBytes,
           createRevision: existingLeaf?.createRevision,
           modRevision: existingLeaf?.modRevision,
           version: existingLeaf?.version,
@@ -108,6 +120,8 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
     const existingGroup = groups.get(groupId(segments));
     if (existingGroup) {
       existingGroup.key = key.key;
+      existingGroup.keyIdentity = key.keyIdentity;
+      existingGroup.keyBytes = key.keyBytes;
       existingGroup.createRevision = key.createRevision;
       existingGroup.modRevision = key.modRevision;
       existingGroup.version = key.version;
@@ -118,9 +132,11 @@ export function buildKvKeyTree(keys: KvKeySummary[]): KvKeyTreeNode[] {
 
     current.push({
       kind: "leaf",
-      id: leafId(key.key),
+      id: leafId(key),
       label: segments[segments.length - 1],
       key: key.key,
+      keyIdentity: key.keyIdentity,
+      keyBytes: key.keyBytes,
       pathSegments: segments,
       createRevision: key.createRevision,
       modRevision: key.modRevision,

@@ -5,6 +5,7 @@ export type KvExportScopeKind = "key" | "prefix";
 export interface KvExportScopeRequest {
   path: string;
   kind: KvExportScopeKind;
+  keyBytes?: KvValue | null;
 }
 
 export function kvDirectoryPrefix(path: string): string {

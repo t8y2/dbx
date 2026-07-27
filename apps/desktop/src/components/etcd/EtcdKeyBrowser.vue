@@ -39,6 +39,7 @@ interface EtcdBundle {
 interface SearchResult {
   id: string;
   displayKey: string;
+  keyIdentity: string;
   summary: api.KvKeySummary;
   selected: boolean;
 }
@@ -65,7 +66,7 @@ let ttlCapabilityRequest = 0;
 let ttlCapabilityInFlightConnection: string | null = null;
 let ttlCapabilityRefreshTimer: ReturnType<typeof setInterval> | null = null;
 const mode = ref<WorkbenchMode>("keys");
-const keyBytesByDisplay = new Map<string, api.KvValue>();
+const keyBytesByDisplay = new Map<string, Map<string, api.KvValue>>();
 const fileInput = ref<HTMLInputElement>();
 
 const searchQuery = ref("");
@@ -114,15 +115,28 @@ function keyValue(summary: api.KvKeySummary): api.KvValue {
   return summary.keyBytes ?? { encoding: "utf8", data: summary.key };
 }
 
+function keyIdentity(key: api.KvValue): string {
+  return kvValueByteIdentity(key);
+}
+
+function rememberKeyBytes(display: string, bytes: api.KvValue) {
+  const identity = keyIdentity(bytes);
+  const bytesByIdentity = keyBytesByDisplay.get(display) ?? new Map<string, api.KvValue>();
+  bytesByIdentity.set(identity, bytes);
+  keyBytesByDisplay.set(display, bytesByIdentity);
+  return identity;
+}
+
 function rememberSummary(summary: api.KvKeySummary): api.KvKeySummary {
   const bytes = keyValue(summary);
   const shown = displayKey(bytes, summary.key);
-  keyBytesByDisplay.set(shown, bytes);
-  return { ...summary, key: shown };
+  const identity = rememberKeyBytes(shown, bytes);
+  return { ...summary, key: shown, keyBytes: bytes, keyIdentity: identity };
 }
 
 function keyOptions(key: string): api.KvGetOptions {
-  return { keyBytes: keyBytesByDisplay.get(key) };
+  const candidates = keyBytesByDisplay.get(key);
+  return { keyBytes: candidates?.size === 1 ? [...candidates.values()][0] : undefined };
 }
 
 const etcdApi = {
@@ -130,14 +144,20 @@ const etcdApi = {
     const response = await api.etcdListPrefix(connectionId, prefix, limit, continuation, options);
     return { ...response, keys: response.keys.map(rememberSummary) };
   },
-  get: (connectionId: string, key: string, options?: api.KvGetOptions | null) => api.etcdGet(connectionId, key, { ...keyOptions(key), ...options }),
-  getMetadata: (connectionId: string, key: string) => api.etcdGet(connectionId, key, { ...keyOptions(key), metadataOnly: true }),
+  async get(connectionId: string, key: string, options?: api.KvGetOptions | null) {
+    const result = await api.etcdGet(connectionId, key, { ...keyOptions(key), ...options });
+    if (!result.found || !result.keyBytes) return result;
+    const shown = displayKey(result.keyBytes, result.key ?? key);
+    const identity = rememberKeyBytes(shown, result.keyBytes);
+    return { ...result, key: shown, keyIdentity: identity };
+  },
+  getMetadata: (connectionId: string, key: string, options?: api.KvGetOptions | null) => api.etcdGet(connectionId, key, { ...keyOptions(key), ...options, metadataOnly: true }),
   put: (connectionId: string, key: string, value: api.KvValue, options?: api.KvPutOptions | null) =>
     api.etcdPut(connectionId, key, value, {
       ...options,
-      keyBytes: options?.keyBytes ?? (options?.expectedCreateRevision === "0" ? undefined : keyBytesByDisplay.get(key)),
+      keyBytes: options?.keyBytes ?? (options?.expectedCreateRevision === "0" ? undefined : keyOptions(key).keyBytes),
     }),
-  deleteKey: (connectionId: string, key: string, options?: api.KvDeleteOptions | null) => api.etcdDelete(connectionId, key, { ...options, keyBytes: options?.keyBytes ?? keyBytesByDisplay.get(key) }),
+  deleteKey: (connectionId: string, key: string, options?: api.KvDeleteOptions | null) => api.etcdDelete(connectionId, key, { ...options, keyBytes: options?.keyBytes ?? keyOptions(key).keyBytes }),
   rename: api.etcdRename,
   history: api.etcdHistory,
   exportScope: exportEtcdNodeScope,
@@ -224,6 +244,7 @@ function startTtlCapabilityRefresh() {
 watch(
   () => props.connectionId,
   () => {
+    keyBytesByDisplay.clear();
     supportsTtl.value = false;
     ttlCapabilityKnown.value = false;
     startTtlCapabilityRefresh();
@@ -316,7 +337,8 @@ async function exportEtcdNodeScope(connectionId: string, request: KvExportScopeR
     let revision: string | null;
 
     if (request.kind === "key") {
-      const result = await api.etcdGet(connectionId, request.path, keyOptions(request.path));
+      const options = keyOptions(request.path);
+      const result = await api.etcdGet(connectionId, request.path, { ...options, keyBytes: request.keyBytes ?? options.keyBytes });
       if (!result.found || !result.value) throw new Error(t("etcd.notFound"));
       entries = [
         {
@@ -405,13 +427,13 @@ async function previewTransfer() {
     for (const source of bundle.entries) {
       const shown = displayKey(source.key);
       if (normalizedLease(source.metadata) !== "0") {
-        rows.push({ id: source.key.data, displayKey: shown, source, operation: "skipped", reason: "Leased keys are skipped by default.", selected: false });
+        rows.push({ id: `source:${kvValueByteIdentity(source.key)}`, displayKey: shown, source, operation: "skipped", reason: "Leased keys are skipped by default.", selected: false });
         continue;
       }
       const target = await api.etcdGet(targetId, shown, { keyBytes: source.key });
       if (generation !== transferPreviewGeneration) return;
       const operation: TransferOperation = !target.found ? "create" : valuesEqual(source.value, target.value) ? "unchanged" : "update";
-      rows.push({ id: source.key.data, displayKey: shown, source, target, operation, selected: operation === "create" || operation === "update" });
+      rows.push({ id: `source:${kvValueByteIdentity(source.key)}`, displayKey: shown, source, target, operation, selected: operation === "create" || operation === "update" });
     }
     if (includeMirrorDeletes) {
       searchCancelled = false;
@@ -530,9 +552,10 @@ async function runSearch() {
       })
       .slice(0, 1000)
       .map((summary) => {
-        const shown = displayKey(keyValue(summary), summary.key);
-        keyBytesByDisplay.set(shown, keyValue(summary));
-        return { id: `${summary.keyBytes?.data || summary.key}:${summary.modRevision || ""}`, displayKey: shown, summary, selected: true };
+        const bytes = keyValue(summary);
+        const shown = displayKey(bytes, summary.key);
+        const identity = rememberKeyBytes(shown, bytes);
+        return { id: `${identity}:${summary.modRevision || ""}`, displayKey: shown, keyIdentity: identity, summary: { ...summary, key: shown, keyBytes: bytes, keyIdentity: identity }, selected: true };
       });
   } catch (error) {
     searchError.value = error instanceof Error ? error.message : String(error);
@@ -548,7 +571,7 @@ function cancelSearch() {
 async function openSearchResult(result: SearchResult) {
   mode.value = "keys";
   await nextTick();
-  await browserRef.value?.selectKey(result.displayKey);
+  await (browserRef.value as any)?.selectKey({ key: result.displayKey, keyIdentity: result.keyIdentity, keyBytes: keyValue(result.summary) });
 }
 
 function exportSearchResults() {

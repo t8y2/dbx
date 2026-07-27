@@ -2163,6 +2163,16 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function updateDataGridHiddenColumnKeys(id: string, keys: string[]) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab?.result) return;
+    if (keys.length === 0) {
+      delete tab.result.local_hidden_column_keys;
+    } else {
+      tab.result.local_hidden_column_keys = [...keys];
+    }
+  }
+
   function setAutoCommit(id: string, autoCommit: boolean) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
@@ -4746,6 +4756,7 @@ export const useQueryStore = defineStore("query", () => {
     rollbackDatabaseTransactions,
     updateSql,
     updateDataGridLocalColumnFilters,
+    updateDataGridHiddenColumnKeys,
     updateEditorViewport,
     updateEditorSelection,
     updateObjectBrowserViewport,

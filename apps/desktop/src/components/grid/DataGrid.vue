@@ -349,6 +349,7 @@ const emit = defineEmits<{
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
+  "hidden-column-keys-change": [value: string[]];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({ canRefresh: computed(() => !isSaving.value && !props.loading), refresh: onToolbarRefresh });
@@ -1711,6 +1712,7 @@ const {
   toggleColumnVisibility,
   showAllColumns,
   invertColumnVisibility,
+  showColumn,
   persistColumnOrder,
   resetColumnOrder,
   toggleAllNullColumns,
@@ -1729,7 +1731,9 @@ const {
   columnOrderKeys,
   layoutScopeKey: columnLayoutScopeKey,
   tableScopeKey: tableColumnOrderScopeKey,
+  initialHiddenColumnKeys: computed(() => props.result.local_hidden_column_keys),
   hideNullColumns,
+  onHiddenColumnKeysChange: (keys) => emit("hidden-column-keys-change", keys),
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: refreshGridScrollerMetrics,
 });
@@ -1818,8 +1822,7 @@ function scrollToColumnIndex(columnIndex: number) {
   if (columnIndex < 0 || !displayableColumnIndexes.value.includes(columnIndex)) return;
 
   if (hiddenColumnIndexes.value.has(columnIndex)) {
-    hiddenColumnIndexes.value.delete(columnIndex);
-    hiddenColumnIndexes.value = new Set(hiddenColumnIndexes.value);
+    showColumn(columnIndex);
   }
 
   highlightedColumnIndex.value = columnIndex;
@@ -2324,7 +2327,7 @@ watch(
   () => localFilterScopeKey.value,
   () => {
     localColumnFilters.value = {};
-    resetColumnVisibility();
+    resetColumnVisibility(props.result.local_hidden_column_keys);
     closeLocalFilter();
   },
 );

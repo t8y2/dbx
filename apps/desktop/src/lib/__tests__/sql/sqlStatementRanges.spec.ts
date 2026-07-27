@@ -80,6 +80,18 @@ BEGIN
   NULL;
 END;`;
 
+const gaussDbDollarQuotedFunctionScript = `DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid;
+
+CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid (v_str IN TEXT) RETURNS varchar(36) LANGUAGE PLPGSQL IMMUTABLE AS $function$
+DECLARE
+    str1 TEXT;
+BEGIN
+    str1 := md5(v_str);
+    RETURN CAST(str1 AS varchar(36));
+END$function$;
+
+DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing;`;
+
 const xuguProgrammableObjectFixtures = [
   `CREATE OR REPLACE PROCEDURE dbx_xugu_procedure AS
   v_value INTEGER;
@@ -290,6 +302,15 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps nested GaussDB procedure blocks together", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(gaussDbNestedProcedure, "gaussdb"))).toEqual([gaussDbNestedProcedure]);
+  });
+
+  it("separates GaussDB dollar-quoted functions from surrounding statements", () => {
+    const ranges = splitSqlStatementRanges(gaussDbDollarQuotedFunctionScript, "gaussdb");
+    expect(rangeSqlTexts(ranges)).toEqual([
+      "DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid",
+      gaussDbDollarQuotedFunctionScript.slice(gaussDbDollarQuotedFunctionScript.indexOf("CREATE"), gaussDbDollarQuotedFunctionScript.lastIndexOf(";\n\nDROP")),
+      "DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing",
+    ]);
   });
 
   it("keeps Xugu programmable object DDL together and retains its terminator", () => {

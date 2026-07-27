@@ -1809,6 +1809,36 @@ function requestDuplicateStructure(row: ObjectBrowserRow) {
   showDuplicateDialog.value = true;
 }
 
+async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, sourceColumns?: ColumnInfo[]) {
+  let columns = sourceColumns;
+  if (effectiveDatabaseType.value === "dameng" && !columns) {
+    try {
+      columns = await api.getColumns(props.connection.id, props.database, schema || "", sourceName, props.catalog);
+    } catch (error) {
+      console.warn(`Failed to load Dameng column comments for table clone: ${sourceName}`, error);
+    }
+  }
+  const columnComments =
+    effectiveDatabaseType.value === "dameng"
+      ? (columns ?? []).flatMap((column) => {
+          const comment = column.comment?.trim();
+          return comment ? [{ name: column.name, comment }] : [];
+        })
+      : [];
+  const sql = await buildDuplicateTableStructureSql({
+    databaseType: effectiveDatabaseType.value,
+    schema,
+    sourceName,
+    targetName,
+    columnComments,
+  });
+  return { sql, sourceColumns: columns, executeAsScript: columnComments.length > 0 };
+}
+
+function executeDuplicateStructurePlan(plan: { sql: string; executeAsScript: boolean }, schema: string | undefined) {
+  return plan.executeAsScript ? api.executeScript(props.connection.id, props.database, plan.sql, schema) : api.executeQuery(props.connection.id, props.database, plan.sql, schema);
+}
+
 async function confirmDuplicateStructure() {
   const row = duplicateTarget.value;
   const newName = duplicateTableName.value.trim();
@@ -1816,13 +1846,8 @@ async function confirmDuplicateStructure() {
   showDuplicateDialog.value = false;
   try {
     const schema = row.schema || selectedSchema.value;
-    const sql = await buildDuplicateTableStructureSql({
-      databaseType: effectiveDatabaseType.value,
-      schema,
-      sourceName: row.name,
-      targetName: newName,
-    });
-    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    const plan = await buildDuplicateStructurePlan(row.name, newName, schema);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
     if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
     await reload();
@@ -1919,18 +1944,15 @@ async function confirmPasteTable() {
     const targetName = entry.targetName.trim();
     const schema = entry.schema || selectedSchema.value;
     try {
+      let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
-        const structureSql = await buildDuplicateTableStructureSql({
-          databaseType: effectiveDatabaseType.value,
-          schema,
-          sourceName: entry.sourceName,
-          targetName,
-        });
-        const executed = await executeObjectBrowserSqlWithProductionGuard(structureSql, () => api.executeQuery(props.connection.id, props.database, structureSql, schema));
+        const plan = await buildDuplicateStructurePlan(entry.sourceName, targetName, schema, sourceColumns);
+        sourceColumns = plan.sourceColumns;
+        const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
         if (!executed) return;
       }
       if (copyData) {
-        const sourceColumns = await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName, props.catalog);
+        sourceColumns ??= await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName, props.catalog);
         const dataCopyColumnOptions = tableDataCopyColumnOptions(effectiveDatabaseType.value, sourceColumns);
         if (dataCopyColumnOptions.columns.length === 0) {
           throw new Error("No writable columns available for table data copy.");

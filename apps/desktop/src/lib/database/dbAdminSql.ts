@@ -55,6 +55,7 @@ export interface DuplicateTableStructureSqlOptions {
   schema?: string | null;
   sourceName: string;
   targetName: string;
+  columnComments?: Array<{ name: string; comment: string }>;
 }
 
 export interface CopyTableDataSqlOptions {

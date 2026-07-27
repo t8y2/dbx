@@ -1468,7 +1468,7 @@ function finishAgentDriverInstall() {
 function failAgentDriverInstall(error: unknown) {
   agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
-  agentInstallError.value = errorMessage(error);
+  agentInstallError.value = translateBackendError(t, errorMessage(error));
   showAgentInstallDialog.value = true;
 }
 

@@ -5,6 +5,7 @@ export default withEnglishFallback({
     name: "DBX",
   },
   auth: {
+    rateLimited: "{seconds} 秒後に再試行してください",
     setupTitle: "アクセスパスワードを設定",
     setupDescription: "インスタンスを保護するためのパスワードを設定してください",
     loginDescription: "データベース管理ツール",
@@ -669,6 +670,7 @@ export default withEnglishFallback({
     sshHostKeyNoticeLearnFailed: "{host}:{port} のホストキーを保存できません — このホストは現在のセッションでのみ信頼され、次回の接続時に再確認が必要です。",
   },
   editor: {
+    duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",
     pressToExecute: "{mod}+Enter で実行",
     pressToSaveSql: "{mod}+S でSQLを保存",
     queryTimeoutError: "クエリがタイムアウトしました（{seconds}秒）。データベース接続が正常か確認してください。",
@@ -1322,6 +1324,9 @@ export default withEnglishFallback({
     numericColumnAlignRight: "右揃え",
   },
   exportProgress: {
+    xlsxRowLimit: "XLSX は最大 {limit} 行のデータに対応しています。完全な結果を得るには CSV エクスポートを使用してください。",
+    streamingUnsupported: "このクエリはストリーミングエクスポートに対応していません。クエリを簡略化するか、対応しているドライバーを使用してください。",
+    agentSessionMissing: "ストリーミングエクスポートには結果セットのセッションが必要ですが、このドライバーは session_id を返しませんでした。",
     title: "テーブルデータをエクスポート中",
     fetching: "データベースからデータを取得中...",
     writing: "ファイルに書き込み中...",
@@ -1374,6 +1379,7 @@ export default withEnglishFallback({
     mcpLearnMore: "詳細を見る",
   },
   common: {
+    fileNotFound: "ファイルが存在しません: {path}",
     language: "言語",
     loading: "読み込み中...",
     stopping: "停止中...",
@@ -4440,6 +4446,11 @@ export default withEnglishFallback({
     dateTimeFormatEmpty: "カスタム日時形式を入力",
   },
   driverStore: {
+    jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",
+    jreDirRemoveFailedWindows:
+      "古い JRE ディレクトリを削除できませんでした: {path}\n考えられる原因:\n  - dbx Agent / java プロセスがディレクトリを使用中です\n  - ウイルス対策ソフトがスキャン中です\nディレクトリを使用している可能性のあるプロセスを終了するか、dbx を再起動して再試行してください。\n（元のエラー: {error}）",
+    jreInUseByDrivers: "JRE {jre} は次のドライバーが使用中です: {drivers}。先にアンインストールしてください。",
+    offlinePackageRegistryMissing: "ZIP 内に agent-registry.json が見つかりません。有効なオフラインドライバーパッケージではありません。",
     progressJreExtract: "JREを展開中...",
     progressDownloadJre: "JREをダウンロード中",
     progressDownloadDriver: "ドライバーをダウンロード中",
@@ -5453,6 +5464,7 @@ export default withEnglishFallback({
     },
   },
   mqClients: {
+    unloadTopicUnsupportedKafka: "Kafka はトピックのアンロードに対応していません",
     title: "プロデューサー / コンシューマー",
     unloadTopic: "トピックをアンロード",
     unloading: "アンロード中...",

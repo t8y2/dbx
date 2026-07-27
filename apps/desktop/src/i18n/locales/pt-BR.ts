@@ -5,6 +5,7 @@ export default withEnglishFallback({
     name: "DBX",
   },
   auth: {
+    rateLimited: "Tente novamente em {seconds}s",
     setupTitle: "Configurar senha de acesso",
     setupDescription: "Defina uma senha para proteger sua instância",
     loginDescription: "Ferramenta de gerenciamento de banco de dados",
@@ -670,6 +671,7 @@ export default withEnglishFallback({
     sshHostKeyNoticeLearnFailed: "Não foi possível salvar a chave do host {host}:{port} — o host é confiável apenas nesta sessão, necessitando reconfirmação na próxima conexão.",
   },
   editor: {
+    duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",
     pressToExecute: "Pressione {mod}+Enter para executar",
     pressToSaveSql: "Pressione {mod}+S para salvar o SQL",
     queryTimeoutError: "A consulta expirou ({seconds}s). Verifique se a conexão com o banco de dados está saudável.",
@@ -1323,6 +1325,9 @@ export default withEnglishFallback({
     numericColumnAlignRight: "Alinhamento à direita",
   },
   exportProgress: {
+    xlsxRowLimit: "O XLSX suporta no máximo {limit} linhas de dados. Use a exportação CSV para obter o resultado completo.",
+    streamingUnsupported: "A exportação em streaming não é compatível com esta consulta. Simplifique-a ou use um driver compatível.",
+    agentSessionMissing: "A exportação em streaming requer uma sessão de conjunto de resultados, mas este driver não retornou session_id.",
     title: "Exportando Dados da Tabela",
     fetching: "Buscando dados do banco de dados...",
     writing: "Gravando no arquivo...",
@@ -1375,6 +1380,7 @@ export default withEnglishFallback({
     mcpLearnMore: "Saiba mais",
   },
   common: {
+    fileNotFound: "O arquivo não existe: {path}",
     language: "Idioma",
     loading: "Carregando...",
     stopping: "Parando...",
@@ -4442,6 +4448,11 @@ export default withEnglishFallback({
     dateTimeFormatEmpty: "Insira um formato de data e hora personalizado",
   },
   driverStore: {
+    jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",
+    jreDirRemoveFailedWindows:
+      "Não foi possível remover o diretório JRE antigo: {path}\nCausas possíveis:\n  - um processo dbx Agent / java ainda está usando o diretório\n  - o antivírus está analisando o diretório\nFeche qualquer processo que possa estar usando o diretório, ou reinicie o dbx e tente novamente.\n(erro original: {error})",
+    jreInUseByDrivers: "O JRE {jre} está em uso pelos drivers: {drivers}. Desinstale-os primeiro.",
+    offlinePackageRegistryMissing: "agent-registry.json não encontrado no ZIP; não é um pacote de drivers offline válido.",
     progressJreExtract: "Extraindo JRE...",
     progressDownloadJre: "Baixando JRE",
     progressDownloadDriver: "Baixando driver",
@@ -5455,6 +5466,7 @@ export default withEnglishFallback({
     },
   },
   mqClients: {
+    unloadTopicUnsupportedKafka: "O Kafka não suporta o descarregamento de tópicos",
     title: "Produtores / Consumidores",
     unloadTopic: "Descarregar tópico",
     unloading: "Descarregando...",

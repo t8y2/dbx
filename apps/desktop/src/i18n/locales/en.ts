@@ -3,6 +3,7 @@ export default {
     name: "DBX",
   },
   auth: {
+    rateLimited: "Please try again in {seconds}s",
     setupTitle: "Set up access password",
     setupDescription: "Set a password to protect your instance",
     loginDescription: "Database management tool",
@@ -689,6 +690,7 @@ export default {
     connectCancelled: "Connection cancelled",
   },
   editor: {
+    duckdbDraining: "The previous DuckDB query is still stopping. Please try again shortly.",
     statementExecutionSucceeded: "{count} statement succeeded | {count} statements succeeded",
     statementExecutionFailed: "{count} statement failed | {count} statements failed",
     pressToExecute: "Press {mod}+Enter to execute",
@@ -1380,6 +1382,9 @@ export default {
     truncatedHint: "Results were truncated after loading {count} rows. Use the footer pagination to browse loaded data; exporting the full result reruns the database query.",
   },
   exportProgress: {
+    xlsxRowLimit: "XLSX supports at most {limit} data rows. Use CSV export for the full result.",
+    streamingUnsupported: "Streaming export is unsupported for this query. Simplify it or use a supported driver.",
+    agentSessionMissing: "Streaming export needs a result-set session, but this driver returned no session_id.",
     title: "Exporting Table Data",
     fetching: "Fetching data from database...",
     writing: "Writing to file...",
@@ -1432,6 +1437,7 @@ export default {
     mcpLearnMore: "Learn more",
   },
   common: {
+    fileNotFound: "File does not exist: {path}",
     language: "Language",
     loading: "Loading...",
     stopping: "Stopping...",
@@ -4675,6 +4681,10 @@ export default {
     shortcutExPasteSqlInCondition: "ExPaste: paste as IN condition",
   },
   driverStore: {
+    jreDirRemoveFailed: "Failed to remove the old JRE directory: {path} (original error: {error})",
+    jreDirRemoveFailedWindows: "Failed to remove the old JRE directory: {path}\nPossible causes:\n  - a dbx Agent / java process still holds the directory\n  - antivirus software is scanning it\nClose any process that may hold the directory, or restart dbx and try again.\n(original error: {error})",
+    jreInUseByDrivers: "JRE {jre} is in use by drivers: {drivers}. Uninstall them first.",
+    offlinePackageRegistryMissing: "agent-registry.json not found in the ZIP; not a valid offline driver package.",
     progressJreExtract: "Extracting JRE...",
     progressDownloadJre: "Downloading JRE",
     progressDownloadDriver: "Downloading driver",
@@ -5593,6 +5603,7 @@ export default {
     peekMessageKey: "key={key}",
   },
   mqClients: {
+    unloadTopicUnsupportedKafka: "Kafka does not support unloading topics",
     title: "Producers / Consumers",
     unloadTopic: "Unload topic",
     unloading: "Unloading...",

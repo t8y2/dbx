@@ -64,6 +64,8 @@ import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { SavedSqlFile } from "@/types/database";
+import i18n from "@/i18n";
+import { translateBackendError } from "@/i18n/backend-errors";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const HIDDEN_QUERY_KEY_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle"]);
@@ -2469,7 +2471,10 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function toErrorResult(e: any): NonNullable<QueryTab["result"]> {
-    const message = e instanceof Error ? e.message : String(e);
+    const raw = e instanceof Error ? e.message : String(e);
+    // Single funnel for every query execution failure, so backend messages DBX
+    // knows about are shown in the active locale rather than as raw English.
+    const message = translateBackendError(i18n.global.t, raw);
     return markQueryResultRowsRaw({
       columns: ["Error"],
       execution_error: true,

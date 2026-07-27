@@ -4,6 +4,7 @@ export default withEnglishFallback({
     name: "DBX",
   },
   auth: {
+    rateLimited: "Riprova tra {seconds} s",
     setupTitle: "Imposta la password di accesso",
     setupDescription: "Imposta una password per proteggere la tua istanza",
     loginDescription: "Strumento di gestione del database",
@@ -669,6 +670,7 @@ export default withEnglishFallback({
     sshHostKeyNoticeLearnFailed: "Impossibile salvare la chiave host di {host}:{port} — Questo host è considerato affidabile solo per questa sessione, alla prossima connessione sarà necessaria una nuova conferma.",
   },
   editor: {
+    duckdbDraining: "La query DuckDB precedente è ancora in fase di arresto. Riprova a breve.",
     pressToExecute: "Premi {mod}+Enter per eseguire",
     pressToSaveSql: "Premi {mod}+S per salvare SQL",
     queryTimeoutError: "Timeout della query ({seconds}s). Verifica se la connessione al database è integra.",
@@ -1321,6 +1323,9 @@ export default withEnglishFallback({
     numericColumnAlignRight: "Allineamento a destra",
   },
   exportProgress: {
+    xlsxRowLimit: "XLSX supporta al massimo {limit} righe di dati. Usa l'esportazione CSV per il risultato completo.",
+    streamingUnsupported: "L'esportazione in streaming non è supportata per questa query. Semplificala o usa un driver supportato.",
+    agentSessionMissing: "L'esportazione in streaming richiede una sessione del set di risultati, ma questo driver non ha restituito session_id.",
     title: "Esportazione Dati Tabella",
     fetching: "Recupero dati dal database...",
     writing: "Scrittura su file...",
@@ -1373,6 +1378,7 @@ export default withEnglishFallback({
     mcpLearnMore: "Scopri di più",
   },
   common: {
+    fileNotFound: "Il file non esiste: {path}",
     language: "Lingua",
     loading: "Caricamento...",
     stopping: "Interruzione...",
@@ -4440,6 +4446,11 @@ export default withEnglishFallback({
     dateTimeFormatEmpty: "Inserisci un formato data/ora personalizzato",
   },
   driverStore: {
+    jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",
+    jreDirRemoveFailedWindows:
+      "Impossibile rimuovere la vecchia directory JRE: {path}\nCause possibili:\n  - un processo dbx Agent / java sta ancora usando la directory\n  - l'antivirus la sta analizzando\nChiudi ogni processo che potrebbe usare la directory, oppure riavvia dbx e riprova.\n(errore originale: {error})",
+    jreInUseByDrivers: "Il JRE {jre} è in uso dai driver: {drivers}. Disinstallali prima.",
+    offlinePackageRegistryMissing: "agent-registry.json non trovato nello ZIP; non è un pacchetto driver offline valido.",
     progressJreExtract: "Estrazione JRE...",
     progressDownloadJre: "Download JRE in corso",
     progressDownloadDriver: "Download driver in corso",
@@ -5453,6 +5464,7 @@ export default withEnglishFallback({
     },
   },
   mqClients: {
+    unloadTopicUnsupportedKafka: "Kafka non supporta lo scaricamento dei topic",
     title: "Produttori / Consumatori",
     unloadTopic: "Scarica topic",
     unloading: "Scaricamento in corso...",

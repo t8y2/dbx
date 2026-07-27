@@ -408,8 +408,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
         if (!constraints.hasFilter()) {
             return;
         }
-        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '\\\\'");
-        args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '~'");
+        args.add(constraints.fuzzyLikePattern('~').toUpperCase(Locale.ROOT));
     }
 
     private static void appendLimitOffset(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {

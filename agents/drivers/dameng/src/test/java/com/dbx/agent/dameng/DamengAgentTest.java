@@ -140,7 +140,7 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertTrue(query.sql().contains("o.OBJECT_TYPE = 'MATERIALIZED VIEW'"));
         assertTrue(query.sql().contains("mv.MVIEW_NAME IS NOT NULL"));
         assertTrue(query.sql().contains("IN (?, ?)"));
-        assertTrue(query.sql().contains("UPPER(o.OBJECT_NAME) LIKE ? ESCAPE '\\\\'"));
+        assertTrue(query.sql().contains("UPPER(o.OBJECT_NAME) LIKE ? ESCAPE '~'"));
         assertTrue(query.sql().endsWith("LIMIT ? OFFSET ?"));
         assertEquals(List.of("APP", "TABLE", "VIEW", "%O%R%D%", 50, 100), query.args());
     }
@@ -186,7 +186,7 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertFalse(query.sql().contains("USER_MVIEWS"));
         assertFalse(query.sql().contains("DBMS_METADATA.GET_DDL"));
         assertTrue(query.sql().contains("mv.MVIEW_NAME IS NOT NULL"));
-        assertTrue(query.sql().contains("UPPER(o.OBJECT_NAME) LIKE ? ESCAPE '\\\\'"));
+        assertTrue(query.sql().contains("UPPER(o.OBJECT_NAME) LIKE ? ESCAPE '~'"));
         assertTrue(query.sql().endsWith("LIMIT ? OFFSET ?"));
         assertEquals(List.of("REPORTING", "VIEW", "MATERIALIZED_VIEW", "%S%A%L%E%S%", 20, 40), query.args());
     }
@@ -218,6 +218,17 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertTrue(query.sql().contains("WHEN 'PROCEDURE' THEN 3"));
         assertTrue(query.sql().endsWith("LIMIT ?"));
         assertEquals(List.of("APP", "PROCEDURE", "FUNCTION", "%S%Y%N%C%", 20), query.args());
+    }
+
+    @Test
+    void constrainedTableQueryEscapesDamengLikeWildcardsWithSingleCharacter() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildConstrainedTablesQuery(
+            "APP",
+            new MetadataListConstraints("a_%~\\", 20, null, List.of("TABLE"))
+        );
+
+        assertTrue(query.sql().contains("UPPER(o.OBJECT_NAME) LIKE ? ESCAPE '~'"));
+        assertEquals(List.of("APP", "TABLE", "%A%~_%~%%~~%\\%", 20), query.args());
     }
 
     @Test

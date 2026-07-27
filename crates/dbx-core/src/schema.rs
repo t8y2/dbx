@@ -3012,6 +3012,17 @@ mod tests {
     }
 
     #[test]
+    fn detects_opengauss_sequence_compatibility_profiles() {
+        assert!(super::is_opengauss_family_config(&test_connection_config(DatabaseType::OpenGauss)));
+        assert!(super::is_opengauss_family_config(&test_connection_config(DatabaseType::Gaussdb)));
+        assert!(!super::is_opengauss_family_config(&test_connection_config(DatabaseType::Postgres)));
+
+        let mut profiled_postgres = test_connection_config(DatabaseType::Postgres);
+        profiled_postgres.driver_profile = Some("opengauss".to_string());
+        assert!(super::is_opengauss_family_config(&profiled_postgres));
+    }
+
+    #[test]
     fn agent_paging_detection_avoids_double_offset_only_when_page_sized() {
         assert!(super::agent_paging_likely_applied(true, Some(500), 500));
         assert!(super::agent_paging_likely_applied(true, Some(500), 120));
@@ -5471,10 +5482,14 @@ pub async fn list_sequences_core(
 ) -> Result<Vec<db::SequenceInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let db_config = connection_config(state, connection_id).await;
         let connections = state.connections.read().await;
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
         match pool {
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_family_config) => {
+                db::postgres::list_opengauss_sequences(p, schema, with_last_values).await
+            }
             PoolKind::Postgres(p) => db::postgres::list_sequences(p, schema, with_last_values).await,
             _ => Ok(vec![]),
         }
@@ -5942,6 +5957,40 @@ fn opengauss_object_source_sql(
     postgres_object_source_sql_inner(schema, name, kind, signature, true, true)
 }
 
+fn opengauss_sequence_object_source_sql(schema: &str, name: &str) -> String {
+    format!(
+        "SELECT concat_ws(E'\\n\\n', \
+           '-- auto-generated definition' || E'\\n' || \
+           'create ' || CASE WHEN lower(COALESCE(s.data_type::text, '')) = 'numeric' THEN 'large ' ELSE '' END || \
+           'sequence ' || quote_ident(c.relname) || E'\\n' || \
+           '    increment by ' || COALESCE(s.increment::text, '1') || E'\\n' || \
+           '    minvalue ' || COALESCE(s.minimum_value::text, '1') || E'\\n' || \
+           '    maxvalue ' || COALESCE(s.maximum_value::text, '9223372036854775807') || E'\\n' || \
+           '    start with ' || COALESCE(s.start_value::text, '1') || E'\\n' || \
+           CASE WHEN upper(COALESCE(s.cycle_option::text, 'NO')) = 'YES' \
+             THEN '    cycle;' ELSE '    no cycle;' END, \
+           'alter ' || CASE WHEN lower(COALESCE(s.data_type::text, '')) = 'numeric' THEN 'large ' ELSE '' END || \
+           'sequence ' || quote_ident(c.relname) || ' owner to ' || quote_ident(pg_get_userbyid(c.relowner)) || ';', \
+           CASE WHEN owned.relname IS NOT NULL AND a.attname IS NOT NULL \
+             THEN 'alter ' || CASE WHEN lower(COALESCE(s.data_type::text, '')) = 'numeric' THEN 'large ' ELSE '' END || \
+             'sequence ' || quote_ident(c.relname) || ' owned by ' || quote_ident(owned.relname) || '.' || quote_ident(a.attname) || ';' \
+           END \
+         ) \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         JOIN information_schema.sequences s \
+           ON s.sequence_schema = n.nspname AND s.sequence_name = c.relname \
+         LEFT JOIN pg_catalog.pg_depend d \
+           ON d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'a' \
+         LEFT JOIN pg_catalog.pg_class owned ON owned.oid = d.refobjid \
+         LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid \
+         WHERE n.nspname = {} AND c.relname = {} AND c.relkind = 'S' \
+         ORDER BY c.oid LIMIT 1",
+        sql_string(schema),
+        sql_string(name)
+    )
+}
+
 fn postgres_object_source_sql_without_relispopulated(
     schema: &str,
     name: &str,
@@ -6055,6 +6104,9 @@ fn postgres_object_source_sql_inner(
             )
         }
         db::ObjectSourceKind::Sequence => {
+            if unwrap_opengauss_record {
+                return opengauss_sequence_object_source_sql(schema, name);
+            }
             format!(
                 "SELECT concat_ws(E'\\n\\n', \
                    '-- auto-generated definition' || E'\\n' || \
@@ -6832,6 +6884,20 @@ mod object_source_tests {
             postgres_function_object_source_sql_without_prokind("public", "recalc_score", true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND NOT p.proisagg AND NOT p.proiswindow ORDER BY p.oid LIMIT 1"
         );
+    }
+
+    #[test]
+    fn builds_opengauss_sequence_source_without_pg_sequence_catalog() {
+        let sql = opengauss_object_source_sql("public", "order_id_seq", &ObjectSourceKind::Sequence, None);
+
+        assert!(sql.contains("information_schema.sequences"));
+        assert!(sql.contains("s.sequence_schema = n.nspname"));
+        assert!(sql.contains("s.sequence_name = c.relname"));
+        assert!(sql.contains("increment by"));
+        assert!(sql.contains("start with"));
+        assert!(sql.contains("cycle;"));
+        assert!(sql.contains("THEN 'large '"));
+        assert!(!sql.contains("pg_catalog.pg_sequence"));
     }
 
     #[test]

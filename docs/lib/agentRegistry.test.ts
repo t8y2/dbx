@@ -30,6 +30,7 @@ test("non-release assets retain their official download link", () => {
 });
 
 test("catalog falls back from R2 to CNB without using GitHub API", async () => {
+  const accessVersion = driverVersions.access;
   const requestedUrls: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -42,9 +43,9 @@ test("catalog falls back from R2 to CNB without using GitHub API", async () => {
       return Response.json({
         drivers: {
           access: {
-            version: "0.1.30",
+            version: accessVersion,
             jar: {
-              url: "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agent-access-0.1.30.jar",
+              url: `https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agent-access-${accessVersion}.jar`,
               size: 1,
             },
           },

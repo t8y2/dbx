@@ -3020,6 +3020,9 @@ mod tests {
         let mut profiled_postgres = test_connection_config(DatabaseType::Postgres);
         profiled_postgres.driver_profile = Some("opengauss".to_string());
         assert!(super::is_opengauss_family_config(&profiled_postgres));
+
+        profiled_postgres.driver_profile = Some("gaussdb".to_string());
+        assert!(super::is_opengauss_family_config(&profiled_postgres));
     }
 
     #[test]
@@ -5957,22 +5960,28 @@ fn opengauss_object_source_sql(
     postgres_object_source_sql_inner(schema, name, kind, signature, true, true)
 }
 
-fn opengauss_sequence_object_source_sql(schema: &str, name: &str) -> String {
+fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache: bool) -> String {
+    let cache_clause = if include_cache {
+        "'    cache ' || COALESCE((pg_sequence_last_value(c.oid)).cache_value::text, '1') || E'\\n' || "
+    } else {
+        ""
+    };
     format!(
         "SELECT concat_ws(E'\\n\\n', \
            '-- auto-generated definition' || E'\\n' || \
-           'create ' || CASE WHEN lower(COALESCE(s.data_type::text, '')) = 'numeric' THEN 'large ' ELSE '' END || \
+           'create ' || CASE WHEN c.relkind IN ('L','Z') THEN 'large ' ELSE '' END || \
            'sequence ' || quote_ident(c.relname) || E'\\n' || \
            '    increment by ' || COALESCE(s.increment::text, '1') || E'\\n' || \
            '    minvalue ' || COALESCE(s.minimum_value::text, '1') || E'\\n' || \
            '    maxvalue ' || COALESCE(s.maximum_value::text, '9223372036854775807') || E'\\n' || \
            '    start with ' || COALESCE(s.start_value::text, '1') || E'\\n' || \
+           {cache_clause} \
            CASE WHEN upper(COALESCE(s.cycle_option::text, 'NO')) = 'YES' \
              THEN '    cycle;' ELSE '    no cycle;' END, \
-           'alter ' || CASE WHEN lower(COALESCE(s.data_type::text, '')) = 'numeric' THEN 'large ' ELSE '' END || \
+           'alter ' || CASE WHEN c.relkind IN ('L','Z') THEN 'large ' ELSE '' END || \
            'sequence ' || quote_ident(c.relname) || ' owner to ' || quote_ident(pg_get_userbyid(c.relowner)) || ';', \
            CASE WHEN owned.relname IS NOT NULL AND a.attname IS NOT NULL \
-             THEN 'alter ' || CASE WHEN lower(COALESCE(s.data_type::text, '')) = 'numeric' THEN 'large ' ELSE '' END || \
+             THEN 'alter ' || CASE WHEN c.relkind IN ('L','Z') THEN 'large ' ELSE '' END || \
              'sequence ' || quote_ident(c.relname) || ' owned by ' || quote_ident(owned.relname) || '.' || quote_ident(a.attname) || ';' \
            END \
          ) \
@@ -5984,10 +5993,10 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str) -> String {
            ON d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'a' \
          LEFT JOIN pg_catalog.pg_class owned ON owned.oid = d.refobjid \
          LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid \
-         WHERE n.nspname = {} AND c.relname = {} AND c.relkind = 'S' \
+         WHERE n.nspname = {schema} AND c.relname = {name} AND c.relkind IN ('S','L','z','Z') \
          ORDER BY c.oid LIMIT 1",
-        sql_string(schema),
-        sql_string(name)
+        schema = sql_string(schema),
+        name = sql_string(name)
     )
 }
 
@@ -6105,7 +6114,7 @@ fn postgres_object_source_sql_inner(
         }
         db::ObjectSourceKind::Sequence => {
             if unwrap_opengauss_record {
-                return opengauss_sequence_object_source_sql(schema, name);
+                return opengauss_sequence_object_source_sql(schema, name, true);
             }
             format!(
                 "SELECT concat_ws(E'\\n\\n', \
@@ -6745,6 +6754,17 @@ async fn postgres_object_source(
         }
         Err(primary_err)
             if unwrap_opengauss_record
+                && matches!(object_type, db::ObjectSourceKind::Sequence)
+                && opengauss_sequence_cache_metadata_error(&primary_err) =>
+        {
+            let fallback_sql = opengauss_sequence_object_source_sql(schema, name, false);
+            db::postgres::execute_query(pool, &fallback_sql)
+                .await
+                .and_then(first_string_cell)
+                .map_err(|fallback_err| format!("{primary_err}; sequence cache fallback failed: {fallback_err}"))
+        }
+        Err(primary_err)
+            if unwrap_opengauss_record
                 && matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) =>
         {
             let mut errors = vec![primary_err];
@@ -6785,6 +6805,11 @@ fn postgres_missing_prokind_error(err: &str) -> bool {
         && (lower.contains("column p.prokind")
             || lower.contains("column \"p\".\"prokind\"")
             || lower.contains("column \"prokind\""))
+}
+
+fn opengauss_sequence_cache_metadata_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("pg_sequence_last_value") || lower.contains("cache_value")
 }
 
 fn postgres_missing_relispopulated_error(err: &str) -> bool {
@@ -6893,11 +6918,26 @@ mod object_source_tests {
         assert!(sql.contains("information_schema.sequences"));
         assert!(sql.contains("s.sequence_schema = n.nspname"));
         assert!(sql.contains("s.sequence_name = c.relname"));
+        assert!(sql.contains("c.relkind IN ('S','L','z','Z')"));
+        assert!(sql.contains("CASE WHEN c.relkind IN ('L','Z') THEN 'large '"));
         assert!(sql.contains("increment by"));
         assert!(sql.contains("start with"));
+        assert!(sql.contains("(pg_sequence_last_value(c.oid)).cache_value::text"));
         assert!(sql.contains("cycle;"));
-        assert!(sql.contains("THEN 'large '"));
         assert!(!sql.contains("pg_catalog.pg_sequence"));
+
+        let fallback_sql = opengauss_sequence_object_source_sql("public", "order_id_seq", false);
+        assert!(fallback_sql.contains("c.relkind IN ('S','L','z','Z')"));
+        assert!(fallback_sql.contains("CASE WHEN c.relkind IN ('L','Z') THEN 'large '"));
+        assert!(!fallback_sql.contains("pg_sequence_last_value"));
+        assert!(!fallback_sql.contains("cache_value"));
+    }
+
+    #[test]
+    fn detects_opengauss_sequence_cache_metadata_fallback_errors() {
+        assert!(opengauss_sequence_cache_metadata_error("cannot execute pg_sequence_last_value() on a standby node"));
+        assert!(opengauss_sequence_cache_metadata_error("column notation .cache_value applied to type text"));
+        assert!(!opengauss_sequence_cache_metadata_error("permission denied for sequence order_id_seq"));
     }
 
     #[test]

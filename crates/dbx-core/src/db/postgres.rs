@@ -3492,16 +3492,18 @@ fn postgres_sequences_sql() -> &'static str {
 }
 
 fn opengauss_sequences_sql() -> &'static str {
-    "SELECT sequence_name, \
-      COALESCE(data_type::text, 'bigint'), \
-      COALESCE(start_value::text, '1'), \
-      COALESCE(minimum_value::text, '1'), \
-      COALESCE(maximum_value::text, '9223372036854775807'), \
-      COALESCE(increment::text, '1'), \
-      COALESCE(cycle_option::text, 'NO') \
-     FROM information_schema.sequences \
-     WHERE sequence_schema = $1 \
-     ORDER BY sequence_name"
+    "SELECT s.sequence_name, \
+      COALESCE(s.data_type::text, 'bigint'), \
+      COALESCE(s.start_value::text, '1'), \
+      COALESCE(s.minimum_value::text, '1'), \
+      COALESCE(s.maximum_value::text, '9223372036854775807'), \
+      COALESCE(s.increment::text, '1'), \
+      COALESCE(s.cycle_option::text, 'NO') \
+     FROM information_schema.sequences s \
+     JOIN pg_namespace n ON n.nspname = s.sequence_schema \
+     JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = s.sequence_name \
+     WHERE s.sequence_schema = $1 AND c.relkind IN ('S','L','z','Z') \
+     ORDER BY s.sequence_name"
 }
 
 fn postgres_sequence_last_values_sql() -> &'static str {
@@ -3515,7 +3517,7 @@ fn opengauss_sequence_last_values_sql() -> &'static str {
     "SELECT c.relname, (pg_sequence_last_value(c.oid)).last_value::text \
      FROM pg_class c \
      JOIN pg_namespace n ON n.oid = c.relnamespace \
-     WHERE c.relkind = 'S' AND n.nspname = $1"
+     WHERE c.relkind IN ('S','L','z','Z') AND n.nspname = $1"
 }
 
 async fn list_sequences_with_sql(
@@ -4800,7 +4802,8 @@ mod tests {
         let sql = opengauss_sequences_sql();
 
         assert!(sql.contains("information_schema.sequences"));
-        assert!(sql.contains("sequence_schema = $1"));
+        assert!(sql.contains("s.sequence_schema = $1"));
+        assert!(sql.contains("c.relkind IN ('S','L','z','Z')"));
         assert!(sql.contains("sequence_name"));
         assert!(sql.contains("start_value"));
         assert!(sql.contains("minimum_value"));
@@ -4815,7 +4818,7 @@ mod tests {
         let sql = opengauss_sequence_last_values_sql();
 
         assert!(sql.contains("(pg_sequence_last_value(c.oid)).last_value::text"));
-        assert!(sql.contains("c.relkind = 'S'"));
+        assert!(sql.contains("c.relkind IN ('S','L','z','Z')"));
         assert!(sql.contains("n.nspname = $1"));
     }
 

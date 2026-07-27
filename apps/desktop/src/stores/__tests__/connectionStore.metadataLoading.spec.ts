@@ -93,6 +93,7 @@ describe("connectionStore metadata loading", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases,
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),

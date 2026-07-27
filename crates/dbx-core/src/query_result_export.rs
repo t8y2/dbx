@@ -34,9 +34,11 @@ use tokio_util::sync::CancellationToken;
 
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
 pub const XLSX_MAX_DATA_ROWS: usize = 1_048_575;
-const XLSX_ROW_LIMIT_ERROR: &str = "XLSX 最多支持 1,048,575 行数据，请改用 CSV 导出完整结果。";
-const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str = "当前查询暂不支持流式导出，请简化查询或使用受支持的驱动。";
-const AGENT_SESSION_MISSING_ERROR: &str = "查询结果流式导出需要驱动返回结果集会话，但当前驱动未返回 session_id。";
+const XLSX_ROW_LIMIT_ERROR: &str = "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result.";
+const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
+    "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
+const AGENT_SESSION_MISSING_ERROR: &str =
+    "Streaming export needs a result-set session, but this driver returned no session_id.";
 const STREAM_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
 const EXCEL_CELL_CHARACTER_LIMIT: usize = 32_767;
 

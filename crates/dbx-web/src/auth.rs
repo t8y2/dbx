@@ -79,7 +79,7 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
                 let remaining = (locked_until - std::time::Instant::now()).as_secs();
                 return Ok((
                     StatusCode::TOO_MANY_REQUESTS,
-                    Json(serde_json::json!({"error": format!("请 {remaining} 秒后再试")})),
+                    Json(serde_json::json!({"error": format!("Please try again in {remaining}s")})),
                 )
                     .into_response());
             }

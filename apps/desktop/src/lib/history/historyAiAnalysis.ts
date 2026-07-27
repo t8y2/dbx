@@ -22,11 +22,11 @@ export function canRollbackHistoryEntry(entry: Pick<HistoryAiAnalysisEntry, "con
 
 export function buildHistoryAiAnalysisPrompt(entry: HistoryAiAnalysisEntry): string {
   const details = [
-    "请分析这条 DBX 历史记录，重点说明：",
-    "1. 这次操作做了什么，以及可能影响哪些数据或结构。",
-    "2. 是否有风险，例如无 WHERE 更新、删除、DDL、锁表、性能或权限问题。",
-    "3. 如果有 Rollback SQL，请评估它是否足够安全，执行前还应该确认什么。",
-    "4. 如果没有 Rollback SQL，请明确说明无法直接回滚，并给出可行的人工恢复建议。",
+    "Analyse this DBX history entry and focus on:",
+    "1. What this operation did, and which data or structures it may have affected.",
+    "2. Whether it carries risk, e.g. an UPDATE without WHERE, deletes, DDL, table locks, performance or permission problems.",
+    "3. If rollback SQL is present, judge whether it is safe enough and what should be confirmed before running it.",
+    "4. If no rollback SQL is present, state clearly that it cannot be rolled back directly and suggest a workable manual recovery path.",
     "",
     "History metadata:",
     `Connection: ${entry.connection_name || "(unknown)"}`,

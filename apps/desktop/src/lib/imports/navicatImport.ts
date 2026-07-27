@@ -194,7 +194,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
   const profile = inferProfile(rawType, node.tag, port);
   if (!profile) {
     const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]) || "(unnamed)";
-    console.warn(`[Navicat Import] 跳过无法识别类型的连接: "${name}" (type="${rawType}", tag="${node.tag}", port=${port ?? "N/A"})`);
+    console.warn(`[Navicat Import] Skipped connection with unrecognised type: "${name}" (type="${rawType}", tag="${node.tag}", port=${port ?? "N/A"})`);
     return null;
   }
 

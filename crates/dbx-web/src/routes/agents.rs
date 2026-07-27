@@ -342,7 +342,7 @@ async fn ensure_no_agent_update_blockers(
     if blockers.is_empty() {
         Ok(())
     } else {
-        Err(format!("请先关闭以下数据库连接后再更新驱动: {}", blockers.join(", ")))
+        Err(format!("Close these database connections before updating drivers: {}", blockers.join(", ")))
     }
 }
 

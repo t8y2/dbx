@@ -2313,7 +2313,7 @@ const aiEndpointHint = computed(() => {
     return t("ai.anthropicMessagesHint");
   }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
-    return "大多数 OpenAI 兼容 API 需要 /v1 路径前缀";
+    return t("ai.openAiCompatibleEndpointHint");
   }
   return "";
 });
@@ -4716,7 +4716,7 @@ onUnmounted(cleanupPreviewEditor);
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="github">GitHub Gist</SelectItem>
-                          <SelectItem value="gitee">Gitee 代码片段</SelectItem>
+                          <SelectItem value="gitee">{{ t("settings.syncSnippetProviderGitee") }}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>

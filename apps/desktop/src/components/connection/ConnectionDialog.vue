@@ -2767,11 +2767,11 @@ const testResultMessage = computed(() => {
 const agentInstallPercent = computed(() => driverInstallProgressPercent(agentInstallProgress.value));
 const agentInstallProgressLabel = computed(() => {
   const progress = agentInstallProgress.value;
-  if (agentInstallError.value) return "安装失败";
-  if (!agentInstallRunning.value) return "等待安装";
-  if (!progress) return "准备安装驱动...";
-  if (progress.step === "jre-extract") return "解压 JRE...";
-  const label = progress.step === "jre" ? "下载 JRE" : progress.step === "driver" ? "下载驱动" : progress.step || "安装驱动";
+  if (agentInstallError.value) return t("connection.driverInstall.statusFailed");
+  if (!agentInstallRunning.value) return t("connection.driverInstall.statusWaiting");
+  if (!progress) return t("connection.driverInstall.statusPreparing");
+  if (progress.step === "jre-extract") return t("connection.driverInstall.statusExtractingJre");
+  const label = progress.step === "jre" ? t("connection.driverInstall.stepJre") : progress.step === "driver" ? t("connection.driverInstall.stepDriver") : progress.step || t("connection.driverInstall.stepDefault");
   if (!progress.total) return `${label}...`;
   return `${label} ${formatInstallSize(progress.downloaded ?? 0)} / ${formatInstallSize(progress.total)} (${agentInstallPercent.value ?? 0}%)`;
 });
@@ -4852,7 +4852,7 @@ function openExternalUrl(url: string) {
                       <PopoverContent class="w-auto p-2">
                         <div class="flex items-center gap-2">
                           <input type="color" :value="form.color" @input="handleCustomColorPicked(($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
-                          <Input type="text" :value="customColorInput || form.color" @input="handleCustomColorInput(($event.target as HTMLInputElement).value)" class="w-28 h-7 text-xs font-mono" :placeholder="'#ff0000 或 rgba(…)'" />
+                          <Input type="text" :value="customColorInput || form.color" @input="handleCustomColorInput(($event.target as HTMLInputElement).value)" class="w-28 h-7 text-xs font-mono" :placeholder="t('connection.customColorPlaceholder')" />
                         </div>
                       </PopoverContent>
                     </Popover>
@@ -5082,11 +5082,11 @@ function openExternalUrl(url: string) {
                   </div>
                   <template v-if="form.db_type === 'h2' || form.db_type === 'access'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">{{ t("connection.user") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}{{ form.db_type === "access" ? t("connection.optionalSuffix") : "" }}</Label>
                       <Input v-model="form.username" class="col-span-3" :placeholder="form.db_type === 'access' ? '' : 'sa'" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">{{ t("connection.password") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}{{ form.db_type === "access" ? t("connection.optionalSuffix") : "" }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                   </template>
@@ -5795,12 +5795,12 @@ function openExternalUrl(url: string) {
                 <template v-else-if="form.db_type === 'turso'">
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
-                    <Input v-model="form.host" class="col-span-3" placeholder="your-database.turso.io 或 libsql://your-database.turso.io" />
+                    <Input v-model="form.host" class="col-span-3" :placeholder="t('connection.tursoHostPlaceholder')" />
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">
                     <span />
-                    <p class="col-span-3 text-xs text-muted-foreground">支持 libsql:// 或 https:// 协议，也可以只填主机名（自动使用 HTTPS）</p>
+                    <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.tursoHostHint") }}</p>
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -5810,12 +5810,12 @@ function openExternalUrl(url: string) {
 
                   <div class="grid grid-cols-4 items-start gap-4">
                     <span />
-                    <p class="col-span-3 text-xs text-muted-foreground">使用 <code class="px-1 py-0.5 rounded bg-muted text-xs">turso db tokens create &lt;database-name&gt;</code> 创建 token</p>
+                    <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.tursoTokenHint") }} <code class="px-1 py-0.5 rounded bg-muted text-xs">turso db tokens create &lt;database-name&gt;</code></p>
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
-                    <Input v-model="form.url_params" class="col-span-3" placeholder="authToken=xxx（可选，优先使用上面的 Token 字段）" />
+                    <Input v-model="form.url_params" class="col-span-3" :placeholder="t('connection.tursoUrlParamsPlaceholder')" />
                   </div>
                 </template>
 
@@ -6857,7 +6857,7 @@ function openExternalUrl(url: string) {
   <Dialog :open="showAgentInstallDialog" @update:open="setAgentInstallDialogOpen">
     <DialogContent class="sm:max-w-[520px]" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader>
-        <DialogTitle>{{ agentInstallError ? "驱动安装失败" : "正在安装驱动" }}</DialogTitle>
+        <DialogTitle>{{ agentInstallError ? t("connection.driverInstall.failedTitle") : t("connection.driverInstall.installingTitle") }}</DialogTitle>
       </DialogHeader>
 
       <div class="space-y-4">
@@ -6875,7 +6875,7 @@ function openExternalUrl(url: string) {
         </div>
 
         <div v-if="agentInstallError" class="space-y-2">
-          <div class="text-sm font-medium text-destructive">完整错误</div>
+          <div class="text-sm font-medium text-destructive">{{ t("connection.driverInstall.fullError") }}</div>
           <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
         </div>
       </div>
@@ -6883,10 +6883,10 @@ function openExternalUrl(url: string) {
       <DialogFooter class="gap-2">
         <Button v-if="agentInstallError" variant="outline" @click="copyAgentInstallError">
           <Copy class="mr-1.5 h-3.5 w-3.5" />
-          复制错误
+          {{ t("connection.copyError") }}
         </Button>
         <Button :disabled="!canCloseAgentInstallDialog" @click="showAgentInstallDialog = false">
-          {{ agentInstallError ? "关闭" : "安装中..." }}
+          {{ agentInstallError ? t("common.close") : t("connection.driverInstall.installingButton") }}
         </Button>
       </DialogFooter>
     </DialogContent>
@@ -6895,11 +6895,11 @@ function openExternalUrl(url: string) {
   <Dialog v-model:open="showConnectionErrorDialog">
     <DialogContent class="sm:max-w-[560px]">
       <DialogHeader>
-        <DialogTitle>连接失败</DialogTitle>
+        <DialogTitle>{{ t("connection.connectFailedTitle") }}</DialogTitle>
       </DialogHeader>
 
       <div class="space-y-2">
-        <div class="text-sm text-muted-foreground">完整错误信息</div>
+        <div class="text-sm text-muted-foreground">{{ t("connection.fullErrorMessage") }}</div>
         <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ connectionErrorDetail }}</pre>
       </div>
 
@@ -6910,9 +6910,9 @@ function openExternalUrl(url: string) {
         </Button>
         <Button variant="outline" @click="copyConnectionErrorDetail">
           <Copy class="mr-1.5 h-3.5 w-3.5" />
-          复制错误
+          {{ t("connection.copyError") }}
         </Button>
-        <Button @click="showConnectionErrorDialog = false">关闭</Button>
+        <Button @click="showConnectionErrorDialog = false">{{ t("common.close") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

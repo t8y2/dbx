@@ -46,7 +46,7 @@ const SQL_OMITTED_ERROR_CONTEXT: &str =
 #[cfg(feature = "duckdb-bundled")]
 const DUCKDB_INTERRUPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(feature = "duckdb-bundled")]
-const DUCKDB_DRAINING_MESSAGE: &str = "上一条 DuckDB 查询仍在停止，请稍后重试。";
+const DUCKDB_DRAINING_MESSAGE: &str = "The previous DuckDB query is still stopping. Please try again shortly.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolErrorAction {

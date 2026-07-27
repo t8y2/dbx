@@ -3260,6 +3260,252 @@ test("mongo aggregate execution uses editor page size when pagination plan has n
   }
 });
 
+test("mongo find execution uses editor page size and supports server pagination", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const findBodies: any[] = [];
+
+  settingsStore.updateEditorSettings({ pageSize: 100 });
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-page-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/document-store/find-documents") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      findBodies.push(body);
+      const available = Math.max(0, 824 - body.skip);
+      const rowCount = Math.min(body.limit, available);
+      return new Response(
+        JSON.stringify({
+          documents: Array.from({ length: rowCount }, (_, index) => ({ _id: body.skip + index + 1 })),
+          total: 824,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-page-1", "dbx_test", "Query", "query", "");
+    await store.executeTabSql(tabId, "db.issue_4566.find({})");
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.equal(findBodies[0]?.collection, "issue_4566");
+    assert.equal(findBodies[0]?.skip, 0);
+    assert.equal(findBodies[0]?.limit, 100);
+    assert.equal(tab?.result?.rows.length, 100);
+    assert.equal(tab?.resultPageLimit, 100);
+    assert.equal(tab?.resultPageOffset, 0);
+    assert.equal(tab?.resultTotalRowCount, 824);
+
+    await store.executeTabSql(tabId, "db.issue_4566.find({})", {
+      pagination: { offset: 100, limit: 100 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+    });
+
+    assert.equal(findBodies[1]?.collection, "issue_4566");
+    assert.equal(findBodies[1]?.skip, 100);
+    assert.equal(findBodies[1]?.limit, 100);
+    assert.equal(tab?.result?.rows[0]?.[0], 101);
+    assert.equal(tab?.resultPageOffset, 100);
+    assert.equal(tab?.resultTotalRowCount, 824);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo find pagination does not use an estimated total as a hard limit", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const findBodies: any[] = [];
+
+  settingsStore.updateEditorSettings({ pageSize: 100 });
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-estimated-total-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/document-store/find-documents") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      findBodies.push(body);
+      const rowCount = body.skip === 0 ? body.limit : 20;
+      return Response.json({
+        documents: Array.from({ length: rowCount }, (_, index) => ({ _id: body.skip + index + 1 })),
+        total: 50,
+        total_is_exact: false,
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "db.issue_4566.find({})";
+    const tabId = store.createTab("mongo-estimated-total-1", "dbx_test", "Query", "query", "");
+    await store.executeTabSql(tabId, sql);
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+
+    assert.equal(tab.result?.total_is_exact, false);
+    assert.equal(tab.result?.affected_rows, 100, "loaded rows raise the displayed lower bound above a stale estimate");
+    assert.equal(tab.result?.truncated, true);
+    assert.equal(tab.result?.has_more, true);
+    assert.equal(tab.resultTotalRowCount, undefined, "an estimate must not become the pagination upper bound");
+
+    await store.executeTabSql(tabId, sql, {
+      pagination: { offset: 100, limit: 100 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+    });
+
+    assert.equal(findBodies[1]?.skip, 100);
+    assert.equal(tab.result?.rows.length, 20);
+    assert.equal(tab.result?.affected_rows, 120);
+    assert.equal(tab.result?.truncated, false);
+    assert.equal(tab.result?.has_more, false);
+    assert.equal(tab.resultPageOffset, 100);
+    assert.equal(tab.resultTotalRowCount, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo find execution appends server pages for infinite scroll", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const findBodies: any[] = [];
+
+  settingsStore.updateEditorSettings({ pageSize: 100 });
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-append-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/document-store/find-documents") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      findBodies.push(body);
+      const available = Math.max(0, 824 - body.skip);
+      const rowCount = Math.min(body.limit, available);
+      const documents = Array.from({ length: rowCount }, (_, index) => ({ _id: body.skip + index + 1 }));
+      return Response.json({ documents, extended_documents: documents, total: 824 });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "db.issue_4566.find({})";
+    const tabId = store.createTab("mongo-append-1", "dbx_test", "Query", "query", "");
+    await store.executeTabSql(tabId, sql);
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+
+    await store.executeTabSql(tabId, sql, {
+      pagination: { offset: 100, limit: 100 },
+      appendResult: { maxRows: 5000 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+    });
+
+    assert.equal(findBodies[1]?.skip, 100);
+    assert.equal(findBodies[1]?.limit, 100);
+    assert.equal(tab.result?.rows.length, 200);
+    assert.equal(tab.result?.rows[0]?.[0], 1);
+    assert.equal(tab.result?.rows[199]?.[0], 200);
+    assert.equal(tab.result?.mongo_documents?.length, 200);
+    assert.equal(tab.result?.mongo_copy_documents?.length, 200);
+    assert.equal(tab.result?.appended_from_row_count, 100);
+    assert.equal(tab.resultPageOffset, 0);
+    assert.equal(tab.resultPageLimit, 100);
+    assert.equal(tab.resultTotalRowCount, 824);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo find pagination preserves explicit skip and limit semantics", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const findBodies: any[] = [];
+
+  settingsStore.updateEditorSettings({ pageSize: 100 });
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-bounded-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/document-store/find-documents") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      findBodies.push(body);
+      const rowCount = Math.min(body.limit, Math.max(0, 824 - body.skip));
+      return Response.json({
+        documents: Array.from({ length: rowCount }, (_, index) => ({ _id: body.skip + index + 1 })),
+        total: 824,
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "db.issue_4566.find({}).skip(20).limit(150)";
+    const tabId = store.createTab("mongo-bounded-1", "dbx_test", "Query", "query", "");
+    await store.executeTabSql(tabId, sql);
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+
+    assert.equal(findBodies[0]?.skip, 20);
+    assert.equal(findBodies[0]?.limit, 100);
+    assert.equal(tab.result?.rows.length, 100);
+    assert.equal(tab.resultTotalRowCount, 150);
+
+    await store.executeTabSql(tabId, sql, {
+      pagination: { offset: 100, limit: 100 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+    });
+
+    assert.equal(findBodies[1]?.skip, 120);
+    assert.equal(findBodies[1]?.limit, 50);
+    assert.equal(tab.result?.rows.length, 50);
+    assert.equal(tab.result?.rows[0]?.[0], 121);
+    assert.equal(tab.result?.rows[49]?.[0], 170);
+    assert.equal(tab.result?.truncated, false);
+    assert.equal(tab.resultPageOffset, 100);
+    assert.equal(tab.resultTotalRowCount, 150);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("mongo multi-find results use database and collection source labels", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

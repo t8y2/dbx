@@ -9,72 +9,6 @@ permissions:
   contents: write
 
 jobs:
-  nix-packaging:
-    if: false  # sorchk/dbx fork does not publish Nix packages; skip.
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-
-      - name: Build Nix desktop package
-        run: nix build .#dbx-desktop --no-link --print-build-logs
-
-  bump-jdbc-plugin-version:
-    if: false  # sorchk/dbx fork does not auto-bump JDBC plugin version; skip.
-    runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.bump.outputs.changed }}
-      old_version: ${{ steps.bump.outputs.old_version }}
-      new_version: ${{ steps.bump.outputs.new_version }}
-      prev_tag: ${{ steps.prev-tag.outputs.prev_tag }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Find previous release tag
-        id: prev-tag
-        shell: bash
-        run: |
-          PREV_TAG=$(git tag --sort=-creatordate | grep '^v' | sed -n '2p')
-          if [ -z "$PREV_TAG" ]; then
-            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
-          fi
-          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
-          echo "Comparing ${PREV_TAG}..HEAD"
-
-      - name: Detect JDBC plugin changes and bump version
-        id: bump
-        shell: bash
-        run: |
-          BUMP_OUTPUT="$(node .github/scripts/bump-jdbc-plugin-version.mjs "${{ steps.prev-tag.outputs.prev_tag }}" HEAD --write)"
-          echo "$BUMP_OUTPUT"
-          echo "$BUMP_OUTPUT" >> "$GITHUB_OUTPUT"
-
-      - name: Commit JDBC plugin version bump
-        if: steps.bump.outputs.changed == 'true'
-        shell: bash
-        run: |
-          TMP_DIR="$(mktemp -d)"
-          cp plugins/jdbc/pom.xml "$TMP_DIR/pom.xml"
-          cp plugins/jdbc/manifest.json "$TMP_DIR/manifest.json"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git switch -C jdbc-plugin-version-bump origin/main
-          cp "$TMP_DIR/pom.xml" plugins/jdbc/pom.xml
-          cp "$TMP_DIR/manifest.json" plugins/jdbc/manifest.json
-          git add plugins/jdbc/pom.xml plugins/jdbc/manifest.json
-          if git diff --cached --quiet; then
-            echo "JDBC plugin version ${{ steps.bump.outputs.new_version }} is already on main."
-            exit 0
-          fi
-          git commit -m "chore(jdbc): bump plugin version [skip ci]"
-          git push origin HEAD:main
-
   build:
     strategy:
       fail-fast: false
@@ -243,69 +177,9 @@ jobs:
               --yes
           done
 
-  jdbc-plugin:
-    if: false  # depends on bump-jdbc-plugin-version which is skipped.
-    needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: maven
-
-      - name: Apply automatic JDBC plugin version bump
-        shell: bash
-        run: node .github/scripts/bump-jdbc-plugin-version.mjs "${{ needs.bump-jdbc-plugin-version.outputs.prev_tag }}" HEAD --write
-
-      - name: Read JDBC plugin version
-        id: jdbc-plugin
-        shell: bash
-        run: |
-          VERSION="$(grep -m1 '<version>' plugins/jdbc/pom.xml | sed -E 's/.*<version>([^<]+)<.*/\1/')"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Package JDBC plugin
-        run: ./plugins/jdbc/package.sh
-
-      - name: Upload JDBC plugin asset
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          gh release upload "${GITHUB_REF_NAME}" \
-            "plugins/jdbc/dist/dbx-jdbc-plugin-${{ steps.jdbc-plugin.outputs.version }}.zip" \
-            "plugins/jdbc/dist/dbx-jdbc-plugin-latest.zip" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
-
-      - name: Add JDBC plugin metadata to latest.json
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/latest-json"
-          gh release download "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern latest.json \
-            --dir "$RUNNER_TEMP/latest-json"
-          node .github/scripts/augment-latest-json-jdbc-plugin.mjs \
-            "$RUNNER_TEMP/latest-json/latest.json" \
-            "${{ steps.jdbc-plugin.outputs.version }}" \
-            "1" \
-            "https://github.com/sorchk/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip"
-          gh release upload "${GITHUB_REF_NAME}" \
-            "$RUNNER_TEMP/latest-json/latest.json" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
-
   publish:
     # Keep the release as a draft until every platform and the Nix package pass.
-    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, nix-packaging]
+    needs: [cleanup-release-signatures, docker-manifest ]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release

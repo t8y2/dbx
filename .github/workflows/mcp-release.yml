@@ -90,19 +90,10 @@ jobs:
 
           for (const path of [
             "packages/cli/package.json",
-            "packages/cli-darwin-arm64/package.json",
-            "packages/cli-darwin-x64/package.json",
             "packages/cli-linux-arm64-gnu/package.json",
             "packages/cli-linux-x64-gnu/package.json",
-            "packages/cli-win32-arm64/package.json",
-            "packages/cli-win32-x64/package.json",
-            "packages/mcp-server/package.json",
-            "packages/mcp-darwin-arm64/package.json",
-            "packages/mcp-darwin-x64/package.json",
             "packages/mcp-linux-arm64-gnu/package.json",
             "packages/mcp-linux-x64-gnu/package.json",
-            "packages/mcp-win32-arm64/package.json",
-            "packages/mcp-win32-x64/package.json",
           ]) {
             const pkg = readJson(path);
             pkg.version = version;
@@ -317,16 +308,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            package-dir: cli-darwin-arm64
-            package-name: "@dbx-app/cli-darwin-arm64"
-            binary: dbx
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            package-dir: cli-darwin-x64
-            package-name: "@dbx-app/cli-darwin-x64"
-            binary: dbx
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             package-dir: cli-linux-arm64-gnu
@@ -337,16 +318,6 @@ jobs:
             package-dir: cli-linux-x64-gnu
             package-name: "@dbx-app/cli-linux-x64-gnu"
             binary: dbx
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            package-dir: cli-win32-arm64
-            package-name: "@dbx-app/cli-win32-arm64"
-            binary: dbx.exe
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            package-dir: cli-win32-x64
-            package-name: "@dbx-app/cli-win32-x64"
-            binary: dbx.exe
 
     steps:
       - uses: actions/checkout@v5
@@ -409,14 +380,10 @@ jobs:
       - name: Build Rust CLI binary
         shell: bash
         run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # cargo-zigbuild 通过 target 后缀 `.2.31` 把 glibc 目标压到 2.31，
-            # 让 dbx-cli 在 Deepin 23 / Debian 12 / Ubuntu 22.04 等老 glibc 系统上
-            # 不报 `GLIBC_2.34 not found`；非 Linux 走原生 cargo build 不变。
-            cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}.${{ env.GLIBC_VERSION }}"
-          else
-            cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
-          fi
+          # cargo-zigbuild 通过 target 后缀 `.2.31` 把 glibc 目标压到 2.31，
+          # 让 dbx-cli 在 Deepin 23 / Debian 12 / Ubuntu 22.04 等老 glibc 系统上
+          # 不报 `GLIBC_2.34 not found`。
+          cargo zigbuild --release -p dbx-cli --no-default-features --target "${{ matrix.target }}.${{ env.GLIBC_VERSION }}"
 
       - name: Verify GLIBC symbols ≤ ${{ env.GLIBC_VERSION }}
         if: runner.os == 'Linux'
@@ -449,14 +416,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p "packages/${{ matrix.package-dir }}/bin"
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # Linux zigbuild 产物路径里带 `.2.31` 后缀
-            ARTIFACT_DIR="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release"
-          else
-            ARTIFACT_DIR="target/${{ matrix.target }}/release"
-          fi
+          # Linux zigbuild 产物路径里带 `.2.31` 后缀
+          ARTIFACT_DIR="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release"
           cp "${ARTIFACT_DIR}/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
-          if [[ "${{ runner.os }}" != "Windows" ]]; then chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"; fi
+          chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
 
       - uses: actions/setup-node@v6
         with:
@@ -514,12 +477,8 @@ jobs:
             return 1
           }
           for package in \
-            @dbx-app/cli-darwin-arm64 \
-            @dbx-app/cli-darwin-x64 \
             @dbx-app/cli-linux-arm64-gnu \
-            @dbx-app/cli-linux-x64-gnu \
-            @dbx-app/cli-win32-arm64 \
-            @dbx-app/cli-win32-x64; do
+            @dbx-app/cli-linux-x64-gnu; do
             wait_for_package "${package}" || {
               echo "${package}@${VERSION} is not available on npm; refusing to publish @dbx-app/cli."
               exit 1
@@ -543,16 +502,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            package-dir: mcp-darwin-arm64
-            package-name: "@dbx-app/mcp-darwin-arm64"
-            binary: dbx-mcp
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            package-dir: mcp-darwin-x64
-            package-name: "@dbx-app/mcp-darwin-x64"
-            binary: dbx-mcp
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             package-dir: mcp-linux-arm64-gnu
@@ -563,16 +512,6 @@ jobs:
             package-dir: mcp-linux-x64-gnu
             package-name: "@dbx-app/mcp-linux-x64-gnu"
             binary: dbx-mcp
-          - runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            package-dir: mcp-win32-arm64
-            package-name: "@dbx-app/mcp-win32-arm64"
-            binary: dbx-mcp.exe
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            package-dir: mcp-win32-x64
-            package-name: "@dbx-app/mcp-win32-x64"
-            binary: dbx-mcp.exe
 
     steps:
       - uses: actions/checkout@v5
@@ -635,14 +574,10 @@ jobs:
       - name: Build Rust MCP binary
         shell: bash
         run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # cargo-zigbuild 通过 target 后缀 `.2.31` 把 glibc 目标压到 2.31，
-            # 让 dbx-mcp 在 Deepin 23 / Debian 12 / Ubuntu 22.04 等老 glibc 系统上
-            # 不报 `GLIBC_2.34 not found`；非 Linux 走原生 cargo build 不变。
-            cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}.${{ env.GLIBC_VERSION }}"
-          else
-            cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
-          fi
+          # cargo-zigbuild 通过 target 后缀 `.2.31` 把 glibc 目标压到 2.31，
+          # 让 dbx-mcp 在 Deepin 23 / Debian 12 / Ubuntu 22.04 等老 glibc 系统上
+          # 不报 `GLIBC_2.34 not found`。
+          cargo zigbuild --release -p dbx-mcp --target "${{ matrix.target }}.${{ env.GLIBC_VERSION }}"
 
       - name: Verify GLIBC symbols ≤ ${{ env.GLIBC_VERSION }}
         if: runner.os == 'Linux'
@@ -675,16 +610,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p "packages/${{ matrix.package-dir }}/bin"
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # Linux zigbuild 产物路径里带 `.2.31` 后缀
-            ARTIFACT_DIR="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release"
-          else
-            ARTIFACT_DIR="target/${{ matrix.target }}/release"
-          fi
+          # Linux zigbuild 产物路径里带 `.2.31` 后缀
+          ARTIFACT_DIR="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release"
           cp "${ARTIFACT_DIR}/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
-          if [[ "${{ runner.os }}" != "Windows" ]]; then
-            chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
-          fi
+          chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
 
       - uses: actions/setup-node@v6
         with:
@@ -750,12 +679,8 @@ jobs:
           }
 
           for package in \
-            @dbx-app/mcp-darwin-arm64 \
-            @dbx-app/mcp-darwin-x64 \
             @dbx-app/mcp-linux-arm64-gnu \
-            @dbx-app/mcp-linux-x64-gnu \
-            @dbx-app/mcp-win32-arm64 \
-            @dbx-app/mcp-win32-x64; do
+            @dbx-app/mcp-linux-x64-gnu; do
             wait_for_package "${package}" || {
               echo "${package}@${VERSION} is not available on npm; refusing to publish @dbx-app/mcp-server."
               exit 1
@@ -802,26 +727,12 @@ jobs:
             tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx-mcp
           }
 
-          pack_windows() {
-            package_name="$1"
-            asset_name="$2"
-            work_dir="$(mktemp -d)"
-            npm pack "${package_name}@${VERSION}" --pack-destination "${work_dir}" --json > "${work_dir}/pack.json"
-            tarball="${work_dir}/$(jq -r '.[0].filename' "${work_dir}/pack.json")"
-            tar -xzf "${tarball}" -C "${work_dir}"
-            zip -j "release-assets/${asset_name}.zip" "${work_dir}/package/bin/dbx-mcp.exe"
-          }
-
-          pack_unix "@dbx-app/mcp-darwin-arm64" "dbx-mcp-darwin-arm64"
-          pack_unix "@dbx-app/mcp-darwin-x64" "dbx-mcp-darwin-x64"
           pack_unix "@dbx-app/mcp-linux-arm64-gnu" "dbx-mcp-linux-arm64-gnu"
           pack_unix "@dbx-app/mcp-linux-x64-gnu" "dbx-mcp-linux-x64-gnu"
-          pack_windows "@dbx-app/mcp-win32-arm64" "dbx-mcp-win32-arm64"
-          pack_windows "@dbx-app/mcp-win32-x64" "dbx-mcp-win32-x64"
 
           (
             cd release-assets
-            sha256sum *.tar.gz *.zip > SHA256SUMS
+            sha256sum *.tar.gz > SHA256SUMS
           )
 
       - name: Attest native release archives
@@ -837,7 +748,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           cat > release-notes.md <<EOF
-          DBX MCP and CLI ${VERSION} provide precompiled native binaries for macOS, Linux, and Windows.
+          DBX MCP and CLI ${VERSION} provide precompiled native Linux binaries.
 
           Recommended npm installation:
 
@@ -845,9 +756,9 @@ jobs:
           npm install -g @dbx-app/mcp-server@${VERSION}
           \`\`\`
 
-          Native archives run without Node.js. Download the archive matching your operating system and CPU, verify it with \`SHA256SUMS\`, extract \`dbx-mcp\` (or \`dbx-mcp.exe\`), and configure your MCP client to run it directly.
+          Native archives run without Node.js. Download the archive matching your CPU architecture, verify it with \`SHA256SUMS\`, extract \`dbx-mcp\`, and configure your MCP client to run it directly.
 
-          The CLI archives use the \`dbx-cli-*\` prefix. Verify them with \`CLI-SHA256SUMS\`, extract \`dbx\` (or \`dbx.exe\`), and run it directly without Node.js.
+          The CLI archives use the \`dbx-cli-*\` prefix. Verify them with \`CLI-SHA256SUMS\`, extract \`dbx\`, and run it directly without Node.js.
 
           This package release is separate from the DBX desktop application release and is intentionally not marked as the repository's latest release.
           EOF
@@ -899,26 +810,12 @@ jobs:
             tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx
           }
 
-          pack_windows() {
-            package_name="$1"
-            asset_name="$2"
-            work_dir="$(mktemp -d)"
-            npm pack "${package_name}@${VERSION}" --pack-destination "${work_dir}" --json > "${work_dir}/pack.json"
-            tarball="${work_dir}/$(jq -r '.[0].filename' "${work_dir}/pack.json")"
-            tar -xzf "${tarball}" -C "${work_dir}"
-            zip -j "release-assets/${asset_name}.zip" "${work_dir}/package/bin/dbx.exe"
-          }
-
-          pack_unix "@dbx-app/cli-darwin-arm64" "dbx-cli-darwin-arm64"
-          pack_unix "@dbx-app/cli-darwin-x64" "dbx-cli-darwin-x64"
           pack_unix "@dbx-app/cli-linux-arm64-gnu" "dbx-cli-linux-arm64-gnu"
           pack_unix "@dbx-app/cli-linux-x64-gnu" "dbx-cli-linux-x64-gnu"
-          pack_windows "@dbx-app/cli-win32-arm64" "dbx-cli-win32-arm64"
-          pack_windows "@dbx-app/cli-win32-x64" "dbx-cli-win32-x64"
 
           (
             cd release-assets
-            sha256sum *.tar.gz *.zip > CLI-SHA256SUMS
+            sha256sum *.tar.gz > CLI-SHA256SUMS
           )
 
       - name: Attest native CLI release archives
@@ -932,86 +829,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: gh release upload "${TAG}" release-assets/* --clobber
-
-  publish-homebrew-formula:
-    name: Publish Homebrew formula
-    if: false  # sorchk/dbx fork does not publish Homebrew; skip until re-enabled.
-    runs-on: ubuntu-latest
-    needs: [prepare, publish-cli, publish-mcp-server]
-    steps:
-      - name: Download CLI npm tarball and compute SHA256
-        id: cli-hash
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          VERSION="${VERSION}"
-          NPM_TARBALL="cli-${VERSION}.tgz"
-          NPM_URL="https://registry.npmjs.org/@dbx-app/cli/-/${NPM_TARBALL}"
-
-          # Poll npm until the package is available (CDN propagation delay)
-          for i in $(seq 1 12); do
-            if curl -fsSLI "${NPM_URL}" >/dev/null 2>&1; then
-              echo "Package found on attempt ${i}"
-              break
-            fi
-            echo "Waiting for npm CDN (attempt ${i}/12)..."
-            sleep 10
-          done
-
-          curl -fsSL -o "${NPM_TARBALL}" "${NPM_URL}"
-          CLI_SHA256=$(sha256sum "${NPM_TARBALL}" | cut -d ' ' -f 1)
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${CLI_SHA256}" >> "$GITHUB_OUTPUT"
-          echo "  cli version: ${VERSION}"
-          echo "  sha256: ${CLI_SHA256}"
-
-      - name: Push formula to homebrew-tap
-        env:
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-          CLI_VERSION: ${{ steps.cli-hash.outputs.version }}
-          CLI_SHA256: ${{ steps.cli-hash.outputs.sha256 }}
-        run: |
-          git clone --depth 1 \
-            "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/sorchk/homebrew-tap.git" \
-            homebrew-tap
-          cd homebrew-tap
-          mkdir -p Formula
-
-          cat > Formula/dbx-cli.rb <<'RUBY_EOF'
-          class DbxCli < Formula
-            desc "Command-line interface for DBX database connections, schema, and safe queries"
-            homepage "https://github.com/sorchk/dbx"
-            url "https://registry.npmjs.org/@dbx-app/cli/-/cli-__CLI_VERSION__.tgz"
-            sha256 "__CLI_SHA256__"
-            license "Apache-2.0"
-
-              depends_on "node"
-
-            def install
-              system "npm", "install", *std_npm_args
-              bin.install_symlink libexec.glob("bin/*")
-
-            end
-
-            test do
-              assert_path_exists bin/"dbx"
-              system bin/"dbx", "doctor"
-            end
-          end
-          RUBY_EOF
-
-          sed -i 's/^          //' Formula/dbx-cli.rb
-          sed -i "s/__CLI_VERSION__/${CLI_VERSION}/g" Formula/dbx-cli.rb
-          sed -i "s/__CLI_SHA256__/${CLI_SHA256}/g" Formula/dbx-cli.rb
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/dbx-cli.rb
-
-          if git diff --cached --quiet; then
-            echo "CLI Homebrew formula is already up to date."
-          else
-            git commit -m "dbx-cli ${CLI_VERSION}"
-            git push
-            echo "::notice::CLI Homebrew formula updated to ${CLI_VERSION}"
-          fi
+ 

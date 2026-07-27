@@ -40,7 +40,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     queryStore.updateSql(tabId, target.tableName);
     return;
   }
-  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data", tableSchema);
+  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data", tableSchema, undefined, undefined, { forceNew: true });
   const targetTab = queryStore.tabs.find((tab) => tab.id === tabId);
   if (targetTab) targetTab.tableInfoTab = options.tableInfoTab;
   // Stamp the new table identity synchronously so SQL rebuilds (refresh,

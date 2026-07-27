@@ -17,7 +17,7 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
-import { cancelSqlFileExecution, executeSqlFile, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
+import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
@@ -38,7 +38,7 @@ const productionSafetyStore = useProductionSafetyStore();
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const filePath = ref("");
-const preview = ref<SqlFilePreview | null>(null);
+const previews = ref<SqlFilePreview[]>([]);
 const selectingFile = ref(false);
 const loadingPreview = ref(false);
 const connectionId = ref("");
@@ -56,6 +56,7 @@ const progress = ref<SqlFileProgress | null>(null);
 const terminalStatus = ref<SqlFileStatus | "idle">("idle");
 const terminalError = ref("");
 const refreshedTarget = ref(false);
+const MAX_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
 
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
 
@@ -63,8 +64,14 @@ const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id 
 
 const canStart = computed(() => {
   const connection = selectedConnection.value;
-  if (!preview.value || !connection || running.value || loadingPreview.value || loadingDatabases.value) return false;
-  return !!database.value.trim() || !requiresSqlFileTargetDatabaseSelection(connection, preview.value.canExecuteWithoutSelectedDatabase);
+  if (previews.value.length === 0 || !connection || running.value || loadingPreview.value || loadingDatabases.value) return false;
+  let hasDatabaseContext = false;
+  const canExecuteWithoutSelectedDatabase = previews.value.every((item) => {
+    if (!hasDatabaseContext && !item.canExecuteWithoutSelectedDatabase) return false;
+    hasDatabaseContext ||= item.establishesDatabaseContext === true;
+    return true;
+  });
+  return !!database.value.trim() || !requiresSqlFileTargetDatabaseSelection(connection, canExecuteWithoutSelectedDatabase);
 });
 
 const statusTone = computed(() => {
@@ -90,6 +97,7 @@ const progressPercent = computed(() => {
   if (current <= 0) return running.value ? 8 : 0;
   return Math.min(95, Math.max(8, Math.round((attempted / current) * 100)));
 });
+const preview = computed(() => previews.value[0] ?? null);
 const previewLineCount = computed(() => preview.value?.preview.split(/\r\n|\r|\n/).length ?? 0);
 const previewLineNumbers = computed(() => Array.from({ length: previewLineCount.value }, (_, index) => index + 1));
 const previewIsTruncated = computed(() => {
@@ -127,10 +135,6 @@ function statusLabel(status: SqlFileStatus | "idle") {
   return t(`sqlFile.status.${status}`);
 }
 
-function isTerminalStatus(status: SqlFileStatus | "idle") {
-  return status === "done" || status === "error" || status === "cancelled";
-}
-
 function resolveInitialConnectionId() {
   if (props.prefillConnectionId && sqlConnections.value.some((c) => c.id === props.prefillConnectionId)) {
     return props.prefillConnectionId;
@@ -162,7 +166,7 @@ function resetExecution() {
 
 function resetState() {
   filePath.value = "";
-  preview.value = null;
+  previews.value = [];
   selectingFile.value = false;
   loadingPreview.value = false;
   connectionId.value = resolveInitialConnectionId();
@@ -209,17 +213,26 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
   if (isTauriRuntime()) {
     return previewSqlFile(fileOrPath as string);
   }
+  const file = fileOrPath as File;
+  if (file.size > MAX_WEB_SQL_FILE_BYTES) {
+    throw new Error(`File too large: ${file.size} bytes (max ${MAX_WEB_SQL_FILE_BYTES} bytes)`);
+  }
   const { previewSqlFile: previewWebSqlFile } = await import("@/lib/backend/http");
-  return previewWebSqlFile(fileOrPath as File);
+  return previewWebSqlFile(file);
 }
 
-async function loadPreview(fileOrPath: string | File) {
+async function loadPreviews(filesOrPaths: Array<string | File>) {
   loadingPreview.value = true;
-  preview.value = null;
+  previews.value = [];
+  filePath.value = "";
+  resetExecution();
   try {
-    preview.value = await previewSelectedSqlFile(fileOrPath);
-    filePath.value = preview.value.filePath;
-    resetExecution();
+    const nextPreviews: SqlFilePreview[] = [];
+    for (const fileOrPath of filesOrPaths) {
+      nextPreviews.push(await previewSelectedSqlFile(fileOrPath));
+    }
+    previews.value = nextPreviews;
+    filePath.value = nextPreviews.map((item) => item.filePath).join("; ");
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {
@@ -237,11 +250,12 @@ async function selectFile() {
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
-      multiple: false,
+      multiple: true,
       filters: [{ name: "SQL", extensions: ["sql"] }],
     });
-    if (typeof selected === "string") {
-      await loadPreview(selected);
+    const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+    if (paths.length > 0) {
+      await loadPreviews(paths);
     }
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
@@ -252,23 +266,27 @@ async function selectFile() {
 
 async function handleFileInputChange(event: Event) {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
+  const files = Array.from(input.files ?? []);
   input.value = "";
-  if (!file || running.value) return;
+  if (files.length === 0 || running.value) return;
   selectingFile.value = true;
   try {
-    await loadPreview(file);
+    await loadPreviews(files);
   } finally {
     selectingFile.value = false;
   }
 }
 
-async function listenProgress(id: string, handler: (next: SqlFileProgress) => void): Promise<() => void> {
+async function listenProgress(id: string, handler: (next: SqlFileProgress) => void, onError?: (error: Error) => void): Promise<() => void> {
   if (isTauriRuntime()) {
     return listenSqlFileProgress(handler);
   }
   const { listenSqlFileProgressById } = await import("@/lib/sql/httpSqlFileProgress");
-  return listenSqlFileProgressById(id, handler);
+  return listenSqlFileProgressById(id, handler, onError);
+}
+
+function isTerminalProgress(status: SqlFileStatus): boolean {
+  return status === "done" || status === "error" || status === "cancelled";
 }
 
 async function refreshTargetAfterImport() {
@@ -282,12 +300,15 @@ async function refreshTargetAfterImport() {
 }
 
 async function startExecution() {
-  if (!canStart.value || !preview.value) return;
+  if (!canStart.value || previews.value.length === 0) return;
   const productionContext = productionContextForDatabase(selectedConnection.value, database.value);
   if (productionContext.active) {
     // File previews are truncated, so production file execution is always reviewed instead of inferring safety from a partial preview.
     const confirmed = await productionSafetyStore.requestConfirmation({
-      sql: preview.value.preview,
+      sql: previews.value
+        .map((item) => item.preview)
+        .join("\n\n")
+        .slice(0, 20_000),
       connectionName: selectedConnection.value?.name,
       database: database.value,
       productionDatabases: productionContext.databases,
@@ -296,8 +317,8 @@ async function startExecution() {
     if (!confirmed) return;
   }
 
-  const id = uuid();
-  executionId.value = id;
+  const batchId = uuid();
+  executionId.value = batchId;
   running.value = true;
   cancelling.value = false;
   cancelRequested.value = false;
@@ -305,9 +326,9 @@ async function startExecution() {
   terminalStatus.value = "running";
   terminalError.value = "";
   progress.value = null;
-  addSqlFileTask(id, preview.value.fileName, preview.value.filePath);
+  const taskLabel = previews.value.length === 1 ? previews.value[0]!.fileName : `${previews.value[0]!.fileName} (+${previews.value.length - 1})`;
+  addSqlFileTask(batchId, taskLabel, filePath.value);
 
-  let unlisten: (() => void) | undefined;
   try {
     await store.ensureConnected(connectionId.value);
     if (cancelRequested.value) {
@@ -315,58 +336,60 @@ async function startExecution() {
       return;
     }
 
-    unlisten = await listenProgress(id, (next) => {
-      if (next.executionId !== id) return;
-      progress.value = next;
-      terminalStatus.value = next.status;
-      terminalError.value = next.error ?? terminalError.value;
-      updateSqlFileTask(id, next);
-      if (isTerminalStatus(next.status)) {
-        running.value = false;
-        cancelling.value = false;
-      }
-      if (next.status === "done") {
-        void refreshTargetAfterImport();
-      }
+    let resolveTerminalProgress: (progress: SqlFileProgress) => void = () => {};
+    let rejectTerminalProgress: (error: Error) => void = () => {};
+    const terminalProgress = new Promise<SqlFileProgress>((resolve, reject) => {
+      resolveTerminalProgress = resolve;
+      rejectTerminalProgress = reject;
     });
+    let completedSuccessfully = false;
+    const unlisten = await listenProgress(
+      batchId,
+      (next) => {
+        if (next.executionId !== batchId) return;
+        progress.value = next;
+        terminalStatus.value = next.status;
+        terminalError.value = next.error ?? terminalError.value;
+        updateSqlFileTask(batchId, next);
+        if (isTerminalProgress(next.status)) {
+          resolveTerminalProgress(next);
+        }
+      },
+      rejectTerminalProgress,
+    );
 
-    if (cancelRequested.value) {
-      terminalStatus.value = "cancelled";
-      return;
+    try {
+      executionStarted.value = true;
+      await executeSqlFiles(
+        {
+          executionId: batchId,
+          connectionId: connectionId.value,
+          database: database.value.trim(),
+          filePath: previews.value[0]!.filePath,
+          continueOnError: continueOnError.value,
+        },
+        previews.value.map((item) => item.filePath),
+      );
+      const terminal = await terminalProgress;
+      if (terminal.status === "error") {
+        throw new Error(terminal.error || "SQL file execution failed");
+      }
+      if (terminal.status === "cancelled") {
+        cancelRequested.value = true;
+      }
+      completedSuccessfully = terminal.status === "done";
+    } finally {
+      executionStarted.value = false;
+      unlisten();
     }
 
-    executionStarted.value = true;
-    await executeSqlFile({
-      executionId: id,
-      connectionId: connectionId.value,
-      database: database.value.trim(),
-      filePath: preview.value.filePath,
-      continueOnError: continueOnError.value,
-    });
-    if (!isTerminalStatus(terminalStatus.value)) {
-      terminalStatus.value = cancelRequested.value ? "cancelled" : "done";
-      const lastProgress = progress.value as SqlFileProgress | null;
-      updateSqlFileTask(id, {
-        executionId: id,
-        status: terminalStatus.value,
-        statementIndex: lastProgress?.statementIndex ?? 0,
-        successCount: lastProgress?.successCount ?? 0,
-        failureCount: lastProgress?.failureCount ?? 0,
-        affectedRows: lastProgress?.affectedRows ?? 0,
-        elapsedMs: lastProgress?.elapsedMs ?? 0,
-        statementSummary: lastProgress?.statementSummary ?? "",
-        error: lastProgress?.error ?? null,
-      });
-      if (terminalStatus.value === "done") {
-        await refreshTargetAfterImport();
-      }
-    }
+    if (completedSuccessfully) await refreshTargetAfterImport();
   } catch (e: any) {
     terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
     terminalError.value = e?.message || String(e);
     const lastProgress = progress.value as SqlFileProgress | null;
-    updateSqlFileTask(id, {
-      executionId: id,
+    updateSqlFileTask(batchId, {
+      executionId: batchId,
       status: terminalStatus.value,
       statementIndex: lastProgress?.statementIndex ?? 0,
       successCount: lastProgress?.successCount ?? 0,
@@ -380,7 +403,6 @@ async function startExecution() {
       toast(terminalError.value, 5000);
     }
   } finally {
-    unlisten?.();
     running.value = false;
     cancelling.value = false;
     executionStarted.value = false;
@@ -429,7 +451,7 @@ watch(
     // When opened from the SQL Files panel with a pre-selected file, load its
     // preview automatically so the user can review statements before running.
     if (props.prefillFilePath) {
-      void loadPreview(props.prefillFilePath);
+      void loadPreviews([props.prefillFilePath]);
     }
   },
   { immediate: true },
@@ -454,7 +476,7 @@ watch(
           </div>
 
           <div class="flex items-center gap-2">
-            <input ref="fileInput" type="file" accept=".sql,text/sql" class="hidden" @change="handleFileInputChange" />
+            <input ref="fileInput" type="file" accept=".sql,text/sql" multiple class="hidden" @change="handleFileInputChange" />
             <Input :model-value="filePath" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
@@ -468,6 +490,7 @@ watch(
               <div class="min-w-0 flex items-center gap-2">
                 <FileCode class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                 <span class="font-medium truncate">{{ preview.fileName }}</span>
+                <span v-if="previews.length > 1" class="shrink-0 text-muted-foreground">(+{{ previews.length - 1 }})</span>
               </div>
               <div class="flex shrink-0 items-center gap-2 text-muted-foreground">
                 <span>{{ previewLineSummary }}</span>

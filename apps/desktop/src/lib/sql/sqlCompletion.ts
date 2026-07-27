@@ -3,6 +3,9 @@ import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { buildMongoCompletionItemsFromContext, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { CLOUDFLARE_D1_COMMON_FUNCTION_NAMES } from "@/lib/sql/cloudflareD1";
 import type { SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
+import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
+
+export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
 const SQL_KEYWORDS = [
   "SELECT",
@@ -778,119 +781,6 @@ function getFunctionDescriptions(t?: SqlCompletionTranslations): Map<string, str
   ]);
 }
 
-export const DEFAULT_SQL_SNIPPETS: SqlSnippet[] = [
-  {
-    id: "builtin-sel",
-    label: "select *",
-    prefix: "sel",
-    body: "SELECT *\nFROM table\nLIMIT 100;",
-    enabled: true,
-  },
-  {
-    id: "builtin-ins",
-    label: "insert into",
-    prefix: "ins",
-    body: "INSERT INTO table (columns)\nVALUES (values);",
-    enabled: true,
-  },
-  {
-    id: "builtin-upd",
-    label: "update set",
-    prefix: "upd",
-    body: "UPDATE table\nSET column = value\nWHERE condition;",
-    enabled: true,
-  },
-  {
-    id: "builtin-cte",
-    label: "common table expression",
-    prefix: "cte",
-    body: "WITH name AS (\n  SELECT columns\n  FROM table\n)\nSELECT *\nFROM name;",
-    enabled: true,
-  },
-  {
-    id: "builtin-join",
-    label: "join",
-    prefix: "join",
-    body: "JOIN table ON left_column = right_column",
-    enabled: true,
-  },
-  {
-    id: "builtin-case",
-    label: "case when",
-    prefix: "case",
-    body: "CASE\n  WHEN condition THEN value\n  ELSE default\nEND",
-    enabled: true,
-  },
-  {
-    id: "builtin-ct",
-    label: "create table",
-    prefix: "ct",
-    body: "CREATE TABLE table (\n  column type\n);",
-    enabled: true,
-  },
-  {
-    id: "builtin-ex",
-    label: "exists",
-    prefix: "ex",
-    body: "EXISTS (\n  SELECT 1\n  FROM table\n  WHERE condition\n)",
-    enabled: true,
-  },
-  {
-    id: "builtin-nex",
-    label: "not exists",
-    prefix: "nex",
-    body: "NOT EXISTS (\n  SELECT 1\n  FROM table\n  WHERE condition\n)",
-    enabled: true,
-  },
-  {
-    id: "builtin-at",
-    label: "alter table add column",
-    prefix: "at",
-    body: "ALTER TABLE table\nADD COLUMN column type;",
-    enabled: true,
-  },
-  {
-    id: "builtin-ci",
-    label: "create index",
-    prefix: "ci",
-    body: "CREATE INDEX idx_name\nON table (column);",
-    enabled: true,
-  },
-];
-
-const MANTICORESEARCH_SQL_SNIPPETS: SqlSnippet[] = [
-  {
-    id: "builtin-manticore-match",
-    label: "match query",
-    prefix: "match",
-    body: "MATCH('query')",
-  },
-  {
-    id: "builtin-manticore-facet",
-    label: "facet",
-    prefix: "facet",
-    body: "FACET column",
-  },
-  {
-    id: "builtin-manticore-show-meta",
-    label: "show meta",
-    prefix: "m",
-    body: "SHOW META;",
-  },
-  {
-    id: "builtin-manticore-show-tables",
-    label: "show tables",
-    prefix: "tab",
-    body: "SHOW TABLES;",
-  },
-  {
-    id: "builtin-manticore-call-pq",
-    label: "call pq",
-    prefix: "p",
-    body: "CALL PQ ('pq', ('{\"title\":\"query\"}'));",
-  },
-];
-
 const SQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   // Aggregate
   ["COUNT", ["expression"]],
@@ -1255,6 +1145,7 @@ function sqlAliasKeywordWords(...sources: Array<string | undefined>): string[] {
 
 export interface SqlCompletionTable {
   name: string;
+  catalog?: string;
   database?: string;
   schema?: string;
   type?: SqlObjectNavigationType;
@@ -1313,8 +1204,10 @@ export type SqlKeywordCase = "preserve" | "upper" | "lower";
 
 export interface SqlCompletionReferencedTable {
   name: string;
+  nameQuoted?: boolean;
   database?: string;
   schema?: string;
+  schemaQuoted?: boolean;
   alias?: string;
   columns?: string[];
   columnAliases?: string[];
@@ -1445,7 +1338,7 @@ class SqlCompletionProvider {
     if (!pendingJoinKeyword && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
       const snippets = this.databaseType === "manticoresearch" ? [...(this.input.snippets ?? DEFAULT_SQL_SNIPPETS), ...MANTICORESEARCH_SQL_SNIPPETS] : (this.input.snippets ?? DEFAULT_SQL_SNIPPETS);
       if (!preferReferencedColumns) {
-        this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase));
+        this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase, this.databaseType));
       }
       if (!preferReferencedColumns || context.suggestRoutines) {
         const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType);
@@ -1462,6 +1355,7 @@ class SqlCompletionProvider {
           context.prefix,
           MANTICORESEARCH_SQL_SNIPPETS.filter((snippet) => snippet.id === "builtin-manticore-call-pq"),
           this.input.keywordCase,
+          this.databaseType,
         ),
       );
     }
@@ -2612,13 +2506,16 @@ function extractReferencedTables(sql: string): SqlCompletionReferencedTable[] {
       referenced.push({ name: unquoteIdentifier(rawName), alias: cleanAlias });
       continue;
     }
-    const parts = splitQualifiedNameParts(rawName);
+    const rawParts = splitQualifiedNameRawParts(rawName);
+    const parts = rawParts.map((part) => unquoteIdentifier(part)).filter(Boolean);
     const name = parts[parts.length - 1];
     if (!name) continue;
     const table: SqlCompletionReferencedTable = {
       name,
+      nameQuoted: isQuotedIdentifier(rawParts[rawParts.length - 1]),
       database: parts.length >= 3 ? parts[parts.length - 3] : undefined,
       schema: parts.length >= 2 ? parts[parts.length - 2] : undefined,
+      schemaQuoted: parts.length >= 2 ? isQuotedIdentifier(rawParts[rawParts.length - 2]) : undefined,
       alias: cleanAlias,
     };
     referenced.push(table);
@@ -2879,6 +2776,12 @@ function splitQualifiedName(input: string): [string | undefined, string | undefi
 }
 
 function splitQualifiedNameParts(input: string): string[] {
+  return splitQualifiedNameRawParts(input)
+    .map((part) => unquoteIdentifier(part))
+    .filter(Boolean);
+}
+
+function splitQualifiedNameRawParts(input: string): string[] {
   const parts: string[] = [];
   let current = "";
   let inDoubleQuote = false;
@@ -2908,7 +2811,12 @@ function splitQualifiedNameParts(input: string): string[] {
   }
   if (current.trim()) parts.push(current.trim());
 
-  return parts.map((p) => unquoteIdentifier(p)).filter(Boolean);
+  return parts;
+}
+
+function isQuotedIdentifier(value: string | undefined): boolean {
+  if (!value) return false;
+  return (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("`") && value.endsWith("`")) || (value.startsWith("[") && value.endsWith("]"));
 }
 
 function unquoteIdentifier(value: string): string {
@@ -3050,13 +2958,26 @@ function buildTableItems(
   const { prefix } = context;
   const qualifierSchema = context.qualifier?.split(".").filter(Boolean).pop();
   const existingAliases = new Set(referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
-  return tables
-    .filter((table) => matchesPrefix(table.name, prefix))
+  const matchingTables = tables.filter((table) => matchesPrefix(table.name, prefix));
+  const schemasByTableName = new Map<string, Set<string>>();
+  for (const table of matchingTables) {
+    const tableName = normalizeIdentifierPart(table.name);
+    const schemas = schemasByTableName.get(tableName) ?? new Set<string>();
+    schemas.add(normalizeIdentifierPart(table.schema ?? ""));
+    schemasByTableName.set(tableName, schemas);
+  }
+  return matchingTables
     .map((table) => {
       const qualifiedByContext = !!qualifierSchema && !!table.schema && normalizeIdentifierPart(qualifierSchema) === normalizeIdentifierPart(table.schema);
       const oracleSchemaQualification = databaseType === "oracle" && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
-      const defaultApplyName = oracleSchemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
-      const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : (table.applyName ?? defaultApplyName);
+      // A bare table name is ambiguous when metadata contains the same name in multiple schemas.
+      // Keep Oracle's current-schema behavior, but qualify the generic/PostgreSQL/SQL Server paths.
+      const ambiguousTableName = databaseType !== "oracle" && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
+      const schemaQualification = !!table.schema && (oracleSchemaQualification || ambiguousTableName);
+      const defaultApplyName = schemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
+      const suppliedApplyName = table.applyName?.trim();
+      const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
+      const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
       return {
         label: table.name,
@@ -3064,7 +2985,7 @@ function buildTableItems(
         detail: table.detail ?? (table.schema ? `${table.schema}.${table.name}` : table.type),
         apply: formatTableAliasApply(applyName, alias, databaseType),
         boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
-        dedupeKey: table.applyName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
+        dedupeKey: table.applyName || ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
       };
     })
     .sort(compareCompletionItems)
@@ -3249,9 +3170,9 @@ function applyBuiltinSnippetKeywordCase(snippet: SqlSnippet, text: string, keywo
 
 const BUILTIN_SNIPPET_PLACEHOLDER_RE = /\b(idx_name|left_column|right_column|columns|values|condition|column|default|value|name|type|table)\b/g;
 
-function applyBuiltinSnippetPlaceholders(snippet: SqlSnippet): string {
-  if (!shouldFormatBuiltinSnippet(snippet)) return snippet.body;
-  return snippet.body.replace(BUILTIN_SNIPPET_PLACEHOLDER_RE, (match) => `\${${match}}`);
+function applyBuiltinSnippetPlaceholders(snippet: SqlSnippet, body = snippet.body): string {
+  if (!shouldFormatBuiltinSnippet(snippet)) return body;
+  return body.replace(BUILTIN_SNIPPET_PLACEHOLDER_RE, (match) => `\${${match}}`);
 }
 
 function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
@@ -4107,11 +4028,11 @@ function singularTableName(name: string): string {
   return lower;
 }
 
-export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
-  return buildSnippetItems(prefix, snippets, keywordCase);
+export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType): SqlCompletionItem[] {
+  return buildSnippetItems(prefix, snippets, keywordCase, databaseType);
 }
 
-function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
+function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType): SqlCompletionItem[] {
   if (!prefix) return [];
   return snippets
     .filter((snippet) => {
@@ -4130,8 +4051,9 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
       const baseBoost = matchesByPrefix ? 4000 : 0;
       // Placeholder replacement runs on the original (UPPER-case) body first,
       // then keyword casing is applied to both variants uniformly.
-      const body = applyBuiltinSnippetKeywordCase(snippet, snippet.body, keywordCase);
-      const apply = applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet), keywordCase);
+      const resolvedBody = resolveSqlSnippetBodyForDatabase(snippet, databaseType);
+      const body = applyBuiltinSnippetKeywordCase(snippet, resolvedBody, keywordCase);
+      const apply = applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet, resolvedBody), keywordCase);
       return {
         label: snippet.label,
         type: "snippet" as const,

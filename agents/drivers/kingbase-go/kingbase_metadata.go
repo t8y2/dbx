@@ -28,6 +28,7 @@ var kingbaseDataTypes = []string{
 }
 
 type kingbaseMode struct {
+	compatibilityMode string
 	postgresCatalog   bool
 	mysqlCompat       bool
 	sqlServerIdentity bool
@@ -108,13 +109,17 @@ type triggerInfo struct {
 }
 
 func detectKingbaseMode(db *sql.DB, configuredMySQL bool) kingbaseMode {
-	mode := kingbaseMode{mysqlCompat: configuredMySQL}
 	if configuredMySQL {
-		return mode
+		return kingbaseMode{compatibilityMode: "mysql", mysqlCompat: true}
 	}
+	mode := kingbaseMode{compatibilityMode: detectDatabaseMode(db)}
 	mode.postgresCatalog = !catalogExists(db, "sys_catalog.sys_namespace") && catalogExists(db, "pg_catalog.pg_namespace")
 	if !mode.postgresCatalog {
-		mode.mysqlCompat = detectMySQLCompatMode(db)
+		if mode.compatibilityMode != "" {
+			mode.mysqlCompat = mode.compatibilityMode == "mysql"
+		} else {
+			mode.mysqlCompat = supportsBacktickIdentifiers(db)
+		}
 		mode.sqlServerIdentity = !mode.mysqlCompat && catalogExists(db, "sys.identity_columns")
 	}
 	return mode
@@ -131,25 +136,30 @@ func catalogExists(db *sql.DB, catalog string) bool {
 }
 
 func detectMySQLCompatMode(db *sql.DB) bool {
+	if databaseMode := detectDatabaseMode(db); databaseMode != "" {
+		return databaseMode == "mysql"
+	}
+	return supportsBacktickIdentifiers(db)
+}
+
+func detectDatabaseMode(db *sql.DB) string {
 	var databaseMode string
 	switch err := db.QueryRow("SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'").Scan(&databaseMode); {
 	case err == nil:
 		// Treat database_mode as authoritative when the server exposes it. This
 		// avoids misclassifying Oracle-compatible servers that also publish
 		// sql_mode for MySQL syntax toggles such as ANSI_QUOTES.
-		return strings.EqualFold(strings.TrimSpace(databaseMode), "mysql")
+		return strings.ToLower(strings.TrimSpace(databaseMode))
 	case errors.Is(err, sql.ErrNoRows):
-		// Older Kingbase versions may not expose database_mode. Fall back to the
-		// legacy sql_mode existence probe in that case.
+		return ""
 	default:
-		// Ignore metadata errors and fall back to the legacy probe below.
+		return ""
 	}
-	return mysqlSQLModeExists(db)
 }
 
-func mysqlSQLModeExists(db *sql.DB) bool {
+func supportsBacktickIdentifiers(db *sql.DB) bool {
 	var value int
-	return db.QueryRow("SELECT 1 FROM sys_catalog.sys_settings WHERE LOWER(name) = 'sql_mode'").Scan(&value) == nil
+	return db.QueryRow("SELECT 1 AS `dbx_identifier_probe`").Scan(&value) == nil
 }
 
 func (s *server) identifierQuote() string {
@@ -173,7 +183,8 @@ func (s *server) connectionInfo() (map[string]any, error) {
 	}
 	return map[string]any{
 		"database": database, "username": username, "version": version, "schema": schema,
-		"mysql_compat_mode": s.mode.mysqlCompat, "identifierQuote": s.identifierQuote(),
+		"compatibilityMode": s.mode.compatibilityMode, "mysql_compat_mode": s.mode.mysqlCompat,
+		"identifierQuote": s.identifierQuote(),
 	}, nil
 }
 
@@ -574,6 +585,14 @@ JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
 WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname, pos.n`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 }
 
+func kingbaseCatalogFunction(catalog, sysFunction, postgresFunction string) string {
+	// Kingbase compatibility modes expose different catalog-qualified deparser names.
+	if catalog == "pg_catalog" {
+		return "pg_catalog." + postgresFunction
+	}
+	return "sys_catalog." + sysFunction
+}
+
 func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error) {
 	effective, err := s.effectiveSchema(schema)
 	if err != nil {
@@ -673,7 +692,16 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 		return "", err
 	}
 	tableComment, _ := s.getTableComment(effective, table)
-	return renderTableDDL(effective, table, columns, tableComment), nil
+	ddl := renderTableDDL(effective, table, columns, tableComment)
+	ddl, err = s.appendTableIndexDDL(effective, table, ddl)
+	if err != nil {
+		return "", err
+	}
+	ddl, err = s.appendTableTriggerDDL(effective, table, ddl)
+	if err != nil {
+		return "", err
+	}
+	return ddl, nil
 }
 
 func renderTableDDL(schema, table string, columns []columnInfo, tableComment *string) string {
@@ -700,6 +728,120 @@ func renderTableDDL(schema, table string, columns []columnInfo, tableComment *st
 		ddl += "\nCOMMENT ON COLUMN " + qualifiedTable + "." + quoteIdentifier(column.Name) + " IS " + quoteLiteral(*column.Comment) + ";"
 	}
 	return ddl
+}
+
+func (s *server) appendTableIndexDDL(schema, table, ddl string) (string, error) {
+	definitions, err := s.listIndexDefinitions(schema, table)
+	if err != nil {
+		return "", err
+	}
+	return appendDDLStatements(ddl, definitions), nil
+}
+
+func (s *server) appendTableTriggerDDL(schema, table, ddl string) (string, error) {
+	definitions, err := s.listTriggerDefinitions(schema, table)
+	if err != nil {
+		return "", err
+	}
+	return appendDDLStatements(ddl, definitions), nil
+}
+
+func (s *server) listIndexDefinitions(schema, table string) ([]string, error) {
+	effective, err := s.effectiveSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	indexDefinitionFunction := kingbaseCatalogFunction(catalog, "sys_get_indexdef", "pg_get_indexdef")
+	query := fmt.Sprintf(`SELECT i.relname, %s(ix.indexrelid, 0, true), obj_description(i.oid)
+FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
+JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+WHERE n.nspname = %s AND t.relname = %s AND NOT ix.indisprimary ORDER BY i.relname`, indexDefinitionFunction, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var name string
+		var definition string
+		var comment sql.NullString
+		if err := rows.Scan(&name, &definition, &comment); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(definition) != "" {
+			result = append(result, definition)
+		}
+		if comment.Valid && strings.TrimSpace(comment.String) != "" {
+			result = append(result, "COMMENT ON INDEX "+quoteIdentifier(effective)+"."+quoteIdentifier(name)+" IS "+quoteLiteral(comment.String))
+		}
+	}
+	return result, rows.Err()
+}
+
+func (s *server) listTriggerDefinitions(schema, table string) ([]string, error) {
+	effective, err := s.effectiveSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	triggerDefinitionFunction := kingbaseCatalogFunction(catalog, "sys_get_triggerdef", "pg_get_triggerdef")
+	query := fmt.Sprintf(`SELECT %s(tg.oid, true)
+FROM %s.%s_trigger tg JOIN %s.%s_class c ON c.oid = tg.tgrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = %s AND c.relname = %s AND NOT tg.tgisinternal ORDER BY tg.tgname`, triggerDefinitionFunction, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var definition string
+		if err := rows.Scan(&definition); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(definition) != "" {
+			result = append(result, definition)
+		}
+	}
+	return result, rows.Err()
+}
+
+func appendDDLStatements(ddl string, statements []string) string {
+	for _, statement := range statements {
+		ddl = appendDDLStatement(ddl, statement)
+	}
+	return ddl
+}
+
+func appendDDLStatement(ddl, statement string) string {
+	ddl = strings.TrimRight(ddl, "\r\n\t ")
+	statement = ensureStatementTerminator(statement)
+	if statement == "" {
+		return ddl
+	}
+	if ddl == "" {
+		return statement
+	}
+	if !strings.HasSuffix(ddl, ";") {
+		ddl += ";"
+	}
+	return ddl + "\n\n" + statement
+}
+
+func ensureStatementTerminator(statement string) string {
+	trimmed := strings.TrimSpace(statement)
+	if trimmed == "" || strings.HasSuffix(trimmed, ";") {
+		return trimmed
+	}
+	return trimmed + ";"
 }
 
 func columnDDLDefinition(column columnInfo) string {

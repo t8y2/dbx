@@ -45,9 +45,10 @@ describe("resolveEditorTheme", () => {
 });
 
 describe("SQL completion theme", () => {
-  it("uses the configurable large radius for the popup container", () => {
+  it("uses the configurable medium radius for the popup container", () => {
     const rules = buildSqlCompletionThemeRules();
 
-    expect(rules[".cm-tooltip.cm-tooltip-autocomplete"]).toMatchObject({ borderRadius: "var(--dbx-radius-lg)" });
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete"]).toMatchObject({ borderRadius: "var(--dbx-radius-md)" });
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li"]).toMatchObject({ borderRadius: "var(--dbx-radius-sm)" });
   });
 });

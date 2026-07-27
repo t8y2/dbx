@@ -20,6 +20,7 @@ export interface SavedOpenTab {
   customTitle?: boolean;
   connectionId: string;
   database: string;
+  catalog?: string;
   schema?: string;
   sql: string;
   originalSql?: string;
@@ -84,6 +85,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.customTitle ? { customTitle: true } : {}),
     connectionId: tab.connectionId,
     database: tab.database,
+    ...(tab.catalog !== undefined ? { catalog: tab.catalog } : {}),
     schema: tab.schema,
     sql: shouldPersistTabSql(tab) ? tab.sql : "",
     // Only round-trip originalSql for plain query tabs (no savedSqlId / externalSqlPath):

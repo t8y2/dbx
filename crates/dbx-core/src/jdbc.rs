@@ -318,6 +318,7 @@ pub fn uninstall_jdbc_plugin(plugins_root: &Path) -> Result<JdbcPluginStatus, St
 
 // ---- System Fonts ----
 
+#[cfg(feature = "system-fonts")]
 pub fn list_system_fonts() -> Vec<String> {
     let source = font_kit::source::SystemSource::new();
     match source.all_families() {
@@ -333,6 +334,11 @@ pub fn list_system_fonts() -> Vec<String> {
         }
         Err(_) => vec![],
     }
+}
+
+#[cfg(not(feature = "system-fonts"))]
+pub fn list_system_fonts() -> Vec<String> {
+    vec![]
 }
 
 // ---- Internal helpers ----

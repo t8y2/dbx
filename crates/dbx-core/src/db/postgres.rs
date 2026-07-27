@@ -3401,6 +3401,24 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
         .collect())
 }
 
+pub async fn list_trigger_definitions(pool: &Pool, schema: &str, table: &str) -> Result<Vec<String>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_trigger_definitions_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).filter(|definition| !definition.trim().is_empty()).collect())
+}
+
+fn postgres_trigger_definitions_sql() -> &'static str {
+    "SELECT pg_catalog.pg_get_triggerdef(t.oid, true) AS trigger_definition \
+     FROM pg_catalog.pg_trigger t \
+     JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND NOT t.tgisinternal \
+     ORDER BY t.tgname, t.oid"
+}
+
 fn postgres_functions_sql(has_proc_prokind: bool) -> &'static str {
     if has_proc_prokind {
         return "SELECT p.proname, \
@@ -5107,6 +5125,14 @@ mod tests {
         assert!(sql.contains("pg_catalog.pg_attribute"));
         assert!(sql.contains("'pg_catalog.pg_proc'::regclass"));
         assert!(sql.contains("attname = 'prosp'"));
+    }
+
+    #[test]
+    fn postgres_trigger_definitions_sql_excludes_internal_triggers() {
+        let sql = postgres_trigger_definitions_sql();
+        assert!(sql.contains("pg_catalog.pg_get_triggerdef(t.oid, true) AS trigger_definition"));
+        assert!(sql.contains("NOT t.tgisinternal"));
+        assert!(sql.contains("ORDER BY t.tgname, t.oid"));
     }
 
     #[test]

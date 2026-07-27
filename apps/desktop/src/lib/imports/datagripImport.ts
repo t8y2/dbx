@@ -1,14 +1,21 @@
-import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
+import { buildSidebarLayoutFromFolderPaths } from "@/lib/sidebar/sidebarLayout";
 
 declare var process: { env: Record<string, string | undefined> } | undefined;
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
+export type DataGripImportResult = {
+  connections: ConnectionConfig[];
+  layout?: SidebarLayout;
+};
+
 export type DataGripImportPayload = {
   format: "datagrip-import";
   dataSources: string;
   dataSourcesLocal?: string;
+  dbForestConfig?: string;
 };
 
 type DataSourceFragment = {
@@ -54,6 +61,8 @@ const driverRefMap: Record<string, DriverProfile> = {
   elasticsearch: { dbType: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", port: 9200, user: "" },
   h2: { dbType: "h2", profile: "h2", label: "H2", port: 9092, user: "sa" },
   snowflake: { dbType: "snowflake", profile: "snowflake", label: "Snowflake", port: 443, user: "" },
+  kingbase: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
+  kingbase8: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
 };
 
 // product name from <database-info product="..."> → dbx profile
@@ -74,6 +83,7 @@ const productMap: Record<string, DriverProfile> = {
   redshift: { dbType: "redshift", profile: "redshift", label: "Redshift", port: 5439, user: "awsuser" },
   elasticsearch: { dbType: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", port: 9200, user: "" },
   snowflake: { dbType: "snowflake", profile: "snowflake", label: "Snowflake", port: 443, user: "" },
+  kingbase: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
 };
 
 // JDBC subprotocol → dbx profile (fallback when driver-ref and product are unknown)
@@ -92,6 +102,8 @@ const subprotocolMap: Record<string, DriverProfile> = {
   duckdb: { dbType: "duckdb", profile: "duckdb", label: "DuckDB", port: 0, user: "" },
   bigquery: { dbType: "bigquery", profile: "bigquery", label: "BigQuery", port: 443, user: "" },
   redshift: { dbType: "redshift", profile: "redshift", label: "Redshift", port: 5439, user: "awsuser" },
+  kingbase: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
+  kingbase8: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
 };
 
 function getNumber(value: string | undefined): number {
@@ -248,6 +260,7 @@ function inferProfile(driverRef: string, subprotocol: string, driverClass: strin
   if (classLower.includes("mongo")) return driverRefMap.mongodb;
   if (classLower.includes("redis")) return driverRefMap.redis;
   if (classLower.includes("clickhouse")) return driverRefMap.clickhouse;
+  if (classLower.includes("kingbase")) return driverRefMap.kingbase;
 
   // 5. Fallback to JDBC
   return { dbType: "jdbc", profile: "jdbc", label: driverClass || "JDBC", port: 0, user: "" };
@@ -320,6 +333,59 @@ function parseDataSourcesLocalXml(xml: string): Map<string, Partial<DataSourceFr
   }
 
   return result;
+}
+
+function parseDbForestGroupPaths(xml: string): Map<string, string> {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.querySelector("parsererror")) return new Map();
+
+  const data = doc.getElementsByTagName("data")[0]?.textContent;
+  if (!data) return new Map();
+
+  const groupRecords = new Map<string, { parentId: string; name: string }>();
+  const connectionRecords: Array<{ uuid: string; parentId: string }> = [];
+  let readingConnections = false;
+
+  for (const rawLine of data.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line === ".") continue;
+    if (/^-{8,}$/.test(line)) {
+      readingConnections = true;
+      continue;
+    }
+
+    const match = line.match(/^(\d+):(\d+):([^:]+)(?::(.*))?$/);
+    if (!match) continue;
+    const [, recordId, parentId, uuidVal, rawName] = match;
+    if (!readingConnections && rawName) {
+      const name = rawName.replace(/^[\u200B\uFEFF]+/, "").trim();
+      if (name) groupRecords.set(recordId, { parentId, name });
+    } else if (readingConnections) {
+      connectionRecords.push({ uuid: uuidVal, parentId });
+    }
+  }
+
+  const groupPathByRecordId = new Map<string, string>();
+  const resolveGroupPath = (recordId: string, visiting = new Set<string>()): string => {
+    const cached = groupPathByRecordId.get(recordId);
+    if (cached) return cached;
+    const group = groupRecords.get(recordId);
+    if (!group || visiting.has(recordId)) return "";
+
+    visiting.add(recordId);
+    const parentPath = group.parentId === "0" ? "" : resolveGroupPath(group.parentId, visiting);
+    visiting.delete(recordId);
+    const path = parentPath ? `${parentPath}/${group.name}` : group.name;
+    groupPathByRecordId.set(recordId, path);
+    return path;
+  };
+
+  const paths = new Map<string, string>();
+  for (const connection of connectionRecords) {
+    const path = resolveGroupPath(connection.parentId);
+    if (path) paths.set(connection.uuid, path);
+  }
+  return paths;
 }
 
 function mergeFragments(shared: Map<string, Partial<DataSourceFragment>>, local: Map<string, Partial<DataSourceFragment>>): DataSourceFragment[] {
@@ -412,12 +478,14 @@ export function isDataGripImportPayload(content: string): boolean {
   }
 }
 
-export function parseDataGripConnections(payload: DataGripImportPayload): ConnectionConfig[] {
+export function parseDataGripImport(payload: DataGripImportPayload): DataGripImportResult {
   const shared = parseDataSourcesXml(payload.dataSources);
   const local = payload.dataSourcesLocal ? parseDataSourcesLocalXml(payload.dataSourcesLocal) : new Map();
   const fragments = mergeFragments(shared, local);
+  const forestGroupPaths = payload.dbForestConfig ? parseDbForestGroupPaths(payload.dbForestConfig) : new Map<string, string>();
 
   const configs: ConnectionConfig[] = [];
+  const connectionGroupPaths = new Map<string, string>();
   const seen = new Set<string>();
 
   for (const fragment of fragments) {
@@ -426,9 +494,22 @@ export function parseDataGripConnections(payload: DataGripImportPayload): Connec
     if (seen.has(key)) continue;
     seen.add(key);
     configs.push(config);
+    const groupPath = forestGroupPaths.get(fragment.uuid) || fragment.groupName;
+    if (groupPath) connectionGroupPaths.set(config.id, groupPath);
   }
 
-  return configs;
+  // DataGrip stores the selected group on each data source rather than in a
+  // separate folder registry, so rebuild the layout from those references.
+  const layout = buildSidebarLayoutFromFolderPaths(
+    configs.map((config) => config.id),
+    new Set(connectionGroupPaths.values()),
+    connectionGroupPaths,
+  );
+  return { connections: configs, layout };
+}
+
+export function parseDataGripConnections(payload: DataGripImportPayload): ConnectionConfig[] {
+  return parseDataGripImport(payload).connections;
 }
 
 /** Returns a map of dedup key (name\0host\0port\0db) → DataGrip UUID for Keychain lookup. */

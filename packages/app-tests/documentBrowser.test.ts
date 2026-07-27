@@ -28,6 +28,7 @@ test("mongo document table passes copy context to the data grid", () => {
   assert.match(source, /const customSaveHandler = computed<CustomSaveHandler>\(\(\) => \(\{[\s\S]*?targetLabel: props\.collection,[\s\S]*?\}\)\);/);
   assert.match(source, /mongo_copy_documents: copyDocuments\.value/);
   assert.match(source, /result\.extended_documents\?\.length === nextDocuments\.length/);
+  assert.match(source, /props\.databaseType === "mongodb" && mongoCopyDocumentsAvailable\.value/);
 });
 
 test("document edit mode toggles whole JSON editing for insert and save", () => {

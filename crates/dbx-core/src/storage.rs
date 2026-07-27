@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
@@ -106,6 +106,9 @@ pub fn maybe_import_user_data_db(
 
 pub struct Storage {
     db: SqliteHandle,
+    /// Path to the SQLite database file (`dbx.db`). Its parent directory is the
+    /// application data dir where dbx-managed state (e.g. `known_hosts`) lives.
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,11 +388,18 @@ const SCHEMA_STATEMENTS: &[&str] = &[
 
 impl Storage {
     pub async fn open(db_path: &Path) -> Result<Self, String> {
+        let path = db_path.to_path_buf();
         let db_path = db_path.to_string_lossy().to_string();
         let db = connect_path_create_if_missing(&db_path).await?;
-        let storage = Self { db };
+        let storage = Self { db, path };
         storage.init_schema().await?;
         Ok(storage)
+    }
+
+    /// Directory containing the SQLite database (`dbx.db`). SSH host keys are
+    /// stored in `<data_dir>/known_hosts` so dbx never touches `~/.ssh`.
+    pub fn data_dir(&self) -> &Path {
+        self.path.parent().unwrap_or_else(|| Path::new("."))
     }
 
     async fn init_schema(&self) -> Result<(), String> {
@@ -1594,21 +1604,6 @@ impl Storage {
             return Ok(Vec::new());
         };
         Ok(array.iter().filter_map(|item| item.as_str().map(|value| value.to_string())).collect())
-    }
-
-    /// Persist the entire structured favorites state (groups + items). Stored
-    /// as a single JSON document so groups and items update atomically.
-    pub async fn save_favorites_state(&self, state: &serde_json::Value) -> Result<(), String> {
-        let mut settings = self.load_app_settings_json().await?;
-        settings.insert("favorites_state".to_string(), state.clone());
-        self.save_app_settings_json(&settings).await
-    }
-
-    /// Load the structured favorites state, returning `None` when nothing has
-    /// been persisted yet. Callers should seed defaults on `None`.
-    pub async fn load_favorites_state(&self) -> Result<Option<serde_json::Value>, String> {
-        let settings = self.load_app_settings_json().await?;
-        Ok(settings.get("favorites_state").cloned())
     }
 
     async fn save_app_state_value(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {

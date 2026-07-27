@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde_json::Value;
 use std::fmt::Write as _;
 
@@ -15,6 +15,12 @@ enum ParsedTemporal {
     DateTime(NaiveDateTime),
     Date(NaiveDate),
     Time(NaiveTime),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExcelTemporalKind {
+    Date,
+    DateTime,
 }
 
 fn temporal_kind(data_type: Option<&str>) -> Option<TemporalKind> {
@@ -120,6 +126,40 @@ fn parse_temporal(value: &str, preferred_pattern: Option<&str>) -> Option<Parsed
         .filter(|pattern| !pattern.trim().is_empty())
         .and_then(|pattern| parse_with_pattern(value, pattern))
         .or_else(|| parse_known_temporal(value))
+}
+
+pub(crate) fn excel_temporal_serial(
+    value: &str,
+    data_type: Option<&str>,
+    preferred_pattern: Option<&str>,
+) -> Option<(f64, ExcelTemporalKind)> {
+    let kind = match temporal_kind(data_type)? {
+        TemporalKind::Date => ExcelTemporalKind::Date,
+        TemporalKind::DateTime => ExcelTemporalKind::DateTime,
+        // Excel cannot retain a timezone in a numeric date cell, so preserve
+        // timezone-bearing and time-only values as text.
+        TemporalKind::DateTimeWithTimeZone | TemporalKind::Time => return None,
+    };
+    let parsed = parse_temporal(value.trim(), preferred_pattern)?;
+    let (date, time) = match (kind, parsed) {
+        (ExcelTemporalKind::Date, ParsedTemporal::Date(date)) => (date, NaiveTime::default()),
+        (ExcelTemporalKind::Date, ParsedTemporal::DateTime(value)) => (value.date(), value.time()),
+        (ExcelTemporalKind::DateTime, ParsedTemporal::Date(date)) => (date, NaiveTime::default()),
+        (ExcelTemporalKind::DateTime, ParsedTemporal::DateTime(value)) => (value.date(), value.time()),
+        (_, ParsedTemporal::Zoned(_) | ParsedTemporal::Time(_)) => return None,
+    };
+    let excel_min_date = NaiveDate::from_ymd_opt(1900, 1, 1)?;
+    if date < excel_min_date {
+        return None;
+    }
+    let epoch = NaiveDate::from_ymd_opt(1899, 12, 31)?;
+    let mut serial = date.signed_duration_since(epoch).num_days() as f64;
+    // Excel's 1900 date system retains the historical fake 1900-02-29.
+    if date >= NaiveDate::from_ymd_opt(1900, 3, 1)? {
+        serial += 1.0;
+    }
+    let seconds = time.num_seconds_from_midnight() as f64 + f64::from(time.nanosecond()) / 1_000_000_000.0;
+    Some((serial + seconds / 86_400.0, kind))
 }
 
 fn format_parsed(parsed: ParsedTemporal, pattern: &str) -> Option<String> {

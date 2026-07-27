@@ -20,7 +20,6 @@ import {
   Network,
   Server,
   Pin,
-  Star,
   Search,
   Plus,
   ScrollText,
@@ -29,6 +28,7 @@ import {
   Check,
   UsersRound,
   CalendarClock,
+  Gauge,
   Lock,
   Archive,
   Square,
@@ -45,7 +45,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
-import { canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -61,8 +61,9 @@ import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 // --- Drag and Drop ---
-import { useDragSort, type DropPosition } from "@/composables/useDragSort";
+import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
+import { treeNodePinKey } from "@/lib/app/pinnedItems";
 
 const { t } = useI18n();
 
@@ -73,8 +74,6 @@ const rowRef = ref<HTMLElement>();
 const trailingCommentLayoutRef = ref<HTMLElement>();
 
 const trailingCommentLeadingRef = ref<HTMLElement>();
-
-const favoriteGroupLabelRef = ref<HTMLElement>();
 
 const trailingCommentMaxWidth = ref(0);
 
@@ -247,6 +246,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-sky-500" };
     case "etcd-root":
       return { icon: Database, colorClass: "text-sky-500" };
+    case "etcd-dashboard":
+      return { icon: Gauge, colorClass: "text-sky-500" };
     case "zookeeper-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "mongo-db":
@@ -298,10 +299,6 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-violet-500" };
     case "extension":
       return { icon: Package, colorClass: "text-violet-400" };
-    case "favorites":
-      return { icon: Star, colorClass: "text-amber-500" };
-    case "favorites-group":
-      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-amber-400" };
     case "load-more":
       return { icon: Plus, colorClass: "text-primary" };
     default:
@@ -324,7 +321,6 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-types",
   "group-partitions",
   "group-extensions",
-  "favorites",
 ]);
 
 function isGroupLabel(node: TreeNode): boolean {
@@ -346,6 +342,18 @@ function visibleLabel(node: TreeNode): string {
     return withValidity(sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes));
   }
   return withValidity(displayLabel(node));
+}
+
+function hasActiveTableNameFilter(node: TreeNode): boolean {
+  if (node.type !== "group-tables" || !node.connectionId || !node.database) return false;
+  const filter = connectionStore.tableNameFilterForScope({
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    nodeKind: node.type,
+    catalog: node.catalog,
+  });
+  return !!filter && (filter.includePatterns.length > 0 || filter.excludePatterns.length > 0);
 }
 
 type DetailTooltipRow = {
@@ -443,23 +451,12 @@ const detailTooltip = computed(() => {
     return { rows };
   }
   const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
-  const isFavoritable = node.type === "table" || node.type === "view" || node.type === "materialized_view";
-  if (!comment && !isFavoritable) return null;
-  if (comment && node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column") return null;
-  const rows: DetailTooltipRow[] = [{ label: t("connection.name"), value: visibleLabel(node) }];
-  if (comment) {
-    rows.push({ label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true });
-  }
-  // Show the favorited item's note alongside the comment. This is the only
-  // way users see notes in the tree without adding a second line per row,
-  // which would push the existing comment out of the layout.
-  if (isFavoritable && node.connectionId) {
-    const note = connectionStore.getFavoriteNote(`${node.connectionId}:fav:v1:${encodeURIComponent(JSON.stringify([node.database || "", node.schema || "", node.catalog || "", node.type, node.objectName || node.tableName || node.label, node.signature || "", node.id]))}`);
-    if (note) {
-      rows.push({ label: t("contextMenu.favoritesGroup.noteLabel"), value: cleanTooltipValue(note), multiline: true });
-    }
-  }
-  return { rows: rows.filter((row) => row.value) };
+  if (!comment || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
+  const rows: DetailTooltipRow[] = [
+    { label: t("connection.name"), value: visibleLabel(node) },
+    { label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true },
+  ].filter((row) => row.value);
+  return { rows };
 });
 
 function isTooltipDisabled(): boolean {
@@ -566,7 +563,11 @@ const canExpand = computed(() =>
 const isPinned = computed(() => activeNode.value.pinned || connectionStore.isTreeNodePinned(activeNode.value));
 
 const isNodeDefaultDatabase = computed(
-  () => (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
+  () =>
+    (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") &&
+    !!activeNode.value.connectionId &&
+    typeof activeNode.value.database === "string" &&
+    connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
 );
 
 const trailingComment = computed(() => {
@@ -632,6 +633,11 @@ function formattedObjectStorage(): string {
 
 const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" ? props.commentLabelWidth : undefined));
 
+function alignedCommentLeadingStyle(): { width: string } | undefined {
+  const width = alignedCommentLeadingWidth(alignedCommentLabelWidth.value, canTreeNodePin(activeNode.value.type));
+  return width === undefined ? undefined : { width: `${width}px` };
+}
+
 function hasTrailingMetadata(): boolean {
   return !!trailingComment.value || !!formattedObjectStorage();
 }
@@ -640,7 +646,7 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.valu
 
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 
-const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata() }));
+const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata(), hasInlineAction: isPinned.value }));
 
 watch(() => [isRightAlignedComment(), visibleLabel(activeNode.value), trailingComment.value, trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
@@ -775,20 +781,27 @@ function finishRenameGroup() {
   connectionStore.renameConnectionGroup(activeNode.value.id, trimmed);
 }
 
+const PINNED_TREE_NODE_DRAG_TYPE = "__pinned-tree-node__";
+
+function pinnedSortKey(): string {
+  return treeNodePinKey(activeNode.value);
+}
+
+function canDragPinnedOrder(): boolean {
+  return isPinned.value && !isNodeDefaultDatabase.value && !props.dragDisabled;
+}
+
 const {
   state: dragState,
   startDrag,
   updateTarget,
   clearTarget,
-} = useDragSort((draggedId, draggedType, targetId, position) => {
-  // Favorites reuse the drag-sort channel but use the explicit "reorderFavorite"
-  // store action so the structured FavoritesState stays consistent.
-  if (draggedType === "favorites-item") {
-    const targetIndex = resolveFavoriteDropIndex(draggedId, targetId, position);
-    if (targetIndex < 0) return;
-    connectionStore.reorderFavorite(draggedId, targetIndex);
+} = useDragSort((draggedId, targetId, position) => {
+  if (dragState.draggedType === PINNED_TREE_NODE_DRAG_TYPE) {
+    connectionStore.reorderPinnedTreeNodes(draggedId, targetId, position);
     return;
   }
+
   // If the grabbed row is part of a multi-selection, move all selected rows
   // together; otherwise just the grabbed one (issue #681).
   const selected = connectionStore.selectedTreeNodeIds;
@@ -796,57 +809,50 @@ const {
   connectionStore.reorderSidebarEntries(draggedIds, targetId, position);
 });
 
-const isFavoriteDraggable = computed(() => {
-  if (props.dragDisabled) return false;
-  const node = activeNode.value;
-  if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return false;
-  const key = connectionStore.favoriteKeyForNode(node);
-  return !!key && connectionStore.isFavoritedKey(key);
-});
-
 const isDraggable = computed(() => {
   if (props.dragDisabled) return false;
-  if (isFavoriteDraggable.value) return true;
   return activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
 });
 
+function isPinnedOrderDrag(): boolean {
+  return dragState.active && dragState.draggedType === PINNED_TREE_NODE_DRAG_TYPE;
+}
+
 const dragVisual = computed(() => {
-  const isDropTarget = isDraggable.value;
+  const targetId = isPinnedOrderDrag() ? pinnedSortKey() : activeNode.value.id;
+  const isDropTarget = isPinnedOrderDrag() ? connectionStore.isPinnedTreeNodeReorderTarget(pinnedSortKey()) : activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
+
   return {
     isDropTarget,
-    showBefore: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "before",
-    showAfter: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "after",
-    showInside: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "inside",
-    dragging: dragState.active && dragState.draggedId === activeNode.value.id,
+    showBefore: dragState.active && dragState.targetId === targetId && dragState.dropPosition === "before",
+    showAfter: dragState.active && dragState.targetId === targetId && dragState.dropPosition === "after",
+    showInside: !isPinnedOrderDrag() && dragState.active && dragState.targetId === targetId && dragState.dropPosition === "inside",
+    dragging: dragState.active && dragState.draggedId === targetId,
   };
 });
 
-/** Convert a (draggedId, targetId, position) drop into a target index inside
- *  the same group. Returns -1 when the drop should be ignored (different
- *  groups, missing siblings, etc.). */
-function resolveFavoriteDropIndex(draggedId: string, targetId: string, position: DropPosition): number {
-  const draggedItem = connectionStore.getFavoriteItemForKey(draggedId);
-  if (!draggedItem) return -1;
-  const siblings = connectionStore.getFavoriteSiblingsForKey(draggedId);
-  if (siblings.index < 0) return -1;
-  // The drop handler passes the target's tree node id (e.g. `c:a:t1`) — map
-  // it back to the structured favorite key so we can look up the group.
-  const targetKey = connectionStore.favoriteKeyForNode({ ...activeNode.value, id: targetId });
-  if (!targetKey) return -1;
-  const targetItem = connectionStore.getFavoriteItemForKey(targetKey);
-  // Drops on the group subnode fall back to the group's edge; drops on
-  // missing items are ignored.
-  if (targetKey === "__group__") {
-    return position === "before" ? 0 : Math.max(0, siblings.items.length - 1);
+function startPinnedOrderDrag(event: MouseEvent) {
+  if (event.button !== 0 || !canDragPinnedOrder()) return;
+  const draggedKey = pinnedSortKey();
+  connectionStore.beginPinnedTreeNodeReorder(draggedKey);
+  startDrag(event, draggedKey, PINNED_TREE_NODE_DRAG_TYPE, {
+    autoScroll: true,
+    scrollContainer: rowRef.value?.closest<HTMLElement>(".connection-tree-scroller") ?? null,
+    onEnd: connectionStore.endPinnedTreeNodeReorder,
+  });
+}
+
+function updateTreeDragTarget(event: MouseEvent) {
+  if (!dragState.active || !dragVisual.value.isDropTarget) return;
+  if (isPinnedOrderDrag()) {
+    updateTarget(event, pinnedSortKey(), PINNED_TREE_NODE_DRAG_TYPE);
+    return;
   }
-  if (!targetItem || targetItem.groupId !== draggedItem.groupId) return -1;
-  const targetIndexInList = siblings.items.findIndex((entry) => entry.key === targetKey);
-  if (targetIndexInList < 0) return -1;
-  let next = position === "before" ? targetIndexInList : targetIndexInList + 1;
-  // Removing the dragged item before computing the insert position shifts
-  // the list left by one for every later sibling.
-  if (siblings.index < targetIndexInList) next -= 1;
-  return Math.max(0, Math.min(next, siblings.items.length - 1));
+  updateTarget(event, activeNode.value.id, activeNode.value.type);
+}
+
+function clearTreeDragTarget() {
+  clearTarget(isPinnedOrderDrag() ? pinnedSortKey() : activeNode.value.id);
 }
 
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
@@ -971,12 +977,7 @@ function startTableReferenceMouseDrag(event: MouseEvent) {
 }
 
 function onRowMouseDown(event: MouseEvent) {
-  if (isFavoriteDraggable.value) {
-    // Drag the favorite by its structured key so the drop handler can look
-    // it up without re-deriving the fav:v1 key format from a tree node.
-    const favKey = connectionStore.favoriteKeyForNode(activeNode.value);
-    if (favKey) startDrag(event, favKey, "favorites-item");
-  } else if (isDraggable.value) {
+  if (isDraggable.value) {
     startDrag(event, activeNode.value.id, activeNode.value.type);
   } else if (canDragTableReference.value) {
     startTableReferenceMouseDrag(event);
@@ -1120,10 +1121,10 @@ function onKeydown(event: KeyboardEvent) {
         @dblclick="onDoubleClick"
         @keydown="onKeydown"
         @mousedown="onRowMouseDown"
-        @mousemove="dragVisual.isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
+        @mousemove="updateTreeDragTarget"
         @mouseenter="handleMouseEnter"
         @mouseleave="
-          clearTarget(node.id);
+          clearTreeDragTarget();
           handleMouseLeave();
         "
       >
@@ -1141,11 +1142,7 @@ function onKeydown(event: KeyboardEvent) {
         <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
         <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
         <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
-          <div
-            ref="trailingCommentLeadingRef"
-            :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'"
-            :style="alignedCommentLabelWidth ? { width: `${alignedCommentLabelWidth}px` } : undefined"
-          >
+          <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">
             <input
               v-if="isRenamingGroup"
               ref="renameInputRef"
@@ -1157,6 +1154,19 @@ function onKeydown(event: KeyboardEvent) {
               @click.stop
             />
             <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+            <button
+              v-if="canDragPinnedOrder()"
+              type="button"
+              class="flex h-4 w-4 shrink-0 cursor-grab items-center justify-center rounded-sm text-primary hover:bg-primary/10 active:cursor-grabbing"
+              :aria-label="t('contextMenu.reorderPinned')"
+              :title="t('contextMenu.reorderPinned')"
+              @mousedown.stop="startPinnedOrderDrag"
+              @click.stop.prevent
+              @dblclick.stop.prevent
+            >
+              <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
+            </button>
+            <Pin v-else-if="isPinned" class="h-3 w-3 shrink-0 fill-current text-primary" aria-hidden="true" />
             <ProductionContextBadge v-if="showProductionBadge" compact />
             <span
               v-if="
@@ -1164,7 +1174,7 @@ function onKeydown(event: KeyboardEvent) {
                 node.objectCount != null
               "
               class="text-muted-foreground text-[10px] shrink-0"
-              >{{ node.objectCount }}</span
+              >{{ node.objectCount }}<span v-if="hasActiveTableNameFilter(node)"> · {{ t("tree.tableNameFilterActive") }}</span></span
             >
             <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
               {{ t("editor.defaultDatabase") }}
@@ -1179,13 +1189,11 @@ function onKeydown(event: KeyboardEvent) {
             :style="{ marginLeft: `${trailingCommentGapPx}px`, maxWidth: `${trailingCommentMaxWidth}px` }"
             >{{ trailingComment }}</span
           >
-          <span v-if="resolveFavoriteGroupLabel()" ref="favoriteGroupLabelRef" class="sidebar-favorite-group-label shrink-0 truncate" :class="{ 'ml-auto': !trailingComment }" :title="resolveFavoriteGroupLabel() ?? undefined">{{ resolveFavoriteGroupLabel() }}</span>
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
-        <Pin v-if="isPinned" class="w-3 h-3 shrink-0 text-primary fill-current" aria-hidden="true" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
         <button
           v-if="isConnecting"
@@ -1249,32 +1257,6 @@ function onKeydown(event: KeyboardEvent) {
   font-size: 14px;
   font-weight: 500;
   opacity: 1;
-}
-
-/* Small tag rendered after the trailing comment to show which favorites
- * group the table/view belongs to. Uses an outlined pill so it stays
- * visually distinct from the muted comment text without dominating the
- * row. */
-.sidebar-favorite-group-label {
-  display: inline-flex;
-  align-items: center;
-  height: 14px;
-  max-width: 120px;
-  padding: 0 6px;
-  border-radius: 9999px;
-  border: 1px solid hsl(var(--primary) / 0.45);
-  background-color: hsl(var(--primary) / 0.08);
-  color: hsl(var(--primary));
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 500;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
-}
-:root.dark .sidebar-favorite-group-label {
-  background-color: hsl(var(--primary) / 0.18);
-  border-color: hsl(var(--primary) / 0.55);
 }
 
 .tree-item-connection-tint {

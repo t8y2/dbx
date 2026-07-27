@@ -3,7 +3,6 @@ import { computed, nextTick, watch, onBeforeUnmount, inject, reactive, shallowRe
 import { createRoutedSidebarDialogController } from "./sidebarDialogControllerRouting";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
-import { useFavoriteEditDialog } from "@/composables/useFavoriteEditDialog";
 import { useSidebarConnectionMutationRuntime } from "@/composables/useSidebarConnectionMutationRuntime";
 import { useSidebarDatabaseSpecificMutationRuntime } from "@/composables/useSidebarDatabaseSpecificMutationRuntime";
 import { useSidebarTableMutationRuntime } from "@/composables/useSidebarTableMutationRuntime";
@@ -13,6 +12,7 @@ import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import {
   Database,
+  ChevronsDown,
   FolderOpen,
   Trash2,
   TerminalSquare,
@@ -25,15 +25,7 @@ import {
   Plug,
   Unplug,
   Pin,
-  Star,
-  StarOff,
   ArrowRightLeft,
-  ChevronUp,
-  ChevronDown,
-  ChevronsUp,
-  ChevronsDown,
-  NotebookPen,
-  Notebook,
   Download,
   Upload,
   FileCode,
@@ -72,8 +64,7 @@ import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/d
 import * as api from "@/lib/backend/api";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
-import { extractFavoriteGroupIdFromSubnode, favoritesNodeParentId, objectTypesForGroupNode } from "@/lib/table/tableTree";
-import { loadFavoritesParentContent } from "@/lib/app/favorites/parentLoading";
+import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
@@ -86,6 +77,7 @@ import {
   editableDatabasePropertyGroups,
   supportsDatabaseCreation,
   supportsDatabaseSearch,
+  supportsConnectionQueryActions,
   supportsFieldLineage,
   supportsObjectBrowserTreeNode,
   supportsSchemaDiagram,
@@ -323,6 +315,7 @@ const emit = defineEmits<{
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
   "open-visible-schemas": [node: TreeNode];
+  "open-table-name-filters": [node: TreeNode];
   "open-danger-dialog": [request: SidebarDangerDialogRequest];
   "open-dialog-controller": [controller: Record<string, any> | null];
   "open-install-extension": [node: TreeNode];
@@ -347,8 +340,6 @@ const {
   cancelConnectionAttempt,
   closeDatabaseConnection,
   isPinned,
-  isFavorited,
-  isFavoritable,
   isNodeDefaultDatabase,
   isConnected,
   isConnecting,
@@ -477,6 +468,9 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-indexes",
   "group-fkeys",
   "group-triggers",
+  "group-constraints",
+  "group-table-partitions",
+  "group-table-subpartitions",
   "group-tables",
   "group-views",
   "group-materialized-views",
@@ -487,15 +481,10 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-types",
   "group-partitions",
   "group-extensions",
-  "favorites",
 ]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
-}
-
-function isFavoritesNode(node: TreeNode): boolean {
-  return node.type === "favorites";
 }
 
 async function toggle() {
@@ -519,51 +508,6 @@ async function toggle() {
 
   if (node.type === "group-partitions") {
     node.isExpanded = !node.isExpanded;
-    emit("node-toggled", node, wasExpanded);
-    return;
-  }
-
-  // Favorites placeholders and their sub-groups have no async loader — they
-  // render straight from the controller state, so all the toggle path needs
-  // to do is flip the local `isExpanded` flag and (for sub-groups) persist
-  // the new collapsed state.
-  //
-  // Edge case: when the user expands the placeholder for the very first
-  // time (before they have ever expanded the parent database/schema), the
-  // source tree still has no tables — `collectFavoritedTreeNodes` walks an
-  // empty subtree and the placeholder's children end up empty. Load the
-  // parent content first so the favorites can resolve to actual nodes
-  // before the user opens the placeholder.
-  //
-  // Even when the parent has already been expanded (so its tables live in
-  // the source tree), the placeholder itself is only attached by
-  // `setChildren` with an empty `children` array — nothing populates those
-  // children until the next state change triggers a refresh pass. We
-  // therefore always run `refreshFavoritesNodesInTree` on first expansion
-  // so the user sees their favorited tables without having to toggle a
-  // favorite first.
-  if (node.type === "favorites" || node.type === "favorites-group") {
-    if (!wasExpanded && node.type === "favorites") {
-      const parentId = favoritesNodeParentId(node);
-      if (parentId && node.connectionId && node.database !== undefined) {
-        if (!connectionStore.isTreeNodeChildrenLoaded(parentId)) {
-          await loadFavoritesParentContent(node, connectionStore);
-        }
-        // The parent-content load above may have replaced the placeholder's
-        // children (via `setChildren` → `ensureFavoritesForParentChildren`),
-        // but the inner favorites children still need a refresh pass so the
-        // newly-loaded tables surface inside the placeholder. We also run
-        // this when the parent was already loaded — the placeholder is
-        // attached with an empty `children` array, so it has to be hydrated
-        // before the first expand can show the favorites.
-        connectionStore.refreshFavoritesNodesInTree();
-      }
-    }
-    node.isExpanded = !node.isExpanded;
-    if (node.type === "favorites-group") {
-      const groupId = extractFavoriteGroupIdFromSubnode(node);
-      if (groupId) connectionStore.setFavoriteGroupCollapsed(groupId, !node.isExpanded);
-    }
     emit("node-toggled", node, wasExpanded);
     return;
   }
@@ -637,6 +581,10 @@ async function toggle() {
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:keys`;
       queryStore.createTab(node.connectionId, "", tabTitle, "etcd");
       refreshActiveKvBrowserAfterOpen("etcd", node.connectionId);
+    } else if (node.type === "etcd-dashboard" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
+      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:dashboard`;
+      queryStore.createTab(node.connectionId, "", tabTitle, "etcd-dashboard");
     } else if (node.type === "zookeeper-root" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "ZooKeeper"}:keys`;
@@ -709,6 +657,14 @@ async function toggle() {
       await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-fkeys" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
+    } else if (node.type === "group-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
+      await connectionStore.loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
+    } else if (node.type === "group-constraints" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
+      await connectionStore.loadConstraints(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
+    } else if (node.type === "group-table-partitions" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
+      await connectionStore.loadPartitions(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
+    } else if (node.type === "group-table-subpartitions" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
+      await connectionStore.loadSubpartitions(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-extensions" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await connectionStore.refreshTreeNode(node);
     }
@@ -1105,7 +1061,9 @@ async function openServerDashboard() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
-    if (currentDatabaseType() === "postgres") {
+    if (currentDatabaseType() === "nacos") {
+      queryStore.openNacosDashboard(node.connectionId);
+    } else if (currentDatabaseType() === "postgres") {
       queryStore.openPostgresDashboard(node.connectionId);
     } else {
       queryStore.openMysqlDashboard(node.connectionId);
@@ -1150,7 +1108,7 @@ async function newQuery() {
         await newSelectTemplate();
         return;
       }
-      queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema);
+      queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog);
       return;
     }
     const connection = connectionStore.getConfig(node.connectionId);
@@ -1318,104 +1276,6 @@ async function refresh() {
   }
 }
 
-function clearFavoritesForActive() {
-  const node = activeNode.value;
-  if (!isFavoritesNode(node) || !node.connectionId || node.database === undefined) return;
-  const removed = connectionStore.clearFavoritesForDatabase(node.connectionId, node.database ?? "");
-  if (removed > 0) {
-    toast(t("contextMenu.clearFavorites"), 2000);
-  }
-}
-
-const favoriteEditDialog = useFavoriteEditDialog();
-
-function favoriteKeyForNode(node: TreeNode): string | null {
-  if (!node.connectionId) return null;
-  return connectionStore.getFavoriteKeyForNode(node);
-}
-
-function openNoteDialogForActive() {
-  const node = activeNode.value;
-  if (!isFavorited.value) return;
-  const key = favoriteKeyForNode(node);
-  if (!key) return;
-  const note = connectionStore.getFavoriteNote(key) ?? "";
-  favoriteEditDialog.openNoteEdit(key, note);
-}
-
-function openCreateGroupDialogForActive() {
-  const node = activeNode.value;
-  if (!isFavoritesNode(node) || !node.connectionId || node.database === undefined) return;
-  favoriteEditDialog.openGroupCreate(node.connectionId, node.database);
-}
-
-function pickGroupToRename(groupId: string) {
-  const group = connectionStore.getFavoriteGroupById(groupId);
-  if (!group) return;
-  favoriteEditDialog.openGroupRename(group.id, group.connectionId, group.database, group.name);
-}
-
-function pickGroupToDelete(groupId: string) {
-  const group = connectionStore.getFavoriteGroupById(groupId);
-  if (!group) return;
-  if (!window.confirm(t("contextMenu.favoritesGroup.deleteGroupConfirm"))) return;
-  connectionStore.deleteFavoriteGroup(group.id);
-}
-
-function moveFavoriteUp() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.shiftFavoriteOrder(key, -1);
-}
-
-function moveFavoriteDown() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.shiftFavoriteOrder(key, 1);
-}
-
-function moveFavoriteToTop() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.moveFavoriteToEdge(key, "top");
-}
-
-function moveFavoriteToBottom() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.moveFavoriteToEdge(key, "bottom");
-}
-
-function removeFavorite() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.removeFavorite(key);
-}
-
-/** Add the active node to a chosen group, or move it there when it is
- *  already favorited. Clicking the current group in the submenu removes
- *  the item so a single menu handles "add / move / remove" in one place. */
-function addOrMoveFavoriteToGroup(groupId: string) {
-  const node = activeNode.value;
-  const key = favoriteKeyForNode(node);
-  if (!key) {
-    connectionStore.addFavoriteToGroup(node, groupId);
-    return;
-  }
-  const currentGroup = connectionStore.getFavoriteGroupForKey(key);
-  if (currentGroup?.id === groupId) {
-    connectionStore.removeFavorite(key);
-    return;
-  }
-  connectionStore.moveFavoriteToGroup(key, groupId);
-}
-
-function clearFavoriteNote() {
-  const key = favoriteKeyForNode(activeNode.value);
-  if (!key) return;
-  connectionStore.updateFavoriteNote(key, "");
-}
-
 async function copyName() {
   const node = activeNode.value;
   updateTreeClipboardForNodes([node]);
@@ -1433,7 +1293,14 @@ async function copySelectedNames() {
   const connectionTargets = selectedConnectionClipboardTargets(activeNode.value, nodes);
   if (connectionTargets.length > 0) {
     const copiedCount = connectionStore.copyConnectionsToTreeClipboard(connectionTargets.map((node) => node.connectionId));
-    if (copiedCount > 0) toast(t("connection.copied"), 2000);
+    if (copiedCount > 0) {
+      try {
+        await copyToClipboard(connectionTargets.map(copyNameForTreeNode).join("\n"));
+      } catch {
+        /* system clipboard copy is best-effort */
+      }
+      toast(t("connection.copied"), 2000);
+    }
     return;
   }
   updateTreeClipboardForNodes(nodes);
@@ -1984,6 +1851,7 @@ async function confirmRenameObject() {
   const newName = renameObjectName.value.trim();
   if (!objectType || !newName || newName === node.label || !node.connectionId || !node.database) return;
   renameObjectError.value = "";
+  let renameApplied = false;
   try {
     const dbType = databaseTypeForNode(node);
     await connectionStore.ensureConnected(node.connectionId);
@@ -2011,10 +1879,18 @@ async function confirmRenameObject() {
       });
       await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     }
+    renameApplied = true;
     toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
     showRenameObjectDialog.value = false;
+    const renamedNode: TreeNode = { ...node, label: newName, objectName: newName, tableName: newName };
     await refreshTableList(node);
+    connectionStore.replacePinnedTreeNode(node, renamedNode);
   } catch (e: any) {
+    if (renameApplied) {
+      // The database mutation succeeded even when metadata refresh did not;
+      // remove the old pin instead of allowing it to revive later.
+      connectionStore.removePinnedTreeNodes([node]);
+    }
     renameObjectError.value = e?.message || String(e);
   }
 }
@@ -2031,6 +1907,9 @@ async function confirmDropObject() {
     const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "materialized_view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
     toast(t(msgKey, { name: node.label }), 3000);
     closeDroppedTableObjectTabsForNode(node);
+    // Procedure/function drops refresh their parent instead of removing this
+    // node directly, so clear their pin before the old identity can survive.
+    connectionStore.removePinnedTreeNodes([node]);
     if (node.type === "view" || node.type === "materialized_view") {
       connectionStore.removeTreeNode(node.id);
       releaseActiveNodeReference([node.id]);
@@ -2948,7 +2827,7 @@ async function confirmPasteTable() {
   showPasteDialog.value = false;
   let successCount = 0;
   let failCount = 0;
-  const refreshedConnections = new Set<string>();
+  const refreshTargets = new Map<string, { connectionId: string; database: string; schema?: string }>();
   for (const entry of entries) {
     const targetName = entry.targetName.trim();
     try {
@@ -2980,13 +2859,22 @@ async function confirmPasteTable() {
       }
       successCount++;
       const refreshKey = `${entry.connectionId}:${entry.database}:${entry.schema || ""}`;
-      if (!refreshedConnections.has(refreshKey)) {
-        refreshedConnections.add(refreshKey);
-        await connectionStore.refreshObjectListTreeNode(entry.connectionId, entry.database, entry.schema);
-      }
+      refreshTargets.set(refreshKey, {
+        connectionId: entry.connectionId,
+        database: entry.database,
+        schema: entry.schema,
+      });
     } catch (e: any) {
       failCount++;
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
+    }
+  }
+  for (const refreshTarget of refreshTargets.values()) {
+    try {
+      await connectionStore.refreshObjectListTreeNode(refreshTarget.connectionId, refreshTarget.database, refreshTarget.schema);
+    } catch (e: any) {
+      failCount++;
+      console.error(`Failed to refresh pasted tables for "${refreshTarget.database}"${refreshTarget.schema ? ` schema "${refreshTarget.schema}"` : ""}:`, e);
     }
   }
   if (failCount === 0) {
@@ -3652,19 +3540,27 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     } else {
       items.push({ label: t("contextMenu.closeConnection"), action: disconnectConnection, icon: Unplug });
     }
-    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: "", separator: true });
+    const supportsQueryActions = supportsConnectionQueryActions(currentDatabaseType());
+    if (supportsQueryActions) {
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    }
     if (currentDatabaseType() === "redis") {
       items.push({ label: t("contextMenu.instanceInfo"), action: openRedisInstanceInfo, icon: Info });
     }
-    const sqlHistoryMenu = savedSqlHistorySubmenu();
-    if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+    if (supportsQueryActions) {
+      const sqlHistoryMenu = savedSqlHistorySubmenu();
+      if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+    }
     if (node.connectionId && connectionSupportsDatabaseUserAdmin(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
     }
-    if (node.connectionId && (connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))) {
+    if (node.connectionId && (currentDatabaseType() === "nacos" || connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))) {
       items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {
@@ -3892,7 +3788,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 5. Redis DB / Mongo DB
-  if (node.type === "etcd-root" || node.type === "zookeeper-root") {
+  if (node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "zookeeper-root") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;
   }
@@ -4218,45 +4114,6 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 9. Group Labels (group-columns, group-tables, etc.)
-  if (isFavoritesNode(node)) {
-    const hasEntries = (node.children?.length ?? 0) > 0;
-    items.push({ label: t("contextMenu.favoritesGroup.newGroup"), action: openCreateGroupDialogForActive, icon: FolderPlus });
-    const groups = node.connectionId && node.database !== undefined ? connectionStore.getFavoriteGroupsForDatabase(node.connectionId, node.database) : [];
-    if (groups.length > 1) {
-      // Submenu lets the user pick which group to operate on. Marking the
-      // currently-active node's parent group (if any) isn't meaningful here
-      // because we're right-clicking the favorites parent itself.
-      items.push({
-        label: t("contextMenu.favoritesGroup.renameGroup"),
-        icon: Pencil,
-        children: groups.map((group) => ({
-          label: group.name,
-          action: () => pickGroupToRename(group.id),
-        })),
-      });
-      items.push({
-        label: t("contextMenu.favoritesGroup.deleteGroup"),
-        icon: Trash2,
-        children: groups.map((group) => ({
-          label: group.name,
-          action: () => pickGroupToDelete(group.id),
-        })),
-      });
-    }
-    if (hasEntries) {
-      items.push({ label: "", separator: true });
-      items.push({
-        label: t("contextMenu.clearFavorites"),
-        action: clearFavoritesForActive,
-        icon: Eraser,
-        variant: "destructive" as const,
-      });
-    } else {
-      items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.favoritesEmptyHint"), disabled: true });
-    }
-    return true;
-  }
   if (isGroupLabel(node)) {
     const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
     const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate;
@@ -4295,6 +4152,13 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
         disabled: node.isLoading,
       });
     }
+    if (node.type === "group-tables") {
+      items.push({
+        label: t("contextMenu.tableNameFilters"),
+        action: () => emit("open-table-name-filters", node),
+        icon: ListFilter,
+      });
+    }
     if (node.type !== "group-partitions") {
       items.push({
         label: t("contextMenu.refreshChildren"),
@@ -4330,49 +4194,6 @@ function treeItemMenuItems(): ContextMenuItem[] {
       action: togglePin,
       icon: Pin,
     });
-    // "Add to Favorites" is always rendered as a submenu listing every group
-    // in the active (connection, database) scope. Picking a group adds the
-    // node (or moves it when already favorited); picking the current group
-    // removes the item so a single menu covers add / move / remove.
-    if (isFavoritable.value && node.connectionId && node.database !== undefined) {
-      const groups = connectionStore.getFavoriteGroupsForDatabase(node.connectionId, node.database);
-      if (groups.length > 0) {
-        const currentKey = favoriteKeyForNode(node);
-        const currentGroup = currentKey ? connectionStore.getFavoriteGroupForKey(currentKey) : null;
-        const groupSubmenu: ContextMenuItem[] = groups.map((group) => {
-          const isCurrent = currentGroup?.id === group.id;
-          return {
-            label: isCurrent ? `✓ ${group.name}` : group.name,
-            action: () => addOrMoveFavoriteToGroup(group.id),
-          };
-        });
-        items.push({ label: t("contextMenu.addToFavorites"), children: groupSubmenu, icon: Star });
-      }
-    }
-    // When the item is already favorited, expose note + sort actions. The
-    // "Move to Group" submenu is intentionally omitted here because the
-    // "Add to Favorites" submenu above already lets the user re-target the
-    // group.
-    if (isFavorited.value) {
-      const key = favoriteKeyForNode(node);
-      if (key) {
-        const note = connectionStore.getFavoriteNote(key) ?? "";
-        const siblings = connectionStore.getFavoriteSiblingsForKey(key);
-        const canMoveUp = siblings.index > 0;
-        const canMoveDown = siblings.index >= 0 && siblings.index < siblings.items.length - 1;
-        items.push({ label: t("contextMenu.favoritesGroup.editNote"), action: openNoteDialogForActive, icon: NotebookPen });
-        if (note) {
-          items.push({ label: t("contextMenu.favoritesGroup.clearNote"), action: clearFavoriteNote, icon: Notebook });
-        }
-        items.push({ label: "", separator: true });
-        if (canMoveUp) items.push({ label: t("contextMenu.favoritesGroup.moveToTop"), action: moveFavoriteToTop, icon: ChevronsUp });
-        if (canMoveUp) items.push({ label: t("contextMenu.favoritesGroup.moveUp"), action: moveFavoriteUp, icon: ChevronUp });
-        if (canMoveDown) items.push({ label: t("contextMenu.favoritesGroup.moveDown"), action: moveFavoriteDown, icon: ChevronDown });
-        if (canMoveDown) items.push({ label: t("contextMenu.favoritesGroup.moveToBottom"), action: moveFavoriteToBottom, icon: ChevronsDown });
-        items.push({ label: "", separator: true });
-        items.push({ label: t("contextMenu.removeFromFavorites"), action: removeFavorite, icon: StarOff });
-      }
-    }
     if (hasTypeMenu.value) items.push({ label: "", separator: true });
   }
   const factoryContext: SidebarMenuFactoryContext = {

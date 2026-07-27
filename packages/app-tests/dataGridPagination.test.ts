@@ -1,6 +1,31 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canGoNextDataGridPage, hasCompleteLocalDataGridResult } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+
+test("estimated display totals do not become pagination bounds", () => {
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      serverKnownTotalRowCount: 10_000_000,
+      totalRowCountIsExact: false,
+    }),
+    undefined,
+  );
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      serverKnownTotalRowCount: 10_000_000,
+      totalRowCountIsExact: true,
+    }),
+    10_000_000,
+  );
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      paginationTotalRowCount: 500,
+      serverKnownTotalRowCount: 10_000_000,
+      totalRowCountIsExact: false,
+    }),
+    500,
+  );
+});
 
 test("first query page is complete when its known total is already loaded", () => {
   assert.equal(

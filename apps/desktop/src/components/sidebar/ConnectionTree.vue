@@ -6,12 +6,12 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import type { ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import type { ObjectSourceKind, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards } from "@/lib/sidebar/sidebarSearchTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { connectionPasteTargetGroupId, selectedConnectionClipboardNodes, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
+import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -24,8 +24,6 @@ import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHan
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
 import TreeItem from "./TreeItem.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
-import { useFavoriteEditDialog } from "@/composables/useFavoriteEditDialog";
-import FavoriteEditDialog from "./FavoriteEditDialog.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -33,6 +31,8 @@ import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { cancelPendingSidebarDataOpen, runSidebarDataOpenImmediately, type SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { codeMirrorSqlDialect } from "@/lib/database/jdbcDialect";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { createSidebarActionTarget, findSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
@@ -41,8 +41,9 @@ import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
-import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNodeComment } from "@/lib/sidebar/sidebarTreeItemLayout";
-import { sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -58,6 +59,7 @@ const pointerInsideTree = ref(false);
 const treeScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
 const plainTreeScrollerRef = ref<HTMLElement | null>(null);
 const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
+const sidebarHorizontalScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarContextMenuRef = ref<{ close: () => void } | null>(null);
 const sidebarContextMenuItems = ref<ContextMenuItem[]>([]);
 const sidebarContextMenuTarget = ref<SidebarActionTarget | null>(null);
@@ -80,6 +82,10 @@ const sidebarVisibleDatabasesTarget = ref<TreeNode | null>(null);
 const sidebarVisibleDatabasesOpen = ref(false);
 const sidebarVisibleSchemasTarget = ref<TreeNode | null>(null);
 const sidebarVisibleSchemasOpen = ref(false);
+const sidebarTableNameFilterTarget = ref<TreeNode | null>(null);
+const sidebarTableNameFilterOpen = ref(false);
+const tableNameFilterIncludeDraft = ref("");
+const tableNameFilterExcludeDraft = ref("");
 let sidebarActionGeneration = 0;
 const sidebarDdlDatabaseType = computed(() => {
   const connectionId = sidebarDdlTarget.value?.connectionId;
@@ -373,7 +379,10 @@ const flatNodes = computed<FlatTreeNode[]>(() =>
 
 const sidebarCommentLabelWidths = shallowRef(new Map<string, number>());
 let sidebarCommentMeasureFrame = 0;
+const sidebarTreeContentWidth = ref(0);
+let sidebarTreeContentMeasureFrame = 0;
 const sidebarTableNameDisplayTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "mongo-collection", "vector-collection", "elasticsearch-index"]);
+const sidebarStorageDisplayTypes = new Set<TreeNodeType>(["database", "table", "materialized_view"]);
 
 function sidebarCommentLabel(node: TreeNode): string {
   const label = sidebarTableNameDisplayTypes.has(node.type) ? sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes) : node.label;
@@ -411,7 +420,51 @@ function scheduleSidebarCommentLabelMeasure() {
   sidebarCommentMeasureFrame = window.requestAnimationFrame(measureSidebarCommentLabelWidths);
 }
 
+function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
+  const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
+  if (mode.startsWith("comment-") && sidebarTreeNodeComment(node)) return true;
+  return mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
+}
+
+const sidebarTreeNaturalWidthItems = computed(() =>
+  flatNodes.value.map(({ depth, node }) => ({
+    depth,
+    label: sidebarCommentLabel(node),
+    usesNaturalWidth: usesFullWidthTreeLabel(node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll, sidebarNodeHasTrailingMetadata(node)),
+    trailingWidth: node.pinned || store.isTreeNodePinned(node) ? 20 : 0,
+  })),
+);
+
+function measureSidebarTreeContentWidth() {
+  sidebarTreeContentMeasureFrame = 0;
+  if (!settingsStore.editorSettings.sidebarAllowHorizontalScroll || typeof document === "undefined" || !rootRef.value) {
+    sidebarTreeContentWidth.value = 0;
+    return;
+  }
+
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return;
+  const style = window.getComputedStyle(rootRef.value);
+  context.font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  sidebarTreeContentWidth.value = sidebarTreeNaturalContentWidth(sidebarTreeNaturalWidthItems.value, (text) => context.measureText(text).width);
+  void nextTick(scheduleSidebarScrollMetricsUpdate);
+}
+
+function scheduleSidebarTreeContentWidthMeasure() {
+  if (typeof window === "undefined") {
+    measureSidebarTreeContentWidth();
+    return;
+  }
+  if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
+  sidebarTreeContentMeasureFrame = window.requestAnimationFrame(measureSidebarTreeContentWidth);
+}
+
 watch([flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarCommentLabelMeasure, {
+  flush: "post",
+  immediate: true,
+});
+
+watch([sidebarTreeNaturalWidthItems, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarTreeContentWidthMeasure, {
   flush: "post",
   immediate: true,
 });
@@ -450,26 +503,31 @@ const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryS
 // component, tracking scroll offset to find the topmost visible database-level
 // ancestor. The overlay reuses <TreeItem>, so collapse/expand comes for free.
 const stickyScrollTop = ref(0);
-const sidebarScrollMetrics = ref({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 });
+const sidebarScrollMetrics = ref({ scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 });
 const isScrollingSidebar = ref(false);
 const isDraggingSidebarScrollbar = ref(false);
+const isDraggingSidebarHorizontalScrollbar = ref(false);
 let sidebarScrollbarResizeObserver: ResizeObserver | null = null;
 let sidebarScrollbarAnimationFrame = 0;
 let sidebarScrollbarDragOffset = 0;
+let sidebarHorizontalScrollbarDragOffset = 0;
 let sidebarScrollingTimer = 0;
 
 function updateSidebarScrollMetrics() {
   const scroller = currentTreeScroller();
   if (!scroller) {
-    sidebarScrollMetrics.value = { scrollTop: 0, clientHeight: 0, scrollHeight: 0 };
+    sidebarScrollMetrics.value = { scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 };
     return;
   }
 
   if (useVirtualTree.value) stickyScrollTop.value = scroller.scrollTop;
   sidebarScrollMetrics.value = {
     scrollTop: scroller.scrollTop,
+    scrollLeft: scroller.scrollLeft,
     clientHeight: scroller.clientHeight,
+    clientWidth: scroller.clientWidth,
     scrollHeight: scroller.scrollHeight,
+    scrollWidth: Math.max(scroller.scrollWidth, sidebarTreeContentWidth.value),
   };
 }
 
@@ -511,6 +569,8 @@ watch(
 
     sidebarScrollbarResizeObserver = new ResizeObserver(scheduleSidebarScrollMetricsUpdate);
     sidebarScrollbarResizeObserver.observe(scroller);
+    const content = scroller.querySelector<HTMLElement>(".connection-tree-content");
+    if (content) sidebarScrollbarResizeObserver.observe(content);
     scheduleSidebarScrollMetricsUpdate();
 
     onCleanup(() => {
@@ -562,21 +622,32 @@ watch(flatNodes, () => {
 });
 
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
+const sidebarTreeScrollerStyle = computed<CSSProperties>(() => ({ "--sidebar-tree-content-width": `${sidebarTreeContentWidth.value}px` }) as CSSProperties);
 
 const hasSidebarVerticalOverflow = computed(() => sidebarScrollMetrics.value.scrollHeight > sidebarScrollMetrics.value.clientHeight + 1);
+const hasSidebarHorizontalOverflow = computed(() => settingsStore.editorSettings.sidebarAllowHorizontalScroll && sidebarScrollMetrics.value.scrollWidth > sidebarScrollMetrics.value.clientWidth + 1);
+
+watch(
+  () => settingsStore.editorSettings.sidebarAllowHorizontalScroll,
+  (enabled) =>
+    void nextTick(() => {
+      const scroller = currentTreeScroller();
+      if (!enabled && scroller) scroller.scrollLeft = 0;
+      scheduleSidebarScrollMetricsUpdate();
+    }),
+  { flush: "post" },
+);
 
 function sidebarScrollbarGeometry() {
   const { scrollTop, clientHeight, scrollHeight } = sidebarScrollMetrics.value;
   const trackHeight = sidebarScrollbarTrackRef.value?.clientHeight ?? Math.max(0, clientHeight - 8);
-  if (trackHeight <= 0 || scrollHeight <= clientHeight) {
-    return { thumbTop: 0, thumbHeight: 0, maxThumbTop: 0, maxScrollTop: 0 };
-  }
-
-  const thumbHeight = Math.max(24, Math.min(trackHeight, (clientHeight / scrollHeight) * trackHeight));
-  const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
-  const maxScrollTop = Math.max(1, scrollHeight - clientHeight);
-  const thumbTop = Math.min(maxThumbTop, Math.max(0, (scrollTop / maxScrollTop) * maxThumbTop));
-  return { thumbTop, thumbHeight, maxThumbTop, maxScrollTop };
+  const { thumbOffset, thumbSize, maxThumbOffset, maxScrollOffset } = calculateSidebarScrollbarGeometry({
+    scrollOffset: scrollTop,
+    viewportSize: clientHeight,
+    contentSize: scrollHeight,
+    trackSize: trackHeight,
+  });
+  return { thumbTop: thumbOffset, thumbHeight: thumbSize, maxThumbTop: maxThumbOffset, maxScrollTop: maxScrollOffset };
 }
 
 const sidebarScrollbarThumbStyle = computed<CSSProperties>(() => {
@@ -640,6 +711,79 @@ function onSidebarScrollbarThumbPointerDown(event: PointerEvent) {
   window.addEventListener("pointercancel", stopSidebarScrollbarDrag);
 }
 
+function sidebarHorizontalScrollbarGeometry() {
+  const { scrollLeft, clientWidth, scrollWidth } = sidebarScrollMetrics.value;
+  const trackWidth = sidebarHorizontalScrollbarTrackRef.value?.clientWidth ?? clientWidth;
+  const { thumbOffset, thumbSize, maxThumbOffset, maxScrollOffset } = calculateSidebarScrollbarGeometry({
+    scrollOffset: scrollLeft,
+    viewportSize: clientWidth,
+    contentSize: scrollWidth,
+    trackSize: trackWidth,
+  });
+  return { thumbLeft: thumbOffset, thumbWidth: thumbSize, maxThumbLeft: maxThumbOffset, maxScrollLeft: maxScrollOffset };
+}
+
+const sidebarHorizontalScrollbarThumbStyle = computed<CSSProperties>(() => {
+  const { thumbLeft, thumbWidth } = sidebarHorizontalScrollbarGeometry();
+  return {
+    width: `${thumbWidth}px`,
+    transform: `translateX(${thumbLeft}px)`,
+  };
+});
+
+function setSidebarHorizontalScrollFromPointer(clientX: number, offset: number) {
+  const scroller = currentTreeScroller();
+  const track = sidebarHorizontalScrollbarTrackRef.value;
+  if (!scroller || !track) return;
+
+  const rect = track.getBoundingClientRect();
+  const { maxThumbLeft, maxScrollLeft } = sidebarHorizontalScrollbarGeometry();
+  if (maxThumbLeft <= 0) return;
+
+  const thumbLeft = Math.min(maxThumbLeft, Math.max(0, clientX - rect.left - offset));
+  scroller.scrollLeft = (thumbLeft / maxThumbLeft) * maxScrollLeft;
+  updateSidebarScrollMetrics();
+}
+
+function stopSidebarHorizontalScrollbarDrag() {
+  isDraggingSidebarHorizontalScrollbar.value = false;
+  window.removeEventListener("pointermove", onSidebarHorizontalScrollbarPointerMove);
+  window.removeEventListener("pointerup", stopSidebarHorizontalScrollbarDrag);
+  window.removeEventListener("pointercancel", stopSidebarHorizontalScrollbarDrag);
+}
+
+function onSidebarHorizontalScrollbarPointerMove(event: PointerEvent) {
+  event.preventDefault();
+  setSidebarHorizontalScrollFromPointer(event.clientX, sidebarHorizontalScrollbarDragOffset);
+}
+
+function onSidebarHorizontalScrollbarTrackPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const { thumbWidth } = sidebarHorizontalScrollbarGeometry();
+  sidebarHorizontalScrollbarDragOffset = thumbWidth / 2;
+  setSidebarHorizontalScrollFromPointer(event.clientX, sidebarHorizontalScrollbarDragOffset);
+  isDraggingSidebarHorizontalScrollbar.value = true;
+  window.addEventListener("pointermove", onSidebarHorizontalScrollbarPointerMove);
+  window.addEventListener("pointerup", stopSidebarHorizontalScrollbarDrag);
+  window.addEventListener("pointercancel", stopSidebarHorizontalScrollbarDrag);
+}
+
+function onSidebarHorizontalScrollbarThumbPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const track = sidebarHorizontalScrollbarTrackRef.value;
+  if (!track) return;
+
+  const rect = track.getBoundingClientRect();
+  const { thumbLeft } = sidebarHorizontalScrollbarGeometry();
+  sidebarHorizontalScrollbarDragOffset = event.clientX - rect.left - thumbLeft;
+  isDraggingSidebarHorizontalScrollbar.value = true;
+  window.addEventListener("pointermove", onSidebarHorizontalScrollbarPointerMove);
+  window.addEventListener("pointerup", stopSidebarHorizontalScrollbarDrag);
+  window.addEventListener("pointercancel", stopSidebarHorizontalScrollbarDrag);
+}
+
 const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
 
 provide(sidebarTreeContextKey, {
@@ -663,29 +807,6 @@ function bindSidebarTreeRuntimeHost(host: Element | ComponentPublicInstance | nu
 const pendingRenameGroupId = ref<string | null>(null);
 const highlightedNodeId = ref<string | null>(null);
 let highlightTimer: number | undefined;
-
-const favoriteEditDialog = useFavoriteEditDialog();
-const favoriteEditDialogState = favoriteEditDialog.state;
-
-function onFavoriteEditSubmit(value: string) {
-  const dialogState = favoriteEditDialogState.value;
-  if (!dialogState) return;
-  if (dialogState.mode === "note" && dialogState.favoriteKey) {
-    store.updateFavoriteNote(dialogState.favoriteKey, value);
-  } else if (dialogState.mode === "group" && dialogState.connectionId && dialogState.database !== undefined) {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      favoriteEditDialog.close();
-      return;
-    }
-    if (dialogState.groupId) {
-      store.renameFavoriteGroup(dialogState.groupId, trimmed);
-    } else {
-      store.createFavoriteGroup(dialogState.connectionId, dialogState.database, trimmed);
-    }
-  }
-  favoriteEditDialog.close();
-}
 
 // 等待虚拟列表渲染后再高亮。
 function waitForSidebarRenderFrame(): Promise<void> {
@@ -857,7 +978,7 @@ function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: Qu
 }
 
 async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean }) {
-  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "zookeeper-root") return;
+  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "zookeeper-root") return;
   const connId = target.connectionId;
   if (!connId) return;
 
@@ -1054,11 +1175,13 @@ function beginSidebarAction(): number {
   sidebarProcedureOpen.value = false;
   sidebarVisibleDatabasesOpen.value = false;
   sidebarVisibleSchemasOpen.value = false;
+  sidebarTableNameFilterOpen.value = false;
   sidebarDdlTarget.value = null;
   sidebarObjectSourceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
+  sidebarTableNameFilterTarget.value = null;
   return sidebarActionGeneration;
 }
 
@@ -1131,6 +1254,61 @@ function openSidebarVisibleSchemas(node: TreeNode) {
   sidebarVisibleSchemasOpen.value = true;
 }
 
+function tableNameFilterScopeForNode(node: TreeNode): string | null {
+  if (!node.connectionId || !node.database) return null;
+  return store.tableNameFilterScopeKey({
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    nodeKind: node.type,
+    catalog: node.catalog,
+  });
+}
+
+function patternsFromDraft(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((pattern) => pattern.trim())
+    .filter(Boolean);
+}
+
+function openSidebarTableNameFilters(node: TreeNode) {
+  const scopeKey = tableNameFilterScopeForNode(node);
+  if (!scopeKey) return;
+  beginSidebarAction();
+  sidebarTableNameFilterTarget.value = createSidebarActionTarget(node);
+  const filter = store.sidebarTableNameFilters[scopeKey];
+  tableNameFilterIncludeDraft.value = filter?.includePatterns.join("\n") ?? "";
+  tableNameFilterExcludeDraft.value = filter?.excludePatterns.join("\n") ?? "";
+  sidebarTableNameFilterOpen.value = true;
+}
+
+async function saveSidebarTableNameFilters() {
+  const target = sidebarTableNameFilterTarget.value;
+  if (!target) return;
+  const scopeKey = tableNameFilterScopeForNode(target);
+  if (!scopeKey) return;
+  const filter: TableNameFilter = {
+    includePatterns: patternsFromDraft(tableNameFilterIncludeDraft.value),
+    excludePatterns: patternsFromDraft(tableNameFilterExcludeDraft.value),
+  };
+  const revision = store.setSidebarTableNameFilter(scopeKey, filter);
+  sidebarTableNameFilterOpen.value = false;
+  const currentTarget = findSidebarActionTarget(store.treeNodes, target);
+  if (currentTarget) {
+    try {
+      await store.refreshTreeNodeForTableNameFilter(currentTarget, scopeKey, revision);
+    } catch (error: any) {
+      toast(error?.message || String(error), 5000);
+    }
+  }
+}
+
+function clearSidebarTableNameFilters() {
+  tableNameFilterIncludeDraft.value = "";
+  tableNameFilterExcludeDraft.value = "";
+}
+
 function openSidebarProcedureSql(sql: string) {
   const target = sidebarProcedureTarget.value;
   if (!target?.connectionId || !target.database || !sql) return;
@@ -1176,6 +1354,10 @@ watch(sidebarVisibleDatabasesOpen, (open) => {
 
 watch(sidebarVisibleSchemasOpen, (open) => {
   if (!open) sidebarVisibleSchemasTarget.value = null;
+});
+
+watch(sidebarTableNameFilterOpen, (open) => {
+  if (!open) sidebarTableNameFilterTarget.value = null;
 });
 
 function collapseAllTreeNodes() {
@@ -1329,11 +1511,10 @@ function requestSelectedConnectionEdit(): boolean {
 function copySelectedSidebarNames(): boolean {
   const nodes = selectedSidebarNodesInVisibleOrder();
   if (nodes.length === 0) return false;
-  const connectionNodes = selectedConnectionClipboardNodes(nodes);
-  if (connectionNodes.length > 0) {
-    const copiedCount = store.copyConnectionsToTreeClipboard(connectionNodes.map((node) => node.connectionId));
-    if (copiedCount > 0) toast(t("connection.copied"), 2000);
-    return copiedCount > 0;
+  const copiedCount = copySelectedConnectionsToClipboards(nodes, (connectionIds) => store.copyConnectionsToTreeClipboard(connectionIds), copyToClipboard);
+  if (copiedCount > 0) {
+    toast(t("connection.copied"), 2000);
+    return true;
   }
   const tableNodes = nodes.filter((node) => node.type === "table" && !!node.connectionId && !!node.database);
   store.treeClipboard =
@@ -1399,10 +1580,12 @@ onUnmounted(() => {
   tableSearchFocusRestoreTokens.clear();
   latestTableSearchInteractionParentId = null;
   stopSidebarScrollbarDrag();
+  stopSidebarHorizontalScrollbarDrag();
   sidebarScrollbarResizeObserver?.disconnect();
   window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);
   window.clearTimeout(sidebarScrollingTimer);
   if (sidebarCommentMeasureFrame) window.cancelAnimationFrame(sidebarCommentMeasureFrame);
+  if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
 });
 
 defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
@@ -1421,6 +1604,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"
       @open-visible-schemas="openSidebarVisibleSchemas"
+      @open-table-name-filters="openSidebarTableNameFilters"
       @request-group-rename="startRenamingCreatedGroup"
       @open-danger-dialog="openSidebarDangerDialog"
       @open-dialog-controller="updateSidebarTreeItemDialogController"
@@ -1499,11 +1683,12 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       </div>
     </div>
     <CustomContextMenu ref="sidebarContextMenuRef" :items="sidebarContextMenuItems" v-slot="contextMenuSlot">
-      <div v-if="flatNodes.length > 0 && useVirtualTree" class="connection-tree-scroll-shell relative min-h-0 flex-1">
+      <div v-if="flatNodes.length > 0 && useVirtualTree" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
         <RecycleScroller
           ref="treeScrollerRef"
           class="sidebar-tree connection-tree-scroller h-full overflow-y-auto"
           :class="sidebarTreeOverflowClass"
+          :style="sidebarTreeScrollerStyle"
           @click="clearSidebarSelection"
           :items="flatNodes"
           :item-size="SIDEBAR_TREE_ROW_HEIGHT"
@@ -1512,6 +1697,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           :skip-hover="true"
           key-field="id"
           type-field="poolType"
+          list-class="connection-tree-content"
           flow-mode
         >
           <template #default="{ item }">
@@ -1531,28 +1717,60 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
         <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
           <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)" @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)" />
         </div>
-        <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+        <div
+          v-if="hasSidebarVerticalOverflow"
+          ref="sidebarScrollbarTrackRef"
+          class="sidebar-tree-scrollbar"
+          :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar, 'sidebar-tree-scrollbar--with-horizontal': hasSidebarHorizontalOverflow }"
+          @pointerdown="onSidebarScrollbarTrackPointerDown"
+        >
           <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
+        </div>
+        <div
+          v-if="hasSidebarHorizontalOverflow"
+          ref="sidebarHorizontalScrollbarTrackRef"
+          class="sidebar-tree-horizontal-scrollbar"
+          :class="{ 'sidebar-tree-horizontal-scrollbar--with-vertical': hasSidebarVerticalOverflow, 'sidebar-tree-horizontal-scrollbar--dragging': isDraggingSidebarHorizontalScrollbar }"
+          @pointerdown="onSidebarHorizontalScrollbarTrackPointerDown"
+        >
+          <div class="sidebar-tree-horizontal-scrollbar__thumb" :style="sidebarHorizontalScrollbarThumbStyle" @pointerdown.stop="onSidebarHorizontalScrollbarThumbPointerDown" />
         </div>
       </div>
-      <div v-else-if="flatNodes.length > 0" class="connection-tree-scroll-shell relative min-h-0 flex-1">
-        <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
-          <TreeItem
-            v-for="item in flatNodes"
-            :key="item.id"
-            :node="item.node"
-            :depth="item.depth"
-            :drag-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
-            :pending-rename="pendingRenameGroupId === item.node.id"
-            :highlighted="highlightedNodeId === item.id"
-            :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
-            @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-            @rename-started="pendingRenameGroupId = null"
-            @group-created="startRenamingCreatedGroup"
-          />
+      <div v-else-if="flatNodes.length > 0" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
+        <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" :style="sidebarTreeScrollerStyle" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
+          <div class="connection-tree-content">
+            <TreeItem
+              v-for="item in flatNodes"
+              :key="item.id"
+              :node="item.node"
+              :depth="item.depth"
+              :drag-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
+              :pending-rename="pendingRenameGroupId === item.node.id"
+              :highlighted="highlightedNodeId === item.id"
+              :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
+              @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+              @rename-started="pendingRenameGroupId = null"
+              @group-created="startRenamingCreatedGroup"
+            />
+          </div>
         </div>
-        <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
+        <div
+          v-if="hasSidebarVerticalOverflow"
+          ref="sidebarScrollbarTrackRef"
+          class="sidebar-tree-scrollbar"
+          :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar, 'sidebar-tree-scrollbar--with-horizontal': hasSidebarHorizontalOverflow }"
+          @pointerdown="onSidebarScrollbarTrackPointerDown"
+        >
           <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
+        </div>
+        <div
+          v-if="hasSidebarHorizontalOverflow"
+          ref="sidebarHorizontalScrollbarTrackRef"
+          class="sidebar-tree-horizontal-scrollbar"
+          :class="{ 'sidebar-tree-horizontal-scrollbar--with-vertical': hasSidebarVerticalOverflow, 'sidebar-tree-horizontal-scrollbar--dragging': isDraggingSidebarHorizontalScrollbar }"
+          @pointerdown="onSidebarHorizontalScrollbarTrackPointerDown"
+        >
+          <div class="sidebar-tree-horizontal-scrollbar__thumb" :style="sidebarHorizontalScrollbarThumbStyle" @pointerdown.stop="onSidebarHorizontalScrollbarThumbPointerDown" />
         </div>
       </div>
     </CustomContextMenu>
@@ -1608,6 +1826,42 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :connection-name="sidebarVisibleSchemasTarget.label"
       :database="sidebarVisibleSchemasTarget.database"
     />
+    <Dialog v-model:open="sidebarTableNameFilterOpen">
+      <DialogContent class="max-w-xl">
+        <DialogHeader class="space-y-2">
+          <DialogTitle>{{ t("contextMenu.tableNameFilters") }}</DialogTitle>
+          <DialogDescription>
+            {{ t("contextMenu.tableNameFiltersDescription") }}
+          </DialogDescription>
+        </DialogHeader>
+        <div class="space-y-5 py-1">
+          <div class="rounded-lg border bg-muted/20 p-3.5">
+            <label class="mb-2.5 block text-sm font-medium leading-none">{{ t("contextMenu.tableNameFilterInclude") }}</label>
+            <textarea
+              v-model="tableNameFilterIncludeDraft"
+              class="min-h-32 w-full resize-y rounded-md border bg-background px-3 py-2.5 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-2 focus:ring-ring/40"
+              :placeholder="t('contextMenu.tableNameFilterIncludePlaceholder')"
+            ></textarea>
+          </div>
+          <div class="rounded-lg border bg-muted/20 p-3.5">
+            <label class="mb-2.5 block text-sm font-medium leading-none">{{ t("contextMenu.tableNameFilterExclude") }}</label>
+            <textarea
+              v-model="tableNameFilterExcludeDraft"
+              class="min-h-32 w-full resize-y rounded-md border bg-background px-3 py-2.5 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-2 focus:ring-ring/40"
+              :placeholder="t('contextMenu.tableNameFilterExcludePlaceholder')"
+            ></textarea>
+          </div>
+          <p class="rounded-md bg-muted/50 px-3 py-2 text-xs leading-relaxed text-muted-foreground">{{ t("contextMenu.tableNameFilterLikeHint") }}</p>
+        </div>
+        <DialogFooter class="gap-2 sm:justify-between">
+          <Button variant="ghost" @click="clearSidebarTableNameFilters">{{ t("common.clear") }}</Button>
+          <div class="flex gap-2">
+            <Button variant="outline" @click="sidebarTableNameFilterOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+            <Button @click="saveSidebarTableNameFilters">{{ t("common.save") }}</Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <SidebarDangerConfirmDialog
       v-if="sidebarDangerDialogRequest"
       v-model:open="sidebarDangerDialogOpen"
@@ -1665,6 +1919,15 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   width: max-content;
 }
 
+.connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.connection-tree-content),
+.connection-tree-scroller.sidebar-tree-horizontal-scroll > .connection-tree-content {
+  min-width: max(100%, var(--sidebar-tree-content-width));
+}
+
+.connection-tree-scroll-shell--horizontal-overflow .connection-tree-scroller {
+  height: calc(100% - 10px);
+}
+
 .sidebar-tree-scrollbar {
   position: absolute;
   top: 0;
@@ -1675,6 +1938,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   cursor: default;
   opacity: 0;
   transition: opacity 120ms ease;
+}
+
+.sidebar-tree-scrollbar--with-horizontal {
+  bottom: 10px;
 }
 
 .sidebar-tree-scrollbar--scrolling,
@@ -1701,5 +1968,41 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
   right: 1px;
   width: 8px;
   background: color-mix(in oklch, var(--foreground) 48%, transparent);
+}
+
+.sidebar-tree-horizontal-scrollbar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 10;
+  height: 10px;
+  cursor: default;
+  background: color-mix(in oklch, var(--muted) 45%, transparent);
+}
+
+.sidebar-tree-horizontal-scrollbar--with-vertical {
+  right: 10px;
+}
+
+.sidebar-tree-horizontal-scrollbar__thumb {
+  position: absolute;
+  bottom: 2px;
+  left: 0;
+  height: 6px;
+  min-width: 24px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 34%, transparent);
+  transition:
+    background-color 120ms ease,
+    height 120ms ease,
+    bottom 120ms ease;
+}
+
+.sidebar-tree-horizontal-scrollbar:hover .sidebar-tree-horizontal-scrollbar__thumb,
+.sidebar-tree-horizontal-scrollbar--dragging .sidebar-tree-horizontal-scrollbar__thumb {
+  bottom: 1px;
+  height: 8px;
+  background: color-mix(in oklch, var(--foreground) 50%, transparent);
 }
 </style>

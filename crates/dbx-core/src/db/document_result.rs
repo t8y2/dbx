@@ -47,4 +47,18 @@ mod tests {
         .unwrap();
         assert!(deserialized.total_is_exact);
     }
+
+    #[test]
+    fn inexact_results_preserve_the_explicit_flag() {
+        let deserialized: DocumentQueryResult = serde_json::from_value(serde_json::json!({
+            "documents": [],
+            "total": 10_000_000,
+            "total_is_exact": false,
+        }))
+        .unwrap();
+        assert!(!deserialized.total_is_exact);
+
+        let serialized = serde_json::to_value(deserialized).unwrap();
+        assert_eq!(serialized.get("total_is_exact"), Some(&serde_json::json!(false)));
+    }
 }

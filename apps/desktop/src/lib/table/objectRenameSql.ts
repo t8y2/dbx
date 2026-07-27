@@ -11,7 +11,7 @@ export interface BuildRenameObjectSqlOptions {
   newName: string;
 }
 
-const postgresLikeRenameTypes = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase"]);
+const postgresLikeRenameTypes = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase"]);
 
 const oracleLikeRenameTypes = new Set<DatabaseType>(["oracle", "dameng"]);
 

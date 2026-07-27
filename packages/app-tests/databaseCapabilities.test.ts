@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { canConfigureVisibleSchemasForTreeNode, isSchemaAware, supportsClearableQuerySchema, supportsDatabaseCreation, usesTreeSchemaMode } from "../../apps/desktop/src/lib/database/databaseCapabilities.ts";
+import { canConfigureVisibleSchemasForTreeNode, isSchemaAware, supportsClearableQuerySchema, supportsConnectionQueryActions, supportsDatabaseCreation, usesTreeSchemaMode } from "../../apps/desktop/src/lib/database/databaseCapabilities.ts";
 
 test("TDengine uses database/catalog tree nodes without a schema layer", () => {
   assert.equal(isSchemaAware("tdengine"), false);
@@ -43,4 +43,10 @@ test("only explicitly supported query schemas can be cleared from query tabs", (
   assert.equal(supportsClearableQuerySchema("opengauss"), false);
   assert.equal(supportsClearableQuerySchema("sqlserver"), false);
   assert.equal(supportsClearableQuerySchema("jdbc"), false);
+});
+
+test("Nacos connection menus do not expose SQL-style query actions", () => {
+  assert.equal(supportsConnectionQueryActions("nacos"), false);
+  assert.equal(supportsConnectionQueryActions("mysql"), true);
+  assert.equal(supportsConnectionQueryActions("redis"), true);
 });

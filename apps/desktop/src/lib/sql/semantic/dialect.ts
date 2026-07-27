@@ -150,6 +150,7 @@ export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; di
     case "opengauss":
     case "gaussdb":
     case "highgo":
+    case "uxdb":
       return SQL_SEMANTIC_DIALECTS.postgres;
     case "mysql":
     case "doris":

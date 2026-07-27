@@ -75,6 +75,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         profiles: &[],
     },
     AgentCatalogEntry {
+        db_type: DatabaseType::Uxdb,
+        key: "uxdb",
+        label: "优炫 UXDB",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::Vastbase,
         key: "vastbase",
         label: "Vastbase",

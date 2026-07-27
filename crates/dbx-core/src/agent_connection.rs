@@ -12,7 +12,10 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         mongo_agent_database(config, database)
     } else if matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
         oracle_agent_database(config, database)
-    } else if matches!(config.db_type, DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Vastbase) {
+    } else if matches!(
+        config.db_type,
+        DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
+    ) {
         postgres_like_agent_database(config, database).to_string()
     } else if is_h2_file_connection(config) {
         h2_agent_database(config)
@@ -25,7 +28,10 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         oracle_jdbc_connection_string(config, host, port, database)
     } else if config.db_type == DatabaseType::OceanbaseOracle {
         oceanbase_oracle_jdbc_connection_string(config, host, port, database)
-    } else if matches!(config.db_type, DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Vastbase) {
+    } else if matches!(
+        config.db_type,
+        DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
+    ) {
         postgres_like_agent_jdbc_connection_string(config, host, port, database)
     } else if config.db_type == DatabaseType::SapHana {
         sap_hana_jdbc_connection_string(config, host, port, database)
@@ -408,6 +414,7 @@ fn postgres_like_agent_jdbc_connection_string(
     let scheme = match config.db_type {
         DatabaseType::Kingbase => "kingbase8",
         DatabaseType::Highgo => "highgo",
+        DatabaseType::Uxdb => "uxdb",
         DatabaseType::Vastbase => "vastbase",
         _ => unreachable!("postgres-like agent JDBC URL requested for {:?}", config.db_type),
     };
@@ -725,6 +732,16 @@ mod tests {
 
         assert_eq!(params["database"], "postgres");
         assert_eq!(params["connection_string"], "jdbc:vastbase://vastbase.example.com:5432/postgres");
+    }
+
+    #[test]
+    fn uxdb_agent_params_use_vendor_jdbc_url() {
+        let cfg = config(DatabaseType::Uxdb, Some("uxdb"));
+
+        let params = agent_connect_params(&cfg, "uxdb.example.com", 52025, "uxdb");
+
+        assert_eq!(params["database"], "uxdb");
+        assert_eq!(params["connection_string"], "jdbc:uxdb://uxdb.example.com:52025/uxdb");
     }
 
     #[test]

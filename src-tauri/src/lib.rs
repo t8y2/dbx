@@ -1245,6 +1245,9 @@ pub fn run() {
             app.manage(commands::external_db::ExternalDbOpenState::default());
             app.manage(commands::deep_link::DeepLinkOpenState::default());
             app.manage(commands::update::PendingUpdateState::default());
+            app.manage(commands::ssh_prompt::SshPromptState::new());
+            commands::ssh_prompt::install_ssh_prompt_bridge(app.handle());
+            commands::ssh_prompt::install_ssh_notice_bridge(app.handle());
             #[cfg(target_os = "macos")]
             macos_app_delegate::install_dock_quit_handler(app.handle());
             let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));
@@ -1332,8 +1335,6 @@ pub fn run() {
             commands::app_settings::get_driver_store_path,
             commands::app_settings::load_pinned_tree_node_ids,
             commands::app_settings::save_pinned_tree_node_ids,
-            commands::app_settings::load_favorites_state,
-            commands::app_settings::save_favorites_state,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
             commands::app_settings::load_editor_settings,
@@ -1411,6 +1412,9 @@ pub fn run() {
             commands::schema::list_indexes,
             commands::schema::list_foreign_keys,
             commands::schema::list_triggers,
+            commands::schema::list_constraints,
+            commands::schema::list_partitions,
+            commands::schema::list_subpartitions,
             commands::schema::get_table_ddl,
             commands::schema::list_functions,
             commands::schema::list_sequences,
@@ -1497,6 +1501,7 @@ pub fn run() {
             commands::data_compare::build_data_compare_sync_plan,
             commands::sql_file::preview_sql_file,
             commands::sql_file::execute_sql_file,
+            commands::sql_file::execute_sql_files,
             commands::sql_file::cancel_sql_file_execution,
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
@@ -1530,6 +1535,7 @@ pub fn run() {
             commands::redis_cmd::redis_json_set,
             commands::redis_cmd::redis_check_json_module,
             commands::redis_cmd::redis_set_ttl,
+            commands::redis_cmd::redis_set_expire_at,
             commands::redis_cmd::redis_delete_keys,
             commands::redis_cmd::redis_flush_db,
             commands::redis_cmd::redis_execute_command,
@@ -1538,10 +1544,14 @@ pub fn run() {
             commands::redis_pubsub_server::redis_pubsub_server_port,
             commands::redis_cmd::redis_slowlog_get,
             commands::redis_cmd::redis_cluster_master_nodes,
+            commands::etcd_cmd::etcd_supports_ttl,
             commands::etcd_cmd::etcd_list_prefix,
             commands::etcd_cmd::etcd_get,
             commands::etcd_cmd::etcd_put,
             commands::etcd_cmd::etcd_delete,
+            commands::etcd_cmd::etcd_rename,
+            commands::etcd_cmd::etcd_history,
+            commands::etcd_cmd::etcd_status,
             commands::zookeeper_cmd::zookeeper_list_prefix,
             commands::zookeeper_cmd::zookeeper_get,
             commands::zookeeper_cmd::zookeeper_put,
@@ -1562,7 +1572,15 @@ pub fn run() {
             commands::nacos_cmd::nacos_list_services,
             commands::nacos_cmd::nacos_list_instances,
             commands::nacos_cmd::nacos_update_instance,
+            commands::nacos_cmd::nacos_get_dashboard,
             commands::nacos_cmd::nacos_raw_request,
+            commands::nacos_cmd::nacos_search_config_content,
+            commands::nacos_cmd::nacos_cancel_operation,
+            commands::nacos_cmd::nacos_export_configs,
+            commands::nacos_cmd::nacos_preview_config_import,
+            commands::nacos_cmd::nacos_apply_config_import,
+            commands::nacos_cmd::nacos_preview_config_transfer,
+            commands::nacos_cmd::nacos_apply_config_transfer,
             commands::saved_sql::load_saved_sql_library,
             commands::saved_sql::load_saved_sql_file,
             commands::saved_sql::save_saved_sql_folder,
@@ -1810,6 +1828,9 @@ pub fn run() {
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
             commands::ssh_config::list_ssh_config_hosts,
+            commands::ssh_prompt::ssh_prompt_ready,
+            commands::ssh_prompt::ssh_prompt_not_ready,
+            commands::ssh_prompt::resolve_ssh_prompt,
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,

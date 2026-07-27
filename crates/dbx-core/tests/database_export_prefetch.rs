@@ -176,6 +176,7 @@ async fn database_export_writes_structure_and_data_for_all_tables() {
         include_structure: true,
         include_data: true,
         include_objects: false,
+        include_create_database: false,
         drop_table_if_exists: true,
         omit_auto_increment: false,
         fail_on_error: true,

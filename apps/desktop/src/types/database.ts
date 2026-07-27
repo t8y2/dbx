@@ -25,6 +25,7 @@ export type DatabaseType =
   | "gaussdb"
   | "kingbase"
   | "highgo"
+  | "uxdb"
   | "vastbase"
   | "goldendb"
   | "kwdb"
@@ -218,11 +219,14 @@ export interface SshTunnelConfig {
    * back to key > password > agent based on which fields are non-empty,
    * independent of this selector (see `db/ssh_tunnel.rs`).
    *
+   * `"key+password"` tries private key auth first and falls back to
+   * password auth if the key is rejected.
+   *
    * `"agent"` is a legacy value: it's no longer offered as a dropdown
    * choice for new connections, but is preserved and displayed read-only
    * for connections that already have `use_ssh_agent` configured.
    */
-  auth_method?: "password" | "key" | "agent" | "none";
+  auth_method?: "password" | "key" | "key+password" | "agent" | "none";
   /**
    * When set, this layer references a shared tunnel profile; the profile's
    * configuration replaces this layer's fields at connect time (only `id`
@@ -467,6 +471,42 @@ export interface TriggerInfo {
   statement?: string | null;
 }
 
+export interface ConstraintInfo {
+  name: string;
+  constraint_type: string;
+  definition: string;
+  columns: string[];
+  ref_schema?: string | null;
+  ref_table?: string | null;
+  ref_columns: string[];
+  match_type?: string | null;
+  on_update?: string | null;
+  on_delete?: string | null;
+  deferrable: boolean;
+  initially_deferred: boolean;
+  enabled: boolean;
+  valid: boolean;
+}
+
+export interface PartitionInfo {
+  name: string;
+  position: number;
+  value: string;
+  partition_type: string;
+  partition_key: string;
+  online?: boolean | null;
+  auto_partition_type?: string | null;
+  auto_partition_span?: number | null;
+}
+
+export interface SubpartitionInfo {
+  name: string;
+  position: number;
+  value: string;
+  partition_type: string;
+  partition_key: string;
+}
+
 export interface FunctionInfo {
   name: string;
   function_type: string;
@@ -515,6 +555,8 @@ export interface QueryResult {
   statement_index?: number;
   /** Internal row identifiers appended to editable query results. */
   hidden_column_indexes?: number[];
+  /** Local value filters survive DataGrid component eviction when switching tabs. */
+  local_column_filters?: Record<string, string[]>;
   /**
    * Database type name for each column, parallel to `columns`. Optional and may
    * be shorter/empty when a driver cannot supply types (schemaless stores,
@@ -536,6 +578,8 @@ export interface QueryResult {
   mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
+  /** Whether a backend-reported result total is exact. */
+  total_is_exact?: boolean;
   truncated?: boolean;
   session_id?: string | null;
   has_more?: boolean;
@@ -565,6 +609,7 @@ export interface QueryResultRun {
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
+  resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;
@@ -643,6 +688,9 @@ export type TreeNodeType =
   | "group-indexes"
   | "group-fkeys"
   | "group-triggers"
+  | "group-constraints"
+  | "group-table-partitions"
+  | "group-table-subpartitions"
   | "group-tables"
   | "group-views"
   | "group-materialized-views"
@@ -654,8 +702,6 @@ export type TreeNodeType =
   | "group-partitions"
   | "group-extensions"
   | "extension"
-  | "favorites"
-  | "favorites-group"
   | "object-browser"
   | "user-admin"
   | "dameng-job-admin"
@@ -668,10 +714,14 @@ export type TreeNodeType =
   | "index"
   | "fkey"
   | "trigger"
+  | "constraint"
+  | "partition"
+  | "subpartition"
   | "redis-db"
   | "mq-tenant"
   | "nacos-namespace"
   | "etcd-root"
+  | "etcd-dashboard"
   | "zookeeper-root"
   | "mongo-db"
   | "mongo-gridfs"
@@ -693,34 +743,6 @@ export type SidebarOrderEntry = { type: "group"; id: string; children?: SidebarO
 export interface SidebarLayout {
   groups: ConnectionGroup[];
   order: SidebarOrderEntry[];
-}
-
-/** A user-defined collection of favorited items. Scoped to one database so the
- *  sidebar can show "工作 / 临时" sections under each connection. */
-export interface FavoriteGroup {
-  id: string;
-  connectionId: string;
-  database: string;
-  name: string;
-  order: number;
-  collapsed: boolean;
-}
-
-/** One favorited table/view. Identity is the favorite key (separate prefix
- *  from pin keys) so favorites and pin state stay independent. */
-export interface FavoriteItem {
-  key: string;
-  groupId: string;
-  note: string;
-  order: number;
-  createdAt: number;
-}
-
-/** Single source of truth for favorites. Persisted as one JSON document so
- *  groups and items update atomically. */
-export interface FavoritesState {
-  groups: FavoriteGroup[];
-  items: FavoriteItem[];
 }
 
 export interface TreeNode {
@@ -755,23 +777,21 @@ export interface TreeNode {
   totalKeyCount?: number;
   partitionParentSchema?: string;
   partitionParentName?: string;
-  /** Set on favorited-clone nodes that share an id namespace with the source
-   *  table/view. The original (non-favorited) id is preserved here so the
-   *  favorite key remains stable even though the cloned node carries a
-   *  unique tree id. Without this, expanding a favorites-group subnode and
-   *  the original tables group at the same time would push two rows with
-   *  the same id into the virtual scroller, blanking the sibling rows. */
-  favoritedFromId?: string;
   hiddenChildren?: TreeNode[];
   tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;
   loadMore?: {
     parentId: string;
     offset: number;
     pageSize: number;
   };
+}
+
+export interface TableNameFilter {
+  includePatterns: string[];
+  excludePatterns: string[];
 }
 
 export type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
@@ -833,6 +853,7 @@ export interface QueryTab {
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
+  resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;
@@ -878,11 +899,15 @@ export interface QueryTab {
   explainClientSessionId?: string;
   /** Invalidates tab-scoped completion metadata after session context changes. */
   completionContextVersion?: number;
-  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "etcd-dashboard" | "zookeeper" | "mq" | "nacos" | "nacos-dashboard" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
   mqTenant?: string;
   mqInitialTab?: "topics";
   nacosNamespace?: string;
   nacosNamespaceName?: string;
+  nacosTargetDataId?: string;
+  nacosTargetGroup?: string;
+  nacosTargetKeyword?: string;
+  nacosTargetRequestId?: number;
   structureTableName?: string;
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;

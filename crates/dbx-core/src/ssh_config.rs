@@ -265,6 +265,16 @@ mod tests {
     }
 
     #[test]
+    fn resolve_preserves_key_plus_password_method() {
+        let mut ssh = config("myserver");
+        ssh.auth_method = "key+password".to_string();
+        ssh.password = "secret".to_string();
+        let resolved = apply_host_entry(&ssh, entry("myserver"));
+        assert_eq!(resolved.key_path, "~/.ssh/id_ed25519");
+        assert_eq!(resolved.auth_method, "key+password");
+    }
+
+    #[test]
     fn resolve_does_not_override_explicit_values() {
         let mut ssh = config("myserver");
         ssh.user = "alice".to_string();

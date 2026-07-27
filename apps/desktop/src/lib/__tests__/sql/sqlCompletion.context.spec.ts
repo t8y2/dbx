@@ -446,4 +446,54 @@ describe("sqlCompletion scoped metadata ranking", () => {
 
     expect(items.findIndex((item) => item.label === "ORDERS_10K")).toBeLessThan(items.findIndex((item) => item.label === "TABLE"));
   });
+
+  it("qualifies same-name PostgreSQL tables from different schemas", () => {
+    const sql = "SELECT * FROM shared";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [
+        { name: "shared", schema: "public", type: "table" },
+        { name: "shared", schema: "reporting", type: "table" },
+      ],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.apply).sort()).toEqual(["public.shared", "reporting.shared"]);
+  });
+
+  it("qualifies same-name tables for generic metadata providers", () => {
+    const sql = "SELECT * FROM orders";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [
+        { name: "orders", schema: "archive", type: "table" },
+        { name: "orders", schema: "sales", type: "table" },
+      ],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(items.map((item) => item.apply).sort()).toEqual(["archive.orders", "sales.orders"]);
+  });
+
+  it("preserves Oracle current-schema and SQL Server unique-table insertion", () => {
+    const oracleItems = buildSqlCompletionItems("SELECT * FROM ORDERS", "SELECT * FROM ORDERS".length, {
+      databaseType: "oracle",
+      tables: [
+        { name: "ORDERS", schema: "APP", type: "table" },
+        { name: "ORDERS", schema: "REPORTING", type: "table" },
+      ],
+      columnsByTable: new Map(),
+      currentSchema: "APP",
+    }).filter((item) => item.type === "table");
+    const sqlServerItems = buildSqlCompletionItems("SELECT * FROM Orders", "SELECT * FROM Orders".length, {
+      databaseType: "sqlserver",
+      dialect: "sqlserver",
+      tables: [{ name: "Orders", schema: "dbo", type: "table" }],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(oracleItems.map((item) => item.apply).sort()).toEqual(["ORDERS", "REPORTING.ORDERS"]);
+    expect(sqlServerItems).toEqual([expect.objectContaining({ label: "Orders", apply: "Orders" })]);
+  });
 });

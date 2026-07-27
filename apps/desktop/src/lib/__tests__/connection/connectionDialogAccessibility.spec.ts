@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 const dialogSource = readFileSync(new URL("../../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 
 describe("connection dialog accessibility", () => {
-  it("moves initial focus to the dialog title instead of the dialog container", () => {
-    expect(dialogSource).toContain('<DialogTitle data-connection-dialog-title tabindex="-1">');
-    expect(dialogSource).toContain('querySelector<HTMLElement>("[data-connection-dialog-title]")?.focus({ preventScroll: true })');
+  it("moves initial focus to an input inside the dialog", () => {
+    expect(dialogSource).toContain('<Input v-model="dbSearchQuery" v-connection-dialog-auto-focus');
+    expect(dialogSource).toContain('<Input v-model="form.name" v-connection-dialog-auto-focus');
+    expect(dialogSource).toContain("const vConnectionDialogAutoFocus: ObjectDirective<HTMLInputElement>");
+    expect(dialogSource).toContain("input.focus({ preventScroll: true })");
     expect(dialogSource).not.toMatch(/<DialogContent[^>]*\stabindex="-1"/);
   });
 

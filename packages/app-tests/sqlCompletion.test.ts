@@ -2596,6 +2596,19 @@ test("automatic table aliases avoid SQL keywords", () => {
   }
 });
 
+test("does not force automatic table aliases when disabled", () => {
+  const sql = "select * from item";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "item_file", schema: "public", type: "table" }],
+    columnsByTable,
+    autoAliasTables: false,
+  });
+
+  const tableItem = items.find((item) => item.type === "table" && item.label === "item_file");
+  assert.ok(tableItem);
+  assert.equal(tableItem!.apply, "item_file");
+});
+
 test("table alias suggestions avoid existing aliases", () => {
   const items = buildSqlCompletionItems("select * from customer_orders co join customer_orders ", "select * from customer_orders co join customer_orders ".length, {
     tables: [...tables, { name: "customer_orders", schema: "public", type: "table" }],

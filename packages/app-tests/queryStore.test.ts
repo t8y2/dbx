@@ -786,6 +786,7 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
       { id: 1, name: "Ada", nested: { level: 1 } },
       { id: 3, name: "Linus", nested: { level: 3 } },
     ],
+    mongo_copy_documents: [{ copyId: 2 }, { copyId: 1 }, { copyId: 3 }],
     affected_rows: 0,
     execution_time_ms: 1,
   };
@@ -801,12 +802,24 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
     tab.result?.mongo_documents?.map((document) => (document as { id: number }).id),
     [1, 2, 3],
   );
+  assert.deepEqual(
+    tab.result?.mongo_copy_documents?.map((document) => (document as { copyId: number }).copyId),
+    [1, 2, 3],
+  );
+  assert.deepEqual(
+    tab.resultLocalSortOriginalMongoCopyDocuments?.map((document) => (document as { copyId: number }).copyId),
+    [2, 1, 3],
+  );
   assert.equal(tab.resultSortColumn, "name");
   assert.equal(tab.resultSortColumnIndex, 1);
   assert.equal(tab.resultSortDirection, "asc");
   assert.equal(tab.resultSortMode, "local");
   assert.equal(tab.resultSortedSql, undefined);
 
+  // Cache/archive decoding rebuilds row objects, so sorting must rely on the
+  // persisted BSON copy baseline rather than row reference identity.
+  tab.result!.rows = tab.result!.rows.map((resultRow) => [...resultRow]);
+  tab.resultLocalSortOriginalRows = tab.resultLocalSortOriginalRows?.map((resultRow) => [...resultRow]);
   store.sortTabResultLocally(tabId, "name", 1, "desc");
 
   assert.deepEqual(tab.result?.rows, [
@@ -816,6 +829,10 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
   ]);
   assert.deepEqual(
     tab.result?.mongo_documents?.map((document) => (document as { id: number }).id),
+    [3, 2, 1],
+  );
+  assert.deepEqual(
+    tab.result?.mongo_copy_documents?.map((document) => (document as { copyId: number }).copyId),
     [3, 2, 1],
   );
 
@@ -830,8 +847,13 @@ test("sortTabResultLocally sorts current rows and restores original order", () =
     tab.result?.mongo_documents?.map((document) => (document as { id: number }).id),
     [2, 1, 3],
   );
+  assert.deepEqual(
+    tab.result?.mongo_copy_documents?.map((document) => (document as { copyId: number }).copyId),
+    [2, 1, 3],
+  );
   assert.equal(tab.resultSortColumn, undefined);
   assert.equal(tab.resultSortMode, undefined);
+  assert.equal(tab.resultLocalSortOriginalMongoCopyDocuments, undefined);
 });
 
 test("selecting a result run restores its displayed result without changing SQL draft", async () => {
@@ -2596,11 +2618,28 @@ test("append pagination preserves existing rows and respects the memory cap", as
   const tab = store.tabs.find((item) => item.id === tabId);
   assert.ok(tab);
   const firstRow = [1] as (string | number | boolean | null)[];
-  tab.result = { columns: ["id"], rows: [firstRow], affected_rows: 0, execution_time_ms: 3 };
+  tab.result = {
+    columns: ["id"],
+    rows: [firstRow],
+    mongo_documents: [{ id: 1 }],
+    mongo_copy_documents: [{ id: { $numberLong: "1" } }],
+    affected_rows: 0,
+    execution_time_ms: 3,
+  };
 
   globalThis.fetch = withConnectionHealthMock(async (input) => {
     if (String(input) === "/api/query/execute-multi") {
-      return Response.json([{ columns: ["id"], rows: [[2], [3]], affected_rows: 0, execution_time_ms: 4, has_more: true }]);
+      return Response.json([
+        {
+          columns: ["id"],
+          rows: [[2], [3]],
+          mongo_documents: [{ id: 2 }, { id: 3 }],
+          mongo_copy_documents: [{ id: { $numberLong: "2" } }, { id: { $numberLong: "3" } }],
+          affected_rows: 0,
+          execution_time_ms: 4,
+          has_more: true,
+        },
+      ]);
     }
     return new Response("unexpected request", { status: 500 });
   });
@@ -2614,11 +2653,64 @@ test("append pagination preserves existing rows and respects the memory cap", as
     });
 
     assert.deepEqual(tab.result?.rows, [[1], [2]]);
+    assert.deepEqual(tab.result?.mongo_documents, [{ id: 1 }, { id: 2 }]);
+    assert.deepEqual(tab.result?.mongo_copy_documents, [{ id: { $numberLong: "1" } }, { id: { $numberLong: "2" } }]);
     assert.equal(toRaw(tab.result?.rows[0]), firstRow);
     assert.equal(tab.result?.execution_time_ms, 7);
     assert.equal(tab.result?.has_more, false);
     assert.equal(tab.resultPageOffset, 0, "later refreshes must restart from the logical result origin");
     assert.equal(tab.resultPageLimit, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("append pagination drops incomplete Mongo copy metadata instead of misaligning rows", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(conn("conn-append-old-cache"));
+  const tabId = store.createTab("conn-append-old-cache", "db", "users", "data", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  tab.result = {
+    columns: ["id"],
+    rows: [[1]],
+    mongo_documents: [{ id: 1 }],
+    affected_rows: 0,
+    execution_time_ms: 3,
+  };
+
+  globalThis.fetch = withConnectionHealthMock(async (input) => {
+    if (String(input) === "/api/query/execute-multi") {
+      return Response.json([
+        {
+          columns: ["id"],
+          rows: [[2]],
+          mongo_documents: [{ id: 2 }],
+          mongo_copy_documents: [{ id: { $numberLong: "2" } }],
+          affected_rows: 0,
+          execution_time_ms: 4,
+        },
+      ]);
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 1 OFFSET 1;', {
+      pagination: { limit: 1, offset: 1 },
+      appendResult: { maxRows: 2 },
+      preserveResultDuringExecution: true,
+    });
+
+    assert.deepEqual(tab.result?.rows, [[1], [2]]);
+    assert.deepEqual(tab.result?.mongo_documents, [{ id: 1 }, { id: 2 }]);
+    assert.equal(tab.result?.mongo_copy_documents, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -3232,6 +3324,47 @@ test("mongo multi-find results use database and collection source labels", async
       tab.results?.map((result) => result.sourceLabel),
       ["cmdb.model_field_group", "cmdb.model_field_info"],
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo projected find results do not enable copy as UPDATE", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-projection-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    if (String(input) === "/api/document-store/find-documents") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(body.projection, '{"_id":1,"profile.name":1}');
+      return new Response(
+        JSON.stringify({
+          documents: [{ _id: "user-1", profile: { name: "Ada" } }],
+          extended_documents: [{ _id: "user-1", profile: { name: "Ada" } }],
+          total: 1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-projection-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(tabId, 'db.users.find({}, { _id: 1, "profile.name": 1 })');
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.equal(tab?.mongoEditTarget, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -4747,6 +4880,70 @@ test("query execution keeps automatically counting total rows in the background"
       ),
     );
     await waitFor(() => tab.resultTotalRowCount === 250);
+    assert.equal(tab.resultTotalRowCountLoading, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("inexact backend totals do not become query pagination bounds", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  settingsStore.updateEditorSettings({ autoCalculateTotalRows: false });
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "db", "Query", "query", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  globalThis.fetch = withConnectionHealthMock(async (input) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      return new Response(
+        JSON.stringify({
+          sqlToExecute: "select id from users limit 100",
+          pageSql: "select id from users limit 100",
+          pageLimit: 100,
+          pageOffset: 0,
+          useAgentResultSession: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["id"],
+            rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+            affected_rows: 10_000_000,
+            execution_time_ms: 1,
+            total_is_exact: false,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "select id from users");
+
+    assert.equal(tab.result?.total_is_exact, false);
+    assert.equal(tab.result?.affected_rows, 10_000_000);
+    assert.equal(tab.resultTotalRowCount, undefined);
     assert.equal(tab.resultTotalRowCountLoading, false);
   } finally {
     globalThis.fetch = originalFetch;

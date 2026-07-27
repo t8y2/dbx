@@ -425,6 +425,21 @@ func TestOracleExplainPlanBindArgsUsesNamedArguments(t *testing.T) {
 	}
 }
 
+func TestOracleExplainTargetSchemaIgnoresSysDBAServicePrefix(t *testing.T) {
+	if got := oracleExplainTargetSchema("ORCLPDB1", "", "SYSDBA:ORCLPDB1"); got != "" {
+		t.Fatalf("oracleExplainTargetSchema() = %q, want no schema switch", got)
+	}
+}
+
+func TestOracleExplainTargetSchemaKeepsSelectedSchema(t *testing.T) {
+	if got := oracleExplainTargetSchema("APP", "", "SYSDBA:ORCLPDB1"); got != "APP" {
+		t.Fatalf("oracleExplainTargetSchema() = %q, want APP", got)
+	}
+	if got := oracleExplainTargetSchema("ORCLPDB1", "REPORTING", "SYSDBA:ORCLPDB1"); got != "REPORTING" {
+		t.Fatalf("oracleExplainTargetSchema() = %q, want REPORTING", got)
+	}
+}
+
 func protocolContract(t *testing.T) struct {
 	ProtocolVersion int      `json:"protocolVersion"`
 	AllCapabilities []string `json:"allCapabilities"`

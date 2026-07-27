@@ -14,6 +14,8 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "object-browser",
   "redis-db",
   "mq-tenant",
+  "etcd-root",
+  "etcd-dashboard",
   "zookeeper-root",
   "mongo-gridfs",
   "mongo-bucket",
@@ -58,9 +60,15 @@ export function treeItemPaddingLeft(depth: number): string {
 }
 
 export const trailingCommentGapPx = 8;
+export const sidebarPinnedActionSlotWidthPx = 24;
 
 export function trailingCommentAvailableWidth(containerWidth: number, leadingWidth: number): number {
   return Math.max(0, Math.floor(containerWidth - leadingWidth - trailingCommentGapPx));
+}
+
+export function alignedCommentLeadingWidth(labelWidth: number | undefined, reservePinnedAction: boolean): number | undefined {
+  if (labelWidth === undefined) return undefined;
+  return labelWidth + (reservePinnedAction ? sidebarPinnedActionSlotWidthPx : 0);
 }
 
 export interface SidebarCommentAlignmentItem {
@@ -69,6 +77,26 @@ export interface SidebarCommentAlignmentItem {
   alignable: boolean;
   hasComment: boolean;
   labelWidth: number;
+}
+
+export interface SidebarTreeNaturalWidthItem {
+  depth: number;
+  label: string;
+  usesNaturalWidth: boolean;
+  trailingWidth?: number;
+}
+
+// Right padding, expander/icon widths and the two flex gaps before the label.
+const sidebarTreeRowChromeWidth = 54;
+
+export function sidebarTreeNaturalContentWidth(items: readonly SidebarTreeNaturalWidthItem[], measureText: (text: string) => number): number {
+  let width = 0;
+  for (const item of items) {
+    if (!item.usesNaturalWidth) continue;
+    const paddingLeft = item.depth * 16 + 8;
+    width = Math.max(width, Math.ceil(paddingLeft + sidebarTreeRowChromeWidth + measureText(item.label) + (item.trailingWidth ?? 0)));
+  }
+  return width;
 }
 
 export function alignedSidebarCommentLabelWidths(items: readonly SidebarCommentAlignmentItem[]): Map<string, number> {
@@ -110,8 +138,9 @@ export function usesFullWidthTreeLabel(type: TreeNodeType, allowHorizontalScroll
   return allowHorizontalScroll && !hasTrailingComment && fullWidthLabelTypes.has(type);
 }
 
-export function treeLabelWidthClass({ fullWidth, hasTrailingComment }: { fullWidth: boolean; hasTrailingComment: boolean }): string {
+export function treeLabelWidthClass({ fullWidth, hasTrailingComment, hasInlineAction = false }: { fullWidth: boolean; hasTrailingComment: boolean; hasInlineAction?: boolean }): string {
   if (fullWidth) return "shrink-0 whitespace-nowrap";
+  if (hasTrailingComment && hasInlineAction) return "min-w-0 shrink truncate";
   return hasTrailingComment ? "min-w-0 flex-1 truncate" : "min-w-0 truncate";
 }
 

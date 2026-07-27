@@ -73,6 +73,7 @@ export default withEnglishFallback({
     downloadAndInstall: "ダウンロード & インストール",
     activeTasksBlockUpdate: "{count} 件のタスクが実行中です。完了してから DBX を更新してください。",
     portableAutomaticUpdate: "DBX は署名済みのポータブル ZIP をダウンロードし、終了後に DBX.exe のみを置き換えて自動的に再起動します。portable.dbx とデータは保持されます。",
+    windows7ManualUpdate: "Windows 7 では専用の WebView2 109 オフラインインストーラーが必要です。リリースページから Windows 7 用パッケージをダウンロードして更新してください。",
     downloading: "ダウンロード中 {progress}%",
     downloadFailed: "アップデートのダウンロードに失敗しました: {error}",
     installing: "アップデートをインストール中...",

@@ -65,6 +65,18 @@ ${StrLoc}
 !define STARTMENUFOLDER "{{start_menu_folder}}"
 !searchreplace WEBVIEW2LOADERSRCPATH "${MAINBINARYSRCPATH}" "\${MAINBINARYNAME}.exe" "\WebView2Loader.dll"
 
+!macro ReadWebView2RuntimeVersion RESULT
+  StrCpy ${RESULT} ""
+  ${If} ${RunningX64}
+    ReadRegStr ${RESULT} HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+  ${Else}
+    ReadRegStr ${RESULT} HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+  ${EndIf}
+  ${If} ${RESULT} == ""
+    ReadRegStr ${RESULT} HKCU "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
+  ${EndIf}
+!macroend
+
 Var PassiveMode
 Var UpdateMode
 Var NoShortcutMode
@@ -554,18 +566,24 @@ Section WebView2
       DetailPrint "$(webview2InstallSuccess)"
     ${Else}
       DetailPrint "$(webview2InstallError)"
-      Abort "$(webview2AbortError)"
+      ; Enterprise policy can make the bundled installer return a non-zero code.
+      ; Continue when a usable Runtime is already registered on the machine.
+      !insertmacro ReadWebView2RuntimeVersion $4
+      ${If} $4 != ""
+        !if "${MINIMUMWEBVIEW2VERSION}" != ""
+          ${VersionCompare} "${MINIMUMWEBVIEW2VERSION}" "$4" $R0
+          ${If} $R0 = 1
+            StrCpy $4 ""
+          ${EndIf}
+        !endif
+      ${EndIf}
+      ${If} $4 == ""
+        Abort "$(webview2AbortError)"
+      ${EndIf}
     ${EndIf}
   !else
   ; Check if Webview2 is already installed and skip this section
-  ${If} ${RunningX64}
-    ReadRegStr $4 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
-  ${Else}
-    ReadRegStr $4 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
-  ${EndIf}
-  ${If} $4 == ""
-    ReadRegStr $4 HKCU "SOFTWARE\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
-  ${EndIf}
+  !insertmacro ReadWebView2RuntimeVersion $4
 
   ${If} $4 == ""
     ; Webview2 installation

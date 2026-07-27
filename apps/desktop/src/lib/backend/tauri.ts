@@ -1487,6 +1487,7 @@ export interface UpdateInfo {
   latest_version: string;
   update_available: boolean;
   portable_mode: boolean;
+  manual_update_only: boolean;
   release_name: string;
   release_url: string;
   release_notes: string;

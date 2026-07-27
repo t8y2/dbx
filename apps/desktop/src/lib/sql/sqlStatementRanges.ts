@@ -1705,7 +1705,7 @@ function oraclePlSqlBlockIsComplete(sql: string): boolean {
     if (token.kind !== "word") continue;
 
     if (token.value === "DECLARE") {
-      stack.push("DECLARATION");
+      if (stack[stack.length - 1] !== "DECLARATION") stack.push("DECLARATION");
       continue;
     }
     if (token.value === "BEGIN") {

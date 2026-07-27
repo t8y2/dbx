@@ -3222,6 +3222,48 @@ DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing;";
     }
 
     #[test]
+    fn gaussdb_split_separates_issue_4573_procedure_from_following_statements() {
+        let sql = "\
+CREATE OR REPLACE PROCEDURE createIndex (
+  dbName IN VARCHAR(32),
+  tableName IN VARCHAR(64),
+  indexInfo IN VARCHAR(64),
+  indexColumns IN VARCHAR(128)
+) AS
+DECLARE STMT TEXT;
+
+DECLARE flag int;
+
+BEGIN
+SELECT
+  count(*) INTO flag
+FROM
+  PG_CATALOG.PG_INDEXES
+WHERE
+  schemaname = dbName
+  AND TABLENAME = tableName
+  AND INDEXNAME = indexInfo;
+
+IF flag = 0 THEN STMT := 'CREATE INDEX ' || indexInfo || ' ON ' || dbName || '.' || tableName || '(' || indexColumns || ')';
+
+EXECUTE STMT;
+
+END IF;
+
+END;
+
+SELECT 1 AS after_procedure;
+SELECT 2 AS final_statement;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Gaussdb);
+        assert_eq!(statements.len(), 3);
+        assert!(statements[0].starts_with("CREATE OR REPLACE PROCEDURE createIndex"));
+        assert!(statements[0].ends_with("END;"));
+        assert_eq!(statements[1], "SELECT 1 AS after_procedure");
+        assert_eq!(statements[2], "SELECT 2 AS final_statement");
+    }
+
+    #[test]
     fn oracle_like_split_keeps_issue_2405_anonymous_plsql_block_together() {
         let sql = "\
 DECLARE

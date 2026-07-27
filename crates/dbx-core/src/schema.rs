@@ -2646,9 +2646,9 @@ mod tests {
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error,
-        kingbase_object_statistics_sql, mysql_object_source_sql, mysql_table_metadata_catalog,
-        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        kingbase_object_statistics_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
+        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
+        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
@@ -2758,6 +2758,35 @@ mod tests {
             mysql_object_source_sql("", "users_view", &db::ObjectSourceKind::View),
             "SHOW CREATE VIEW `users_view`"
         );
+    }
+
+    #[test]
+    fn mysql_object_source_sql_emits_show_create_materialized_view() {
+        // Regression for the review comment: Doris / StarRocks ride on the MySQL
+        // protocol, so the MV branch of mysql_object_source_sql must produce a
+        // real statement (used at crates/dbx-core/src/schema.rs:5395-5404 by
+        // get_table_ddl_core). Returning an empty string silently broke the UI.
+        assert_eq!(
+            mysql_object_source_sql("shop", "daily_sales_mv", &db::ObjectSourceKind::MaterializedView),
+            "SHOW CREATE MATERIALIZED VIEW `shop`.`daily_sales_mv`"
+        );
+        assert_eq!(
+            mysql_object_source_sql("", "daily_sales_mv", &db::ObjectSourceKind::MaterializedView),
+            "SHOW CREATE MATERIALIZED VIEW `daily_sales_mv`"
+        );
+    }
+
+    #[test]
+    fn mysql_object_source_ddl_column_index_matches_dialect_layout() {
+        // VIEW and Doris/StarRocks MaterializedView return (Name, DDL).
+        // PROCEDURE / FUNCTION return (Name, sql_mode, DDL, …).
+        // Reading the wrong index returns the empty/no-op and surfaces as
+        // "Failed to read object source" — regression-guarded here so we
+        // don't have to spin up a real StarRocks to catch it.
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::View), 1);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::MaterializedView), 1);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Procedure), 2);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Function), 2);
     }
 
     #[test]
@@ -5900,8 +5929,40 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
         | db::ObjectSourceKind::Type
-        | db::ObjectSourceKind::TypeBody
-        | db::ObjectSourceKind::MaterializedView => String::new(),
+        | db::ObjectSourceKind::TypeBody => String::new(),
+        // Doris and StarRocks expose materialized views via `SHOW CREATE MATERIALIZED VIEW`.
+        // MySQL itself never reaches this arm in normal use: the desktop capabilities map at
+        // apps/desktop/src/lib/database/databaseObjectCapabilities.ts has no "mysql" entry,
+        // so the UI never sends MaterializedView for a real MySQL connection. If something
+        // else forces the kind through, MySQL 8.x will surface a syntax error instead of
+        // silently returning empty, which is the desired fail-loud behaviour.
+        db::ObjectSourceKind::MaterializedView => {
+            format!("SHOW CREATE MATERIALIZED VIEW {qualified_name}")
+        }
+    }
+}
+
+/// Column index of the DDL text in the row returned by the statements generated
+/// by [`mysql_object_source_sql`].
+///
+/// The shape of the result is dialect-dependent:
+/// - `SHOW CREATE VIEW`, Doris/StarRocks `SHOW CREATE MATERIALIZED VIEW` →
+///   `(Name, DDL)` → DDL at index `1`.
+/// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION` →
+///   `(Name, sql_mode, DDL, …)` → DDL at index `2`.
+///
+/// Encoded as a function so the index can be unit-tested without a live DB.
+pub(crate) fn mysql_object_source_ddl_column_index(kind: &db::ObjectSourceKind) -> usize {
+    match kind {
+        db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => 1,
+        db::ObjectSourceKind::Procedure
+        | db::ObjectSourceKind::Function
+        | db::ObjectSourceKind::Trigger
+        | db::ObjectSourceKind::Sequence
+        | db::ObjectSourceKind::Package
+        | db::ObjectSourceKind::PackageBody
+        | db::ObjectSourceKind::Type
+        | db::ObjectSourceKind::TypeBody => 2,
     }
 }
 
@@ -5937,7 +5998,7 @@ async fn mysql_object_source(
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let row = rows.first().ok_or("Object source not found")?;
-    let index = if matches!(kind, db::ObjectSourceKind::View) { 1 } else { 2 };
+    let index = mysql_object_source_ddl_column_index(kind);
     row.get_opt::<String, usize>(index)
         .and_then(|result| result.ok())
         .or_else(|| {

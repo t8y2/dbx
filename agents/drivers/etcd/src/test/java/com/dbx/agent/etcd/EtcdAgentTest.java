@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.KV;
+import io.etcd.jetcd.Lease;
 import io.etcd.jetcd.Txn;
 import io.etcd.jetcd.api.KeyValue;
 import io.etcd.jetcd.api.RangeResponse;
@@ -18,6 +19,7 @@ import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Assertions;
@@ -176,6 +178,36 @@ final class EtcdAgentTest {
         Assertions.assertEquals("Cannot preserve lease: key changed concurrently; retry the save", error.getMessage());
         Assertions.assertEquals(3, getCalls.get());
         Assertions.assertEquals(3, txnCalls.get());
+    }
+
+    @Test
+    void grantedLeaseIsRevokedWhenWriteFailsAfterCreation() {
+        AtomicInteger revokeCalls = new AtomicInteger();
+        AtomicInteger revokedLeaseId = new AtomicInteger();
+        Lease lease = (Lease) Proxy.newProxyInstance(
+            Lease.class.getClassLoader(),
+            new Class<?>[] { Lease.class },
+            (proxy, method, args) -> {
+                if (method.getName().equals("revoke")) {
+                    revokeCalls.incrementAndGet();
+                    revokedLeaseId.set(Math.toIntExact((long) args[0]));
+                    return CompletableFuture.completedFuture(null);
+                }
+                if (method.getName().equals("close")) return null;
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        TimeoutException error = Assertions.assertThrows(
+            TimeoutException.class,
+            () -> EtcdAgent.cleanUpGrantedLeaseOnFailure(123, lease, () -> {
+                throw new TimeoutException("write timed out");
+            })
+        );
+
+        Assertions.assertEquals("write timed out", error.getMessage());
+        Assertions.assertEquals(1, revokeCalls.get());
+        Assertions.assertEquals(123, revokedLeaseId.get());
     }
 
     private static KV scriptedKv(

@@ -20,7 +20,6 @@ import type { KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { buildKvKeyTree, flattenVisibleKvKeyTree, kvKeyTreeNodePath, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
 import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseKeys, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
 import { classifyKvMutationError, type KvMutationErrorKind } from "@/lib/kv/kvMutationError";
-import { filterKvKeysBySearch } from "@/lib/kv/kvKeySearch";
 import { refreshedKvSelectionKey } from "@/lib/kv/kvRefreshSelection";
 import { parseKvLeaseId, parseOptionalTtl } from "@/lib/kv/kvTtl";
 import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
@@ -304,32 +303,11 @@ function handleKvBrowserSplitResized(payload: { panes?: { size: number }[] }) {
   safeLocalStorageSet(kvBrowserSplitSizeStorageKey, String(size));
 }
 
-async function searchAllKeys(query: string, generation: number, connectionId: string): Promise<{ keys: KvKeySummary[]; revision: KvInt64 | null } | null> {
-  const matches: KvKeySummary[] = [];
-  let continuationToUse: string | null = null;
-  let revision: KvInt64 | null = null;
-
-  do {
-    const result = await props.api.listPrefix(connectionId, "", pageSize, continuationToUse, revision ? { revision } : undefined);
-    if (generation !== keyLoadGeneration || props.connectionId !== connectionId) return null;
-    if (!revision && result.revision != null) revision = String(result.revision);
-    matches.push(...filterKvKeysBySearch(result.keys, query));
-    continuationToUse = result.continuation || null;
-  } while (continuationToUse);
-
-  return { keys: matches, revision };
-}
-
 async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
   if (props.lazyHierarchy) {
     await loadLazyRoot(reset, options);
     return;
   }
-  if (!reset && prefix.value.trim()) {
-    await loadKeys(true, options);
-    return;
-  }
-
   const generation = ++keyLoadGeneration;
   const connectionId = props.connectionId;
   const searchQuery = prefix.value.trim();
@@ -347,22 +325,7 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
     loadingMore.value = true;
   }
   try {
-    if (reset && searchQuery) {
-      const result = await searchAllKeys(searchQuery, generation, connectionId);
-      if (!result) return;
-      keys.value = result.keys;
-      continuation.value = null;
-      listRevision.value = result.revision;
-      preserveExpandedGroups(true);
-      if (options.preserveSelection) {
-        const restoredKey = refreshedKvSelectionKey(keyToRestore, result.keys);
-        if (restoredKey) await loadSelectedKey(restoredKey);
-        else clearSelectedKey();
-      }
-      return;
-    }
-
-    const result = await props.api.listPrefix(connectionId, "", pageSize, reset ? null : continuation.value, reset || !listRevision.value ? undefined : { revision: listRevision.value });
+    const result = await props.api.listPrefix(connectionId, searchQuery, pageSize, reset ? null : continuation.value, reset || !listRevision.value ? undefined : { revision: listRevision.value });
     if (generation !== keyLoadGeneration || props.connectionId !== connectionId) return;
     if (reset && result.revision != null) listRevision.value = String(result.revision);
     const existing = new Set(keys.value.map((key) => key.key));

@@ -4,12 +4,10 @@ import { describe, expect, it } from "vitest";
 const browserSource = readFileSync(new URL("../KvKeyBrowser.vue", import.meta.url), "utf8");
 
 describe("KvKeyBrowser search and split layout", () => {
-  it("scans at a fixed revision and filters complete Key paths", () => {
-    expect(browserSource).toContain('props.api.listPrefix(connectionId, "", pageSize, continuationToUse, revision ? { revision } : undefined)');
-    expect(browserSource).toContain("matches.push(...filterKvKeysBySearch(result.keys, query))");
-    expect(browserSource).toContain("} while (continuationToUse);");
-    expect(browserSource).not.toContain("keySearchScanLimit");
-    expect(browserSource).toContain("preserveExpandedGroups(true)");
+  it("uses the requested prefix for a server-side, paginated search", () => {
+    expect(browserSource).toContain("props.api.listPrefix(connectionId, searchQuery, pageSize, reset ? null : continuation.value");
+    expect(browserSource).not.toContain("async function searchAllKeys");
+    expect(browserSource).not.toContain("filterKvKeysBySearch(result.keys, query)");
   });
 
   it("uses a persisted draggable split between the Key tree and details", () => {

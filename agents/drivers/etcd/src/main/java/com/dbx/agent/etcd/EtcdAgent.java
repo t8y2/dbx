@@ -12,6 +12,7 @@ import io.etcd.jetcd.ClientBuilder;
 import io.etcd.jetcd.Cluster;
 import io.etcd.jetcd.KV;
 import io.etcd.jetcd.KeyValue;
+import io.etcd.jetcd.Lease;
 import io.etcd.jetcd.Maintenance;
 import io.etcd.jetcd.Watch;
 import io.etcd.jetcd.cluster.Member;
@@ -58,6 +59,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -265,36 +267,47 @@ public final class EtcdAgent {
         } else if (hasLease) {
             option = PutOption.newBuilder().withLeaseId(leaseElement.getAsLong()).build();
         }
-        if (expectedModRevision != null || expectedCreateRevision != null) {
-            List<Cmp> comparisons = new ArrayList<>();
-            if (expectedModRevision != null) {
-                comparisons.add(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.modRevision(expectedModRevision)));
-            }
-            if (expectedCreateRevision != null) {
-                comparisons.add(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.createRevision(expectedCreateRevision)));
-            }
-            TxnResponse response = active.txn()
-                .If(comparisons.toArray(Cmp[]::new))
-                .Then(Op.put(key, ByteSequence.from(value), option))
-                .commit()
-                .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (!response.isSucceeded()) {
-                IllegalStateException conflict =
-                    new IllegalStateException("ETCD_CAS_CONFLICT: key changed after it was loaded");
-                if (grantedLeaseId != 0) {
-                    try {
-                        requireClient().getLeaseClient().revoke(grantedLeaseId)
-                            .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                    } catch (Exception revokeError) {
-                        conflict.addSuppressed(revokeError);
-                    }
+        final long leaseToCleanUp = grantedLeaseId;
+        final Lease leaseClient = leaseToCleanUp == 0 ? null : requireClient().getLeaseClient();
+        final PutOption writeOption = option;
+        return cleanUpGrantedLeaseOnFailure(leaseToCleanUp, leaseClient, () -> {
+            if (expectedModRevision != null || expectedCreateRevision != null) {
+                List<Cmp> comparisons = new ArrayList<>();
+                if (expectedModRevision != null) {
+                    comparisons.add(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.modRevision(expectedModRevision)));
                 }
-                throw conflict;
+                if (expectedCreateRevision != null) {
+                    comparisons.add(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.createRevision(expectedCreateRevision)));
+                }
+                TxnResponse response = active.txn()
+                    .If(comparisons.toArray(Cmp[]::new))
+                    .Then(Op.put(key, ByteSequence.from(value), writeOption))
+                    .commit()
+                    .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                if (!response.isSucceeded()) {
+                    throw new IllegalStateException("ETCD_CAS_CONFLICT: key changed after it was loaded");
+                }
+                return Collections.singletonMap("revision", longString(response.getHeader().getRevision()));
             }
+            PutResponse response = active.put(key, ByteSequence.from(value), writeOption)
+                .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             return Collections.singletonMap("revision", longString(response.getHeader().getRevision()));
+        });
+    }
+
+    static <T> T cleanUpGrantedLeaseOnFailure(long grantedLeaseId, Lease leaseClient, Callable<T> write) throws Exception {
+        try {
+            return write.call();
+        } catch (Exception error) {
+            if (grantedLeaseId != 0) {
+                try {
+                    leaseClient.revoke(grantedLeaseId).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                } catch (Exception revokeError) {
+                    error.addSuppressed(revokeError);
+                }
+            }
+            throw error;
         }
-        PutResponse response = active.put(key, ByteSequence.from(value), option).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-        return Collections.singletonMap("revision", longString(response.getHeader().getRevision()));
     }
 
     static long putPreservingLease(KV active, ByteSequence key, ByteSequence value) throws Exception {

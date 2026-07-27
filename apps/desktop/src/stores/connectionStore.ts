@@ -1166,6 +1166,12 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /** Drop loaded/confirmed-empty markers, metadata caches, and generations for a discarded shell. */
+  function forgetTreeNodeLoadState(nodeId: string) {
+    clearLoadedChildrenCache(nodeId);
+    treeNodeLoads.invalidatePrefix(nodeId);
+  }
+
   function syncConfirmedEmptyTreeNodeId(parent: TreeNode) {
     if (parent.type !== "database" && parent.type !== "schema" && parent.type !== "linked-server-schema") return;
     const childCount = parent.children?.length ?? 0;
@@ -1208,9 +1214,19 @@ export const useConnectionStore = defineStore("connection", () => {
     children = preserveExistingConnectionMetadataChildren(parent, children);
     if (shouldClearDescendantLoadedMarkers(parent, children)) {
       clearDescendantLoadedChildrenMarkers(parent.id);
+      // Parent load may still be current; only supersede descendant generations.
+      treeNodeLoads.invalidateDescendants(parent.id);
     }
     if (parent.children && parent.children.length > 0) {
       const oldMap = new Map(parent.children.map((c) => [c.id, c] as const));
+      const nextIds = new Set(children.map((child) => child.id));
+      for (const [oldId, old] of oldMap) {
+        // Removed children keep no loaded markers; also bump generations so in-flight
+        // loads cannot apply if the same id is recreated later.
+        if (!nextIds.has(oldId) && old.type !== "load-more") {
+          forgetTreeNodeLoadState(oldId);
+        }
+      }
       children = children.map((child) => {
         const old = oldMap.get(child.id);
         if (old?.isLoading) {
@@ -1225,6 +1241,13 @@ export const useConnectionStore = defineStore("connection", () => {
         }
         if (old?.isExpanded) {
           return { ...child, isExpanded: true, children: old.children };
+        }
+        // Same-id collapsed database/schema shell replace (e.g. DDL → force loadDatabases):
+        // prior confirmed-empty markers belong to the discarded instance and must not skip
+        // the next expand reload. Do not do this for tables/groups — load-more and list
+        // refresh must preserve nested loaded markers (columns, etc.).
+        if (old && (old.type === "database" || old.type === "schema" || old.type === "linked-server-schema")) {
+          forgetTreeNodeLoadState(child.id);
         }
         return child;
       });
@@ -4070,6 +4093,9 @@ export const useConnectionStore = defineStore("connection", () => {
       },
       async () => {
         let load = beginTreeNodeLoad(node);
+        // Parent writes must honor the parent's generation too — load-more begins on the
+        // placeholder node, so a replaced/invalidated parent must reject the merge.
+        const parentEpoch = treeNodeLoads.observe(parent.id);
         try {
           await ensureConnected(parentConnectionId);
           load = reclaimTreeNodeLoad(load, node);
@@ -4091,7 +4117,7 @@ export const useConnectionStore = defineStore("connection", () => {
               force: false,
             });
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent) return;
+            if (!targetParent || !parentEpoch.isCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             const mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
             const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize), page.loadMoreParent) : mergedChildren;
@@ -4125,7 +4151,7 @@ export const useConnectionStore = defineStore("connection", () => {
               force: false,
             });
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent) return;
+            if (!targetParent || !parentEpoch.isCurrent()) return;
             const currentChildren = withoutTableTreeLoadMoreNodes(targetParent.children);
             mergedChildren = mergeTableTreePageChildren(currentChildren, page.children, parentConnectionId, parentDatabase);
             nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize), page.loadMoreParent) : mergedChildren;
@@ -4141,7 +4167,7 @@ export const useConnectionStore = defineStore("connection", () => {
               force: false,
             });
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
-            if (!targetParent) return;
+            if (!targetParent || !parentEpoch.isCurrent()) return;
             const currentChildren = withoutLoadMoreNodes(targetParent.children);
             mergedChildren = mergeLocatedTreeChildren(targetParent, currentChildren, page.children, parentConnectionId, parentDatabase);
             nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize)] : mergedChildren;
@@ -4152,7 +4178,7 @@ export const useConnectionStore = defineStore("connection", () => {
             return;
           }
           const targetParent = treeNodeLoadRelatedTarget(load, parent);
-          if (!targetParent) return;
+          if (!targetParent || !parentEpoch.isCurrent()) return;
           targetParent.objectCount = mergedChildren.length;
           setChildren(targetParent, nextChildren);
           await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
@@ -4306,25 +4332,32 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadAllObjectGroupChildren(parent: TreeNode) {
     if (!parent.connectionId || !hasTreeNodeDatabaseContext(parent)) return;
     if (!objectTypesForGroupNode(parent.type)) return;
-    parent.isLoading = true;
+    let load = beginTreeNodeLoad(parent);
     try {
       await ensureConnected(parent.connectionId);
-      if (!isTreeNodeChildrenLoaded(parent.id)) {
-        await loadObjectGroupChildren(parent);
+      load = reclaimTreeNodeLoad(load, parent);
+      const liveParent = treeNodeLoadTarget(load);
+      if (!liveParent) return;
+      if (!isTreeNodeChildrenLoaded(liveParent.id)) {
+        await loadObjectGroupChildren(liveParent);
       }
+      if (!load.isCurrent()) return;
 
-      let loadMoreNode = findTreeNodes(parent.children ?? [], (child) => child.type === "load-more")[0];
+      let loadMoreNode = findTreeNodes(liveParent.children ?? [], (child) => child.type === "load-more")[0];
       while (loadMoreNode?.loadMore) {
-        loadMoreNode.isLoading = true;
         await loadMoreObjectGroupChildren(loadMoreNode);
-        loadMoreNode = findTreeNodes(parent.children ?? [], (child) => child.type === "load-more")[0];
+        if (!load.isCurrent()) return;
+        const currentParent = treeNodeLoadTarget(load);
+        if (!currentParent) return;
+        loadMoreNode = findTreeNodes(currentParent.children ?? [], (child) => child.type === "load-more")[0];
       }
-      parent.isExpanded = true;
+      const finishedParent = treeNodeLoadTarget(load);
+      if (finishedParent) finishedParent.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(parent.connectionId, e);
       throw e;
     } finally {
-      parent.isLoading = false;
+      finishTreeNodeLoad(load);
     }
   }
 

@@ -18,7 +18,7 @@ import KvValueEditor from "@/components/kv/KvValueEditor.vue";
 import type { KvCreateMode, KvDeleteOptions, KvGetOptions, KvGetResponse, KvHistoryEvent, KvHistoryResponse, KvInt64, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/backend/api";
 import type { KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { buildKvKeyTree, flattenVisibleKvKeyTree, kvKeyTreeNodePath, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
-import { decideKvMetadataRefresh, knownKvLeaseSummaries, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
+import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseSummaries, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
 import { classifyKvMutationError, type KvMutationErrorKind } from "@/lib/kv/kvMutationError";
 import { refreshedKvSelectionSummary } from "@/lib/kv/kvRefreshSelection";
 import { parseKvLeaseId, parseOptionalTtl } from "@/lib/kv/kvTtl";

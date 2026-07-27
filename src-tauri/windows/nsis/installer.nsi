@@ -542,6 +542,21 @@ Section EarlyChecks
 SectionEnd
 
 Section WebView2
+  ; Offline packages carry the runtime they were built for. Always run that
+  ; installer so an existing stale runtime is upgraded without network access.
+  !if "${INSTALLWEBVIEW2MODE}" == "offlineInstaller"
+    Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
+    File "/oname=$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" "${WEBVIEW2INSTALLERPATH}"
+    DetailPrint "$(installingWebview2)"
+    ExecWait '"$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" ${WEBVIEW2INSTALLERARGS} /install' $1
+    Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
+    ${If} $1 = 0
+      DetailPrint "$(webview2InstallSuccess)"
+    ${Else}
+      DetailPrint "$(webview2InstallError)"
+      Abort "$(webview2AbortError)"
+    ${EndIf}
+  !else
   ; Check if Webview2 is already installed and skip this section
   ${If} ${RunningX64}
     ReadRegStr $4 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WEBVIEW2APPGUID}" "pv"
@@ -577,14 +592,6 @@ Section WebView2
         File "/oname=$TEMP\MicrosoftEdgeWebview2Setup.exe" "${WEBVIEW2BOOTSTRAPPERPATH}"
         DetailPrint "$(installingWebview2)"
         StrCpy $6 "$TEMP\MicrosoftEdgeWebview2Setup.exe"
-        Goto install_webview2
-      !endif
-
-      !if "${INSTALLWEBVIEW2MODE}" == "offlineInstaller"
-        Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
-        File "/oname=$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" "${WEBVIEW2INSTALLERPATH}"
-        DetailPrint "$(installingWebview2)"
-        StrCpy $6 "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
         Goto install_webview2
       !endif
 
@@ -631,6 +638,7 @@ Section WebView2
       ${EndIf}
     !endif
   ${EndIf}
+  !endif
 SectionEnd
 
 Section Install

@@ -262,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
           ALLOWED="${{ env.GLIBC_VERSION }}"
-          ARTIFACT_DIR="target/${{ matrix.target }}.${ALLOWED}/release"
+          ARTIFACT_DIR="target/${{ matrix.target }}/release"
           for BINARY in "${ARTIFACT_DIR}/dbx" "${ARTIFACT_DIR}/dbx-mcp"; do
             if [ ! -f "${BINARY}" ]; then
               echo "::error::missing binary: ${BINARY}"
@@ -292,8 +292,8 @@ jobs:
         with:
           name: dbx-validate-${{ matrix.target }}.glibc-${{ env.GLIBC_VERSION }}
           path: |
-            target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release/dbx
-            target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release/dbx-mcp
+            target/${{ matrix.target }}/release/dbx
+            target/${{ matrix.target }}/release/dbx-mcp
           if-no-files-found: error
 
   publish-cli-platforms:
@@ -390,7 +390,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BINARY="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release/${{ matrix.binary }}"
+          BINARY="target/${{ matrix.target }}/release/${{ matrix.binary }}"
           ALLOWED="${{ env.GLIBC_VERSION }}"
           if [ ! -f "${BINARY}" ]; then
             echo "::error::missing binary: ${BINARY}"
@@ -416,8 +416,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p "packages/${{ matrix.package-dir }}/bin"
-          # Linux zigbuild 产物路径里带 `.2.31` 后缀
-          ARTIFACT_DIR="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release"
+          # Linux zigbuild 产物路径在 target/${{ matrix.target }}/release
+          ARTIFACT_DIR="target/${{ matrix.target }}/release"
           cp "${ARTIFACT_DIR}/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
 
@@ -584,7 +584,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BINARY="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release/${{ matrix.binary }}"
+          BINARY="target/${{ matrix.target }}/release/${{ matrix.binary }}"
           ALLOWED="${{ env.GLIBC_VERSION }}"
           if [ ! -f "${BINARY}" ]; then
             echo "::error::missing binary: ${BINARY}"
@@ -610,8 +610,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p "packages/${{ matrix.package-dir }}/bin"
-          # Linux zigbuild 产物路径里带 `.2.31` 后缀
-          ARTIFACT_DIR="target/${{ matrix.target }}.${{ env.GLIBC_VERSION }}/release"
+          # Linux zigbuild 产物路径在 target/${{ matrix.target }}/release
+          ARTIFACT_DIR="target/${{ matrix.target }}/release"
           cp "${ARTIFACT_DIR}/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
 

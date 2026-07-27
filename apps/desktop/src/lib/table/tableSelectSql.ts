@@ -26,6 +26,7 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
   // JDBC connections use the driver-reported identifier quote string
   // (DatabaseMetaData.getIdentifierQuoteString()) — pass through unquoted.
   if (databaseType === "jdbc") return name;
+  if (databaseType === "bigquery") return `\`${name.replace(/`/g, "\\`")}\``;
   if (databaseType === "mysql" || databaseType === "clickhouse" || databaseType === "hive" || databaseType === "spark" || databaseType === "databend" || databaseType === "tdengine" || databaseType === "access" || databaseType === "doris" || databaseType === "starrocks")
     return `\`${name.replace(/`/g, "``")}\``;
   if (databaseType === "informix" && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) return name;

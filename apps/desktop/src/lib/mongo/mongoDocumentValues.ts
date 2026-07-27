@@ -7,6 +7,7 @@ const MONGO_INTEGER_PATTERN = /^-?\d+$/;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_BSON_INT64 = -9223372036854775808n;
 const MAX_BSON_INT64 = 9223372036854775807n;
+const MONGO_EXTENDED_JSON_VALUE_KEYS = new Set(["$binary", "$code", "$date", "$dbPointer", "$maxKey", "$minKey", "$numberDecimal", "$numberDouble", "$numberInt", "$numberLong", "$oid", "$regularExpression", "$symbol", "$timestamp", "$undefined", "$uuid"]);
 
 export function mongoShellDateToExtendedJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -86,6 +87,39 @@ export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, 
   return doc;
 }
 
+export function buildMongoCopyUpdateDocument(row: MongoInputValue[], columns: string[], dirtyColumns: boolean[], originalDocument?: unknown, idColumn = "_id"): Record<string, unknown> | null {
+  if (!originalDocument || typeof originalDocument !== "object" || Array.isArray(originalDocument)) return null;
+
+  const source = originalDocument as Record<string, unknown>;
+  const setFields: Record<string, unknown> = {};
+  const unsetFields: Record<string, unknown> = {};
+  for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+    const column = columns[columnIndex];
+    if (!column || column === idColumn) continue;
+
+    const value = row[columnIndex] ?? null;
+    if (dirtyColumns[columnIndex]) {
+      if (value === null) {
+        unsetFields[column] = "";
+      } else {
+        setFields[column] = parseMongoExistingFieldInputValue(value, source[column]);
+      }
+      continue;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(source, column)) {
+      setFields[column] = source[column];
+    } else {
+      unsetFields[column] = "";
+    }
+  }
+
+  const update: Record<string, unknown> = {};
+  if (Object.keys(setFields).length > 0) update.$set = setFields;
+  if (Object.keys(unsetFields).length > 0) update.$unset = unsetFields;
+  return Object.keys(update).length > 0 ? update : null;
+}
+
 export function applyMongoGridChangesToDocument(document: unknown, changes: Map<number, MongoInputValue>, columns: string[]): unknown {
   if (!document || typeof document !== "object" || Array.isArray(document)) return document;
 
@@ -100,6 +134,26 @@ export function applyMongoGridChangesToDocument(document: unknown, changes: Map<
     }
   }
   return updated;
+}
+
+function mongoDocumentIdentityKey(document: unknown): string | undefined {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return undefined;
+  const object = document as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(object, "_id")) return undefined;
+  return JSON.stringify(object._id);
+}
+
+export function applyMongoGridChangesToDocumentBaseline(baselineDocuments: unknown[], currentDocuments: unknown[], dirtyRows: Map<number, Map<number, MongoInputValue>>, columns: string[]): unknown[] {
+  const changesByDocumentId = new Map<string, Map<number, MongoInputValue>>();
+  for (const [rowIndex, changes] of dirtyRows) {
+    const identityKey = mongoDocumentIdentityKey(currentDocuments[rowIndex]);
+    if (identityKey !== undefined) changesByDocumentId.set(identityKey, changes);
+  }
+  return baselineDocuments.map((document) => {
+    const identityKey = mongoDocumentIdentityKey(document);
+    const changes = identityKey === undefined ? undefined : changesByDocumentId.get(identityKey);
+    return changes ? applyMongoGridChangesToDocument(document, changes, columns) : document;
+  });
 }
 
 export function buildMongoInsertDocument(row: MongoInputValue[], columns: string[]): Record<string, unknown> {
@@ -166,6 +220,9 @@ export function formatMongoShellLiteral(value: unknown): string {
     }
     if (keys.length === 1 && typeof object.$numberLong === "string") {
       return `NumberLong(${JSON.stringify(object.$numberLong)})`;
+    }
+    if ((keys.length === 1 && MONGO_EXTENDED_JSON_VALUE_KEYS.has(keys[0] ?? "")) || (keys.length === 2 && keys.includes("$code") && keys.includes("$scope"))) {
+      return `EJSON.deserialize(${JSON.stringify(object)})`;
     }
     return `{${keys.map((key) => `${JSON.stringify(key)}:${formatMongoShellLiteral(object[key])}`).join(",")}}`;
   }

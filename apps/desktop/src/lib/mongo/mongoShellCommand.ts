@@ -645,7 +645,7 @@ export function evaluateMongoAggregateSafety(command: MongoAggregateCommand, opt
   return { allowed: true };
 }
 
-export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeMs: number, total: number): QueryResult {
+export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeMs: number, total: number, copyDocuments?: unknown[], totalIsExact = true): QueryResult {
   const columns: string[] = [];
 
   for (const doc of documents) {
@@ -667,6 +667,8 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
     columns,
     rows,
     mongo_documents: documents,
+    ...(copyDocuments?.length === documents.length ? { mongo_copy_documents: copyDocuments } : {}),
+    ...(totalIsExact ? {} : { total_is_exact: false }),
     affected_rows: total,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
     truncated: total > documents.length,

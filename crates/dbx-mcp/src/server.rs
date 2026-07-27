@@ -897,6 +897,7 @@ fn default_port(db_type: &str) -> Option<u16> {
     match db_type.trim().to_ascii_lowercase().as_str() {
         "mysql" | "doris" | "starrocks" | "manticoresearch" => Some(3306),
         "postgres" | "redshift" | "highgo" | "kingbase" | "opengauss" | "gaussdb" => Some(5432),
+        "uxdb" => Some(52025),
         "redis" => Some(6379),
         "mongodb" => Some(27017),
         "rqlite" => Some(4001),

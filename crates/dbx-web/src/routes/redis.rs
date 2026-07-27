@@ -164,6 +164,24 @@ pub struct RedisJsonSetRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisSetTtlRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub ttl: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisSetExpireAtRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub expire_at: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisKeysRequest {
     pub connection_id: String,
     pub db: u32,
@@ -437,6 +455,7 @@ pub async fn set_remove(
 }
 
 pub async fn zadd(State(state): State<Arc<WebState>>, Json(req): Json<RedisZaddRequest>) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "ZADD").await?;
     dbx_core::redis_ops::redis_zadd_in_db_core(
         &state.app,
         &req.connection_id,
@@ -455,6 +474,7 @@ pub async fn stream_add(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisStreamAddRequest>,
 ) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "XADD").await?;
     dbx_core::redis_ops::redis_stream_add_in_db_core(
         &state.app,
         &req.connection_id,
@@ -473,6 +493,7 @@ pub async fn json_set(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisJsonSetRequest>,
 ) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "JSON.SET").await?;
     dbx_core::redis_ops::redis_json_set_in_db_core(
         &state.app,
         &req.connection_id,
@@ -494,6 +515,34 @@ pub async fn check_json_module(
         .await
         .map_err(AppError::from)?;
     Ok(Json(result))
+}
+
+pub async fn set_ttl(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisSetTtlRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "EXPIRE").await?;
+    dbx_core::redis_ops::redis_set_ttl_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw, req.ttl)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn set_expire_at(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisSetExpireAtRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "EXPIREAT").await?;
+    dbx_core::redis_ops::redis_set_expire_at_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        req.expire_at,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(()))
 }
 
 pub async fn delete_keys(

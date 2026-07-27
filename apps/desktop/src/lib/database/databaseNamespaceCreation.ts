@@ -41,6 +41,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   gaussdb: { connection: "database", database: "schema" },
   kingbase: { connection: "database", database: "schema" },
   highgo: { connection: "database", database: "schema" },
+  uxdb: { database: "schema" },
   vastbase: { connection: "database", database: "schema" },
   goldendb: { connection: "database" },
   kwdb: { connection: "database", database: "schema" },

@@ -17,6 +17,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
 import { clampDocumentPage, documentPageRequestLimit, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
+import { canGoNextDocumentPage, resolveDocumentQueryTotals } from "@/lib/document/documentQueryTotals";
 import {
   arrayObjectAncestorPathForDocumentField,
   buildDocumentFilterCondition,
@@ -84,6 +85,7 @@ type ViewMode = "document" | "table";
 
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
+const mongoCopyDocumentsAvailable = ref(false);
 const lastGridColumns = ref<string[]>([]);
 const total = ref<number | undefined>(undefined);
 const totalIsExact = ref(true);
@@ -112,6 +114,7 @@ const sortInput = ref("");
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
+const mongoUpdateTarget = computed(() => (props.databaseType === "mongodb" && mongoCopyDocumentsAvailable.value ? { collection: props.collection, idColumn: "_id" as const } : undefined));
 const documentViewerRef = ref<HTMLElement>();
 const documentSearchInputRef = ref<HTMLInputElement>();
 const documentSearchOpen = ref(false);
@@ -133,7 +136,16 @@ let elasticsearchCountExecutionId = "";
 let elasticsearchCountGeneration = 0;
 const documentStoreProvider = computed(() => documentStoreProviderFor(props.databaseType));
 
-const pageTotal = computed(() => paginationTotal.value ?? total.value ?? 0);
+const pageTotal = computed(() => paginationTotal.value);
+const documentPageCount = computed(() => (pageTotal.value === undefined ? undefined : Math.max(1, Math.ceil(pageTotal.value / pageSize.value))));
+const canGoNextPage = computed(() =>
+  canGoNextDocumentPage({
+    page: page.value,
+    pageSize: pageSize.value,
+    rowCount: documents.value.length,
+    paginationTotal: pageTotal.value,
+  }),
+);
 const documentRequestLimit = computed(() => {
   if (documentStoreProvider.value.kind !== "elasticsearch" || paginationTotal.value === undefined) return pageSize.value;
   return documentPageRequestLimit(page.value, pageSize.value, paginationTotal.value);
@@ -145,7 +157,7 @@ const tableFindPaneStyle = computed(() => {
 });
 const documentFontStyle = computed(() => documentViewerFontStyle(settingsStore.editorSettings));
 const documentStoreLabels = computed(() => ({
-  documentsLabel: documentStoreProvider.value.documentsLabel({ total: total.value ?? 0, t }),
+  documentsLabel: documentStoreProvider.value.documentsLabel({ total: total.value ?? 0, totalIsExact: totalIsExact.value, t }),
   queryPreview: documentQueryPreview.value,
 }));
 
@@ -822,9 +834,11 @@ async function load() {
             }
           })
         : result.documents.map(asRecord);
-    const nextCopyDocuments = result.extended_documents?.length === nextDocuments.length ? result.extended_documents.map(asRecord) : nextDocuments;
+    const hasTypePreservingCopyDocuments = result.extended_documents?.length === nextDocuments.length;
+    const nextCopyDocuments = hasTypePreservingCopyDocuments ? result.extended_documents!.map(asRecord) : nextDocuments;
     documents.value = nextDocuments;
     copyDocuments.value = nextCopyDocuments;
+    mongoCopyDocumentsAvailable.value = hasTypePreservingCopyDocuments;
     if (nextDocuments.length > 0) {
       const keySet = new Set<string>();
       keySet.add("_id");
@@ -839,9 +853,10 @@ async function load() {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
     } else {
       cancelElasticsearchCount();
-      total.value = result.total;
-      totalIsExact.value = true;
-      paginationTotal.value = result.total;
+      const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false);
+      total.value = totals.total;
+      totalIsExact.value = totals.totalIsExact;
+      paginationTotal.value = totals.paginationTotal;
     }
     syncSelectedDocumentAfterLoad(previousSelectedIdx, previousSelectedId);
   } catch (e: unknown) {
@@ -1309,7 +1324,7 @@ function prevPage() {
 }
 
 function nextPage() {
-  if ((page.value + 1) * pageSize.value >= pageTotal.value) return;
+  if (!canGoNextPage.value) return;
   page.value++;
   void load();
 }
@@ -1475,8 +1490,9 @@ defineExpose({ focusSearch });
         <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="page <= 0" @click="prevPage">
           <ChevronLeft class="h-3 w-3" />
         </Button>
-        <span>{{ page + 1 }} / {{ Math.max(1, Math.ceil(pageTotal / pageSize)) }}</span>
-        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="(page + 1) * pageSize >= pageTotal" @click="nextPage">
+        <span v-if="documentPageCount !== undefined">{{ page + 1 }} / {{ documentPageCount }}</span>
+        <span v-else>{{ page + 1 }}</span>
+        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!canGoNextPage" @click="nextPage">
           <ChevronRight class="h-3 w-3" />
         </Button>
       </div>
@@ -1569,6 +1585,7 @@ defineExpose({ focusSearch });
       :result="gridResult"
       context="results"
       :database-type="props.databaseType"
+      :mongo-update-target="mongoUpdateTarget"
       editable
       :custom-save-handler="customSaveHandler"
       :loading="loading"

@@ -513,6 +513,7 @@ public final class DbxJdbcPlugin {
             properties.setProperty("password", password);
         }
         applyConnectTimeout(connection, properties);
+        applyPagedFetchProperties(connection, url, properties);
         applyJdbcxExtensionSecurity(connection, url, properties);
         if (isOracleUrl(url)) {
             applyOracleProperties(connection, properties);
@@ -584,6 +585,33 @@ public final class DbxJdbcPlugin {
         return normalized.equals("com.mysql.cj.jdbc.driver") ||
             normalized.equals("com.mysql.jdbc.driver") ||
             normalized.equals("org.mariadb.jdbc.driver");
+    }
+
+    private static void applyPagedFetchProperties(JsonNode connection, String url, Properties properties) {
+        if (!isMysqlConnection(connection, url) || jdbcUrlHasParameter(url, "useCursorFetch")) {
+            return;
+        }
+        properties.putIfAbsent("useCursorFetch", "true");
+    }
+
+    private static boolean isMysqlConnection(JsonNode connection, String url) {
+        if (urlMatchesPrefix(url, "jdbc:mysql:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        if (driverClass == null) {
+            return false;
+        }
+        String normalized = driverClass.toLowerCase(Locale.ROOT);
+        return normalized.equals("com.mysql.cj.jdbc.driver") || normalized.equals("com.mysql.jdbc.driver");
+    }
+
+    private static boolean isPostgresConnection(JsonNode connection) {
+        if (urlMatchesPrefix(jdbcUrl(connection), "jdbc:postgresql:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        return driverClass != null && driverClass.equalsIgnoreCase("org.postgresql.Driver");
     }
 
     private static boolean isPrestoOrTrinoConnection(JsonNode connection) {
@@ -675,6 +703,8 @@ public final class DbxJdbcPlugin {
         private final ArrayNode columns;
         private final int maxRows;
         private final long startNanos;
+        private final Connection connection;
+        private final boolean restoreAutoCommit;
         private int rowsReturned;
         private ArrayNode pendingRow;
 
@@ -685,7 +715,9 @@ public final class DbxJdbcPlugin {
             ResultSetMetaData meta,
             ArrayNode columns,
             int maxRows,
-            long startNanos
+            long startNanos,
+            Connection connection,
+            boolean restoreAutoCommit
         ) {
             this.id = id;
             this.statement = statement;
@@ -694,6 +726,8 @@ public final class DbxJdbcPlugin {
             this.columns = columns;
             this.maxRows = Math.max(1, maxRows);
             this.startNanos = startNanos;
+            this.connection = connection;
+            this.restoreAutoCommit = restoreAutoCommit;
         }
     }
 
@@ -711,7 +745,14 @@ public final class DbxJdbcPlugin {
         Connection conn = openConnection(connection);
         applyExecutionContext(connection, conn, database, schema);
         JdbcDriverQuirks quirks = driverQuirks(connection);
-        Statement statement = conn.createStatement();
+        boolean restoreAutoCommit = beginPagedQueryTransaction(connection, conn);
+        Statement statement;
+        try {
+            statement = createPagedQueryStatement(conn);
+        } catch (Exception | LinkageError error) {
+            restorePagedQueryTransaction(conn, restoreAutoCommit);
+            throw error;
+        }
         try {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
@@ -727,6 +768,7 @@ public final class DbxJdbcPlugin {
                 result.putNull("session_id");
                 result.put("has_more", false);
                 statement.close();
+                restorePagedQueryTransaction(conn, restoreAutoCommit);
                 return result;
             }
 
@@ -738,15 +780,62 @@ public final class DbxJdbcPlugin {
                 columns.add(label == null || label.isBlank() ? meta.getColumnName(i) : label);
             }
             String sessionId = UUID.randomUUID().toString();
-            QuerySession session = new QuerySession(sessionId, statement, rs, meta, columns, maxRows, start);
+            QuerySession session = new QuerySession(
+                sessionId,
+                statement,
+                rs,
+                meta,
+                columns,
+                maxRows,
+                start,
+                conn,
+                restoreAutoCommit
+            );
             QUERY_SESSIONS.put(sessionId, session);
-            return readQuerySessionPage(session, pageSize);
-        } catch (Exception error) {
+            try {
+                return readQuerySessionPage(session, pageSize);
+            } catch (Exception | LinkageError error) {
+                QUERY_SESSIONS.remove(sessionId);
+                throw error;
+            }
+        } catch (Exception | LinkageError error) {
             try {
                 statement.close();
             } catch (Exception ignored) {
             }
+            restorePagedQueryTransaction(conn, restoreAutoCommit);
             throw error;
+        }
+    }
+
+    private static Statement createPagedQueryStatement(Connection connection) throws SQLException {
+        try {
+            return connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+        } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
+            return connection.createStatement();
+        }
+    }
+
+    private static boolean beginPagedQueryTransaction(JsonNode connectionConfig, Connection connection)
+        throws SQLException {
+        if (!isPostgresConnection(connectionConfig) || !connection.getAutoCommit()) {
+            return false;
+        }
+        connection.setAutoCommit(false);
+        return true;
+    }
+
+    private static void restorePagedQueryTransaction(Connection connection, boolean restoreAutoCommit) {
+        if (!restoreAutoCommit) {
+            return;
+        }
+        try {
+            connection.rollback();
+        } catch (SQLException ignored) {
+        }
+        try {
+            connection.setAutoCommit(true);
+        } catch (SQLException ignored) {
         }
     }
 
@@ -830,6 +919,7 @@ public final class DbxJdbcPlugin {
             session.statement.close();
         } catch (Exception ignored) {
         }
+        restorePagedQueryTransaction(session.connection, session.restoreAutoCommit);
         return true;
     }
 

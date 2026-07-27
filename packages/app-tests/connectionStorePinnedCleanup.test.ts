@@ -83,3 +83,92 @@ test("removeConnection prunes pinned ids and persists the pruned set", async () 
     storage.restore();
   }
 });
+
+test("removeConnection clears persisted sidebar table filters for the removed connection", async () => {
+  const storage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/connection/list") {
+      return new Response(JSON.stringify([conn("conn-a", "A"), conn("conn-b", "B")]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/layout/sidebar") {
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/connection/save") {
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    const removedScope = store.tableNameFilterScopeKey({ connectionId: "conn-a", database: "app", schema: "public", nodeKind: "group-tables" });
+    const keptScope = store.tableNameFilterScopeKey({ connectionId: "conn-b", database: "app", schema: "public", nodeKind: "group-tables" });
+    store.setSidebarTableNameFilter(removedScope, { includePatterns: ["a_%"], excludePatterns: [] });
+    store.setSidebarTableNameFilter(keptScope, { includePatterns: ["b_%"], excludePatterns: [] });
+
+    await store.removeConnection("conn-a");
+
+    assert.equal(store.sidebarTableNameFilters[removedScope], undefined);
+    assert.deepEqual(store.sidebarTableNameFilters[keptScope], { includePatterns: ["b_%"], excludePatterns: [] });
+    assert.deepEqual(JSON.parse(storage.values.get("dbx-sidebar-table-name-filters") || "{}"), {
+      [keptScope]: { includePatterns: ["b_%"], excludePatterns: [] },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
+test("removeConnections clears persisted sidebar table filters for every removed connection", async () => {
+  const storage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/connection/list") {
+      return new Response(JSON.stringify([conn("conn-a", "A"), conn("conn-b", "B"), conn("conn-c", "C")]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/layout/sidebar") {
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/connection/save") {
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    const scopeA = store.tableNameFilterScopeKey({ connectionId: "conn-a", database: "app", schema: "public", nodeKind: "group-tables" });
+    const scopeB = store.tableNameFilterScopeKey({ connectionId: "conn-b", database: "app", schema: "public", nodeKind: "group-tables" });
+    const scopeC = store.tableNameFilterScopeKey({ connectionId: "conn-c", database: "app", schema: "public", nodeKind: "group-tables" });
+    store.setSidebarTableNameFilter(scopeA, { includePatterns: ["a_%"], excludePatterns: [] });
+    store.setSidebarTableNameFilter(scopeB, { includePatterns: ["b_%"], excludePatterns: [] });
+    store.setSidebarTableNameFilter(scopeC, { includePatterns: ["c_%"], excludePatterns: [] });
+
+    await store.removeConnections(["conn-a", "conn-b"]);
+
+    assert.equal(store.sidebarTableNameFilters[scopeA], undefined);
+    assert.equal(store.sidebarTableNameFilters[scopeB], undefined);
+    assert.deepEqual(store.sidebarTableNameFilters[scopeC], { includePatterns: ["c_%"], excludePatterns: [] });
+    assert.deepEqual(JSON.parse(storage.values.get("dbx-sidebar-table-name-filters") || "{}"), {
+      [scopeC]: { includePatterns: ["c_%"], excludePatterns: [] },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});

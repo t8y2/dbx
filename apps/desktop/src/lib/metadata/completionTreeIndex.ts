@@ -16,14 +16,19 @@ export function completionSchemasFromTree(nodes: readonly TreeNode[], connection
   return schemas;
 }
 
-export function completionTablesFromTree(nodes: readonly TreeNode[], connectionId: string, database: string, schema?: string): SqlCompletionTable[] {
+export function completionTablesFromTree(nodes: readonly TreeNode[], connectionId: string, database: string, schema?: string, catalog?: string): SqlCompletionTable[] {
   const preferredSchema = schema?.toLowerCase();
+  const preferredCatalog = catalog?.toLowerCase();
   const tables: SqlCompletionTable[] = [];
   visitTree(nodes, (node) => {
     if (node.connectionId !== connectionId || node.database !== database || !TABLE_NODE_TYPES.has(node.type)) return;
+    // External catalogs can contain databases and tables with the same names as
+    // the internal catalog. Keep the two metadata scopes isolated.
+    if ((node.catalog?.toLowerCase() ?? undefined) !== preferredCatalog) return;
     if (preferredSchema && node.schema?.toLowerCase() !== preferredSchema) return;
     tables.push({
       name: node.tableName || node.label,
+      catalog: node.catalog,
       schema: node.schema,
       type: node.type === "materialized_view" ? "materialized_view" : node.type === "view" ? "view" : "table",
     });
@@ -43,7 +48,7 @@ function dedupeCompletionTables(tables: SqlCompletionTable[]): SqlCompletionTabl
   const seen = new Set<string>();
   const result: SqlCompletionTable[] = [];
   for (const table of tables) {
-    const key = `${table.schema ?? ""}.${table.name}`.toLowerCase();
+    const key = `${table.catalog ?? ""}.${table.schema ?? ""}.${table.name}`.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(table);

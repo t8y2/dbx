@@ -44,6 +44,7 @@ const DataGrid = defineAsyncComponent(loadDataGridComponent);
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const RedisDashboard = defineAsyncComponent(() => import("@/components/redis/RedisDashboard.vue"));
 const EtcdKeyBrowser = defineAsyncComponent(() => import("@/components/etcd/EtcdKeyBrowser.vue"));
+const EtcdDashboard = defineAsyncComponent(() => import("@/components/etcd/EtcdDashboard.vue"));
 const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
@@ -52,6 +53,7 @@ const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/Vec
 const ElasticsearchJsonResponsePanel = defineAsyncComponent(() => import("@/components/common/ElasticsearchJsonResponsePanel.vue"));
 const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
+const NacosDashboard = defineAsyncComponent(() => import("@/components/nacos/NacosDashboard.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
@@ -77,7 +79,7 @@ import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatab
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
 import * as api from "@/lib/backend/api";
-import { applyMongoGridChangesToDocument, buildMongoUpdateDocument, formatMongoShellLiteral, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, buildMongoUpdateDocument, formatMongoShellLiteral, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
@@ -214,6 +216,7 @@ const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
 const documentBrowserRef = ref<SearchableBrowserHandle>();
 
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
+const etcdDashboardRef = ref<{ refresh?: () => boolean }>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
@@ -440,16 +443,22 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
 
     // Replace the raw array only after every backend update succeeds, keeping
     // the grid and JSON preview atomic when a multi-row save partially fails.
-    const replacements = new Map<unknown, unknown>();
+    if (tab.resultLocalSortOriginalMongoDocuments) {
+      tab.resultLocalSortOriginalMongoDocuments = applyMongoGridChangesToDocumentBaseline(tab.resultLocalSortOriginalMongoDocuments, documents, dirtyRows, columns);
+    }
     tab.result!.mongo_documents = documents.map((document, rowIdx) => {
       const changes = dirtyRows.get(rowIdx);
-      if (!changes) return document;
-      const updated = applyMongoGridChangesToDocument(document, changes, columns);
-      replacements.set(document, updated);
-      return updated;
+      return changes ? applyMongoGridChangesToDocument(document, changes, columns) : document;
     });
-    if (tab.resultLocalSortOriginalMongoDocuments) {
-      tab.resultLocalSortOriginalMongoDocuments = tab.resultLocalSortOriginalMongoDocuments.map((document) => replacements.get(document) ?? document);
+    const copyDocuments = tab.result!.mongo_copy_documents;
+    if (copyDocuments) {
+      if (tab.resultLocalSortOriginalMongoCopyDocuments) {
+        tab.resultLocalSortOriginalMongoCopyDocuments = applyMongoGridChangesToDocumentBaseline(tab.resultLocalSortOriginalMongoCopyDocuments, copyDocuments, dirtyRows, columns);
+      }
+      tab.result!.mongo_copy_documents = copyDocuments.map((document, rowIdx) => {
+        const changes = dirtyRows.get(rowIdx);
+        return changes ? applyMongoGridChangesToDocument(document, changes, columns) : document;
+      });
     }
   };
 
@@ -704,6 +713,7 @@ function refreshData(): boolean {
   // Reuse ObjectBrowser's reload path so schema reloads and stale object-response guards stay intact.
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "etcd-dashboard") return etcdDashboardRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
@@ -826,6 +836,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               auto-focus
               :model-value="activeTab.sql"
               :connection-id="activeTab.connectionId"
+              :catalog="activeTab.catalog"
               :database="activeTab.database"
               :schema="activeTab.schema"
               :client-session-id="activeTab.id"
@@ -1167,6 +1178,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
+                :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
                 :query-editability-reason="activeTab.queryEditabilityReason"
                 :allow-insert-rows="activeTab.queryAnalysis?.allowInsert !== false && activeTab.queryAnalysis?.allowInsertDelete !== false"
                 :allow-delete-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
@@ -1182,6 +1194,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :page-limit="activeTab.resultPageLimit"
                 :count-sql="activeTab.resultCountSql"
                 :total-row-count="activeTab.resultTotalRowCount"
+                :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
                 :total-row-count-loading="activeTab.resultTotalRowCountLoading"
                 :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
@@ -1189,6 +1202,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeTab.title"
                 @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
+                @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
@@ -1222,9 +1236,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 @cancel="emit('cancel')"
               />
               <div v-else-if="activeTab.resultEvicted && activeTab.resultCacheState === 'missing'" class="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-                <div>{{ t("editor.cachedResultUnavailable") }}</div>
+                <div>{{ t("grid.cachedResultUnavailable") }}</div>
                 <Button v-if="(activeTab.lastExecutedSql ?? activeTab.sql)?.trim()" variant="secondary" size="sm" @click="queryStore.reloadEvictedTab(activeTab.id, { reexecuteOnMissing: true })">
-                  {{ t("editor.reexecuteQuery") }}
+                  {{ t("grid.reexecuteQuery") }}
                 </Button>
               </div>
               <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-muted-foreground text-sm">
@@ -1509,12 +1523,14 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           :page-offset="activeTab.resultPageOffset"
           :page-limit="activeTab.resultPageLimit"
           :total-row-count="activeTab.resultTotalRowCount"
+          :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
           :total-row-count-loading="activeTab.resultTotalRowCountLoading"
           :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
           :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
           :export-file-base-name="activeTab.title"
           @update:where-input="(v: string) => (activeTab.whereInput = v)"
           @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
+          @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
@@ -1561,6 +1577,13 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
       </div>
     </template>
 
+    <!-- etcd Dashboard: cluster observation -->
+    <template v-else-if="activeTab.mode === 'etcd-dashboard'">
+      <div class="flex-1 min-h-0">
+        <EtcdDashboard ref="etcdDashboardRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
     <!-- ZooKeeper mode: znode browser -->
     <template v-else-if="activeTab.mode === 'zookeeper'">
       <div class="flex-1 min-h-0">
@@ -1602,7 +1625,17 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
     <template v-else-if="activeTab.mode === 'nacos'">
       <div class="flex-1 min-h-0">
-        <NacosAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :namespace="activeTab.nacosNamespace" :namespace-name="activeTab.nacosNamespaceName" :read-only="activeConnection?.read_only ?? false" />
+        <NacosAdminConsole
+          :key="activeTab.id"
+          :connection-id="activeTab.connectionId"
+          :namespace="activeTab.nacosNamespace"
+          :namespace-name="activeTab.nacosNamespaceName"
+          :target-data-id="activeTab.nacosTargetDataId"
+          :target-group="activeTab.nacosTargetGroup"
+          :target-keyword="activeTab.nacosTargetKeyword"
+          :target-request-id="activeTab.nacosTargetRequestId"
+          :read-only="activeConnection?.read_only ?? false"
+        />
       </div>
     </template>
 
@@ -1662,6 +1695,12 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'postgres-dashboard'">
       <div class="min-h-0 flex-1">
         <PostgresDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'nacos-dashboard'">
+      <div class="min-h-0 flex-1">
+        <NacosDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

@@ -335,6 +335,108 @@ jobs:
           Copy-Item $installer.FullName $offlineName -Force
           gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
+  static-browser:
+    # Fully static musl builds of the browser (dbx-web) variant. No glibc
+    # dependency, so the tarball runs on any Linux distribution (verified in
+    # the oldest pullable Ubuntu container for each arch).
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            arch: x64
+            rustflags: "-C target-feature=+crt-static"
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: arm64
+            # 64K max-page-size keeps the binary compatible with 4K/16K/64K
+            # page-size ARM64 kernels.
+            rustflags: "-C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: static-browser-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build static web binary
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          cargo zigbuild --release -p dbx-web --target ${{ matrix.target }} \
+            --no-default-features --features "duckdb-bundled,mq-admin"
+
+      - name: Package static browser runtime
+        env:
+          DBX_STATIC_TARGET: ${{ matrix.target }}
+        run: |
+          chmod +x scripts/package-web-static.sh scripts/verify-web-static.sh
+          ./scripts/package-web-static.sh
+
+      - name: Verify inside oldest available Ubuntu container
+        run: |
+          VERIFY_IMAGE=""
+          for image in ubuntu:14.04 ubuntu:16.04; do
+            if docker pull "$image" >/dev/null 2>&1; then
+              VERIFY_IMAGE="$image"
+              break
+            fi
+          done
+          if [ -z "$VERIFY_IMAGE" ]; then
+            echo "no legacy Ubuntu image available for $(uname -m)" >&2
+            exit 1
+          fi
+          echo "Verifying in $VERIFY_IMAGE"
+          docker run --rm -v "$PWD:/workspace" -w /workspace "$VERIFY_IMAGE" \
+            bash scripts/verify-web-static.sh \
+            "dist-web-static/dbx-linux-${{ matrix.arch }}-browser-static.tar.gz"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dbx-web") | .version')"
+          if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "Release tag version $VERSION does not match dbx-web package version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          SOURCE="dist-web-static/dbx-linux-${{ matrix.arch }}-browser-static.tar.gz"
+          ASSET="DBX_${VERSION}_${{ matrix.arch }}-browser-static.tar.gz"
+          CHECKSUM="${ASSET}.sha256"
+          cp "$SOURCE" "$ASSET"
+          sha256sum "$ASSET" | tee "$CHECKSUM"
+          gh release upload "${GITHUB_REF_NAME}" "$ASSET" "$CHECKSUM" \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+
   cleanup-release-signatures:
     needs: build
     runs-on: ubuntu-latest
@@ -424,7 +526,7 @@ jobs:
 
   publish:
     # Keep the release as a draft until every platform and the Nix package pass.
-    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, nix-packaging]
+    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, nix-packaging, static-browser]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release

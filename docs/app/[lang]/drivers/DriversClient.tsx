@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { LandingNav } from "@/components/landing/LandingNav";
-import { downloadLinksFor, fetchAgentDownloadCatalog, formatSize, type AgentDownloadCatalog, type DownloadSource, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
-import { AlertTriangle, Archive, Cpu, Database, Download, Loader2, Plug, Search, Terminal, X } from "lucide-react";
+import { downloadLinksFor, formatSize, type AgentDownloadCatalog, type DownloadSource, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
+import { Archive, Cpu, Database, Download, Plug, Search, Terminal, X } from "lucide-react";
 
 const i18n = {
   en: {
@@ -22,9 +22,6 @@ const i18n = {
     nativeAgentsDesc: "Platform-specific offline ZIPs for Oracle, KingBase, and XuguDB. Import the ZIP directly in Driver Manager.",
     jre: "Java Runtime (JRE)",
     jreDesc: "JRE packages used by agent-based database drivers. Required for Oracle, SQL Server, and other agent-managed connections.",
-    loading: "Loading driver catalog...",
-    error: "Unable to load driver catalog. Please check your network connection.",
-    retry: "Retry",
     download: "Download",
     installMethod: "Install",
     version: "Version",
@@ -61,9 +58,6 @@ const i18n = {
     nativeAgentsDesc: "Oracle、人大金仓和虚谷的按平台单驱动离线包，可直接在驱动管理中导入 ZIP。",
     jre: "Java 运行时 (JRE)",
     jreDesc: "Agent 驱动所需的 JRE 环境，Oracle、SQL Server 等数据库通过 Agent 连接时需要。",
-    loading: "正在加载驱动列表...",
-    error: "加载驱动列表失败，请检查网络连接。",
-    retry: "重试",
     download: "下载",
     installMethod: "安装方式",
     version: "版本",
@@ -134,39 +128,16 @@ function matchesSearch(values: Array<string | number | undefined>, query: string
   return values.filter(Boolean).join(" ").toLowerCase().includes(query);
 }
 
-export function DriversClient() {
+export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloadCatalog }) {
   const params = useParams();
   const rawLang = params?.lang as string | undefined;
   const lang: "en" | "cn" = rawLang === "cn" ? "cn" : "en";
   const t = i18n[lang];
 
-  const [catalog, setCatalog] = useState<AgentDownloadCatalog | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const catalog = initialCatalog;
   const [activeTab, setActiveTab] = useState<ActiveTab>("bundles");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedNativePlatforms, setSelectedNativePlatforms] = useState<Record<string, string>>({});
-
-  const loadCatalog = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await fetchAgentDownloadCatalog();
-      if (data) {
-        setCatalog(data);
-      } else {
-        setError("Unable to load driver catalog");
-      }
-    } catch {
-      setError("Unable to load driver catalog");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadCatalog();
-  }, [loadCatalog]);
 
   const bundles = catalog?.bundles ?? [];
   const drivers = catalog?.drivers ?? [];
@@ -243,24 +214,7 @@ export function DriversClient() {
       </section>
 
       <section className="max-w-[1180px] mx-auto px-7 pb-20 max-[760px]:px-[18px]">
-        {loading && (
-          <div className="flex items-center justify-center gap-3 py-20 text-landing-muted">
-            <Loader2 size={20} className="animate-spin" />
-            <span className="text-sm">{t.loading}</span>
-          </div>
-        )}
-
-        {error && !loading && (
-          <div className="flex flex-col items-center gap-4 py-20">
-            <AlertTriangle size={28} className="text-yellow-500" />
-            <span className="text-landing-muted text-sm">{t.error}</span>
-            <button type="button" onClick={loadCatalog} className="landing-nav-link rounded-[7px] px-4 py-2 text-sm font-medium border border-landing-line">
-              {t.retry}
-            </button>
-          </div>
-        )}
-
-        {catalog && !loading && (
+        {catalog && (
           <>
             <div className="mb-3 flex items-center gap-2 rounded-[7px] border border-landing-blue/30 bg-landing-blue/10 px-3 py-2 text-xs leading-[1.55] text-landing-sky">
               <Download size={14} className="shrink-0" />

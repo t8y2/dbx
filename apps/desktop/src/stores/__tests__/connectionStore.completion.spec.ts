@@ -49,6 +49,18 @@ function sqlServerConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function dorisConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "doris-1",
+    name: "Doris",
+    db_type: "doris",
+    port: 9030,
+    username: "root",
+    database: "sales",
+  } as ConnectionConfig;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -260,6 +272,67 @@ describe("connectionStore completion assistant", () => {
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
   });
 
+  it("normalizes unquoted Oracle aliases while preserving quoted case before catalog lookup", async () => {
+    const completionAssistantSearch = vi.fn();
+    const getColumns = vi.fn().mockResolvedValue([]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    await store.listCompletionColumns("oracle-1", "ORCL", "orders_alias", undefined, { clientSessionId: "tab-a", version: 0, tableQuoted: false });
+    await store.listCompletionColumns("oracle-1", "ORCL", "orders_alias", undefined, { clientSessionId: "tab-a", version: 1, tableQuoted: true });
+    await store.listCompletionColumns("oracle-1", "ORCL", "Orders_Alias", undefined, { clientSessionId: "tab-a", version: 2, tableQuoted: true });
+
+    expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["ORDERS_ALIAS", "orders_alias", "Orders_Alias"]);
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+  });
+
+  it("keeps quoted and unquoted Oracle objects separate in the local column index", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { parent_name?: string | null }) => ({
+      candidates: [
+        {
+          name: request.parent_name === "ORDERS_ALIAS" ? "UPPER_ID" : "LOWER_ID",
+          kind: "column",
+          schema: "APP",
+          parent_schema: "APP",
+          parent_name: request.parent_name,
+          data_type: "NUMBER",
+        },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns: vi.fn(),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    await store.listCompletionColumns("oracle-1", "ORCL", "orders_alias", "APP", { tableQuoted: false, schemaQuoted: false });
+    await store.listCompletionColumns("oracle-1", "ORCL", "orders_alias", "APP", { tableQuoted: true, schemaQuoted: false });
+
+    expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS_ALIAS", "APP").map((column) => column.name)).toEqual(["UPPER_ID"]);
+    expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "orders_alias", "APP").map((column) => column.name)).toEqual(["LOWER_ID"]);
+    expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "orders_alias", "app", undefined, { tableQuoted: false, schemaQuoted: false }).map((column) => column.name)).toEqual(["UPPER_ID"]);
+    expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "orders_alias", "APP", undefined, { tableQuoted: true, schemaQuoted: false }).map((column) => column.name)).toEqual(["LOWER_ID"]);
+  });
+
   it("isolates Oracle CURRENT_SCHEMA column caches by tab and context version", async () => {
     const completionAssistantSearch = vi.fn();
     const getColumns = vi
@@ -466,6 +539,72 @@ describe("connectionStore completion assistant", () => {
 
     await Promise.all(requests);
     expect(maxActiveColumns).toBe(2);
+  });
+
+  it("keeps Doris table completion caches isolated by catalog", async () => {
+    const listTables = vi.fn(async (...args: unknown[]) => {
+      const catalog = args[7];
+      return [{ name: catalog ? "external_orders" : "internal_orders", table_type: "BASE TABLE", comment: null }];
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listTables,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [dorisConnection()];
+    store.connectedIds.add("doris-1");
+
+    const internal = await store.listCompletionTables("doris-1", "sales", "orders", 20);
+    const external = await store.listCompletionTables("doris-1", "sales", "orders", 20, undefined, false, undefined, "hive_catalog");
+
+    expect(listTables).toHaveBeenNthCalledWith(1, "doris-1", "sales", "sales", "orders", 20);
+    expect(listTables).toHaveBeenNthCalledWith(2, "doris-1", "sales", "", "orders", 20, undefined, undefined, "hive_catalog");
+    expect(internal).toEqual([{ name: "internal_orders", catalog: undefined, type: "table" }]);
+    expect(external).toEqual([{ name: "external_orders", catalog: "hive_catalog", type: "table" }]);
+    expect(store.lookupLocalCompletionTables("doris-1", "sales", "", 20)).toEqual(internal);
+    expect(store.lookupLocalCompletionTables("doris-1", "sales", "", 20, undefined, "hive_catalog")).toEqual(external);
+  });
+
+  it("passes Doris catalog to column metadata and isolates same-name table caches", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false });
+    const getColumns = vi.fn(async (_connectionId: string, _database: string, _schema: string, _table: string, catalog?: string) => [
+      {
+        name: catalog ? "external_id" : "internal_id",
+        data_type: "BIGINT",
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: true,
+        extra: null,
+        comment: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [dorisConnection()];
+    store.connectedIds.add("doris-1");
+
+    const internal = await store.listCompletionColumns("doris-1", "sales", "orders");
+    const external = await store.listCompletionColumns("doris-1", "sales", "orders", undefined, undefined, "hive_catalog");
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
+    expect(getColumns).toHaveBeenNthCalledWith(1, "doris-1", "sales", "sales", "orders", undefined, undefined);
+    expect(getColumns).toHaveBeenNthCalledWith(2, "doris-1", "sales", "sales", "orders", "hive_catalog", undefined);
+    expect(internal.map((column) => column.name)).toEqual(["internal_id"]);
+    expect(external.map((column) => column.name)).toEqual(["external_id"]);
+    expect(store.lookupLocalCompletionColumns("doris-1", "sales", "orders").map((column) => column.name)).toEqual(["internal_id"]);
+    expect(store.lookupLocalCompletionColumns("doris-1", "sales", "orders", undefined, "hive_catalog").map((column) => column.name)).toEqual(["external_id"]);
   });
 
   it("evicts old completion database entries", async () => {

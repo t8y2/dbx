@@ -16,6 +16,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showCurrentStatementFrame",
   "showInsertValueHints",
   "autoAliasTables",
+  "insertSpaceAfterCompletion",
   "wordWrap",
   "vimModeEnabled",
   "autoCloseBrackets",

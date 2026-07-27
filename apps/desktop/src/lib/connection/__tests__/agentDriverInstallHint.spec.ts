@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { driverStoreFocusForInstallError } from "@/lib/connection/agentDriverInstallHint";
+import { driverStoreFocusForInstallError, hasInstalledAgentVersion } from "@/lib/connection/agentDriverInstallHint";
 
 describe("driverStoreFocusForInstallError", () => {
   it("focuses the missing agent driver for driver-not-installed errors", () => {
@@ -36,5 +36,13 @@ describe("driverStoreFocusForInstallError", () => {
   it("returns null for unrelated connection errors", () => {
     expect(driverStoreFocusForInstallError("Connection timed out", "zookeeper", undefined)).toBeNull();
     expect(driverStoreFocusForInstallError("No reachable ZooKeeper server within 2000ms: zk:2181", "zookeeper", undefined)).toBeNull();
+  });
+});
+
+describe("hasInstalledAgentVersion", () => {
+  it("requires an installed Agent at or above the requested release", () => {
+    expect(hasInstalledAgentVersion([{ db_type: "xugu", installed: true, installed_version: "0.1.23" }], "xugu", "0.1.23")).toBe(true);
+    expect(hasInstalledAgentVersion([{ db_type: "xugu", installed: true, installed_version: "0.1.22" }], "xugu", "0.1.23")).toBe(false);
+    expect(hasInstalledAgentVersion([{ db_type: "xugu", installed: true, installed_version: null }], "xugu", "0.1.23")).toBe(false);
   });
 });

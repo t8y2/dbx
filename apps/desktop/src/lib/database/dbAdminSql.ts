@@ -87,8 +87,8 @@ export function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<st
   return api.buildTruncateTableSql(options);
 }
 
-const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss"];
-const TRUNCATE_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss"];
+const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];
+const TRUNCATE_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];
 
 export function supportsDropTableCascade(databaseType?: DatabaseType): boolean {
   return !!databaseType && DROP_TABLE_CASCADE_DATABASE_TYPES.includes(databaseType);
@@ -111,7 +111,7 @@ export function buildDropSchemaSql(options: SchemaNameSqlOptions): Promise<strin
 }
 
 export function supportsSchemaComment(databaseType?: DatabaseType): boolean {
-  return ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss", "yashandb"].includes(databaseType || "");
+  return ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "yashandb"].includes(databaseType || "");
 }
 
 export function buildUpdateDatabasePropertiesSql(options: DatabasePropertyEditSqlOptions): Promise<string> {

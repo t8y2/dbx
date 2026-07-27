@@ -17,7 +17,7 @@ test("shares the configured download source with agent driver management", () =>
   assert.match(driverStore, /void forceRefresh\(\)\.catch\(\(\) => undefined\)/);
 
   assert.match(backendApi, /backend\.listInstalledAgents\(useSettingsStore\(\)\.editorSettings\.updateDownloadSource\)/);
-  assert.match(backendApi, /backend\.installAgent\(dbType, useSettingsStore\(\)\.editorSettings\.updateDownloadSource\)/);
-  assert.match(backendApi, /backend\.upgradeAllAgents\(useSettingsStore\(\)\.editorSettings\.updateDownloadSource\)/);
-  assert.match(backendApi, /backend\.reinstallJre\(jreKey, useSettingsStore\(\)\.editorSettings\.updateDownloadSource\)/);
+  assert.match(backendApi, /backend\.installAgent\(dbType, useSettingsStore\(\)\.editorSettings\.updateDownloadSource(?:, operationId)?\)/);
+  assert.match(backendApi, /backend\.upgradeAllAgents\(useSettingsStore\(\)\.editorSettings\.updateDownloadSource(?:, operationId)?\)/);
+  assert.match(backendApi, /backend\.reinstallJre\(jreKey, useSettingsStore\(\)\.editorSettings\.updateDownloadSource(?:, operationId)?\)/);
 });

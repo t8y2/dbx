@@ -455,8 +455,6 @@ async fn execute_get_columns(
     Ok(lines.join("\n"))
 }
 
-/// Execute a read-only SQL query via the execute_query tool.
-
 /// Normalize a SQL string for confirmation comparison.
 ///
 /// Confirmation is intentionally fail-closed: only surrounding whitespace is
@@ -527,17 +525,15 @@ async fn execute_execute_query(
 
     // When the user confirmed a specific write SQL, the agent must
     // execute only that SQL — not an arbitrary different statement.
-    if risk != SqlRisk::ReadOnly {
-        if !sql_matches_confirmed_write(sql, &sql_permissions.confirmed_write_sql) {
-            let confirmed = sql_permissions.confirmed_write_sql.as_deref().unwrap_or("");
-            return Err(format!(
-                "Blocked: the executed SQL does not match the user-confirmed SQL.\n\
-                 Confirmed: {}\n\
-                 Attempted: {}",
-                truncate_sql_for_error(confirmed),
-                truncate_sql_for_error(sql),
-            ));
-        }
+    if risk != SqlRisk::ReadOnly && !sql_matches_confirmed_write(sql, &sql_permissions.confirmed_write_sql) {
+        let confirmed = sql_permissions.confirmed_write_sql.as_deref().unwrap_or("");
+        return Err(format!(
+            "Blocked: the executed SQL does not match the user-confirmed SQL.\n\
+             Confirmed: {}\n\
+             Attempted: {}",
+            truncate_sql_for_error(confirmed),
+            truncate_sql_for_error(sql),
+        ));
     }
 
     // Execute query using existing infrastructure

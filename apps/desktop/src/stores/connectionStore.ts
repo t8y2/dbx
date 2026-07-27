@@ -321,6 +321,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarTableStorageInFlight = new Map<string, Promise<ObjectStatistics[]>>();
   const pinnedTreeNodeOrder = ref<string[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
+  const activePinnedTreeNodeReorderKey = ref<string | null>(null);
   let pinnedTreeNodePersistQueue: Promise<void> = Promise.resolve();
   const connectedIds = ref<Set<string>>(new Set());
   const identifierQuotes = ref<Record<string, string>>({});
@@ -1347,7 +1348,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function objectGroupCacheKey(node: TreeNode): string {
     const config = node.connectionId ? getConfig(node.connectionId) : undefined;
-    const cacheVersion = config?.db_type === "oracle" ? "objects-v6" : "objects-v5";
+    const cacheVersion = config?.db_type === "oracle" ? "objects-v7" : "objects-v6";
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
 
@@ -1528,7 +1529,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function treeNodeObjectIdentity(node: TreeNode): string {
-    return `${node.type}\0${(node.schema || "").toLowerCase()}\0${node.label.toLowerCase()}`;
+    return `${node.type}\0${node.schema || ""}\0${node.label}`;
   }
 
   function mergeLocatedTreeChildren(parent: TreeNode, currentChildren: TreeNode[], pageChildren: TreeNode[], connectionId: string, database: string): TreeNode[] {
@@ -2066,13 +2067,40 @@ export const useConnectionStore = defineStore("connection", () => {
     return null;
   }
 
+  function collectPinnedTreeNodeReorderTargets(draggedKey: string): Set<string> {
+    const dragged = findPinnedTreeNodeLocation(treeNodes.value, draggedKey);
+    if (!dragged || !isTreeNodePinned(dragged.node) || isFixedPriorityTreeNode(dragged.node)) return new Set();
+
+    const targets = new Set<string>();
+    for (const sibling of dragged.siblings) {
+      const siblingKey = treeNodePinKey(sibling);
+      if (siblingKey === draggedKey || !isTreeNodePinned(sibling) || isFixedPriorityTreeNode(sibling)) continue;
+      targets.add(siblingKey);
+    }
+    return targets;
+  }
+
+  const activePinnedTreeNodeReorderTargets = computed(() => {
+    const draggedKey = activePinnedTreeNodeReorderKey.value;
+    return draggedKey ? collectPinnedTreeNodeReorderTargets(draggedKey) : new Set<string>();
+  });
+
+  function beginPinnedTreeNodeReorder(draggedKey: string) {
+    activePinnedTreeNodeReorderKey.value = draggedKey || null;
+  }
+
+  function endPinnedTreeNodeReorder() {
+    activePinnedTreeNodeReorderKey.value = null;
+  }
+
+  function isPinnedTreeNodeReorderTarget(targetKey: string): boolean {
+    return !!targetKey && targetKey !== activePinnedTreeNodeReorderKey.value && activePinnedTreeNodeReorderTargets.value.has(targetKey);
+  }
+
   function canReorderPinnedTreeNodes(draggedKey: string, targetKey: string): boolean {
     if (!draggedKey || !targetKey || draggedKey === targetKey) return false;
-    const dragged = findPinnedTreeNodeLocation(treeNodes.value, draggedKey);
-    const target = findPinnedTreeNodeLocation(treeNodes.value, targetKey);
-    if (!dragged || !target || dragged.siblings !== target.siblings) return false;
-    if (!isTreeNodePinned(dragged.node) || !isTreeNodePinned(target.node)) return false;
-    return !isFixedPriorityTreeNode(dragged.node) && !isFixedPriorityTreeNode(target.node);
+    if (activePinnedTreeNodeReorderKey.value === draggedKey) return activePinnedTreeNodeReorderTargets.value.has(targetKey);
+    return collectPinnedTreeNodeReorderTargets(draggedKey).has(targetKey);
   }
 
   function reorderPinnedTreeNodes(draggedKey: string, targetKey: string, position: DropPosition): boolean {
@@ -2235,11 +2263,13 @@ export const useConnectionStore = defineStore("connection", () => {
     config = normalizeConnection(config);
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
+    const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
     const nextConnections = [...connections.value];
     nextConnections[idx] = config;
     await persistConnections(nextConnections);
     connections.value = nextConnections;
     rebuildTreeNodes();
+    if (!runtimeConfigChanged) return;
     connectedIds.value.delete(config.id);
     clearConnectionIdentifierQuote(config.id);
     clearConnectionHealthCheck(config.id);
@@ -2438,6 +2468,7 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
+      // Reload: list indices.
       await loadElasticsearchIndices(connectionId);
     } else if (config.db_type === "milvus") {
       await loadMilvusDatabases(connectionId);
@@ -3027,6 +3058,15 @@ export const useConnectionStore = defineStore("connection", () => {
               isExpanded: false,
               children: [],
             },
+            {
+              id: `${connectionId}:etcd-dashboard`,
+              label: "Dashboard",
+              type: "etcd-dashboard" as const,
+              connectionId,
+              database: "",
+              isExpanded: false,
+              children: [],
+            },
           ],
           targetNode,
         ),
@@ -3239,6 +3279,25 @@ export const useConnectionStore = defineStore("connection", () => {
       throw e;
     } finally {
       finishTreeNodeLoad(load);
+    }
+  }
+
+  /**
+   * Connect an Elasticsearch root without expanding or listing indices.
+   * Used when first opening a connection (test/connect) — connectivity uses
+   * GET / or the configured check path via ensureConnected/test_connection.
+   * Expanding the node lists indices via loadElasticsearchIndices.
+   */
+  async function openElasticsearchConnectionTree(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    // Only ensure connectivity (GET / or configured path); do not expand or list indices.
+    try {
+      await ensureConnected(connectionId);
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
     }
   }
 
@@ -3721,7 +3780,7 @@ export const useConnectionStore = defineStore("connection", () => {
             nodeKind: "simple-tables",
             catalog,
           });
-          const cacheKey = schemaCacheKey(connectionId, `doris-catalog:${catalog}`, database, "objects-simple-v4");
+          const cacheKey = schemaCacheKey(connectionId, `doris-catalog:${catalog}`, database, "objects-simple-v5");
           if (!options?.force && !searchFilter && !tableNameFilter) {
             const cached = await loadPersistedTreeChildren(node, cacheKey, load);
             if (cached.hit) {
@@ -3797,7 +3856,7 @@ export const useConnectionStore = defineStore("connection", () => {
           load = reclaimTreeNodeLoad(load, node);
           if (useCachedChildren(node, options, load)) return;
           const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v5" : "objects-grouped-v6");
+          const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v6" : "objects-grouped-v7");
           const searchFilter = activeTreeLoadSearchFilter(options);
           const config = getConfig(connectionId);
           const querySchema = connectionObjectTreeQuerySchema(config, database, schema);
@@ -6347,6 +6406,9 @@ export const useConnectionStore = defineStore("connection", () => {
     isTreeNodePinned,
     orderByPinnedTreeNodes,
     toggleTreeNodePin,
+    beginPinnedTreeNodeReorder,
+    endPinnedTreeNodeReorder,
+    isPinnedTreeNodeReorderTarget,
     canReorderPinnedTreeNodes,
     reorderPinnedTreeNodes,
     addConnection,
@@ -6394,6 +6456,7 @@ export const useConnectionStore = defineStore("connection", () => {
     updateRedisDbKeyStats,
     loadMongoDatabases,
     loadMilvusDatabases,
+    openElasticsearchConnectionTree,
     loadElasticsearchIndices,
     loadVectorCollections,
     loadMongoCollections,

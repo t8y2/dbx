@@ -355,6 +355,7 @@ fn query_result(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 

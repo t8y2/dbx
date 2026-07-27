@@ -496,6 +496,175 @@ pub struct NacosInstanceUpdate {
     pub metadata: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosDashboardQuery {
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosDashboardMetrics {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub service_count: Option<u64>,
+    #[serde(default)]
+    pub instance_count: Option<u64>,
+    #[serde(default)]
+    pub subscribe_count: Option<u64>,
+    #[serde(default)]
+    pub raft_notify_task_count: Option<u64>,
+    #[serde(default)]
+    pub responsible_service_count: Option<u64>,
+    #[serde(default)]
+    pub responsible_instance_count: Option<u64>,
+    #[serde(default)]
+    pub client_count: Option<u64>,
+    #[serde(default)]
+    pub connection_based_client_count: Option<u64>,
+    #[serde(default)]
+    pub ephemeral_ip_port_client_count: Option<u64>,
+    #[serde(default)]
+    pub persistent_ip_port_client_count: Option<u64>,
+    #[serde(default)]
+    pub responsible_client_count: Option<u64>,
+    #[serde(default)]
+    pub cpu: Option<f64>,
+    #[serde(default)]
+    pub load: Option<f64>,
+    #[serde(default)]
+    pub mem: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPrometheusSource {
+    pub kind: String,
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPrometheusResourceMetrics {
+    pub cpu_ratio: Option<f64>,
+    pub memory_ratio: Option<f64>,
+    pub memory_used_bytes: Option<f64>,
+    pub memory_max_bytes: Option<f64>,
+    pub rss_bytes: Option<f64>,
+    pub vms_bytes: Option<f64>,
+    pub system_total_memory_bytes: Option<f64>,
+    pub load_1m: Option<f64>,
+    pub jvm_daemon_threads: Option<f64>,
+    pub gc_pause_count: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPrometheusTrafficMetrics {
+    pub http_requests_total: Option<f64>,
+    pub grpc_requests_total: Option<f64>,
+    pub http_errors_total: Option<f64>,
+    pub grpc_errors_total: Option<f64>,
+    pub http_duration_seconds_total: Option<f64>,
+    pub http_duration_count: Option<f64>,
+    pub grpc_duration_seconds_total: Option<f64>,
+    pub grpc_duration_count: Option<f64>,
+    pub http_p50_ms: Option<f64>,
+    pub http_p95_ms: Option<f64>,
+    pub http_p99_ms: Option<f64>,
+    pub grpc_p50_ms: Option<f64>,
+    pub grpc_p95_ms: Option<f64>,
+    pub grpc_p99_ms: Option<f64>,
+    pub executor_pool_size: Option<f64>,
+    pub executor_active_count: Option<f64>,
+    pub executor_queued_tasks: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPrometheusConfigMetrics {
+    pub config_count: Option<f64>,
+    pub get_config_total: Option<f64>,
+    pub publish_total: Option<f64>,
+    pub long_polling: Option<f64>,
+    pub listener_clients: Option<f64>,
+    pub listener_keys: Option<f64>,
+    pub notify_tasks: Option<f64>,
+    pub notify_client_tasks: Option<f64>,
+    pub dump_tasks: Option<f64>,
+    pub subscriber_count: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPrometheusNamingMetrics {
+    pub service_count: Option<f64>,
+    pub instance_count: Option<f64>,
+    pub subscriber_count: Option<f64>,
+    pub connection_count: Option<f64>,
+    pub total_push: Option<f64>,
+    pub failed_push: Option<f64>,
+    pub empty_push: Option<f64>,
+    pub push_pending_tasks: Option<f64>,
+    pub avg_push_cost_ms: Option<f64>,
+    pub max_push_cost_ms: Option<f64>,
+    pub leader_status: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosPrometheusSnapshot {
+    pub source: NacosPrometheusSource,
+    pub resource: NacosPrometheusResourceMetrics,
+    pub traffic: NacosPrometheusTrafficMetrics,
+    pub config: NacosPrometheusConfigMetrics,
+    pub naming: NacosPrometheusNamingMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosClusterNode {
+    pub address: String,
+    #[serde(default)]
+    pub ip: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub alive: Option<bool>,
+    #[serde(default)]
+    pub site: Option<String>,
+    #[serde(default)]
+    pub weight: Option<f64>,
+    #[serde(default)]
+    pub last_refresh_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosDashboardSnapshot {
+    pub namespace: String,
+    #[serde(default)]
+    pub namespace_count: Option<u64>,
+    #[serde(default)]
+    pub config_count: Option<u64>,
+    #[serde(default)]
+    pub service_count: Option<u64>,
+    #[serde(default)]
+    pub metrics: Option<NacosDashboardMetrics>,
+    #[serde(default)]
+    pub prometheus: Option<NacosPrometheusSnapshot>,
+    #[serde(default)]
+    pub nodes: Vec<NacosClusterNode>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NacosRawRequest {

@@ -322,7 +322,7 @@ describe("connectionStore metadata loading", () => {
       { id: "oracle-1:XE:DIP:__views:DIP:V_TWO", label: "V_TWO", type: "view", connectionId: "oracle-1", database: "XE", schema: "DIP", isExpanded: false },
     ];
     const loadSchemaCache = vi.fn(async (key: string) =>
-      key.endsWith(":objects-v5")
+      key.endsWith(":objects-v6")
         ? {
             version: 2,
             cachedAt: new Date().toISOString(),
@@ -385,7 +385,7 @@ describe("connectionStore metadata loading", () => {
     expect(storedViewGroup?.type).toBe("group-views");
     await store.loadObjectGroupChildren(storedViewGroup!);
 
-    expect(loadSchemaCache).toHaveBeenCalledWith("oracle-1:XE:DIP:group-views:objects-v6");
+    expect(loadSchemaCache).toHaveBeenCalledWith("oracle-1:XE:DIP:group-views:objects-v7");
     expect(listTables).toHaveBeenCalledWith(connection.id, "XE", "DIP", undefined, 201, 0, ["VIEW"]);
     expect(storedViewGroup?.children?.map((node) => node.label)).toEqual(["V_ONE", "V_THREE", "V_TWO"]);
   });

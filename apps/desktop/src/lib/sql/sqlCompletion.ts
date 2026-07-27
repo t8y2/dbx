@@ -1721,6 +1721,8 @@ function isCallRoutineContext(beforeToken: string): boolean {
   return /\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(beforeToken) || /\bcall\s+(?:[A-Za-z_][\w$]*\.)?[A-Za-z_][\w$]*$/i.test(beforeToken);
 }
 
+const SQL_IDENTIFIER_START_CHAR = /[@_\p{ID_Start}]/u;
+const SQL_IDENTIFIER_SUFFIX = /[$@_\u200c\u200d\p{ID_Continue}]+$/u;
 const SQL_IDENTIFIER_CONTINUE_CHAR = /[$_\u200c\u200d\p{ID_Continue}]/u;
 
 function hasTableAliasAfterCursor(sql: string, cursor: number): boolean {
@@ -2022,13 +2024,12 @@ function parseTrailingIdentifierPart(input: string, endExclusive: number): { sta
     return null;
   }
 
-  let start = end;
-  while (start >= 0 && /[A-Za-z0-9_$@]/.test(input[start] ?? "")) start -= 1;
-  start += 1;
-  if (start >= endExclusive) return null;
-  const raw = input.slice(start, endExclusive);
-  if (!/^[@A-Za-z_][\w$@]*$/.test(raw)) return null;
-  return { start, raw };
+  const match = SQL_IDENTIFIER_SUFFIX.exec(input.slice(0, endExclusive));
+  if (!match) return null;
+  const raw = match[0];
+  const firstCodePoint = raw.codePointAt(0);
+  if (firstCodePoint === undefined || !SQL_IDENTIFIER_START_CHAR.test(String.fromCodePoint(firstCodePoint))) return null;
+  return { start: match.index, raw };
 }
 
 /**

@@ -1,7 +1,71 @@
-use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::{AgentCapability, AgentKvMethod};
+use crate::path_utils::expand_tilde;
+
+/// Lossless JSON representation for etcd's signed/unsigned 64-bit identifiers.
+///
+/// Agents historically returned JSON numbers. Accept both shapes for backward
+/// compatibility, but always serialize as a decimal string before data reaches
+/// JavaScript, where values above 2^53 would otherwise lose precision.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct KvInt64(pub String);
+
+impl KvInt64 {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<i64> for KvInt64 {
+    fn from(value: i64) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl Serialize for KvInt64 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for KvInt64 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KvInt64Visitor;
+
+        impl<'de> Visitor<'de> for KvInt64Visitor {
+            type Value = KvInt64;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a 64-bit integer or decimal string")
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(KvInt64(value.to_string()))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(KvInt64(value.to_string()))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                let parsed = value.parse::<i128>().map_err(E::custom)?;
+                if parsed < i64::MIN as i128 || parsed > u64::MAX as i128 {
+                    return Err(E::custom("integer exceeds 64-bit range"));
+                }
+                Ok(KvInt64(value.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(KvInt64Visitor)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -20,10 +84,10 @@ pub enum KvValueEncoding {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KvKeyMetadata {
-    pub create_revision: Option<i64>,
-    pub mod_revision: Option<i64>,
-    pub version: Option<i64>,
-    pub lease: Option<i64>,
+    pub create_revision: Option<KvInt64>,
+    pub mod_revision: Option<KvInt64>,
+    pub version: Option<KvInt64>,
+    pub lease: Option<KvInt64>,
     pub ttl: Option<i64>,
     pub value_size: Option<u64>,
     pub czxid: Option<i64>,
@@ -42,6 +106,10 @@ pub struct KvKeyMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct KvKeySummary {
     pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<KvValue>,
     #[serde(flatten)]
     pub metadata: KvKeyMetadata,
 }
@@ -55,6 +123,10 @@ pub struct KvListPrefixRequest {
     pub continuation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recursive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<KvInt64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_values: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,13 +134,17 @@ pub struct KvListPrefixRequest {
 pub struct KvListPrefixResponse {
     pub keys: Vec<KvKeySummary>,
     pub continuation: Option<String>,
-    pub revision: Option<i64>,
+    pub revision: Option<KvInt64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KvGetRequest {
     pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<KvInt64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_only: Option<bool>,
 }
@@ -78,6 +154,8 @@ pub struct KvGetRequest {
 pub struct KvGetResponse {
     pub found: bool,
     pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
     pub value: Option<KvValue>,
     pub metadata: Option<KvKeyMetadata>,
 }
@@ -86,9 +164,11 @@ pub struct KvGetResponse {
 #[serde(rename_all = "camelCase")]
 pub struct KvPutRequest {
     pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
     pub value: KvValue,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease: Option<i64>,
+    pub lease: Option<KvInt64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,13 +177,17 @@ pub struct KvPutRequest {
     pub write_mode: Option<KvWriteMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create_mode: Option<KvCreateMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_mod_revision: Option<KvInt64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_create_revision: Option<KvInt64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KvPutOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease: Option<i64>,
+    pub lease: Option<KvInt64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,6 +196,12 @@ pub struct KvPutOptions {
     pub write_mode: Option<KvWriteMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create_mode: Option<KvCreateMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_mod_revision: Option<KvInt64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_create_revision: Option<KvInt64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,7 +224,7 @@ pub enum KvCreateMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KvPutResponse {
-    pub revision: Option<i64>,
+    pub revision: Option<KvInt64>,
     pub key: Option<String>,
     pub created_key: Option<String>,
 }
@@ -143,13 +233,233 @@ pub struct KvPutResponse {
 #[serde(rename_all = "camelCase")]
 pub struct KvDeleteRequest {
     pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_mod_revision: Option<KvInt64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KvDeleteResponse {
     pub deleted: u64,
-    pub revision: Option<i64>,
+    pub revision: Option<KvInt64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvRangeOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<KvInt64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_values: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvGetOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<KvInt64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvDeleteOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_mod_revision: Option<KvInt64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvRenameRequest {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    pub new_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_mod_revision: Option<KvInt64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvRenameResponse {
+    pub renamed: bool,
+    pub revision: Option<KvInt64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvHistoryRequest {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_bytes: Option<KvValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_revision: Option<KvInt64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_revision: Option<KvInt64>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvHistoryEventType {
+    Put,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvHistoryEvent {
+    pub event_type: KvHistoryEventType,
+    pub revision: KvInt64,
+    pub value: Option<KvValue>,
+    pub previous_value: Option<KvValue>,
+    pub metadata: Option<KvKeyMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvHistoryResponse {
+    pub events: Vec<KvHistoryEvent>,
+    pub observed_revision: KvInt64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvStatusMember {
+    pub endpoint: String,
+    pub member_id: Option<KvInt64>,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub leader_id: Option<KvInt64>,
+    pub revision: Option<KvInt64>,
+    pub raft_term: Option<KvInt64>,
+    pub raft_index: Option<KvInt64>,
+    pub raft_applied_index: Option<KvInt64>,
+    pub db_size: Option<KvInt64>,
+    pub db_size_in_use: Option<KvInt64>,
+    pub learner: bool,
+    pub reachable: bool,
+    pub latency_ms: Option<u64>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvPrometheusMetrics {
+    pub available: bool,
+    pub source_url: Option<String>,
+    pub error: Option<String>,
+    pub collected_at_ms: Option<u64>,
+    pub sample_count: Option<u64>,
+    pub server_version: Option<String>,
+    pub cluster_version: Option<String>,
+    pub go_version: Option<String>,
+    pub auth_revision: Option<f64>,
+    pub has_leader: Option<f64>,
+    pub is_leader: Option<f64>,
+    pub leader_changes_total: Option<f64>,
+    pub proposals_committed_total: Option<f64>,
+    pub proposals_applied_total: Option<f64>,
+    pub proposals_pending: Option<f64>,
+    pub proposals_failed_total: Option<f64>,
+    pub grpc_requests_total: Option<f64>,
+    pub grpc_failures_total: Option<f64>,
+    #[serde(default)]
+    pub grpc_method_requests_total: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub grpc_method_failures_total: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub request_duration_seconds_sum_by_type: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub request_duration_seconds_count_by_type: BTreeMap<String, f64>,
+    pub mvcc_put_total: Option<f64>,
+    pub mvcc_delete_total: Option<f64>,
+    pub mvcc_range_total: Option<f64>,
+    pub mvcc_txn_total: Option<f64>,
+    pub mvcc_current_revision: Option<f64>,
+    pub mvcc_compact_revision: Option<f64>,
+    pub mvcc_keys_total: Option<f64>,
+    pub mvcc_events_total: Option<f64>,
+    pub mvcc_pending_events_total: Option<f64>,
+    pub mvcc_slow_watcher_total: Option<f64>,
+    pub mvcc_watch_stream_total: Option<f64>,
+    pub mvcc_watcher_total: Option<f64>,
+    pub mvcc_total_put_size_bytes: Option<f64>,
+    pub open_read_transactions: Option<f64>,
+    pub lease_granted_total: Option<f64>,
+    pub lease_renewed_total: Option<f64>,
+    pub lease_revoked_total: Option<f64>,
+    pub lease_expired_total: Option<f64>,
+    pub lease_ttl_seconds_sum: Option<f64>,
+    pub lease_ttl_seconds_count: Option<f64>,
+    pub client_received_bytes_total: Option<f64>,
+    pub client_sent_bytes_total: Option<f64>,
+    pub peer_received_bytes_total: Option<f64>,
+    pub peer_sent_bytes_total: Option<f64>,
+    pub peer_received_failures_total: Option<f64>,
+    pub peer_sent_failures_total: Option<f64>,
+    pub wal_fsync_duration_seconds_sum: Option<f64>,
+    pub wal_fsync_duration_seconds_count: Option<f64>,
+    pub wal_write_bytes_total: Option<f64>,
+    pub wal_write_duration_seconds_sum: Option<f64>,
+    pub wal_write_duration_seconds_count: Option<f64>,
+    pub backend_commit_duration_seconds_sum: Option<f64>,
+    pub backend_commit_duration_seconds_count: Option<f64>,
+    pub backend_snapshot_duration_seconds_sum: Option<f64>,
+    pub backend_snapshot_duration_seconds_count: Option<f64>,
+    pub backend_defrag_duration_seconds_sum: Option<f64>,
+    pub backend_defrag_duration_seconds_count: Option<f64>,
+    pub disk_defrag_inflight: Option<f64>,
+    pub snapshot_apply_in_progress: Option<f64>,
+    pub quota_backend_bytes: Option<f64>,
+    pub known_peers: Option<f64>,
+    pub heartbeat_send_failures_total: Option<f64>,
+    pub read_indexes_failed_total: Option<f64>,
+    pub slow_apply_total: Option<f64>,
+    pub slow_read_indexes_total: Option<f64>,
+    pub health_success_total: Option<f64>,
+    pub health_failures_total: Option<f64>,
+    pub resident_memory_bytes: Option<f64>,
+    pub virtual_memory_bytes: Option<f64>,
+    pub cpu_seconds_total: Option<f64>,
+    pub process_start_time_seconds: Option<f64>,
+    pub process_received_bytes_total: Option<f64>,
+    pub process_transmitted_bytes_total: Option<f64>,
+    pub open_fds: Option<f64>,
+    pub max_fds: Option<f64>,
+    pub goroutines: Option<f64>,
+    pub go_threads: Option<f64>,
+    pub go_max_procs: Option<f64>,
+    pub go_heap_alloc_bytes: Option<f64>,
+    pub go_heap_inuse_bytes: Option<f64>,
+    pub go_heap_sys_bytes: Option<f64>,
+    pub go_heap_objects: Option<f64>,
+    pub go_next_gc_bytes: Option<f64>,
+    pub go_gc_duration_seconds_sum: Option<f64>,
+    pub go_gc_duration_seconds_count: Option<f64>,
+    pub db_size_metric_bytes: Option<f64>,
+    pub db_size_in_use_metric_bytes: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KvStatusResponse {
+    pub cluster_id: Option<KvInt64>,
+    pub revision: Option<KvInt64>,
+    pub leader_id: Option<KvInt64>,
+    pub key_count: Option<KvInt64>,
+    pub alarms: Vec<String>,
+    pub members: Vec<KvStatusMember>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<KvPrometheusMetrics>,
 }
 
 pub fn kv_list_prefix_params(prefix: &str, limit: usize, continuation: Option<&str>) -> serde_json::Value {
@@ -162,43 +472,72 @@ pub fn kv_list_prefix_params_with_options(
     continuation: Option<&str>,
     recursive: Option<bool>,
 ) -> serde_json::Value {
+    kv_list_prefix_params_with_range_options(prefix, limit, continuation, recursive, KvRangeOptions::default())
+}
+
+pub fn kv_list_prefix_params_with_range_options(
+    prefix: &str,
+    limit: usize,
+    continuation: Option<&str>,
+    recursive: Option<bool>,
+    options: KvRangeOptions,
+) -> serde_json::Value {
     serde_json::to_value(KvListPrefixRequest {
         prefix: prefix.to_string(),
         limit,
         continuation: continuation.map(str::to_string),
         recursive,
+        revision: options.revision,
+        include_values: options.include_values,
     })
     .expect("KV list prefix request should serialize")
 }
 
 pub fn kv_get_params(key: &str) -> serde_json::Value {
-    kv_get_params_with_options(key, false)
+    kv_get_params_with_options(key, KvGetOptions::default())
 }
 
-pub fn kv_get_params_with_options(key: &str, metadata_only: bool) -> serde_json::Value {
-    serde_json::to_value(KvGetRequest { key: key.to_string(), metadata_only: metadata_only.then_some(true) })
-        .expect("KV get request should serialize")
+pub fn kv_get_params_with_options(key: &str, options: KvGetOptions) -> serde_json::Value {
+    serde_json::to_value(KvGetRequest {
+        key: key.to_string(),
+        key_bytes: options.key_bytes,
+        revision: options.revision,
+        metadata_only: options.metadata_only,
+    })
+    .expect("KV get request should serialize")
 }
 
 pub fn kv_put_params(key: &str, value: KvValue, lease: Option<i64>) -> serde_json::Value {
-    kv_put_params_with_options(key, value, KvPutOptions { lease, ..KvPutOptions::default() })
+    kv_put_params_with_options(key, value, KvPutOptions { lease: lease.map(KvInt64::from), ..KvPutOptions::default() })
 }
 
 pub fn kv_put_params_with_options(key: &str, value: KvValue, options: KvPutOptions) -> serde_json::Value {
     serde_json::to_value(KvPutRequest {
         key: key.to_string(),
+        key_bytes: options.key_bytes,
         value,
         lease: options.lease,
         ttl: options.ttl,
         preserve_lease: options.preserve_lease,
         write_mode: options.write_mode,
         create_mode: options.create_mode,
+        expected_mod_revision: options.expected_mod_revision,
+        expected_create_revision: options.expected_create_revision,
     })
     .expect("KV put request should serialize")
 }
 
 pub fn kv_delete_params(key: &str) -> serde_json::Value {
-    serde_json::to_value(KvDeleteRequest { key: key.to_string() }).expect("KV delete request should serialize")
+    kv_delete_params_with_options(key, KvDeleteOptions::default())
+}
+
+pub fn kv_delete_params_with_options(key: &str, options: KvDeleteOptions) -> serde_json::Value {
+    serde_json::to_value(KvDeleteRequest {
+        key: key.to_string(),
+        key_bytes: options.key_bytes,
+        expected_mod_revision: options.expected_mod_revision,
+    })
+    .expect("KV delete request should serialize")
 }
 
 pub async fn kv_list_prefix_core(
@@ -224,22 +563,41 @@ pub async fn kv_list_prefix_core_with_options(
         connection_id,
         AgentKvMethod::ListPrefix,
         kv_list_prefix_params_with_options(prefix, limit, continuation, recursive),
-        None,
+        Vec::new(),
+    )
+    .await
+}
+
+pub async fn kv_list_prefix_core_with_range_options(
+    state: &AppState,
+    connection_id: &str,
+    prefix: &str,
+    limit: usize,
+    continuation: Option<&str>,
+    options: KvRangeOptions,
+) -> Result<KvListPrefixResponse, String> {
+    let required_capabilities = kv_range_required_capabilities(&options);
+    call_agent_kv(
+        state,
+        connection_id,
+        AgentKvMethod::ListPrefix,
+        kv_list_prefix_params_with_range_options(prefix, limit, continuation, None, options),
+        required_capabilities,
     )
     .await
 }
 
 pub async fn kv_get_core(state: &AppState, connection_id: &str, key: &str) -> Result<KvGetResponse, String> {
-    kv_get_core_with_options(state, connection_id, key, false).await
+    call_agent_kv(state, connection_id, AgentKvMethod::Get, kv_get_params(key), Vec::new()).await
 }
 
 pub async fn kv_get_core_with_options(
     state: &AppState,
     connection_id: &str,
     key: &str,
-    metadata_only: bool,
+    options: KvGetOptions,
 ) -> Result<KvGetResponse, String> {
-    call_agent_kv(state, connection_id, AgentKvMethod::Get, kv_get_params_with_options(key, metadata_only), None).await
+    call_agent_kv(state, connection_id, AgentKvMethod::Get, kv_get_params_with_options(key, options), Vec::new()).await
 }
 
 pub async fn kv_put_core(
@@ -249,7 +607,14 @@ pub async fn kv_put_core(
     value: KvValue,
     lease: Option<i64>,
 ) -> Result<KvPutResponse, String> {
-    kv_put_core_with_options(state, connection_id, key, value, KvPutOptions { lease, ..KvPutOptions::default() }).await
+    kv_put_core_with_options(
+        state,
+        connection_id,
+        key,
+        value,
+        KvPutOptions { lease: lease.map(KvInt64::from), ..KvPutOptions::default() },
+    )
+    .await
 }
 
 pub async fn kv_put_core_with_options(
@@ -259,35 +624,622 @@ pub async fn kv_put_core_with_options(
     value: KvValue,
     options: KvPutOptions,
 ) -> Result<KvPutResponse, String> {
-    let required_capability = kv_put_required_capability(&options);
+    let required_capabilities = kv_put_required_capabilities(&options);
     call_agent_kv(
         state,
         connection_id,
         AgentKvMethod::Put,
         kv_put_params_with_options(key, value, options),
-        required_capability,
+        required_capabilities,
     )
     .await
 }
 
-fn kv_put_required_capability(options: &KvPutOptions) -> Option<AgentCapability> {
-    (options.ttl.is_some() || options.preserve_lease == Some(true)).then_some(AgentCapability::KvTtl)
+pub async fn kv_delete_core(state: &AppState, connection_id: &str, key: &str) -> Result<KvDeleteResponse, String> {
+    call_agent_kv(state, connection_id, AgentKvMethod::Delete, kv_delete_params(key), Vec::new()).await
 }
 
-pub async fn kv_delete_core(state: &AppState, connection_id: &str, key: &str) -> Result<KvDeleteResponse, String> {
-    call_agent_kv(state, connection_id, AgentKvMethod::Delete, kv_delete_params(key), None).await
+pub async fn kv_delete_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    key: &str,
+    options: KvDeleteOptions,
+) -> Result<KvDeleteResponse, String> {
+    let required_capabilities =
+        options.expected_mod_revision.is_some().then_some(AgentCapability::KvCas).into_iter().collect();
+    call_agent_kv(
+        state,
+        connection_id,
+        AgentKvMethod::Delete,
+        kv_delete_params_with_options(key, options),
+        required_capabilities,
+    )
+    .await
+}
+
+pub async fn kv_rename_core(
+    state: &AppState,
+    connection_id: &str,
+    request: KvRenameRequest,
+) -> Result<KvRenameResponse, String> {
+    let params = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    call_agent_kv(state, connection_id, AgentKvMethod::Rename, params, vec![AgentCapability::KvCas]).await
+}
+
+pub async fn kv_history_core(
+    state: &AppState,
+    connection_id: &str,
+    request: KvHistoryRequest,
+) -> Result<KvHistoryResponse, String> {
+    let params = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    call_agent_kv(state, connection_id, AgentKvMethod::History, params, vec![AgentCapability::KvHistory]).await
+}
+
+pub async fn kv_status_core(state: &AppState, connection_id: &str) -> Result<KvStatusResponse, String> {
+    let mut status: KvStatusResponse = call_agent_kv(
+        state,
+        connection_id,
+        AgentKvMethod::Status,
+        serde_json::json!({}),
+        vec![AgentCapability::KvStatus],
+    )
+    .await?;
+    if !status.metrics.as_ref().is_some_and(|metrics| metrics.available) {
+        let metrics_options =
+            state.configs.read().await.get(connection_id).map(EtcdMetricsConnectionOptions::from).unwrap_or_default();
+        status.metrics = Some(collect_etcd_prometheus_metrics(&status.members, &metrics_options).await);
+    }
+    Ok(status)
+}
+
+const ETCD_METRICS_TIMEOUT: Duration = Duration::from_secs(3);
+const ETCD_METRICS_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const ETCD_METRICS_MAX_CANDIDATES: usize = 8;
+
+#[derive(Debug, Clone, Default)]
+struct EtcdMetricsConnectionOptions {
+    url_params: Option<String>,
+    username: String,
+    password: String,
+    ca_cert_path: String,
+    client_cert_path: String,
+    client_key_path: String,
+}
+
+impl From<&crate::models::connection::ConnectionConfig> for EtcdMetricsConnectionOptions {
+    fn from(config: &crate::models::connection::ConnectionConfig) -> Self {
+        Self {
+            url_params: config.url_params.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            ca_cert_path: config.ca_cert_path.clone(),
+            client_cert_path: config.client_cert_path.clone(),
+            client_key_path: config.client_key_path.clone(),
+        }
+    }
+}
+
+async fn collect_etcd_prometheus_metrics(
+    members: &[KvStatusMember],
+    options: &EtcdMetricsConnectionOptions,
+) -> KvPrometheusMetrics {
+    let candidates = etcd_metrics_candidates(members, options.url_params.as_deref());
+    let collected_at_ms = current_time_millis();
+    if candidates.is_empty() {
+        return KvPrometheusMetrics {
+            available: false,
+            collected_at_ms: Some(collected_at_ms),
+            error: Some("No HTTP(S) etcd endpoint is available for /metrics".to_string()),
+            ..KvPrometheusMetrics::default()
+        };
+    }
+
+    let client = match build_etcd_metrics_client(options).await {
+        Ok(client) => client,
+        Err(error) => {
+            return KvPrometheusMetrics {
+                available: false,
+                collected_at_ms: Some(collected_at_ms),
+                error: Some(error),
+                ..KvPrometheusMetrics::default()
+            };
+        }
+    };
+
+    let mut errors = Vec::new();
+    for candidate in candidates.into_iter().take(ETCD_METRICS_MAX_CANDIDATES) {
+        let display_url = sanitize_metrics_url(&candidate);
+        let mut request = client.get(&candidate).header(reqwest::header::ACCEPT, "text/plain; version=0.0.4");
+        if !options.username.trim().is_empty() {
+            request = request.basic_auth(options.username.trim(), Some(options.password.as_str()));
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                errors.push(format!("{display_url}: {}", error.without_url()));
+                continue;
+            }
+        };
+        if !response.status().is_success() {
+            errors.push(format!("{display_url}: HTTP {}", response.status().as_u16()));
+            continue;
+        }
+        if response.content_length().is_some_and(|length| length > ETCD_METRICS_MAX_BYTES) {
+            errors.push(format!("{display_url}: response exceeds 4 MiB"));
+            continue;
+        }
+        let body = match response.bytes().await {
+            Ok(body) if body.len() as u64 <= ETCD_METRICS_MAX_BYTES => body,
+            Ok(_) => {
+                errors.push(format!("{display_url}: response exceeds 4 MiB"));
+                continue;
+            }
+            Err(error) => {
+                errors.push(format!("{display_url}: {}", error.without_url()));
+                continue;
+            }
+        };
+        let mut parsed = parse_etcd_prometheus_metrics(&String::from_utf8_lossy(&body), &display_url);
+        parsed.collected_at_ms = Some(collected_at_ms);
+        if parsed.available {
+            return parsed;
+        }
+        errors.push(format!("{display_url}: no supported etcd metrics found"));
+    }
+
+    KvPrometheusMetrics {
+        available: false,
+        source_url: etcd_metrics_candidates(members, options.url_params.as_deref())
+            .first()
+            .map(|url| sanitize_metrics_url(url)),
+        collected_at_ms: Some(collected_at_ms),
+        error: Some(errors.into_iter().take(3).collect::<Vec<_>>().join("; ")),
+        ..KvPrometheusMetrics::default()
+    }
+}
+
+async fn build_etcd_metrics_client(options: &EtcdMetricsConnectionOptions) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(ETCD_METRICS_TIMEOUT)
+        .timeout(ETCD_METRICS_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(3));
+
+    if !options.ca_cert_path.trim().is_empty() {
+        let path = expand_tilde(options.ca_cert_path.trim());
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|error| format!("Failed to read etcd metrics CA certificate at {path}: {error}"))?;
+        let certificates = reqwest::Certificate::from_pem_bundle(&bytes)
+            .or_else(|_| reqwest::Certificate::from_der(&bytes).map(|certificate| vec![certificate]))
+            .map_err(|error| format!("Failed to parse etcd metrics CA certificate at {path}: {error}"))?;
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
+    }
+
+    let client_cert = options.client_cert_path.trim();
+    let client_key = options.client_key_path.trim();
+    if client_cert.is_empty() != client_key.is_empty() {
+        return Err("Failed to initialize metrics client: etcd client certificate and key must be configured together"
+            .to_string());
+    }
+    if !client_cert.is_empty() {
+        let cert_path = expand_tilde(client_cert);
+        let key_path = expand_tilde(client_key);
+        let mut identity_pem = tokio::fs::read(&cert_path)
+            .await
+            .map_err(|error| format!("Failed to read etcd metrics client certificate at {cert_path}: {error}"))?;
+        if !identity_pem.ends_with(b"\n") {
+            identity_pem.push(b'\n');
+        }
+        identity_pem.extend(
+            tokio::fs::read(&key_path)
+                .await
+                .map_err(|error| format!("Failed to read etcd metrics client key at {key_path}: {error}"))?,
+        );
+        let identity = reqwest::Identity::from_pem(&identity_pem)
+            .map_err(|error| format!("Failed to parse etcd metrics client identity: {error}"))?;
+        builder = builder.identity(identity);
+    }
+
+    builder.build().map_err(|error| format!("Failed to initialize metrics client: {error}"))
+}
+
+fn etcd_metrics_candidates(members: &[KvStatusMember], url_params: Option<&str>) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    for configured in configured_etcd_metrics_urls(url_params) {
+        push_metrics_candidate(&mut candidates, &mut seen, &configured);
+    }
+    for member in members {
+        push_metrics_candidate(&mut candidates, &mut seen, &member.endpoint);
+    }
+    candidates
+}
+
+fn configured_etcd_metrics_urls(url_params: Option<&str>) -> Vec<String> {
+    let Some(params) = url_params.map(str::trim).filter(|params| !params.is_empty()) else {
+        return Vec::new();
+    };
+    let Ok(url) = reqwest::Url::parse(&format!("http://localhost/?{}", params.trim_start_matches('?'))) else {
+        return Vec::new();
+    };
+    url.query_pairs()
+        .filter(|(key, _)| key == "metricsUrls" || key == "metricsUrl")
+        .flat_map(|(_, value)| {
+            value
+                .split([',', '\n'])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn push_metrics_candidate(candidates: &mut Vec<String>, seen: &mut HashSet<String>, endpoint: &str) {
+    let Some(candidate) = metrics_url_for_endpoint(endpoint) else {
+        return;
+    };
+    if seen.insert(candidate.clone()) {
+        candidates.push(candidate);
+    }
+}
+
+fn metrics_url_for_endpoint(endpoint: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(endpoint.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return None;
+    }
+    if url.path().is_empty() || url.path() == "/" {
+        url.set_path("/metrics");
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+fn sanitize_metrics_url(value: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return "configured metrics endpoint".to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn parse_etcd_prometheus_metrics(text: &str, source_url: &str) -> KvPrometheusMetrics {
+    let mut totals = HashMap::<String, f64>::new();
+    let mut grpc_failures = 0.0;
+    let mut grpc_method_requests_total = BTreeMap::<String, f64>::new();
+    let mut grpc_method_failures_total = BTreeMap::<String, f64>::new();
+    let mut request_duration_seconds_sum_by_type = BTreeMap::<String, f64>::new();
+    let mut request_duration_seconds_count_by_type = BTreeMap::<String, f64>::new();
+    let mut server_version = None;
+    let mut cluster_version = None;
+    let mut go_version = None;
+    let mut recognized_samples = 0_u64;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(separator) = prometheus_value_separator(line) else {
+            continue;
+        };
+        let sample = &line[..separator];
+        let Some(raw_value) = line[separator..].split_whitespace().next() else {
+            continue;
+        };
+        let labels_start = sample.find('{');
+        let metric_name = labels_start.map_or(sample, |index| &sample[..index]);
+        if !supported_etcd_metric(metric_name) {
+            continue;
+        }
+        let Ok(value) = raw_value.parse::<f64>() else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+        *totals.entry(metric_name.to_string()).or_default() += value;
+        match metric_name {
+            "etcd_server_version" => server_version = prometheus_label(sample, "server_version"),
+            "etcd_cluster_version" => cluster_version = prometheus_label(sample, "cluster_version"),
+            "etcd_server_go_version" => go_version = prometheus_label(sample, "server_go_version"),
+            "grpc_server_handled_total" => {
+                if let Some(method) = prometheus_label(sample, "grpc_method") {
+                    *grpc_method_requests_total.entry(method.clone()).or_default() += value;
+                    if prometheus_label(sample, "grpc_code").as_deref() != Some("OK") {
+                        *grpc_method_failures_total.entry(method).or_default() += value;
+                    }
+                }
+                if prometheus_label(sample, "grpc_code").as_deref() != Some("OK") {
+                    grpc_failures += value;
+                }
+            }
+            "etcd_server_request_duration_seconds_sum" => {
+                if let Some(request_type) = prometheus_label(sample, "type") {
+                    *request_duration_seconds_sum_by_type.entry(request_type).or_default() += value;
+                }
+            }
+            "etcd_server_request_duration_seconds_count" => {
+                if let Some(request_type) = prometheus_label(sample, "type") {
+                    *request_duration_seconds_count_by_type.entry(request_type).or_default() += value;
+                }
+            }
+            _ => {}
+        }
+        recognized_samples += 1;
+    }
+
+    let metric = |name: &str| totals.get(name).copied();
+    let available = recognized_samples > 0;
+    KvPrometheusMetrics {
+        available,
+        source_url: Some(sanitize_metrics_url(source_url)),
+        error: (!available).then(|| "No supported etcd metrics found".to_string()),
+        collected_at_ms: Some(current_time_millis()),
+        sample_count: Some(recognized_samples),
+        server_version,
+        cluster_version,
+        go_version,
+        auth_revision: metric("etcd_debugging_auth_revision"),
+        has_leader: metric("etcd_server_has_leader"),
+        is_leader: metric("etcd_server_is_leader"),
+        leader_changes_total: metric("etcd_server_leader_changes_seen_total"),
+        proposals_committed_total: metric("etcd_server_proposals_committed_total"),
+        proposals_applied_total: metric("etcd_server_proposals_applied_total"),
+        proposals_pending: metric("etcd_server_proposals_pending"),
+        proposals_failed_total: metric("etcd_server_proposals_failed_total"),
+        grpc_requests_total: metric("grpc_server_handled_total"),
+        grpc_failures_total: totals.contains_key("grpc_server_handled_total").then_some(grpc_failures),
+        grpc_method_requests_total,
+        grpc_method_failures_total,
+        request_duration_seconds_sum_by_type,
+        request_duration_seconds_count_by_type,
+        mvcc_put_total: metric("etcd_mvcc_put_total"),
+        mvcc_delete_total: metric("etcd_mvcc_delete_total"),
+        mvcc_range_total: metric("etcd_mvcc_range_total"),
+        mvcc_txn_total: metric("etcd_mvcc_txn_total"),
+        mvcc_current_revision: metric("etcd_debugging_mvcc_current_revision"),
+        mvcc_compact_revision: metric("etcd_debugging_mvcc_compact_revision"),
+        mvcc_keys_total: metric("etcd_debugging_mvcc_keys_total"),
+        mvcc_events_total: metric("etcd_debugging_mvcc_events_total"),
+        mvcc_pending_events_total: metric("etcd_debugging_mvcc_pending_events_total"),
+        mvcc_slow_watcher_total: metric("etcd_debugging_mvcc_slow_watcher_total"),
+        mvcc_watch_stream_total: metric("etcd_debugging_mvcc_watch_stream_total"),
+        mvcc_watcher_total: metric("etcd_debugging_mvcc_watcher_total"),
+        mvcc_total_put_size_bytes: metric("etcd_debugging_mvcc_total_put_size_in_bytes"),
+        open_read_transactions: metric("etcd_mvcc_db_open_read_transactions"),
+        lease_granted_total: metric("etcd_debugging_lease_granted_total"),
+        lease_renewed_total: metric("etcd_debugging_lease_renewed_total"),
+        lease_revoked_total: metric("etcd_debugging_lease_revoked_total"),
+        lease_expired_total: metric("etcd_debugging_server_lease_expired_total"),
+        lease_ttl_seconds_sum: metric("etcd_debugging_lease_ttl_total_sum"),
+        lease_ttl_seconds_count: metric("etcd_debugging_lease_ttl_total_count"),
+        client_received_bytes_total: metric("etcd_network_client_grpc_received_bytes_total"),
+        client_sent_bytes_total: metric("etcd_network_client_grpc_sent_bytes_total"),
+        peer_received_bytes_total: metric("etcd_network_peer_received_bytes_total"),
+        peer_sent_bytes_total: metric("etcd_network_peer_sent_bytes_total"),
+        peer_received_failures_total: metric("etcd_network_peer_received_failures_total"),
+        peer_sent_failures_total: metric("etcd_network_peer_sent_failures_total"),
+        wal_fsync_duration_seconds_sum: metric("etcd_disk_wal_fsync_duration_seconds_sum"),
+        wal_fsync_duration_seconds_count: metric("etcd_disk_wal_fsync_duration_seconds_count"),
+        wal_write_bytes_total: metric("etcd_disk_wal_write_bytes_total"),
+        wal_write_duration_seconds_sum: metric("etcd_disk_wal_write_duration_seconds_sum"),
+        wal_write_duration_seconds_count: metric("etcd_disk_wal_write_duration_seconds_count"),
+        backend_commit_duration_seconds_sum: metric("etcd_disk_backend_commit_duration_seconds_sum"),
+        backend_commit_duration_seconds_count: metric("etcd_disk_backend_commit_duration_seconds_count"),
+        backend_snapshot_duration_seconds_sum: metric("etcd_disk_backend_snapshot_duration_seconds_sum"),
+        backend_snapshot_duration_seconds_count: metric("etcd_disk_backend_snapshot_duration_seconds_count"),
+        backend_defrag_duration_seconds_sum: metric("etcd_disk_backend_defrag_duration_seconds_sum"),
+        backend_defrag_duration_seconds_count: metric("etcd_disk_backend_defrag_duration_seconds_count"),
+        disk_defrag_inflight: metric("etcd_disk_defrag_inflight"),
+        snapshot_apply_in_progress: metric("etcd_server_snapshot_apply_in_progress_total"),
+        quota_backend_bytes: metric("etcd_server_quota_backend_bytes"),
+        known_peers: metric("etcd_network_known_peers"),
+        heartbeat_send_failures_total: metric("etcd_server_heartbeat_send_failures_total"),
+        read_indexes_failed_total: metric("etcd_server_read_indexes_failed_total"),
+        slow_apply_total: metric("etcd_server_slow_apply_total"),
+        slow_read_indexes_total: metric("etcd_server_slow_read_indexes_total"),
+        health_success_total: metric("etcd_server_health_success"),
+        health_failures_total: metric("etcd_server_health_failures"),
+        resident_memory_bytes: metric("process_resident_memory_bytes"),
+        virtual_memory_bytes: metric("process_virtual_memory_bytes"),
+        cpu_seconds_total: metric("process_cpu_seconds_total"),
+        process_start_time_seconds: metric("process_start_time_seconds"),
+        process_received_bytes_total: metric("process_network_receive_bytes_total"),
+        process_transmitted_bytes_total: metric("process_network_transmit_bytes_total"),
+        open_fds: metric("process_open_fds"),
+        max_fds: metric("process_max_fds"),
+        goroutines: metric("go_goroutines"),
+        go_threads: metric("go_threads"),
+        go_max_procs: metric("go_sched_gomaxprocs_threads"),
+        go_heap_alloc_bytes: metric("go_memstats_heap_alloc_bytes"),
+        go_heap_inuse_bytes: metric("go_memstats_heap_inuse_bytes"),
+        go_heap_sys_bytes: metric("go_memstats_heap_sys_bytes"),
+        go_heap_objects: metric("go_memstats_heap_objects"),
+        go_next_gc_bytes: metric("go_memstats_next_gc_bytes"),
+        go_gc_duration_seconds_sum: metric("go_gc_duration_seconds_sum"),
+        go_gc_duration_seconds_count: metric("go_gc_duration_seconds_count"),
+        db_size_metric_bytes: metric("etcd_mvcc_db_total_size_in_bytes"),
+        db_size_in_use_metric_bytes: metric("etcd_mvcc_db_total_size_in_use_in_bytes"),
+    }
+}
+
+fn prometheus_label(sample: &str, key: &str) -> Option<String> {
+    let labels = sample.get(sample.find('{')? + 1..sample.rfind('}')?)?;
+    let needle = format!("{key}=\"");
+    let start = labels.find(&needle)? + needle.len();
+    let mut value = String::new();
+    let mut escaped = false;
+    for current in labels[start..].chars() {
+        if escaped {
+            value.push(match current {
+                'n' => '\n',
+                other => other,
+            });
+            escaped = false;
+        } else if current == '\\' {
+            escaped = true;
+        } else if current == '"' {
+            return Some(value);
+        } else {
+            value.push(current);
+        }
+    }
+    None
+}
+
+fn prometheus_value_separator(line: &str) -> Option<usize> {
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut braces = 0_u32;
+    for (index, current) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quoted && current == '\\' {
+            escaped = true;
+            continue;
+        }
+        if current == '"' {
+            quoted = !quoted;
+            continue;
+        }
+        if !quoted {
+            match current {
+                '{' => braces += 1,
+                '}' => braces = braces.saturating_sub(1),
+                _ if braces == 0 && current.is_whitespace() => return Some(index),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn supported_etcd_metric(metric: &str) -> bool {
+    matches!(
+        metric,
+        "etcd_cluster_version"
+            | "etcd_debugging_auth_revision"
+            | "etcd_server_version"
+            | "etcd_server_go_version"
+            | "etcd_server_has_leader"
+            | "etcd_server_is_leader"
+            | "etcd_server_leader_changes_seen_total"
+            | "etcd_server_proposals_committed_total"
+            | "etcd_server_proposals_applied_total"
+            | "etcd_server_proposals_pending"
+            | "etcd_server_proposals_failed_total"
+            | "etcd_server_heartbeat_send_failures_total"
+            | "etcd_server_read_indexes_failed_total"
+            | "etcd_server_slow_apply_total"
+            | "etcd_server_slow_read_indexes_total"
+            | "etcd_server_snapshot_apply_in_progress_total"
+            | "etcd_server_quota_backend_bytes"
+            | "etcd_server_health_success"
+            | "etcd_server_health_failures"
+            | "etcd_server_request_duration_seconds_sum"
+            | "etcd_server_request_duration_seconds_count"
+            | "grpc_server_handled_total"
+            | "etcd_mvcc_put_total"
+            | "etcd_mvcc_delete_total"
+            | "etcd_mvcc_range_total"
+            | "etcd_mvcc_txn_total"
+            | "etcd_mvcc_db_open_read_transactions"
+            | "etcd_debugging_mvcc_current_revision"
+            | "etcd_debugging_mvcc_compact_revision"
+            | "etcd_debugging_mvcc_keys_total"
+            | "etcd_debugging_mvcc_events_total"
+            | "etcd_debugging_mvcc_pending_events_total"
+            | "etcd_debugging_mvcc_slow_watcher_total"
+            | "etcd_debugging_mvcc_watch_stream_total"
+            | "etcd_debugging_mvcc_watcher_total"
+            | "etcd_debugging_mvcc_total_put_size_in_bytes"
+            | "etcd_debugging_lease_granted_total"
+            | "etcd_debugging_lease_renewed_total"
+            | "etcd_debugging_lease_revoked_total"
+            | "etcd_debugging_lease_ttl_total_sum"
+            | "etcd_debugging_lease_ttl_total_count"
+            | "etcd_debugging_server_lease_expired_total"
+            | "etcd_network_client_grpc_received_bytes_total"
+            | "etcd_network_client_grpc_sent_bytes_total"
+            | "etcd_network_known_peers"
+            | "etcd_network_peer_received_bytes_total"
+            | "etcd_network_peer_sent_bytes_total"
+            | "etcd_network_peer_received_failures_total"
+            | "etcd_network_peer_sent_failures_total"
+            | "etcd_disk_wal_fsync_duration_seconds_sum"
+            | "etcd_disk_wal_fsync_duration_seconds_count"
+            | "etcd_disk_wal_write_bytes_total"
+            | "etcd_disk_wal_write_duration_seconds_sum"
+            | "etcd_disk_wal_write_duration_seconds_count"
+            | "etcd_disk_backend_commit_duration_seconds_sum"
+            | "etcd_disk_backend_commit_duration_seconds_count"
+            | "etcd_disk_backend_snapshot_duration_seconds_sum"
+            | "etcd_disk_backend_snapshot_duration_seconds_count"
+            | "etcd_disk_backend_defrag_duration_seconds_sum"
+            | "etcd_disk_backend_defrag_duration_seconds_count"
+            | "etcd_disk_defrag_inflight"
+            | "process_resident_memory_bytes"
+            | "process_virtual_memory_bytes"
+            | "process_cpu_seconds_total"
+            | "process_start_time_seconds"
+            | "process_network_receive_bytes_total"
+            | "process_network_transmit_bytes_total"
+            | "process_open_fds"
+            | "process_max_fds"
+            | "go_goroutines"
+            | "go_threads"
+            | "go_sched_gomaxprocs_threads"
+            | "go_memstats_heap_alloc_bytes"
+            | "go_memstats_heap_inuse_bytes"
+            | "go_memstats_heap_sys_bytes"
+            | "go_memstats_heap_objects"
+            | "go_memstats_next_gc_bytes"
+            | "go_gc_duration_seconds_sum"
+            | "go_gc_duration_seconds_count"
+            | "etcd_mvcc_db_total_size_in_bytes"
+            | "etcd_mvcc_db_total_size_in_use_in_bytes"
+    )
+}
+
+fn current_time_millis() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn kv_range_required_capabilities(options: &KvRangeOptions) -> Vec<AgentCapability> {
+    options
+        .include_values
+        .is_some_and(|include_values| include_values)
+        .then_some(AgentCapability::KvListValues)
+        .into_iter()
+        .collect()
+}
+
+fn kv_put_required_capabilities(options: &KvPutOptions) -> Vec<AgentCapability> {
+    let mut capabilities = Vec::new();
+    if options.ttl.is_some() || options.preserve_lease == Some(true) {
+        capabilities.push(AgentCapability::KvTtl);
+    }
+    if options.expected_mod_revision.is_some() || options.expected_create_revision.is_some() {
+        capabilities.push(AgentCapability::KvCas);
+    }
+    capabilities
 }
 
 pub async fn kv_supports_ttl_core(state: &AppState, connection_id: &str) -> Result<bool, String> {
     ensure_agent_kv_pool(state, connection_id).await?;
-
     let connections = state.connections.read().await;
     let pool = connections.get(connection_id).ok_or("Connection not found")?;
     match pool {
-        PoolKind::Agent(client) => {
-            let client = client.lock().await;
-            Ok(client.supports_capability(AgentCapability::KvTtl))
-        }
+        PoolKind::Agent(client) => Ok(client.lock().await.supports_capability(AgentCapability::KvTtl)),
         _ => Err("Not an agent key-value connection".to_string()),
     }
 }
@@ -301,8 +1253,12 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
     connection_id: &str,
     method: AgentKvMethod,
     params: serde_json::Value,
-    required_capability: Option<AgentCapability>,
+    required_capabilities: Vec<AgentCapability>,
 ) -> Result<T, String> {
+    let create_only_write = method == AgentKvMethod::Put
+        && params
+            .get("expectedCreateRevision")
+            .is_some_and(|value| value.as_str() == Some("0") || value.as_i64() == Some(0));
     ensure_agent_kv_pool(state, connection_id).await?;
 
     let connections = state.connections.read().await;
@@ -313,15 +1269,71 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
             if !client.supports_capability(AgentCapability::Kv) {
                 return Err("Agent does not support key-value operations".to_string());
             }
-            if required_capability.is_some_and(|capability| !client.supports_capability(capability)) {
-                return Err(
-                    "Installed etcd Agent does not support TTL. Update the etcd driver and reconnect.".to_string()
-                );
+            if let Some(capability) =
+                required_capabilities.into_iter().find(|capability| !client.supports_capability(*capability))
+            {
+                return Err(match capability {
+                    AgentCapability::KvTtl => {
+                        "Installed etcd Agent does not support TTL. Update the etcd driver and reconnect.".to_string()
+                    }
+                    AgentCapability::KvCas => {
+                        "ETCD_CAS_UNSUPPORTED: Installed etcd Agent cannot safely compare and update Keys. Update the etcd driver and reconnect."
+                            .to_string()
+                    }
+                    AgentCapability::KvListValues => {
+                        "ETCD_LIST_VALUES_UNSUPPORTED: Installed etcd Agent cannot export or search Key values safely. Update the etcd driver and reconnect."
+                            .to_string()
+                    }
+                    AgentCapability::KvStatus => {
+                        "ETCD_STATUS_UNSUPPORTED: Installed etcd Agent does not support Dashboard status. Update the etcd driver and reconnect."
+                            .to_string()
+                    }
+                    AgentCapability::KvHistory => {
+                        "ETCD_HISTORY_UNSUPPORTED: Installed etcd Agent does not support key history. Update the etcd driver and reconnect."
+                            .to_string()
+                    }
+                    _ => format!("Agent does not support required capability: {}", capability.as_str()),
+                });
             }
-            client.call_kv_method(method, params).await
+            client
+                .call_kv_method(method, params)
+                .await
+                .map_err(|error| normalize_agent_kv_error(&error, method, create_only_write))
         }
         _ => Err("Not an agent key-value connection".to_string()),
     }
+}
+
+fn normalize_agent_kv_error(error: &str, method: AgentKvMethod, create_only_write: bool) -> String {
+    let without_stderr = strip_recent_agent_stderr(error);
+    let message = strip_agent_rpc_error_prefix(without_stderr);
+    if message.to_ascii_lowercase().contains("etcd_cas_conflict") {
+        if method == AgentKvMethod::Put && create_only_write {
+            return "ETCD_KEY_ALREADY_EXISTS: Key already exists".to_string();
+        }
+        return match method {
+            AgentKvMethod::Rename => {
+                "ETCD_CAS_CONFLICT: The source Key changed or the target Key already exists".to_string()
+            }
+            AgentKvMethod::Delete => "ETCD_CAS_CONFLICT: The Key changed before it could be deleted".to_string(),
+            _ => "ETCD_CAS_CONFLICT: The Key changed after it was loaded".to_string(),
+        };
+    }
+    message.to_string()
+}
+
+fn strip_recent_agent_stderr(error: &str) -> &str {
+    let lower = error.to_ascii_lowercase();
+    let end = lower.find("recent stderr:").unwrap_or(error.len());
+    error[..end].trim().trim_end_matches('.').trim()
+}
+
+fn strip_agent_rpc_error_prefix(error: &str) -> &str {
+    let trimmed = error.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("agent rpc error") {
+        return trimmed;
+    }
+    trimmed.split_once(':').map(|(_, message)| message.trim()).unwrap_or(trimmed)
 }
 
 #[cfg(test)]
@@ -348,6 +1360,36 @@ mod tests {
     }
 
     #[test]
+    fn maps_create_cas_conflicts_to_key_already_exists_without_agent_stderr() {
+        let error = "Agent RPC error (-1): ETCD_CAS_CONFLICT: key changed after it was loaded. recent stderr: SLF4J(W): No SLF4J providers were found";
+
+        assert_eq!(
+            normalize_agent_kv_error(error, AgentKvMethod::Put, true),
+            "ETCD_KEY_ALREADY_EXISTS: Key already exists"
+        );
+    }
+
+    #[test]
+    fn keeps_non_create_cas_conflicts_distinct_and_sanitizes_other_rpc_errors() {
+        assert_eq!(
+            normalize_agent_kv_error(
+                "Agent RPC error (-1): ETCD_CAS_CONFLICT: key changed after it was loaded",
+                AgentKvMethod::Put,
+                false,
+            ),
+            "ETCD_CAS_CONFLICT: The Key changed after it was loaded"
+        );
+        assert_eq!(
+            normalize_agent_kv_error(
+                "Agent RPC error (-1): etcdserver: request timed out. recent stderr: noisy warning",
+                AgentKvMethod::Get,
+                false,
+            ),
+            "etcdserver: request timed out"
+        );
+    }
+
+    #[test]
     fn serializes_kv_list_prefix_params_with_recursive_false() {
         assert_eq!(
             kv_list_prefix_params_with_options("/app", 200, None, Some(false)),
@@ -363,13 +1405,6 @@ mod tests {
     fn serializes_kv_get_put_delete_params() {
         assert_eq!(kv_get_params("/app/name"), serde_json::json!({ "key": "/app/name" }));
         assert_eq!(
-            kv_get_params_with_options("/app/name", true),
-            serde_json::json!({
-                "key": "/app/name",
-                "metadataOnly": true
-            })
-        );
-        assert_eq!(
             kv_put_params("/app/name", KvValue { encoding: KvValueEncoding::Utf8, data: "dbx".to_string() }, Some(42),),
             serde_json::json!({
                 "key": "/app/name",
@@ -377,7 +1412,7 @@ mod tests {
                     "encoding": "utf8",
                     "data": "dbx"
                 },
-                "lease": 42
+                "lease": "42"
             })
         );
         assert_eq!(kv_delete_params("/app/name"), serde_json::json!({ "key": "/app/name" }));
@@ -416,50 +1451,92 @@ mod tests {
                 "createMode": "ephemeral_sequential"
             })
         );
+    }
+
+    #[test]
+    fn serializes_etcd_range_and_cas_options_losslessly() {
+        let revision = KvInt64("9007199254740993".to_string());
         assert_eq!(
-            kv_put_params_with_options(
-                "/jobs/expiring",
-                KvValue { encoding: KvValueEncoding::Utf8, data: "value".to_string() },
-                KvPutOptions { ttl: Some(60), ..KvPutOptions::default() },
+            kv_list_prefix_params_with_range_options(
+                "/app/",
+                500,
+                Some("cursor"),
+                None,
+                KvRangeOptions { revision: Some(revision.clone()), include_values: Some(true) },
             ),
             serde_json::json!({
-                "key": "/jobs/expiring",
-                "value": {
-                    "encoding": "utf8",
-                    "data": "value"
-                },
-                "ttl": 60
+                "prefix": "/app/",
+                "limit": 500,
+                "continuation": "cursor",
+                "revision": "9007199254740993",
+                "includeValues": true
             })
         );
         assert_eq!(
             kv_put_params_with_options(
-                "/jobs/expiring",
-                KvValue { encoding: KvValueEncoding::Utf8, data: "updated".to_string() },
-                KvPutOptions { preserve_lease: Some(true), ..KvPutOptions::default() },
+                "/app/name",
+                KvValue { encoding: KvValueEncoding::Utf8, data: "dbx".to_string() },
+                KvPutOptions {
+                    lease: Some(KvInt64("9223372036854775807".to_string())),
+                    expected_mod_revision: Some(revision),
+                    ..KvPutOptions::default()
+                },
             ),
             serde_json::json!({
-                "key": "/jobs/expiring",
-                "value": {
-                    "encoding": "utf8",
-                    "data": "updated"
-                },
-                "preserveLease": true
+                "key": "/app/name",
+                "value": { "encoding": "utf8", "data": "dbx" },
+                "lease": "9223372036854775807",
+                "expectedModRevision": "9007199254740993"
             })
         );
     }
 
     #[test]
-    fn requires_ttl_capability_only_for_ttl_aware_puts() {
-        assert_eq!(kv_put_required_capability(&KvPutOptions::default()), None);
-        assert_eq!(kv_put_required_capability(&KvPutOptions { lease: Some(42), ..KvPutOptions::default() }), None);
+    fn requires_explicit_agent_capabilities_for_value_scans_and_safe_writes() {
         assert_eq!(
-            kv_put_required_capability(&KvPutOptions { ttl: Some(60), ..KvPutOptions::default() }),
-            Some(AgentCapability::KvTtl)
+            kv_range_required_capabilities(&KvRangeOptions { include_values: Some(true), ..KvRangeOptions::default() }),
+            vec![AgentCapability::KvListValues]
         );
+        assert!(kv_range_required_capabilities(&KvRangeOptions::default()).is_empty());
+
         assert_eq!(
-            kv_put_required_capability(&KvPutOptions { preserve_lease: Some(true), ..KvPutOptions::default() }),
-            Some(AgentCapability::KvTtl)
+            kv_put_required_capabilities(&KvPutOptions {
+                ttl: Some(60),
+                expected_create_revision: Some(KvInt64::from(0)),
+                ..KvPutOptions::default()
+            }),
+            vec![AgentCapability::KvTtl, AgentCapability::KvCas]
         );
+        assert!(kv_put_required_capabilities(&KvPutOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn decodes_unsigned_etcd_ids_without_javascript_precision_loss() {
+        let decoded: KvStatusResponse = serde_json::from_value(serde_json::json!({
+            "clusterId": "18446744073709551615",
+            "revision": "42",
+            "leaderId": "9223372036854775808",
+            "keyCount": "3",
+            "alarms": [],
+            "members": [],
+            "metrics": {
+                "available": true,
+                "sourceUrl": "http://localhost:2380/metrics",
+                "collectedAtMs": 1720000000000u64,
+                "sampleCount": 12,
+                "hasLeader": 1,
+                "grpcRequestsTotal": 120.0,
+                "residentMemoryBytes": 104857600.0
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(decoded.cluster_id.unwrap().as_str(), "18446744073709551615");
+        assert_eq!(decoded.leader_id.unwrap().as_str(), "9223372036854775808");
+        let metrics = decoded.metrics.unwrap();
+        assert!(metrics.available);
+        assert_eq!(metrics.has_leader, Some(1.0));
+        assert_eq!(metrics.grpc_requests_total, Some(120.0));
     }
 
     #[test]
@@ -471,7 +1548,6 @@ mod tests {
                 "modRevision": 2,
                 "version": 3,
                 "lease": 0,
-                "ttl": 30,
                 "valueSize": 5
             }],
             "continuation": "next-token",
@@ -480,10 +1556,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(decoded.keys[0].key, "/app/name");
-        assert_eq!(decoded.keys[0].metadata.mod_revision, Some(2));
-        assert_eq!(decoded.keys[0].metadata.ttl, Some(30));
+        assert_eq!(decoded.keys[0].metadata.mod_revision, Some(KvInt64::from(2)));
         assert_eq!(decoded.continuation.as_deref(), Some("next-token"));
-        assert_eq!(decoded.revision, Some(9));
+        assert_eq!(decoded.revision, Some(KvInt64::from(9)));
     }
 
     #[test]
@@ -529,5 +1604,146 @@ mod tests {
         assert_eq!(metadata.pzxid, Some(39825));
         assert_eq!(metadata.ephemeral_owner, Some(0));
         assert_eq!(metadata.num_children, Some(5));
+    }
+
+    #[test]
+    fn derives_metrics_url_from_the_connected_etcd_endpoint() {
+        assert_eq!(
+            metrics_url_for_endpoint("http://127.0.0.1:2380"),
+            Some("http://127.0.0.1:2380/metrics".to_string())
+        );
+        assert_eq!(
+            metrics_url_for_endpoint("https://etcd.example.com:2379/"),
+            Some("https://etcd.example.com:2379/metrics".to_string())
+        );
+    }
+
+    #[test]
+    fn keeps_legacy_metrics_url_params_as_compatibility_candidates() {
+        assert_eq!(
+            configured_etcd_metrics_urls(Some(
+                "metricsUrls=http%3A%2F%2Fmetrics-1%3A2381%2Fmetrics%0Ahttp%3A%2F%2Fmetrics-2%3A2381%2Fmetrics"
+            )),
+            vec!["http://metrics-1:2381/metrics".to_string(), "http://metrics-2:2381/metrics".to_string()]
+        );
+    }
+
+    #[test]
+    fn parses_supported_etcd_prometheus_metrics() {
+        let metrics = parse_etcd_prometheus_metrics(
+            r#"
+                # HELP etcd_server_has_leader Whether a leader exists.
+                etcd_server_has_leader 1
+                etcd_server_proposals_committed_total 120
+                etcd_server_proposals_applied_total 118
+                grpc_server_handled_total{grpc_code="OK",grpc_method="Range"} 80
+                grpc_server_handled_total{grpc_code="Unavailable",grpc_method="Put"} 4
+                etcd_server_request_duration_seconds_sum{success="true",type="Range"} 0.8
+                etcd_server_request_duration_seconds_count{success="true",type="Range"} 40
+                etcd_server_version{server_version="3.7.0"} 1
+                etcd_cluster_version{cluster_version="3.7"} 1
+                etcd_server_go_version{server_go_version="go1.24.4"} 1
+                etcd_debugging_mvcc_watcher_total 3
+                etcd_debugging_lease_granted_total 2
+                go_memstats_heap_alloc_bytes 5242880
+                etcd_disk_wal_fsync_duration_seconds_sum 1.5
+                etcd_disk_wal_fsync_duration_seconds_count 30
+                process_resident_memory_bytes 104857600
+                go_goroutines 42
+                unsupported_metric 99
+            "#,
+            "http://user:secret@127.0.0.1:2380/metrics?token=secret",
+        );
+
+        assert!(metrics.available);
+        assert_eq!(metrics.source_url.as_deref(), Some("http://127.0.0.1:2380/metrics"));
+        assert_eq!(metrics.has_leader, Some(1.0));
+        assert_eq!(metrics.proposals_committed_total, Some(120.0));
+        assert_eq!(metrics.proposals_applied_total, Some(118.0));
+        assert_eq!(metrics.grpc_requests_total, Some(84.0));
+        assert_eq!(metrics.grpc_failures_total, Some(4.0));
+        assert_eq!(metrics.grpc_method_requests_total.get("Range"), Some(&80.0));
+        assert_eq!(metrics.grpc_method_failures_total.get("Put"), Some(&4.0));
+        assert_eq!(metrics.request_duration_seconds_sum_by_type.get("Range"), Some(&0.8));
+        assert_eq!(metrics.server_version.as_deref(), Some("3.7.0"));
+        assert_eq!(metrics.cluster_version.as_deref(), Some("3.7"));
+        assert_eq!(metrics.go_version.as_deref(), Some("go1.24.4"));
+        assert_eq!(metrics.mvcc_watcher_total, Some(3.0));
+        assert_eq!(metrics.lease_granted_total, Some(2.0));
+        assert_eq!(metrics.go_heap_alloc_bytes, Some(5_242_880.0));
+        assert_eq!(metrics.wal_fsync_duration_seconds_count, Some(30.0));
+        assert_eq!(metrics.sample_count, Some(17));
+    }
+
+    #[tokio::test]
+    async fn collects_metrics_directly_from_the_status_member_endpoint() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let request_size = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..request_size]);
+            assert!(request.starts_with("GET /metrics "));
+            assert!(request.lines().any(|line| line.eq_ignore_ascii_case("Authorization: Basic ZGJ4OnNlY3JldA==")));
+            let body = "etcd_server_has_leader 1\nprocess_resident_memory_bytes 2048\n";
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let members = vec![KvStatusMember {
+            endpoint: format!("http://{address}"),
+            member_id: None,
+            name: None,
+            version: None,
+            leader_id: None,
+            revision: None,
+            raft_term: None,
+            raft_index: None,
+            raft_applied_index: None,
+            db_size: None,
+            db_size_in_use: None,
+            learner: false,
+            reachable: true,
+            latency_ms: None,
+            errors: Vec::new(),
+        }];
+
+        let metrics = collect_etcd_prometheus_metrics(
+            &members,
+            &EtcdMetricsConnectionOptions {
+                username: "dbx".to_string(),
+                password: "secret".to_string(),
+                ..EtcdMetricsConnectionOptions::default()
+            },
+        )
+        .await;
+        server.await.unwrap();
+
+        assert!(metrics.available);
+        assert_eq!(metrics.has_leader, Some(1.0));
+        assert_eq!(metrics.resident_memory_bytes, Some(2048.0));
+        assert_eq!(metrics.source_url, Some(format!("http://{address}/metrics")));
+    }
+
+    #[tokio::test]
+    async fn rejects_incomplete_metrics_client_identity_configuration() {
+        let error = build_etcd_metrics_client(&EtcdMetricsConnectionOptions {
+            client_cert_path: "/tmp/client.pem".to_string(),
+            ..EtcdMetricsConnectionOptions::default()
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("certificate and key must be configured together"));
     }
 }

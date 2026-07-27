@@ -18,6 +18,8 @@ import {
   isNacosConfigSaveSnapshotCurrent,
   isNacosConfigDeleteSnapshotInScope,
   nacosConfigFileExtension,
+  nacosMetricsCandidates,
+  normalizeNacosMetricsUrl,
   parseNacosRawBody,
   parseNacosRawQuery,
   normalizeNacosEndpoint,
@@ -41,11 +43,40 @@ describe("nacosAdmin helpers", () => {
       contextPath: "/gateway",
       detectedVersion: "v3",
     });
+    expect(normalizeNacosEndpoint("http://127.0.0.1:8848", { implementation: "nacos", versionMode: "v3" })).toMatchObject({
+      serverAddr: "http://127.0.0.1:8848",
+      contextPath: "/nacos",
+      detectedVersion: "v3",
+    });
+    expect(normalizeNacosEndpoint("http://127.0.0.1:8848", { implementation: "nacos", versionMode: "v3", contextPath: "/" })).toMatchObject({
+      serverAddr: "http://127.0.0.1:8848",
+      contextPath: "/",
+      detectedVersion: "v3",
+    });
+    const savedAutoRootEndpoint = normalizeNacosEndpoint("http://127.0.0.1:8080", { implementation: "nacos", versionMode: "auto" });
+    expect(savedAutoRootEndpoint).toMatchObject({ serverAddr: "http://127.0.0.1:8080", contextPath: "" });
+    expect(
+      normalizeNacosEndpoint(savedAutoRootEndpoint.serverAddr, {
+        implementation: "nacos",
+        versionMode: "auto",
+        contextPath: savedAutoRootEndpoint.contextPath || undefined,
+      }),
+    ).toMatchObject({ serverAddr: "http://127.0.0.1:8080", contextPath: "" });
     expect(normalizeNacosEndpoint("http://rnacos.example:8848/nacos", { implementation: "rnacos" })).toMatchObject({
       serverAddr: "http://rnacos.example:8848",
       contextPath: "/nacos",
     });
     expect(() => normalizeNacosEndpoint("http://user:secret@nacos.example", { implementation: "nacos" })).toThrow(/embedded credentials/i);
+  });
+
+  it("derives and validates Prometheus endpoints", () => {
+    expect(nacosMetricsCandidates("http://127.0.0.1:8818", "/nacos", "nacos")).toEqual(["http://127.0.0.1:8818/nacos/actuator/prometheus", "http://127.0.0.1:8818/actuator/prometheus"]);
+    expect(nacosMetricsCandidates("http://127.0.0.1:3848", "/nacos", "rnacos")).toEqual(["http://127.0.0.1:3848/metrics", "http://127.0.0.1:3848/nacos/metrics", "http://127.0.0.1:3848/rnacos/metrics"]);
+    expect(normalizeNacosMetricsUrl("http://localhost:8818/metrics?node=a")).toBe("http://localhost:8818/metrics?node=a");
+    expect(() => normalizeNacosMetricsUrl("file:///tmp/metrics")).toThrow(/HTTP or HTTPS/);
+    expect(() => normalizeNacosMetricsUrl("http://user:secret@localhost/metrics")).toThrow(/credentials/);
+    expect(() => normalizeNacosMetricsUrl("http://localhost/metrics#fragment")).toThrow(/fragment/);
+    expect(() => normalizeNacosMetricsUrl("http://localhost/metrics#")).toThrow(/fragment/);
   });
   it("parses raw query and body text", () => {
     expect(parseNacosRawQuery("?dataId=a&group=DEFAULT_GROUP")).toEqual({ dataId: "a", group: "DEFAULT_GROUP" });

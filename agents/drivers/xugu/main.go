@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	_ "gitee.com/XuguDB/go-xugu-driver"
 )
@@ -3953,8 +3955,28 @@ func stripLeadingSQLComments(sqlText string) string {
 }
 
 func isQuerySQL(sqlText string) bool {
-	lower := strings.ToLower(strings.TrimSpace(sqlText))
-	return strings.HasPrefix(lower, "select") || strings.HasPrefix(lower, "with")
+	sqlText = stripLeadingSQLComments(sqlText)
+	for _, keyword := range []string{"select", "with", "show"} {
+		if hasLeadingSQLKeyword(sqlText, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLeadingSQLKeyword(sqlText, keyword string) bool {
+	if len(sqlText) < len(keyword) || !strings.EqualFold(sqlText[:len(keyword)], keyword) {
+		return false
+	}
+	if len(sqlText) == len(keyword) {
+		return true
+	}
+	next, _ := utf8.DecodeRuneInString(sqlText[len(keyword):])
+	return !isSQLIdentifierContinuation(next)
+}
+
+func isSQLIdentifierContinuation(value rune) bool {
+	return value == '_' || value == '$' || value == '#' || unicode.IsLetter(value) || unicode.IsDigit(value) || unicode.IsMark(value)
 }
 
 func quoteIdentifier(value string) string {

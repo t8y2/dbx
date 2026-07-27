@@ -45,18 +45,27 @@ export function mergeKvValueRefresh(current: KvGetResponse | null, incoming: KvG
   return current;
 }
 
-export function removeMissingKvKey(keys: readonly KvKeySummary[], missingKey: string): KvKeySummary[] {
-  return keys.filter((key) => key.key !== missingKey);
+function matchesKvKey(summary: KvKeySummary, key: string, keyIdentity?: string | null): boolean {
+  return keyIdentity != null ? (summary.keyIdentity ?? summary.key) === keyIdentity : summary.key === key;
 }
 
-export function knownKvLeaseKeys(keys: readonly KvKeySummary[], selectedKey: string | null): string[] {
-  return keys.filter((key) => key.key !== selectedKey && typeof key.lease === "number" && key.lease > 0).map((key) => key.key);
+export function removeMissingKvKey(keys: readonly KvKeySummary[], missingKey: string, missingKeyIdentity?: string | null): KvKeySummary[] {
+  return keys.filter((summary) => !matchesKvKey(summary, missingKey, missingKeyIdentity));
 }
 
-export function mergeKvKeyMetadata(keys: readonly KvKeySummary[], key: string, incoming: KvGetResponse): KvKeySummary[] {
-  if (!incoming.found) return removeMissingKvKey(keys, key);
+export function hasPositiveKvLease(lease: string | number | null | undefined): boolean {
+  if (typeof lease === "number") return Number.isInteger(lease) && lease > 0;
+  return typeof lease === "string" && /^[1-9]\d*$/.test(lease.trim());
+}
+
+export function knownKvLeaseSummaries(keys: readonly KvKeySummary[], selectedKeyIdentity: string | null): KvKeySummary[] {
+  return keys.filter((key) => (key.keyIdentity ?? key.key) !== selectedKeyIdentity && hasPositiveKvLease(key.lease));
+}
+
+export function mergeKvKeyMetadata(keys: readonly KvKeySummary[], key: string, incoming: KvGetResponse, keyIdentity?: string | null): KvKeySummary[] {
+  if (!incoming.found) return removeMissingKvKey(keys, key, keyIdentity);
   if (!incoming.metadata) return [...keys];
-  return keys.map((item) => (item.key === key ? { ...item, ...incoming.metadata, key: item.key, valueSize: item.valueSize } : item));
+  return keys.map((item) => (matchesKvKey(item, key, keyIdentity) ? { ...item, ...incoming.metadata, key: item.key, valueSize: item.valueSize } : item));
 }
 
 export function nextKvLeaseRefreshDelay(currentDelayMs: number, failed: boolean, baseDelayMs = 2000, maxDelayMs = 30000): number {

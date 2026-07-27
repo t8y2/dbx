@@ -35,14 +35,9 @@ export function clearDataGridClipboardCopy(): void {
   internalClipboardCopy = null;
 }
 
-export function rememberDataGridClipboardCopy(text: string, rows: readonly (readonly unknown[])[], includeHeader = false): void {
-  if (!rows.some((row) => row.some((value) => value === null))) {
-    internalClipboardCopy = null;
-    return;
-  }
-
+export function rememberDataGridClipboardCopy(text: string, rows: readonly (readonly unknown[])[], header?: readonly unknown[]): void {
   // Preserve the logical grid matrix because plain TSV cannot escape embedded tabs or newlines.
-  const headerRows = includeHeader ? parseClipboardTable(text).slice(0, 1) : [];
+  const headerRows = header ? [header.map((value) => displayCellValue(value as CellValue))] : [];
   const copiedRows = rows.map((row) => row.map((value) => (value === null ? null : displayCellValue(value as CellValue))));
   internalClipboardCopy = { text, rows: [...headerRows, ...copiedRows], writeRevision: getClipboardWriteRevision() };
 }

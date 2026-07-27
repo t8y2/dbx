@@ -1,0 +1,17 @@
+{
+  "numeric": [
+    { "backend": "sqlserver-native", "type": "int1" },
+    { "backend": "sqlserver-native", "type": "money4" },
+    { "backend": "sqlserver-native", "type": "intn" },
+    { "backend": "sqlserver-native", "type": "decimaln" },
+    { "backend": "clickhouse-http", "type": "Nullable(Int64)" },
+    { "backend": "clickhouse-http", "type": "LowCardinality(UInt32)" },
+    { "backend": "clickhouse-http", "type": "Nullable(LowCardinality(Decimal(18, 2)))" }
+  ],
+  "nonNumeric": [
+    { "backend": "sqlserver-native", "type": "bit" },
+    { "backend": "clickhouse-http", "type": "Nullable(DateTime64(3))" },
+    { "backend": "clickhouse-http", "type": "LowCardinality(String)" },
+    { "backend": "clickhouse-http", "type": "Array(Int64)" }
+  ]
+}

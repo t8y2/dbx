@@ -1,4 +1,4 @@
-import type { DatabaseObjectType, DatabaseType } from "@/types/database";
+import type { ColumnInfo, DatabaseObjectType, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
 export interface DropObjectSqlOptions {
@@ -55,6 +55,14 @@ export interface DuplicateTableStructureSqlOptions {
   schema?: string | null;
   sourceName: string;
   targetName: string;
+  columnComments?: Array<{ name: string; comment: string }>;
+}
+
+export function collectDuplicateTableColumnComments(columns: readonly Pick<ColumnInfo, "name" | "comment">[]): Array<{ name: string; comment: string }> {
+  return columns.flatMap((column) => {
+    const comment = column.comment;
+    return comment?.trim() ? [{ name: column.name, comment }] : [];
+  });
 }
 
 export interface CopyTableDataSqlOptions {

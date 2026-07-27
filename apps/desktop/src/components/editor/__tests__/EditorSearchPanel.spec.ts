@@ -40,7 +40,8 @@ describe("QueryEditor search shortcuts", () => {
   });
 
   it("keeps the existing search navigation and read-only replace guards", () => {
-    expect(queryEditorSource).toMatch(/Prec\.highest\(\s*keymap\.of\(\[\s*\.\.\.createQueryEditorSearchKeymap/);
+    expect(queryEditorSource).toMatch(/\.\.\.binding\(shortcuts\.sendSelectionToAi[\s\S]*\.\.\.createQueryEditorSearchKeymap/);
+    expect(queryEditorSource).not.toMatch(/Prec\.highest\(\s*keymap\.of\(\[\s*\.\.\.createQueryEditorSearchKeymap/);
     expect(queryEditorSource).toMatch(/function openReplace\(\): boolean \{\s*if \(props\.readOnly\) return false;/);
     expect(contentAreaSource).toContain('if (props.activeTab.mode === "query") return queryEditorRef.value?.openSearch() ?? false;');
     expect(contentAreaSource).toContain("return queryEditorRef.value?.openReplace() ?? false;");

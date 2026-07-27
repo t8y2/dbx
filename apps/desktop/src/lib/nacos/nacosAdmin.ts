@@ -91,9 +91,10 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
     contextPath = hasNacosSuffix ? rawPath : options.contextPath?.trim() || "/nacos";
   } else if (detectedVersion === "v3" || hasNacos3UiSuffix) {
     contextPath = rawPath.replace(/\/(?:next(?:\/index\.html)?|index\.html)$/i, "");
+    if (!contextPath) contextPath = options.contextPath?.trim() || "/nacos";
     if (hasNacos3UiSuffix) warnings.push("The Nacos 3 console route was removed from the API context.");
   } else if (!contextPath) {
-    contextPath = options.contextPath?.trim() || (detectedVersion === "v2" ? "/nacos" : "");
+    contextPath = options.contextPath?.trim() || (versionMode === "v2" ? "/nacos" : "");
   }
   url.pathname = "/";
   url.search = "";
@@ -105,6 +106,27 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
     detectedVersion,
     warnings,
   };
+}
+
+export function normalizeNacosMetricsUrl(input: string): string {
+  const value = input.trim();
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Nacos Prometheus metrics URL must be a valid absolute URL");
+  }
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Nacos Prometheus metrics URL must use HTTP or HTTPS");
+  if (url.username || url.password) throw new Error("Nacos Prometheus metrics URL must not contain embedded credentials");
+  if (value.includes("#")) throw new Error("Nacos Prometheus metrics URL must not contain a fragment");
+  return url.toString();
+}
+
+export function nacosMetricsCandidates(serverAddr: string, contextPath: string, implementation: NacosImplementation): string[] {
+  const base = serverAddr.replace(/\/+$/, "");
+  const context = contextPath.replace(/\/+$/, "");
+  const raw = implementation === "rnacos" ? [`${base}/metrics`, `${base}${context}/metrics`, `${base}/rnacos/metrics`] : [`${base}${context}/actuator/prometheus`, `${base}/nacos/actuator/prometheus`, `${base}/actuator/prometheus`];
+  return [...new Set(raw.map((value) => new URL(value).toString()))];
 }
 
 /**

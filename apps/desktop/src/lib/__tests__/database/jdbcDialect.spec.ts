@@ -64,6 +64,16 @@ describe("jdbc dialect inference", () => {
     expect(inferJdbcDialect(opengaussConnection)).toBe("opengauss");
     expect(connectionUsesDatabaseObjectTreeMode(opengaussConnection)).toBe(false);
   });
+
+  it("detects Dameng JDBC connections", () => {
+    const damengConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:dm://localhost:5236/DAMENG",
+      jdbc_driver_class: "dm.jdbc.driver.DmDriver",
+    };
+
+    expect(inferJdbcDialect(damengConnection)).toBe("dameng");
+  });
 });
 
 describe("query execution schema", () => {

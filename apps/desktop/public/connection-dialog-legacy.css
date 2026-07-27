@@ -1,8 +1,10 @@
 /* Keep these classic media queries outside the Vite/Tailwind transform pipeline.
- * Older WebKit ignores the range syntax emitted by the production CSS build. */
+ * Older WebKit ignores the range syntax emitted by the production CSS build and
+ * needs definite inline sizes for flex items that contain fractional grids. */
 @media (min-width: 640px) {
   [data-slot="dialog-content"].connection-dialog-content--picker {
     width: calc(100vw - 2rem) !important;
+    min-width: 38rem !important;
     height: 720px !important;
     max-width: 880px !important;
   }
@@ -47,6 +49,7 @@
   }
 
   .connection-db-picker-results {
+    width: 0 !important;
     min-width: 0 !important;
     flex: 1 1 0% !important;
   }
@@ -56,7 +59,12 @@
   }
 
   .connection-db-picker-grid {
+    width: 100% !important;
     grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+
+  .connection-db-picker-option {
+    min-width: 0 !important;
   }
 }
 

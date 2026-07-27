@@ -1324,10 +1324,13 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return result;
     }
 
-    private static String indexDdl(String schema, String table, IndexInfo index) {
+    static String indexDdl(String schema, String table, IndexInfo index) {
         StringBuilder ddl = new StringBuilder("CREATE ");
         if (index.getIs_unique()) {
             ddl.append("UNIQUE ");
+        }
+        if ("SPATIAL".equalsIgnoreCase(coalesce(index.getIndex_type()).trim())) {
+            ddl.append("SPATIAL ");
         }
         ddl.append("INDEX ")
             .append(qualifiedName(schema, index.getName()))

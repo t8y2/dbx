@@ -2,6 +2,7 @@ package com.dbx.agent.dameng;
 
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
@@ -80,6 +81,50 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals("FUNCTION", DamengAgent.damengDdlObjectType("function"));
         assertEquals("TRIGGER", DamengAgent.damengDdlObjectType("trigger"));
         assertThrows(IllegalArgumentException.class, () -> DamengAgent.damengDdlObjectType("TABLE"));
+    }
+
+    @Test
+    void spatialIndexDdlPreservesDamengIndexType() {
+        IndexInfo index = new IndexInfo(
+            "IDX_TEST_LINESTRING",
+            List.of("LINESTRING"),
+            false,
+            false,
+            null,
+            "SPATIAL",
+            null,
+            null
+        );
+
+        assertEquals(
+            "CREATE SPATIAL INDEX \"SYSDBA\".\"IDX_TEST_LINESTRING\" ON \"SYSDBA\".\"TEST\" (\"LINESTRING\");",
+            DamengAgent.indexDdl("SYSDBA", "TEST", index)
+        );
+    }
+
+    @Test
+    void ordinaryIndexDdlKeepsExistingSyntax() {
+        IndexInfo index = new IndexInfo(
+            "IDX_TEST_NAME",
+            List.of("NAME"),
+            false,
+            false,
+            null,
+            "NORMAL",
+            null,
+            null
+        );
+
+        assertEquals(
+            "CREATE INDEX \"SYSDBA\".\"IDX_TEST_NAME\" ON \"SYSDBA\".\"TEST\" (\"NAME\");",
+            DamengAgent.indexDdl("SYSDBA", "TEST", index)
+        );
+
+        index.setIs_unique(true);
+        assertEquals(
+            "CREATE UNIQUE INDEX \"SYSDBA\".\"IDX_TEST_NAME\" ON \"SYSDBA\".\"TEST\" (\"NAME\");",
+            DamengAgent.indexDdl("SYSDBA", "TEST", index)
+        );
     }
 
     @Test

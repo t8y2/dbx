@@ -100,6 +100,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         client_session_id: None,
         execution_id: Some(format!("live-clickhouse-query-export-{suffix}")),
         date_time_format: None,
+        numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {

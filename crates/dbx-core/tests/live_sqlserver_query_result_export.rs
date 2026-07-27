@@ -10,6 +10,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
     dbx_core::models::connection::ConnectionConfig {
         id: id.to_string(),
         name: id.to_string(),
+        note: String::new(),
         db_type: DatabaseType::SqlServer,
         driver_profile: None,
         driver_label: None,
@@ -109,6 +110,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         client_session_id: None,
         execution_id: Some(format!("live-sqlserver-xlsx-{suffix}")),
         date_time_format: None,
+        numeric_column_right_align: false,
     };
     let rows_exported = AtomicU64::new(0);
     let done_seen = AtomicBool::new(false);

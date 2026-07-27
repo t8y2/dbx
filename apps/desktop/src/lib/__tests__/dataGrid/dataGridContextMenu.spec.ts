@@ -64,7 +64,7 @@ describe("dataGridContextMenu", () => {
       icons: { cellDetails: icon, columnDetails: icon, rowDetails: icon, setNull: icon, bulkEdit: icon, transpose: icon },
       actions: { cellDetails: action, columnDetails: action, rowDetails: action, setNull: action, bulkEdit: action, transpose: action },
       copySubmenu: { label: "copy" },
-      selectionSubmenu: { label: "selection" },
+      clearSelectionItem: { label: "clear" },
     });
     expect(cellItems.find((item) => item.label === "bulk")?.disabled).toBe(true);
 

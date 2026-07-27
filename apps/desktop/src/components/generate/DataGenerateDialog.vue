@@ -71,6 +71,14 @@ function colKey(schema: string, table: string, column: string) {
   return `${schema}.${table}.${column}`;
 }
 
+function tableInfo(schema: string, table: string): TableInfo | undefined {
+  return schemaTables[schema]?.find((item) => item.name === table);
+}
+
+function isTdengineTagColumn(column: ColumnInfo): boolean {
+  return (column.extra ?? "").toUpperCase().includes("TAG") || (column.comment ?? "").toUpperCase() === "TAG";
+}
+
 // Derived state for template
 const activeCfg = computed(() => {
   const k = panelTableKey.value;
@@ -109,11 +117,13 @@ async function loadSchemas() {
         try {
           const tables = await api.listTables(cid, db, targetSchema);
           schemaTables[targetSchema] = tables;
-          if (tables.some((t: { name: string }) => t.name === props.prefillTable)) {
+          const prefillTableInfo = tables.find((table) => table.name === props.prefillTable);
+          if (prefillTableInfo) {
             const cols = await api.getColumns(cid, db, targetSchema, props.prefillTable);
             const key = tableKey(targetSchema, props.prefillTable);
             configs[key] = {
               tableName: props.prefillTable,
+              tableType: prefillTableInfo.table_type,
               schema: targetSchema,
               database: db,
               rowCount: 1000,
@@ -138,6 +148,7 @@ async function loadSchemas() {
                     gKey,
                   ),
                   isAutoIncrement: isAI,
+                  isTag: isTdengineTagColumn(c),
                   columnDefault: c.column_default,
                 };
               }),
@@ -210,6 +221,7 @@ async function loadColumns(schema: string, table: string) {
   const cols = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, schema, table);
   const cfg: TableGenerateConfig = {
     tableName: table,
+    tableType: tableInfo(schema, table)?.table_type,
     schema,
     database: props.prefillDatabase,
     rowCount: 1000,
@@ -234,6 +246,7 @@ async function loadColumns(schema: string, table: string) {
           gKey,
         ),
         isAutoIncrement: isAI,
+        isTag: isTdengineTagColumn(c),
         columnDefault: c.column_default,
       };
     }),

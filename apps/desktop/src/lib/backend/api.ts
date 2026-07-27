@@ -165,6 +165,7 @@ export const listConstraints = forward("listConstraints");
 export const listPartitions = forward("listPartitions");
 export const listSubpartitions = forward("listSubpartitions");
 export const getTableDdl = forward("getTableDdl");
+export const getTableDisplayDdl = forward("getTableDisplayDdl");
 export const listFunctions = forward("listFunctions");
 export const listSequences = forward("listSequences");
 export const listRules = forward("listRules");
@@ -225,6 +226,7 @@ export const buildCreateTableSql = forward("buildCreateTableSql");
 export const buildSingleColumnAlterSql = forward("buildSingleColumnAlterSql");
 export const analyzeEditableQueryEditability = forward("analyzeEditableQueryEditability");
 export const prepareDataGridSave = forward("prepareDataGridSave");
+export const extractDataGridSelection = forward("extractDataGridSelection");
 export const buildDataGridCopyUpdateStatements = forward("buildDataGridCopyUpdateStatements");
 export const buildDataGridCopyInsertStatement = forward("buildDataGridCopyInsertStatement");
 export const buildDataGridContextFilterCondition = forward("buildDataGridContextFilterCondition");
@@ -345,6 +347,7 @@ export const nacosLoginRNacosConsole = forward("nacosLoginRNacosConsole");
 export const nacosListServices = forward("nacosListServices");
 export const nacosListInstances = forward("nacosListInstances");
 export const nacosUpdateInstance = forward("nacosUpdateInstance");
+export const nacosGetDashboard = forward("nacosGetDashboard");
 export const nacosRawRequest = forward("nacosRawRequest");
 
 // Data Transfer
@@ -395,6 +398,7 @@ export const redisStreamAdd = forward("redisStreamAdd");
 export const redisJsonSet = forward("redisJsonSet");
 export const redisCheckJsonModule = forward("redisCheckJsonModule");
 export const redisSetTtl = forward("redisSetTtl");
+export const redisSetExpireAt = forward("redisSetExpireAt");
 export const redisDeleteKeys = forward("redisDeleteKeys");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
@@ -410,6 +414,9 @@ export const etcdSupportsTtl = forward("etcdSupportsTtl");
 export const etcdGet = forward("etcdGet");
 export const etcdPut = forward("etcdPut");
 export const etcdDelete = forward("etcdDelete");
+export const etcdRename = forward("etcdRename");
+export const etcdHistory = forward("etcdHistory");
+export const etcdStatus = forward("etcdStatus");
 
 // ZooKeeper
 export const zookeeperListPrefix = forward("zookeeperListPrefix");
@@ -618,18 +625,26 @@ export type {
   RedisSlowlogEntry,
   RedisNodeEndpoint,
   KvValueEncoding,
+  KvInt64,
   KvValue,
   KvKeyMetadata,
   KvKeySummary,
   KvListPrefixResponse,
   KvListPrefixOptions,
-  KvGetResponse,
   KvGetOptions,
+  KvGetResponse,
   KvWriteMode,
   KvCreateMode,
   KvPutOptions,
   KvPutResponse,
+  KvDeleteOptions,
   KvDeleteResponse,
+  KvHistoryEventType,
+  KvHistoryEvent,
+  KvHistoryResponse,
+  KvStatusMember,
+  KvPrometheusMetrics,
+  KvStatusResponse,
   DocumentQueryResult,
   MongoDocumentResult,
   HistoryEntry,

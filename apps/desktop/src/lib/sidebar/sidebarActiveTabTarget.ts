@@ -31,6 +31,10 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "etcd-dashboard";
+      connectionId: string;
+    }
+  | {
       type: "zookeeper-root";
       connectionId: string;
     }
@@ -112,6 +116,10 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return { type: "etcd-root", connectionId: tab.connectionId };
   }
 
+  if (tab.mode === "etcd-dashboard") {
+    return { type: "etcd-dashboard", connectionId: tab.connectionId };
+  }
+
   if (tab.mode === "zookeeper") {
     return { type: "zookeeper-root", connectionId: tab.connectionId };
   }
@@ -177,6 +185,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "etcd-root") {
     return node.type === "etcd-root" && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "etcd-dashboard") {
+    return node.type === "etcd-dashboard" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "zookeeper-root") {

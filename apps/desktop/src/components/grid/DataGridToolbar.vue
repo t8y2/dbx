@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { Check, Eye, Loader2, Plus, RefreshCcw, RotateCcw, Rows3, Save, TableProperties, Timer, Upload } from "@lucide/vue";
+import { Check, ChevronDown, Copy, Eye, Loader2, Plus, RefreshCcw, RotateCcw, Rows3, Save, TableProperties, Timer, Upload } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -9,11 +9,14 @@ import {
   isDataGridToolbarCapabilityDisabled,
   isDataGridToolbarCapabilityVisible,
   selectDataGridToolbarAutoRefreshInterval,
+  selectDataGridToolbarCopyItem,
   selectDataGridToolbarExportItem,
   toggleDataGridToolbarAutoRefresh,
+  triggerDataGridToolbarCopy,
   triggerDataGridToolbarAction,
   type DataGridToolbarActionCapability,
   type DataGridToolbarAutoRefreshCapability,
+  type DataGridToolbarCopyCapability,
   type DataGridToolbarExportCapability,
   type DataGridToolbarSaveCapability,
 } from "@/lib/dataGrid/dataGridToolbar";
@@ -23,6 +26,7 @@ const props = defineProps<{
   refresh: DataGridToolbarActionCapability;
   autoRefresh?: DataGridToolbarAutoRefreshCapability;
   addRow?: DataGridToolbarActionCapability;
+  copyData?: DataGridToolbarCopyCapability;
   exportData?: DataGridToolbarExportCapability;
   transpose?: DataGridToolbarActionCapability;
   tableInfo?: DataGridToolbarActionCapability;
@@ -84,6 +88,35 @@ function actionLabelClass() {
     </DropdownMenu>
 
     <slot name="navigation" />
+
+    <div v-if="isDataGridToolbarCapabilityVisible(copyData)" class="flex h-5 shrink-0 items-stretch overflow-hidden rounded-md border border-border">
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="sm" class="h-5 rounded-none border-0 px-1.5 text-xs" :disabled="copyData?.disabled" @click="void triggerDataGridToolbarCopy(copyData)">
+            <Copy class="h-3 w-3" :class="compact ? '' : 'mr-1'" />
+            <span v-if="!compact">{{ copyData?.label }}</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{{ copyData?.tooltip ?? copyData?.label }}</TooltipContent>
+      </Tooltip>
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-5 w-5 rounded-none border-0 border-l border-border" :aria-label="copyData?.label">
+            <ChevronDown class="h-3 w-3" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" class="min-w-52">
+          <template v-for="item in copyData?.items ?? []" :key="item.value">
+            <DropdownMenuSeparator v-if="item.separatorBefore" />
+            <DropdownMenuItem class="gap-2" :disabled="item.disabled" @select="void selectDataGridToolbarCopyItem(copyData, item.value)">
+              <Check v-if="copyData?.currentValue === item.value" class="h-3.5 w-3.5" />
+              <span v-else class="h-3.5 w-3.5" />
+              {{ item.label }}
+            </DropdownMenuItem>
+          </template>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(addRow)">
       <TooltipTrigger as-child>

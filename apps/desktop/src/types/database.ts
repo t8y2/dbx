@@ -116,6 +116,7 @@ export interface CompletionAssistantResponse {
 export interface ConnectionConfig {
   id: string;
   name: string;
+  note?: string;
   db_type: DatabaseType;
   driver_profile?: string;
   driver_label?: string;
@@ -557,6 +558,8 @@ export interface QueryResult {
   hidden_column_indexes?: number[];
   /** Local value filters survive DataGrid component eviction when switching tabs. */
   local_column_filters?: Record<string, string[]>;
+  /** Manually hidden columns survive DataGrid component eviction when switching tabs. */
+  local_hidden_column_keys?: string[];
   /**
    * Database type name for each column, parallel to `columns`. Optional and may
    * be shorter/empty when a driver cannot supply types (schemaless stores,
@@ -583,6 +586,10 @@ export interface QueryResult {
   truncated?: boolean;
   session_id?: string | null;
   has_more?: boolean;
+  /** For Elasticsearch REST search results parsed into a _source table,
+   *  this carries the raw HTTP response body so the UI can toggle between
+   *  the tabular view and the original JSON. */
+  elasticsearch_raw_body?: string;
   sourceLabel?: string;
   sourceStatement?: string;
   /** Absolute offsets in the editor document at execution time. */
@@ -721,6 +728,7 @@ export type TreeNodeType =
   | "mq-tenant"
   | "nacos-namespace"
   | "etcd-root"
+  | "etcd-dashboard"
   | "zookeeper-root"
   | "mongo-db"
   | "mongo-gridfs"
@@ -898,7 +906,7 @@ export interface QueryTab {
   explainClientSessionId?: string;
   /** Invalidates tab-scoped completion metadata after session context changes. */
   completionContextVersion?: number;
-  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "etcd-dashboard" | "zookeeper" | "mq" | "nacos" | "nacos-dashboard" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
   mqTenant?: string;
   mqInitialTab?: "topics";
   nacosNamespace?: string;

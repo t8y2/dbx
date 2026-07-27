@@ -61,7 +61,7 @@ watch(
     ddlLoading.value = true;
     try {
       const schema = props.schema || props.database;
-      const ddl = await api.getTableDdl(props.connectionId, props.database, schema, props.tableName, props.objectType, props.catalog);
+      const ddl = await api.getTableDisplayDdl(props.connectionId, props.database, schema, props.tableName, props.objectType, props.catalog);
       ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     } catch (e: any) {
       ddlError.value = e?.message || String(e);
@@ -176,7 +176,7 @@ function retry() {
   ddlContent.value = "";
   const schema = props.schema || props.database;
   api
-    .getTableDdl(props.connectionId, props.database, schema, props.tableName, props.objectType)
+    .getTableDisplayDdl(props.connectionId, props.database, schema, props.tableName, props.objectType)
     .then(async (ddl) => {
       ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
     })

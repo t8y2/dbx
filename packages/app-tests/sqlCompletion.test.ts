@@ -16,6 +16,8 @@ import {
   type SqlCompletionObject,
   type SqlCompletionTable,
 } from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
+import { sqlCompletionContextFromSemantic } from "../../apps/desktop/src/lib/sql/semantic/completion.ts";
+import { buildSqlSemanticModel } from "../../apps/desktop/src/lib/sql/semantic/model.ts";
 
 const tables: SqlCompletionTable[] = [
   { name: "users", schema: "public", type: "table" },
@@ -469,6 +471,78 @@ test("suggests matching table names after FROM", () => {
     items.slice(0, 2).map((item) => item.label),
     ["users", "user_profiles"],
   );
+});
+
+test("suggests SQL Server tables for unquoted Chinese prefixes", () => {
+  const sql = "select * from 客户";
+  const context = getSqlCompletionContext(sql, sql.length);
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "客户订单", schema: "dbo", type: "table" },
+      { name: "订单", schema: "dbo", type: "table" },
+    ],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.equal(context.prefix, "客户");
+  assert.equal(context.suggestTables, true);
+  assert.equal(context.exclusiveTableSuggestions, true);
+  assert.deepEqual(
+    items.filter((item) => item.type === "table").map((item) => item.label),
+    ["客户订单"],
+  );
+  assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), true);
+});
+
+test("preserves Unicode prefixes through the semantic completion context", () => {
+  const sql = "select * from dbo.客户";
+  const legacy = getSqlCompletionContext(sql, sql.length);
+  const semantic = buildSqlSemanticModel(sql, sql.length, { databaseType: "sqlserver", dialect: "sqlserver" });
+  const context = sqlCompletionContextFromSemantic(semantic, legacy);
+
+  assert.equal(context.prefix, "客户");
+  assert.equal(context.qualifier, "dbo");
+  assert.deepEqual(context.qualifierParts, ["dbo"]);
+  assert.equal(sql.slice(sql.length - context.prefix.length), "客户");
+});
+
+test("parses Unicode identifier start and continuation code points", () => {
+  for (const prefix of ["Δelta", "a\u0301", "𐐀表"] as const) {
+    const sql = `select * from ${prefix}`;
+    const context = getSqlCompletionContext(sql, sql.length);
+
+    assert.equal(context.prefix, prefix);
+    assert.equal(sql.slice(sql.length - context.prefix.length), prefix);
+  }
+});
+
+test("preserves ASCII, qualified, and quoted identifier parsing", () => {
+  const cases = [
+    { sql: "select * from ord", prefix: "ord", qualifier: undefined, qualifierParts: undefined },
+    { sql: "select * from dbo.客户", prefix: "客户", qualifier: "dbo", qualifierParts: ["dbo"] },
+    { sql: "select * from [sales].ord", prefix: "ord", qualifier: "sales", qualifierParts: ["sales"] },
+    { sql: 'select * from "sales".ord', prefix: "ord", qualifier: "sales", qualifierParts: ["sales"] },
+  ] as const;
+
+  for (const expected of cases) {
+    const context = getSqlCompletionContext(expected.sql, expected.sql.length);
+
+    assert.equal(context.prefix, expected.prefix);
+    assert.equal(context.qualifier, expected.qualifier);
+    assert.deepEqual(context.qualifierParts, expected.qualifierParts);
+  }
+});
+
+test("uses the full Unicode prefix as the replacement range without result reuse", () => {
+  const sql = "select * from dbo.客户";
+  const context = getSqlCompletionContext(sql, sql.length);
+  const replacementFrom = sql.length - context.prefix.length;
+
+  assert.equal(replacementFrom, sql.indexOf("客户"));
+  assert.equal(sql.slice(replacementFrom), "客户");
+  assert.equal(getSqlCompletionResultValidFor(sql, sql.length), undefined);
 });
 
 test("ranks prefix matches above substring matches for table names", () => {

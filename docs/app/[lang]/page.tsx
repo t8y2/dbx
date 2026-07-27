@@ -86,7 +86,7 @@ const databaseSupport = [
   { name: "Trino", icon: "/icons/database/trino.svg", tone: "#dd00a1" },
   { name: "PrestoSQL", icon: "/icons/database/presto.svg", tone: "#5890ff" },
   { name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },
-  { name: "Apache Spark", shortLabel: "SP", tone: "#e25a1c" },
+  { name: "Spark", shortLabel: "SP", tone: "#e25a1c" },
   { name: "DB2", icon: "/icons/database/db2.svg", tone: "#054ada" },
   { name: "SAP HANA", icon: "/icons/database/saphana.webp", tone: "#008fd3" },
   { name: "Teradata", icon: "/icons/database/teradata.webp", tone: "#f37440" },
@@ -114,7 +114,7 @@ const databaseSupport = [
   { name: "Etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
   { name: "ZooKeeper", icon: "/icons/database/zookeeper.svg", tone: "#3b82f6" },
   { name: "Pulsar", icon: "/icons/database/pulsar.svg", tone: "#188fff" },
-  { name: "Apache Kafka", shortLabel: "KF", tone: "#231f20" },
+  { name: "Kafka", shortLabel: "KF", tone: "#231f20" },
   { name: "Nacos", icon: "/icons/database/nacos.png", tone: "#2f80ed" },
   { name: "IRIS", icon: "/icons/database/iris.png", tone: "#0085ca" },
   { name: "JDBC", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff" },
@@ -369,8 +369,9 @@ const i18nText = {
     docsStartDesc: "Install DBX, create your first connection, and learn the main workflow.",
     workflowsTitle: "Core workflows",
     workflowsDesc: "The docs are organized around what you actually do in a database client.",
-    supportTitle: "Supports many databases",
-    supportDesc: "Connect and manage SQL, NoSQL, embedded databases, and MySQL/PostgreSQL-compatible engines without switching tools.",
+    supportTitle: "Supports 70+ databases",
+    supportDesc: "Connect SQL, NoSQL, vector, time-series, and embedded databases, message queues, and compatible engines in one place.",
+    supportLink: "View all",
     testimonialsTitle: "What DBX is good at",
     testimonialsDesc: "A closer look at the everyday database workflows DBX is built to make smoother.",
     capabilitiesTitle: "Built for real database work",
@@ -394,8 +395,9 @@ const i18nText = {
     docsStartDesc: "安装 DBX、创建第一个连接，并了解主要工作流。",
     workflowsTitle: "核心工作流",
     workflowsDesc: "文档围绕数据库客户端里的真实任务组织，而不是堆功能清单。",
-    supportTitle: "支持多种数据库",
-    supportDesc: "告别频繁切换工具的烦恼。DBX 可以连接和管理多种数据库类型，让你更专注于查询、分析和数据本身。",
+    supportTitle: "支持70+种数据库",
+    supportDesc: "统一连接和管理 SQL、NoSQL、向量、时序、嵌入式数据库、消息队列及兼容引擎。",
+    supportLink: "查看全部",
     testimonialsTitle: "DBX 适合什么样的工作",
     testimonialsDesc: "从连接管理、数据浏览到 AI 辅助，DBX 围绕高频数据库工作流打磨体验。",
     capabilitiesTitle: "面向真实数据库工作的能力",
@@ -526,7 +528,13 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       <RevealSection className="relative max-w-[1180px] mx-auto px-7 pt-[70px] pb-1 max-[760px]:px-[18px]">
         <div className="grid grid-cols-[minmax(260px,0.28fr)_minmax(0,0.72fr)] gap-9 items-end mb-[30px] max-[760px]:block">
           <h2 className="m-0 text-[25px] font-[720] text-landing-ink">{t.supportTitle}</h2>
-          <p className="mt-2 max-w-[760px] text-landing-muted text-sm leading-[1.65] justify-self-end text-right max-[760px]:max-w-none max-[760px]:text-left">{t.supportDesc}</p>
+          <div className="flex items-center justify-end gap-5 justify-self-end max-w-[760px] text-right max-[760px]:block max-[760px]:max-w-none max-[760px]:text-left">
+            <p className="m-0 text-landing-muted text-sm leading-[1.65]">{t.supportDesc}</p>
+            <Link href={`/${l}/databases`} className="landing-inline-link inline-flex shrink-0 items-center gap-[7px] text-sm font-[650] max-[760px]:mt-3">
+              {t.supportLink}
+              <ArrowRight size={15} />
+            </Link>
+          </div>
         </div>
         <div className="grid grid-cols-9 gap-3 max-[1240px]:grid-cols-7 max-[960px]:grid-cols-5 max-[640px]:grid-cols-3 max-[440px]:grid-cols-2 max-[760px]:gap-2.5">
           {databaseSupport.map((db) => {
@@ -588,9 +596,6 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
         <ContributorsWallContent contributors={contributors} title={t.contributorsTitle} desc={t.contributorsDesc} lang={l} />
       </RevealSection>
 
-      {/* Updates */}
-      <LandingLatestUpdates lang={l} fallbackVersion={appVersion} initialRelease={initialChangelog.releases[0]} initialLatestRelease={initialLatestRelease} />
-
       {/* Sponsor */}
       <RevealSection className="max-w-[1180px] mx-auto px-7 mt-10 max-[760px]:px-[18px]">
         <div className="flex items-center justify-between gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 max-[760px]:block">
@@ -606,6 +611,9 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           </Link>
         </div>
       </RevealSection>
+
+      {/* Updates */}
+      <LandingLatestUpdates lang={l} fallbackVersion={appVersion} initialRelease={initialChangelog.releases[0]} initialLatestRelease={initialLatestRelease} />
 
       {/* Final CTA */}
       <RevealSection className="flex items-center justify-between gap-6 max-w-[1180px] mx-auto px-7 border border-landing-line rounded-[10px] bg-landing-panel mt-[72px] mb-14 py-[30px] max-[760px]:block max-[760px]:px-[18px]">

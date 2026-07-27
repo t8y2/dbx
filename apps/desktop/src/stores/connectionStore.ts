@@ -2119,11 +2119,13 @@ export const useConnectionStore = defineStore("connection", () => {
     config = normalizeConnection(config);
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
+    const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
     const nextConnections = [...connections.value];
     nextConnections[idx] = config;
     await persistConnections(nextConnections);
     connections.value = nextConnections;
     rebuildTreeNodes();
+    if (!runtimeConfigChanged) return;
     connectedIds.value.delete(config.id);
     clearConnectionIdentifierQuote(config.id);
     clearConnectionHealthCheck(config.id);

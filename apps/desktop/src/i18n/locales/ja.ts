@@ -1305,6 +1305,7 @@ export default withEnglishFallback({
     rowsExported: "{count}行をエクスポートしました",
     rowsShort: "行",
     cancel: "キャンセル",
+    minimize: "バックグラウンドに最小化",
     openFolder: "保存先フォルダーを開く",
     openFolderFailed: "フォルダーを開けませんでした：{message}",
     close: "閉じる",

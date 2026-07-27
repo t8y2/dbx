@@ -1306,6 +1306,7 @@ export default withEnglishFallback({
     rowsExported: "{count} linhas exportadas",
     rowsShort: "linhas",
     cancel: "Cancelar",
+    minimize: "Minimizar para segundo plano",
     openFolder: "Abrir pasta do arquivo",
     openFolderFailed: "Falha ao abrir a pasta: {message}",
     close: "Fechar",

@@ -6,6 +6,7 @@ import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
+import { useExportTracker } from "@/composables/useExportTracker";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -125,6 +126,7 @@ export interface UseDataGridExportOptions {
     filePath: string | null;
   }>;
   exportCancelHandler?: Ref<(() => Promise<void>) | null>;
+  exportCanMinimize?: Ref<boolean>;
 }
 
 interface CopyInsertData {
@@ -137,6 +139,7 @@ interface CopyInsertData {
 export function useDataGridExport(options: UseDataGridExportOptions) {
   const { t } = useI18n();
   const { toast } = useToast();
+  const tracker = useExportTracker();
   const exportGuard: ActionActivationGuard = {};
 
   const {
@@ -180,6 +183,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportProgressDialog,
     exportProgressState,
     exportCancelHandler,
+    exportCanMinimize,
   } = options;
   const selectedCellMatrix = selectedCellMatrixOption;
   const allColumns = allColumnsOption ?? columns;
@@ -900,11 +904,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       };
     }
     if (exportProgressDialog) exportProgressDialog.value = true;
+    if (exportCanMinimize) exportCanMinimize.value = true;
 
-    const exportId = uuid();
+    const task = tracker.addTask(meta.tableName, format, outputPath);
+    const exportId = task.exportId;
     if (exportCancelHandler) {
       exportCancelHandler.value = () => api.cancelTableExport(exportId);
     }
+    tracker.registerTaskCancelHandler(exportId, () => api.cancelTableExport(exportId));
     const editorSettings = useSettingsStore().editorSettings;
     const rowLimit = editorSettings.exportRowLimitEnabled ? editorSettings.exportRowLimit : null;
 
@@ -940,6 +947,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               errorMessage: progress.errorMessage || null,
             };
           }
+          tracker.updateTableExportTask(exportId, progress);
         },
       );
       if (progress.status === "Done") {
@@ -947,6 +955,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       }
     } finally {
       if (exportCancelHandler) exportCancelHandler.value = null;
+      tracker.unregisterTaskCancelHandler(exportId);
+      if (exportCanMinimize) exportCanMinimize.value = false;
     }
     return true;
   }
@@ -991,9 +1001,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       };
     }
     if (exportProgressDialog) exportProgressDialog.value = true;
+    if (exportCanMinimize) exportCanMinimize.value = true;
+    tracker.addTask("Query Result", format, outputPath, exportId);
     if (exportCancelHandler) {
       exportCancelHandler.value = () => api.cancelQueryResultExport(exportId, request.executionId);
     }
+    tracker.registerTaskCancelHandler(exportId, () => api.cancelQueryResultExport(exportId, request.executionId));
 
     try {
       const terminalProgress = await api.startQueryResultExport(request, (progress) => {
@@ -1008,12 +1021,15 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             errorMessage: progress.errorMessage || null,
           };
         }
+        tracker.updateTableExportTask(exportId, progress);
       });
       if (terminalProgress.status === "Done") {
         toast(t("grid.exported"));
       }
     } finally {
       if (exportCancelHandler) exportCancelHandler.value = null;
+      tracker.unregisterTaskCancelHandler(exportId);
+      if (exportCanMinimize) exportCanMinimize.value = false;
     }
     return true;
   }

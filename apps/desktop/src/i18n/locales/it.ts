@@ -1304,6 +1304,7 @@ export default withEnglishFallback({
     rowsExported: "{count} righe esportate",
     rowsShort: "righe",
     cancel: "Annulla",
+    minimize: "Minimizza in background",
     openFolder: "Apri cartella contenente",
     openFolderFailed: "Impossibile aprire la cartella: {message}",
     close: "Chiudi",

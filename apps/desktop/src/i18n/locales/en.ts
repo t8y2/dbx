@@ -1363,6 +1363,7 @@ export default {
     rowsExported: "{count} rows exported",
     rowsShort: "rows",
     cancel: "Cancel",
+    minimize: "Minimize to background",
     openFolder: "Open containing folder",
     openFolderFailed: "Failed to open folder: {message}",
     close: "Close",

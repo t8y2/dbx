@@ -14,6 +14,7 @@ const mountedApps: App[] = [];
 interface DialogState {
   open: boolean;
   portableMode: boolean;
+  manualUpdateOnly: boolean;
   isDownloadingUpdate: boolean;
   downloadProgress: number;
   updateDownloaded: boolean;
@@ -30,6 +31,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   const state = reactive<DialogState>({
     open: true,
     portableMode: false,
+    manualUpdateOnly: false,
     isDownloadingUpdate: false,
     downloadProgress: 0,
     updateDownloaded: false,
@@ -67,6 +69,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
               latest_version: "0.5.61",
               update_available: true,
               portable_mode: state.portableMode,
+              manual_update_only: state.manualUpdateOnly,
               release_name: "DBX v0.5.61",
               release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
               release_notes: "",
@@ -134,6 +137,23 @@ describe("UpdateDialog active task guard", () => {
 
     expect(document.body.textContent).toContain("portable ZIP");
     expect(downloadButton()?.disabled).toBe(false);
+  });
+
+  it("routes Windows 7 builds to the dedicated installer", async () => {
+    await mountDialog(0, { manualUpdateOnly: true });
+
+    expect(document.body.textContent).toContain("WebView2 109 offline installer");
+    expect(downloadButton()).toBeUndefined();
+    expect(buttonWithText("Open Release")).toBeDefined();
+  });
+
+  it("prevents Windows 7 portable builds from installing the regular x64 portable update", async () => {
+    await mountDialog(0, { portableMode: true, manualUpdateOnly: true });
+
+    expect(document.body.textContent).toContain("WebView2 109 offline installer");
+    expect(document.body.textContent).not.toContain("signed portable ZIP");
+    expect(downloadButton()).toBeUndefined();
+    expect(buttonWithText("Open Release")).toBeDefined();
   });
 
   it("retains the downloaded update and enables installation only after tasks finish", async () => {

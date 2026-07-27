@@ -106,8 +106,11 @@ watch(
           <code class="bg-muted px-1 py-0.5 rounded text-[11px]">docker compose pull && docker compose up -d</code>
           {{ t("updates.toUpdate") }}
         </p>
-        <p v-if="isDesktop && updateInfo?.update_available && updateInfo.portable_mode" class="text-xs text-muted-foreground">
+        <p v-if="isDesktop && updateInfo?.update_available && updateInfo.portable_mode && !updateInfo.manual_update_only" class="text-xs text-muted-foreground">
           {{ t("updates.portableAutomaticUpdate") }}
+        </p>
+        <p v-if="isDesktop && updateInfo?.update_available && updateInfo.manual_update_only" class="text-xs text-muted-foreground">
+          {{ t("updates.windows7ManualUpdate") }}
         </p>
         <div v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop) && activeTaskCount > 0" role="alert" class="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
           <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />

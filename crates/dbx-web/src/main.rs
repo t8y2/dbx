@@ -21,8 +21,40 @@ use state::WebState;
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
+use utoipa::OpenApi;
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "DBX Data Grid Extractor API", description = "HTTP contract for data-grid clipboard extraction."),
+    paths(routes::query::extract_data_grid_selection),
+    tags((name = "data-grid", description = "Data grid extraction and clipboard formats"))
+)]
+struct ApiDoc;
+
+async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
+    axum::Json(ApiDoc::openapi())
+}
+
+#[cfg(test)]
+mod data_grid_extractor_openapi_tests {
+    use super::*;
+
+    #[test]
+    fn extractor_openapi_contains_the_versioned_request_and_error_responses() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize extractor OpenAPI document");
+        let operation = &document["paths"]["/api/query/extract-data-grid-selection"]["post"];
+
+        assert_eq!(operation["requestBody"]["required"], true);
+        assert!(operation["responses"].get("200").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("413").is_some());
+        assert!(operation["responses"].get("422").is_some());
+        assert!(operation["responses"].get("500").is_some());
+    }
+}
 
 fn web_compression_predicate() -> impl Predicate {
     // XLSX exports are already compressed ZIP archives, so gzip would only add CPU overhead.
@@ -377,6 +409,12 @@ async fn main() {
         .route("/query/build-single-column-alter-sql", post(routes::query::build_single_column_alter_sql))
         .route("/query/analyze-editability", post(routes::query::analyze_editable_query_editability))
         .route("/query/prepare-data-grid-save", post(routes::query::prepare_data_grid_save))
+        .route("/query/data-grid-extractor-openapi.json", get(openapi_json))
+        .route(
+            "/query/extract-data-grid-selection",
+            post(routes::query::extract_data_grid_selection)
+                .layer(DefaultBodyLimit::max(DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES)),
+        )
         .route(
             "/query/build-data-grid-copy-update-statements",
             post(routes::query::build_data_grid_copy_update_statements),

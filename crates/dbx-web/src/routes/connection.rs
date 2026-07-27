@@ -417,6 +417,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "SQLite".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Sqlite,
             driver_profile: None,
             driver_label: None,

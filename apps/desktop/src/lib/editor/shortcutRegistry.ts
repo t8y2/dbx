@@ -2,6 +2,7 @@ import { isMacShortcutPlatform, parseShortcutStrokes, shortcutDisplayParts } fro
 
 export type ShortcutActionId =
   | "executeSql"
+  | "executeSqlInNewResultTab"
   | "formatSql"
   | "toggleLineComment"
   | "saveSql"
@@ -86,6 +87,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutExecuteSql",
     scope: "editor",
     defaultShortcut: "Mod+Enter",
+  },
+  {
+    id: "executeSqlInNewResultTab",
+    labelKey: "settings.shortcutExecuteSqlInNewResultTab",
+    scope: "editor",
+    defaultShortcut: "Mod+\\",
   },
   {
     id: "formatSql",

@@ -57,6 +57,7 @@ import {
   isBrowserReloadShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
   isModRShortcut,
@@ -300,6 +301,7 @@ const {
   showDangerDialog,
   suppressDangerConfirm,
   tryExecute,
+  tryExecuteInNewResultTab,
   doExecute,
   cancelActiveExecution,
   tryExplain,
@@ -324,6 +326,11 @@ const {
 function requestActiveEditorExecute() {
   if (contentAreaRef.value?.requestQueryEditorExecute?.()) return;
   void tryExecute();
+}
+
+function requestActiveEditorExecuteInNewResultTab() {
+  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
+  void tryExecuteInNewResultTab();
 }
 
 const dialogs = useDialogSources();
@@ -1904,6 +1911,12 @@ function handleKeydown(e: KeyboardEvent) {
     void openSaveSqlDialog();
     return;
   }
+  if (activeTab.value?.mode === "query" && isExecuteSqlInNewResultTabShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
+    e.preventDefault();
+    e.stopPropagation();
+    requestActiveEditorExecuteInNewResultTab();
+    return;
+  }
   if (activeTab.value?.mode === "query" && isExecuteSqlShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
@@ -2265,6 +2278,7 @@ onUnmounted(() => {
                     @fix-with-ai="fixWithAi"
                     @send-selection-to-ai="sendSelectionToAi"
                     @execute="tryExecute($event)"
+                    @execute-in-new-result-tab="tryExecuteInNewResultTab($event)"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"
                     @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"

@@ -4175,6 +4175,7 @@ mod tests {
         ConnectionConfig {
             id: "redis".to_string(),
             name: "Redis".to_string(),
+            note: String::new(),
             db_type: crate::models::connection::DatabaseType::Redis,
             driver_profile: None,
             driver_label: None,

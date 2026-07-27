@@ -1484,6 +1484,7 @@ pub fn run() {
             commands::query::build_single_column_alter_sql,
             commands::query::analyze_editable_query_editability,
             commands::query::prepare_data_grid_save,
+            commands::query::extract_data_grid_selection,
             commands::query::build_data_grid_copy_update_statements,
             commands::query::build_data_grid_copy_insert_statement,
             commands::query::build_data_grid_context_filter_condition,

@@ -218,6 +218,7 @@ mod tests {
         let mut cfg = crate::models::connection::ConnectionConfig {
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -287,6 +288,7 @@ mod tests {
         let cfg = crate::models::connection::ConnectionConfig {
             id: "nacos-rollback".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,

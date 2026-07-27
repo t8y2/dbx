@@ -598,6 +598,7 @@ mod tests {
         ConnectionConfig {
             id: "conn".to_string(),
             name: "Connection".to_string(),
+            note: String::new(),
             db_type,
             driver_profile: None,
             driver_label: None,

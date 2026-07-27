@@ -183,7 +183,12 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
   }
 
   const scope = sqlSemanticCompletionScope(model);
-  const qualifier = model.cursorIntent.qualifierParts.length > 0 ? model.cursorIntent.qualifierParts.join(".") : undefined;
+  const contextKind = semanticContextKind(model);
+  const basePrefixHasNonAscii = Array.from(base.prefix).some((character) => (character.codePointAt(0) ?? 0) > 0x7f);
+  const useBaseTrailingIdentifier = basePrefixHasNonAscii && model.cursorIntent.prefix.length === 0 && model.cursorIntent.replacementRange.start === model.cursorIntent.replacementRange.end && base.contextKind === contextKind;
+  const prefix = useBaseTrailingIdentifier ? base.prefix : model.cursorIntent.prefix;
+  const qualifierParts = model.cursorIntent.qualifierParts.length > 0 ? [...model.cursorIntent.qualifierParts] : useBaseTrailingIdentifier ? base.qualifierParts : undefined;
+  const qualifier = qualifierParts?.join(".");
   const referencedTables = sqlSemanticReferencedTables(model);
   const mutationTarget = semanticMutationTarget(model);
   const mutationDatabase = mutationTarget?.metadataTarget?.database;
@@ -195,9 +200,9 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
 
   return {
     ...base,
-    prefix: model.cursorIntent.prefix,
+    prefix,
     qualifier,
-    qualifierParts: model.cursorIntent.qualifierParts.length > 0 ? [...model.cursorIntent.qualifierParts] : undefined,
+    qualifierParts,
     suggestTables,
     suggestColumns,
     suggestKeywords: scope.kind === "keyword" || (!suggestTables && !suggestColumns && !suggestRoutines),
@@ -215,6 +220,6 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
     updateTarget: model.cursorIntent.kind === "update_column" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.updateTarget,
     deleteTarget: model.cursorIntent.kind === "delete_target" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.deleteTarget,
     onStar: model.cursorIntent.kind === "star" || base.onStar,
-    contextKind: semanticContextKind(model),
+    contextKind,
   };
 }

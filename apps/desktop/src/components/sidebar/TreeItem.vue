@@ -45,7 +45,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
-import { canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -633,6 +633,11 @@ function formattedObjectStorage(): string {
 
 const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" ? props.commentLabelWidth : undefined));
 
+function alignedCommentLeadingStyle(): { width: string } | undefined {
+  const width = alignedCommentLeadingWidth(alignedCommentLabelWidth.value, canTreeNodePin(activeNode.value.type));
+  return width === undefined ? undefined : { width: `${width}px` };
+}
+
 function hasTrailingMetadata(): boolean {
   return !!trailingComment.value || !!formattedObjectStorage();
 }
@@ -641,7 +646,7 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.valu
 
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 
-const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata() }));
+const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata(), hasInlineAction: isPinned.value }));
 
 watch(() => [isRightAlignedComment(), visibleLabel(activeNode.value), trailingComment.value, trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
@@ -815,7 +820,7 @@ function isPinnedOrderDrag(): boolean {
 
 const dragVisual = computed(() => {
   const targetId = isPinnedOrderDrag() ? pinnedSortKey() : activeNode.value.id;
-  const isDropTarget = isPinnedOrderDrag() ? !!dragState.draggedId && connectionStore.canReorderPinnedTreeNodes(dragState.draggedId, pinnedSortKey()) : activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
+  const isDropTarget = isPinnedOrderDrag() ? connectionStore.isPinnedTreeNodeReorderTarget(pinnedSortKey()) : activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
 
   return {
     isDropTarget,
@@ -827,8 +832,14 @@ const dragVisual = computed(() => {
 });
 
 function startPinnedOrderDrag(event: MouseEvent) {
-  if (!canDragPinnedOrder()) return;
-  startDrag(event, pinnedSortKey(), PINNED_TREE_NODE_DRAG_TYPE);
+  if (event.button !== 0 || !canDragPinnedOrder()) return;
+  const draggedKey = pinnedSortKey();
+  connectionStore.beginPinnedTreeNodeReorder(draggedKey);
+  startDrag(event, draggedKey, PINNED_TREE_NODE_DRAG_TYPE, {
+    autoScroll: true,
+    scrollContainer: rowRef.value?.closest<HTMLElement>(".connection-tree-scroller") ?? null,
+    onEnd: connectionStore.endPinnedTreeNodeReorder,
+  });
 }
 
 function updateTreeDragTarget(event: MouseEvent) {
@@ -1131,11 +1142,7 @@ function onKeydown(event: KeyboardEvent) {
         <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
         <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
         <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
-          <div
-            ref="trailingCommentLeadingRef"
-            :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'"
-            :style="alignedCommentLabelWidth ? { width: `${alignedCommentLabelWidth}px` } : undefined"
-          >
+          <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">
             <input
               v-if="isRenamingGroup"
               ref="renameInputRef"
@@ -1147,6 +1154,19 @@ function onKeydown(event: KeyboardEvent) {
               @click.stop
             />
             <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+            <button
+              v-if="canDragPinnedOrder()"
+              type="button"
+              class="flex h-4 w-4 shrink-0 cursor-grab items-center justify-center rounded-sm text-primary hover:bg-primary/10 active:cursor-grabbing"
+              :aria-label="t('contextMenu.reorderPinned')"
+              :title="t('contextMenu.reorderPinned')"
+              @mousedown.stop="startPinnedOrderDrag"
+              @click.stop.prevent
+              @dblclick.stop.prevent
+            >
+              <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
+            </button>
+            <Pin v-else-if="isPinned" class="h-3 w-3 shrink-0 fill-current text-primary" aria-hidden="true" />
             <ProductionContextBadge v-if="showProductionBadge" compact />
             <span
               v-if="
@@ -1174,19 +1194,6 @@ function onKeydown(event: KeyboardEvent) {
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
-        <button
-          v-if="canDragPinnedOrder()"
-          type="button"
-          class="flex h-4 w-4 shrink-0 cursor-grab items-center justify-center rounded-sm text-primary hover:bg-primary/10 active:cursor-grabbing"
-          :aria-label="t('contextMenu.reorderPinned')"
-          :title="t('contextMenu.reorderPinned')"
-          @mousedown.stop="startPinnedOrderDrag"
-          @click.stop.prevent
-          @dblclick.stop.prevent
-        >
-          <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
-        </button>
-        <Pin v-else-if="isPinned" class="w-3 h-3 shrink-0 text-primary fill-current" aria-hidden="true" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
         <button
           v-if="isConnecting"

@@ -92,6 +92,69 @@ impl<'a> FromSql<'a> for PgRawBytes {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PgInterval {
+    microseconds: i64,
+    days: i32,
+    months: i32,
+}
+
+impl<'a> FromSql<'a> for PgInterval {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_pg_interval_bytes(raw).ok_or_else(|| "expected 16 bytes for PostgreSQL interval".into())
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::INTERVAL
+    }
+}
+
+fn decode_pg_interval_bytes(raw: &[u8]) -> Option<PgInterval> {
+    let raw: [u8; 16] = raw.try_into().ok()?;
+    Some(PgInterval {
+        microseconds: i64::from_be_bytes(raw[0..8].try_into().ok()?),
+        days: i32::from_be_bytes(raw[8..12].try_into().ok()?),
+        months: i32::from_be_bytes(raw[12..16].try_into().ok()?),
+    })
+}
+
+fn push_pg_interval_component(parts: &mut Vec<String>, value: i64, singular: &str, plural: &str) {
+    if value == 0 {
+        return;
+    }
+    let unit = if value.abs() == 1 { singular } else { plural };
+    parts.push(format!("{value} {unit}"));
+}
+
+fn format_pg_interval_time(microseconds: i64) -> String {
+    let signed_microseconds = i128::from(microseconds);
+    let sign = if signed_microseconds < 0 { "-" } else { "" };
+    let absolute_microseconds = signed_microseconds.abs();
+    let hours = absolute_microseconds / 3_600_000_000;
+    let minutes = absolute_microseconds / 60_000_000 % 60;
+    let seconds = absolute_microseconds / 1_000_000 % 60;
+    let fraction = absolute_microseconds % 1_000_000;
+    let mut formatted = format!("{sign}{hours:02}:{minutes:02}:{seconds:02}");
+    if fraction != 0 {
+        let fraction = format!("{fraction:06}");
+        formatted.push('.');
+        formatted.push_str(fraction.trim_end_matches('0'));
+    }
+    formatted
+}
+
+fn format_pg_interval(interval: PgInterval) -> String {
+    let total_months = i64::from(interval.months);
+    let years = total_months / 12;
+    let months = total_months % 12;
+    let mut parts = Vec::with_capacity(4);
+    push_pg_interval_component(&mut parts, years, "year", "years");
+    push_pg_interval_component(&mut parts, months, "mon", "mons");
+    push_pg_interval_component(&mut parts, i64::from(interval.days), "day", "days");
+    parts.push(format_pg_interval_time(interval.microseconds));
+    parts.join(" ")
+}
+
 /// Decode pgvector binary format into a Vec<f32>.
 ///
 /// pgvector binary layout (big-endian):
@@ -321,6 +384,7 @@ pub(crate) enum PgColType {
     Bytea,
     Json,
     Bool,
+    Interval,
     Temporal { fallback: PgTemporalFallback },
     Numeric,
     Uuid,
@@ -363,6 +427,9 @@ pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
     }
     if upper == "BOOL" {
         return PgColType::Bool;
+    }
+    if upper == "INTERVAL" {
+        return PgColType::Interval;
     }
     if upper.contains("TIMESTAMP")
         || upper == "DATE"
@@ -441,6 +508,10 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
             serde_json::Value::Null
         }
         PgColType::Bool => row.try_get::<_, bool>(idx).map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
+        PgColType::Interval => row
+            .try_get::<_, PgInterval>(idx)
+            .map(|interval| serde_json::Value::String(format_pg_interval(interval)))
+            .unwrap_or_else(|_| pg_fallback_value_to_json(row, idx)),
         PgColType::Temporal { fallback } => {
             if let Some(v) = pg_temporal_to_json_value(row, idx) {
                 return v;
@@ -3480,28 +3551,59 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
         .collect())
 }
 
-pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -> Result<Vec<SequenceInfo>, String> {
+fn postgres_sequences_sql() -> &'static str {
+    "SELECT c.relname, \
+      COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
+      COALESCE(s.seqstart::text, '1'), \
+      COALESCE(s.seqmin::text, '1'), \
+      COALESCE(s.seqmax::text, '9223372036854775807'), \
+      COALESCE(s.seqincrement::text, '1'), \
+      CASE WHEN s.seqcycle THEN 'YES' ELSE 'NO' END \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
+     WHERE c.relkind = 'S' AND n.nspname = $1 \
+     ORDER BY c.relname"
+}
+
+fn opengauss_sequences_sql() -> &'static str {
+    "SELECT s.sequence_name, \
+      COALESCE(s.data_type::text, 'bigint'), \
+      COALESCE(s.start_value::text, '1'), \
+      COALESCE(s.minimum_value::text, '1'), \
+      COALESCE(s.maximum_value::text, '9223372036854775807'), \
+      COALESCE(s.increment::text, '1'), \
+      COALESCE(s.cycle_option::text, 'NO') \
+     FROM information_schema.sequences s \
+     JOIN pg_namespace n ON n.nspname = s.sequence_schema \
+     JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = s.sequence_name \
+     WHERE s.sequence_schema = $1 AND c.relkind IN ('S','L','z','Z') \
+     ORDER BY s.sequence_name"
+}
+
+fn postgres_sequence_last_values_sql() -> &'static str {
+    "SELECT c.relname, pg_sequence_last_value(c.oid)::text \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind = 'S' AND n.nspname = $1"
+}
+
+fn opengauss_sequence_last_values_sql() -> &'static str {
+    "SELECT c.relname, (pg_sequence_last_value(c.oid)).last_value::text \
+     FROM pg_class c \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('S','L','z','Z') AND n.nspname = $1"
+}
+
+async fn list_sequences_with_sql(
+    pool: &Pool,
+    schema: &str,
+    with_last_values: bool,
+    metadata_sql: &str,
+    last_values_sql: &str,
+) -> Result<Vec<SequenceInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    // Use pg_class + pg_sequence + pg_namespace instead of pg_sequences view
-    // for better compatibility and permission handling
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT c.relname, \
-          COALESCE(format_type(s.seqtypid, NULL), 'bigint'), \
-          COALESCE(s.seqstart::text, '1'), \
-          COALESCE(s.seqmin::text, '1'), \
-          COALESCE(s.seqmax::text, '9223372036854775807'), \
-          COALESCE(s.seqincrement::text, '1'), \
-          CASE WHEN s.seqcycle THEN 'YES' ELSE 'NO' END \
-         FROM pg_class c \
-         JOIN pg_namespace n ON n.oid = c.relnamespace \
-         LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
-         WHERE c.relkind = 'S' AND n.nspname = $1 \
-         ORDER BY c.relname",
-        &[&schema],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(&client, metadata_sql, &[&schema]).await.map_err(|e| e.to_string())?;
 
     let mut sequences: Vec<SequenceInfo> = rows
         .iter()
@@ -3518,17 +3620,12 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
         .collect();
 
     if with_last_values {
-        // Batch query: get last values for all sequences in one query
-        let sql = "SELECT c.relname, pg_sequence_last_value(c.oid) \
-                   FROM pg_class c \
-                   JOIN pg_namespace n ON n.oid = c.relnamespace \
-                   WHERE c.relkind = 'S' AND n.nspname = $1";
-        if let Ok(rows) = postgres_query_cached(&client, sql, &[&schema]).await {
+        if let Ok(rows) = postgres_query_cached(&client, last_values_sql, &[&schema]).await {
             for row in rows {
                 let name: String = pg_row_try_string(&row, 0);
-                if let Ok(val) = row.try_get::<_, i64>(1) {
+                if let Ok(Some(value)) = row.try_get::<_, Option<String>>(1) {
                     if let Some(seq) = sequences.iter_mut().find(|s| s.name == name) {
-                        seq.last_value = Some(val.to_string());
+                        seq.last_value = Some(value);
                     }
                 }
             }
@@ -3536,6 +3633,36 @@ pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -
     }
 
     Ok(sequences)
+}
+
+pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -> Result<Vec<SequenceInfo>, String> {
+    // PostgreSQL 10+ stores sequence properties in pg_sequence.
+    list_sequences_with_sql(
+        pool,
+        schema,
+        with_last_values,
+        postgres_sequences_sql(),
+        postgres_sequence_last_values_sql(),
+    )
+    .await
+}
+
+pub async fn list_opengauss_sequences(
+    pool: &Pool,
+    schema: &str,
+    with_last_values: bool,
+) -> Result<Vec<SequenceInfo>, String> {
+    // openGauss does not expose PostgreSQL 10's pg_sequence catalog. Its
+    // information_schema view contains the portable sequence properties, while
+    // pg_sequence_last_value returns a record rather than a scalar.
+    list_sequences_with_sql(
+        pool,
+        schema,
+        with_last_values,
+        opengauss_sequences_sql(),
+        opengauss_sequence_last_values_sql(),
+    )
+    .await
 }
 
 pub async fn list_rules(pool: &Pool, schema: &str) -> Result<Vec<RuleInfo>, String> {
@@ -3766,6 +3893,50 @@ mod tests {
     use std::time::Instant;
     use tokio_postgres::types::FromSql;
 
+    fn pg_interval_bytes(microseconds: i64, days: i32, months: i32) -> [u8; 16] {
+        let mut raw = [0_u8; 16];
+        raw[0..8].copy_from_slice(&microseconds.to_be_bytes());
+        raw[8..12].copy_from_slice(&days.to_be_bytes());
+        raw[12..16].copy_from_slice(&months.to_be_bytes());
+        raw
+    }
+
+    #[test]
+    fn postgres_interval_binary_decodes_and_formats_components() {
+        let microseconds = 4 * 3_600_000_000 + 5 * 60_000_000 + 6 * 1_000_000 + 123_456;
+        let interval = PgInterval::from_sql(&Type::INTERVAL, &pg_interval_bytes(microseconds, 3, 14)).unwrap();
+
+        assert_eq!(interval, PgInterval { microseconds, days: 3, months: 14 });
+        assert_eq!(format_pg_interval(interval), "1 year 2 mons 3 days 04:05:06.123456");
+    }
+
+    #[test]
+    fn postgres_interval_formats_negative_mixed_and_zero_values() {
+        assert_eq!(
+            format_pg_interval(PgInterval { microseconds: -3_723_450_000, days: -2, months: -13 }),
+            "-1 year -1 mon -2 days -01:02:03.45"
+        );
+        assert_eq!(
+            format_pg_interval(PgInterval { microseconds: -1, days: 2, months: -1 }),
+            "-1 mon 2 days -00:00:00.000001"
+        );
+        assert_eq!(format_pg_interval(PgInterval { microseconds: 0, days: 0, months: 0 }), "00:00:00");
+    }
+
+    #[test]
+    fn postgres_interval_formats_now_minus_xact_start_shape() {
+        let elapsed = PgInterval { microseconds: 123_450_000, days: 0, months: 0 };
+        assert_eq!(format_pg_interval(elapsed), "00:02:03.45");
+    }
+
+    #[test]
+    fn postgres_interval_rejects_invalid_binary_and_keeps_binary_protocol() {
+        assert!(PgInterval::from_sql(&Type::INTERVAL, &[0; 15]).is_err());
+        assert_eq!(classify_pg_type("interval"), PgColType::Interval);
+        assert_eq!(classify_pg_type("_interval"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
+        assert!(!pg_type_requires_text_protocol(&Type::INTERVAL, PgColType::Interval));
+    }
+
     #[test]
     fn postgres_custom_other_type_requires_text_protocol() {
         assert!(pg_scalar_type_requires_text_protocol(POSTGRES_FIRST_NORMAL_OBJECT_ID, PgColType::Other));
@@ -3860,7 +4031,7 @@ mod tests {
         assert_eq!(classify_pg_type("date"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("time"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("timetz"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
-        assert_eq!(classify_pg_type("interval"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
+        assert_eq!(classify_pg_type("interval"), PgColType::Interval);
         // 时间数组类型名在原实现中先进时间分支、解码失败后落到通用数组分支
         assert_eq!(classify_pg_type("_timestamp"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
         assert_eq!(classify_pg_type("_interval"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
@@ -4743,6 +4914,36 @@ mod tests {
         assert!(POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("NULL::text AS enum_values"));
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("pg_attribute"));
         assert!(!POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL.contains("regclass"));
+    }
+
+    #[test]
+    fn opengauss_sequence_metadata_uses_compatible_information_schema_view() {
+        let sql = opengauss_sequences_sql();
+
+        assert!(sql.contains("information_schema.sequences"));
+        assert!(sql.contains("s.sequence_schema = $1"));
+        assert!(sql.contains("c.relkind IN ('S','L','z','Z')"));
+        assert!(sql.contains("sequence_name"));
+        assert!(sql.contains("start_value"));
+        assert!(sql.contains("minimum_value"));
+        assert!(sql.contains("maximum_value"));
+        assert!(sql.contains("increment"));
+        assert!(sql.contains("cycle_option"));
+        assert!(!sql.contains("pg_sequence s"));
+    }
+
+    #[test]
+    fn opengauss_sequence_last_values_extract_record_field_as_text() {
+        let sql = opengauss_sequence_last_values_sql();
+
+        assert!(sql.contains("(pg_sequence_last_value(c.oid)).last_value::text"));
+        assert!(sql.contains("c.relkind IN ('S','L','z','Z')"));
+        assert!(sql.contains("n.nspname = $1"));
+    }
+
+    #[test]
+    fn postgres_sequence_last_values_are_read_as_text() {
+        assert!(postgres_sequence_last_values_sql().contains("pg_sequence_last_value(c.oid)::text"));
     }
 
     #[test]

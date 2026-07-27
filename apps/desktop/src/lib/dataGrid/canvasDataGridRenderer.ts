@@ -87,6 +87,12 @@ interface CanvasRenderState {
   currentSearchBorder: string;
 }
 
+export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean }): string {
+  if (options.isSelected) return theme.cellSelected;
+  if (options.isActive && !options.isDeleted) return theme.cellActive;
+  return rowBase;
+}
+
 const canvasRenderStateCache = new WeakMap<HTMLCanvasElement, CanvasRenderState>();
 
 function setCanvasNumericVariant(ctx: CanvasRenderingContext2D, value: "normal" | "tabular-nums") {
@@ -296,14 +302,32 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     if (!item) continue;
     const y = rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop;
     const rowIsActive = isRowActive(item.displayIndex);
+    const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
 
     const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.isDraft && !rowIsActive ? theme.rowMuted : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
+    const rowFill = resolveCanvasDataGridRowFill(theme, rowBase, {
+      isActive: rowIsActive,
+      isDeleted: item.isDeleted,
+      isSelected: rowSelectionVisual,
+    });
     const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
-    ctx.fillStyle = rowIsActive && !item.isDeleted ? theme.cellSelectedSingle : rowBase;
+    ctx.fillStyle = rowFill;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
-    const rowNumberFill = item.status === "draft" ? theme.rowNumberDefault : item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
+    const rowNumberFill = rowSelectionVisual
+      ? theme.rowNumberSelected
+      : item.status === "draft"
+        ? theme.rowNumberDefault
+        : item.status === "new"
+          ? theme.rowNumberNew
+          : item.status === "edited"
+            ? theme.rowNumberEdited
+            : item.status === "deleted"
+              ? theme.rowNumberDeleted
+              : rowIsActive
+                ? theme.rowNumberActive
+                : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.strokeStyle = theme.border;
@@ -339,10 +363,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       if (drawX + colWidth < rowNumberWidth || drawX >= width) return;
 
       const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
-      const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
       const isDirtyCell = item.isDirtyCol[actualColIdx];
       const selectedFillVisual = rowSelectionVisual || selectedCell;
-      const selectedBorderVisual = rowSelectionVisual || selectedCell;
+      const selectedBorderVisual = selectedCell;
       const isSearchMatch = paintSearchMatches && searchMatchKeys.has(dataGridSearchMatchKey(item.displayIndex, actualColIdx));
       const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
       const clippedX = Math.max(drawX, rowNumberWidth);
@@ -357,7 +380,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         ctx.fillStyle = theme.cellHover;
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
-      if ((rowIsActive || selectedCell) && !item.isDeleted && !isDirtyCell) {
+      if (selectedCell && !item.isDeleted && !isDirtyCell) {
         ctx.fillStyle = theme.cellSelectedSingle;
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
@@ -463,16 +486,11 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       // 用不透明底色覆盖冻结区域（遮挡第一轮溢入的非冻结列内容）
       // 注意：rowBase 在浅色主题下可能是 color-mix(..., transparent) 半透明色，
       // 单次半透明填充无法遮挡文字，需先填不透明底再叠加半透明色调
-      if (rowIsActive && !item.isDeleted) {
-        ctx.fillStyle = theme.cellSelectedSingle;
+      ctx.fillStyle = theme.background;
+      ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      if (rowFill !== theme.background) {
+        ctx.fillStyle = rowFill;
         ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-      } else {
-        ctx.fillStyle = theme.background;
-        ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        if (rowBase !== theme.background) {
-          ctx.fillStyle = rowBase;
-          ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        }
       }
       // 绘制冻结列的每个单元格（x 坐标不受 scrollLeft 影响）
       for (let fcIdx = 0; fcIdx < frozenColumnCount; fcIdx++) {

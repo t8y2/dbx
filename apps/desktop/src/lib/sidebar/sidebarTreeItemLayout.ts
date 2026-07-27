@@ -60,9 +60,15 @@ export function treeItemPaddingLeft(depth: number): string {
 }
 
 export const trailingCommentGapPx = 8;
+export const sidebarPinnedActionSlotWidthPx = 24;
 
 export function trailingCommentAvailableWidth(containerWidth: number, leadingWidth: number): number {
   return Math.max(0, Math.floor(containerWidth - leadingWidth - trailingCommentGapPx));
+}
+
+export function alignedCommentLeadingWidth(labelWidth: number | undefined, reservePinnedAction: boolean): number | undefined {
+  if (labelWidth === undefined) return undefined;
+  return labelWidth + (reservePinnedAction ? sidebarPinnedActionSlotWidthPx : 0);
 }
 
 export interface SidebarCommentAlignmentItem {
@@ -132,8 +138,9 @@ export function usesFullWidthTreeLabel(type: TreeNodeType, allowHorizontalScroll
   return allowHorizontalScroll && !hasTrailingComment && fullWidthLabelTypes.has(type);
 }
 
-export function treeLabelWidthClass({ fullWidth, hasTrailingComment }: { fullWidth: boolean; hasTrailingComment: boolean }): string {
+export function treeLabelWidthClass({ fullWidth, hasTrailingComment, hasInlineAction = false }: { fullWidth: boolean; hasTrailingComment: boolean; hasInlineAction?: boolean }): string {
   if (fullWidth) return "shrink-0 whitespace-nowrap";
+  if (hasTrailingComment && hasInlineAction) return "min-w-0 shrink truncate";
   return hasTrailingComment ? "min-w-0 flex-1 truncate" : "min-w-0 truncate";
 }
 

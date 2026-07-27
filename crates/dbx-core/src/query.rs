@@ -3597,6 +3597,7 @@ mod tests {
         ConnectionConfig {
             id: "conn-1".to_string(),
             name: "Connection".to_string(),
+            note: String::new(),
             db_type,
             driver_profile: None,
             driver_label: None,
@@ -4182,7 +4183,13 @@ mod tests {
         assert!(still_present);
 
         drop(extra_reference);
-        timeout(Duration::from_secs(5), async {
+        // The draining-cleanup task (spawn_duckdb_draining_cleanup) cannot drop
+        // the pool until the cancelled query's blocking DuckDB task has fully
+        // unwound — the connection must stay alive while the query still holds
+        // it. That unwind is near-instant on an idle runner but can exceed the
+        // original 5s window under heavy CI load, flaking this test, so allow
+        // ample headroom.
+        timeout(Duration::from_secs(30), async {
             loop {
                 if !state.connections.read().await.contains_key(pool_key) {
                     break;
@@ -4680,6 +4687,7 @@ mod tests {
         let config = ConnectionConfig {
             id: "jdbc-1".to_string(),
             name: "JDBC".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Jdbc,
             driver_profile: None,
             driver_label: None,

@@ -225,6 +225,7 @@ export const buildCreateTableSql = forward("buildCreateTableSql");
 export const buildSingleColumnAlterSql = forward("buildSingleColumnAlterSql");
 export const analyzeEditableQueryEditability = forward("analyzeEditableQueryEditability");
 export const prepareDataGridSave = forward("prepareDataGridSave");
+export const extractDataGridSelection = forward("extractDataGridSelection");
 export const buildDataGridCopyUpdateStatements = forward("buildDataGridCopyUpdateStatements");
 export const buildDataGridCopyInsertStatement = forward("buildDataGridCopyInsertStatement");
 export const buildDataGridContextFilterCondition = forward("buildDataGridContextFilterCondition");

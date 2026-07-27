@@ -16,13 +16,14 @@ sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 system-fonts = ["dbx-core/system-fonts"]
 
 [dependencies]
-dbx-core = { path = "../dbx-core", default-features = false }
+dbx-core = { path = "../dbx-core", default-features = false, features = ["openapi"] }
 redis = { version = "0.32", features = ["tokio-comp"] }
 axum = { version = "0.8", features = ["multipart", "ws"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip", "trace"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+utoipa = { version = "5.5", features = ["axum_extras"] }
 uuid = { version = "1", features = ["v4"] }
 argon2 = "0.5"
 log = "0.4"

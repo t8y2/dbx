@@ -35,7 +35,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { codeMirrorSqlDialect } from "@/lib/database/jdbcDialect";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
-import { createSidebarActionTarget, findSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
+import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
@@ -611,12 +611,16 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
 
 // Reset tracking when the tree rebuilds (connect/disconnect/collapse) so a
 // stale scrollTop doesn't keep the overlay mounted after a structural change.
-watch(flatNodes, () => {
-  // Menu actions originate from a rendered row instance. Close the singleton
-  // before a structural update can recycle that row onto another node.
-  sidebarContextMenuRef.value?.close();
-  sidebarContextMenuItems.value = [];
-  sidebarContextMenuTarget.value = null;
+watch(flatNodes, (nodes) => {
+  const contextMenuTarget = sidebarContextMenuTarget.value;
+  if (contextMenuTarget) {
+    const visibleContextMenuTarget = nodes.find(({ node }) => matchesSidebarActionTarget(node, contextMenuTarget))?.node;
+    if (!visibleContextMenuTarget || visibleContextMenuTarget.valid === false) {
+      sidebarContextMenuRef.value?.close();
+      sidebarContextMenuItems.value = [];
+      sidebarContextMenuTarget.value = null;
+    }
+  }
   stickyScrollTop.value = 0;
   void nextTick(scheduleSidebarScrollMetricsUpdate);
 });

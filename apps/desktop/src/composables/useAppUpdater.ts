@@ -19,7 +19,7 @@ export function shouldOpenUpdateDialog(options: { silent?: boolean }) {
 }
 
 export function canDownloadAndInstallUpdate(info: api.UpdateInfo | null, isDesktop: boolean) {
-  return isDesktop && info?.update_available === true;
+  return isDesktop && info?.update_available === true && info.manual_update_only !== true;
 }
 
 export function normalizeUpdateDownloadSource(value: unknown): SettingsUpdateDownloadSource {

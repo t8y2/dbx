@@ -60,7 +60,18 @@ import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditi
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
-import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, supportsTruncateTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import {
+  buildDropObjectSql,
+  buildDropTableSql,
+  buildDuplicateTableStructureSql,
+  buildCopyTableDataSql,
+  buildEmptyTableSql,
+  buildTruncateTableSql,
+  collectDuplicateTableColumnComments,
+  supportsDropTableCascade,
+  supportsTruncateTableCascade,
+  type TableAdminSqlOptions,
+} from "@/lib/database/dbAdminSql";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
@@ -1818,13 +1829,7 @@ async function buildDuplicateStructurePlan(sourceName: string, targetName: strin
       console.warn(`Failed to load Dameng column comments for table clone: ${sourceName}`, error);
     }
   }
-  const columnComments =
-    effectiveDatabaseType.value === "dameng"
-      ? (columns ?? []).flatMap((column) => {
-          const comment = column.comment?.trim();
-          return comment ? [{ name: column.name, comment }] : [];
-        })
-      : [];
+  const columnComments = effectiveDatabaseType.value === "dameng" ? collectDuplicateTableColumnComments(columns ?? []) : [];
   const sql = await buildDuplicateTableStructureSql({
     databaseType: effectiveDatabaseType.value,
     schema,

@@ -612,12 +612,11 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         .column_comments
         .iter()
         .filter_map(|column| {
-            let comment = column.comment.trim();
-            if comment.is_empty() {
+            if column.comment.trim().is_empty() {
                 return None;
             }
             let column_name = quote_table_identifier(options.database_type, &column.name);
-            Some(format!("COMMENT ON COLUMN {target}.{column_name} IS {}", comment_literal(Some(comment))))
+            Some(format!("COMMENT ON COLUMN {target}.{column_name} IS {}", quote_sql_string(&column.comment)))
         })
         .collect::<Vec<_>>();
     if comment_sql.is_empty() {
@@ -1497,20 +1496,23 @@ mod tests {
             column_comments: vec![
                 DuplicateTableColumnComment {
                     name: "DISPLAY\"NAME".to_string(),
-                    comment: "Owner's; display name".to_string(),
+                    comment: "  Owner's; display name".to_string(),
                 },
-                DuplicateTableColumnComment { name: "EMPTY".to_string(), comment: "  ".to_string() },
+                DuplicateTableColumnComment { name: "STATUS".to_string(), comment: "active  ".to_string() },
+                DuplicateTableColumnComment { name: "EMPTY".to_string(), comment: " \t\n".to_string() },
             ],
         });
         assert_eq!(
             dameng_sql,
-            "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS 'Owner''s; display name';"
+            "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  ';"
         );
         assert_eq!(
             crate::sql::split_sql_statements_for_database(&dameng_sql, DatabaseType::Dameng),
             vec![
                 "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
-                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS 'Owner''s; display name'".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'"
+                    .to_string(),
+                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  '".to_string(),
             ]
         );
         assert_eq!(

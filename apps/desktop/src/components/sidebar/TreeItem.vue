@@ -20,7 +20,6 @@ import {
   Network,
   Server,
   Pin,
-  Star,
   Search,
   Plus,
   ScrollText,
@@ -62,7 +61,7 @@ import { flattenTree } from "@/composables/useFlatTree";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 // --- Drag and Drop ---
-import { useDragSort, type DropPosition } from "@/composables/useDragSort";
+import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 
@@ -75,8 +74,6 @@ const rowRef = ref<HTMLElement>();
 const trailingCommentLayoutRef = ref<HTMLElement>();
 
 const trailingCommentLeadingRef = ref<HTMLElement>();
-
-const favoriteGroupLabelRef = ref<HTMLElement>();
 
 const trailingCommentMaxWidth = ref(0);
 
@@ -302,10 +299,6 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Package, colorClass: "text-violet-500" };
     case "extension":
       return { icon: Package, colorClass: "text-violet-400" };
-    case "favorites":
-      return { icon: Star, colorClass: "text-amber-500" };
-    case "favorites-group":
-      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-amber-400" };
     case "load-more":
       return { icon: Plus, colorClass: "text-primary" };
     default:
@@ -328,7 +321,6 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-types",
   "group-partitions",
   "group-extensions",
-  "favorites",
 ]);
 
 function isGroupLabel(node: TreeNode): boolean {
@@ -459,23 +451,12 @@ const detailTooltip = computed(() => {
     return { rows };
   }
   const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
-  const isFavoritable = node.type === "table" || node.type === "view" || node.type === "materialized_view";
-  if (!comment && !isFavoritable) return null;
-  if (comment && node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column") return null;
-  const rows: DetailTooltipRow[] = [{ label: t("connection.name"), value: visibleLabel(node) }];
-  if (comment) {
-    rows.push({ label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true });
-  }
-  // Show the favorited item's note alongside the comment. This is the only
-  // way users see notes in the tree without adding a second line per row,
-  // which would push the existing comment out of the layout.
-  if (isFavoritable && node.connectionId) {
-    const note = connectionStore.getFavoriteNote(`${node.connectionId}:fav:v1:${encodeURIComponent(JSON.stringify([node.database || "", node.schema || "", node.catalog || "", node.type, node.objectName || node.tableName || node.label, node.signature || "", node.id]))}`);
-    if (note) {
-      rows.push({ label: t("contextMenu.favoritesGroup.noteLabel"), value: cleanTooltipValue(note), multiline: true });
-    }
-  }
-  return { rows: rows.filter((row) => row.value) };
+  if (!comment || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
+  const rows: DetailTooltipRow[] = [
+    { label: t("connection.name"), value: visibleLabel(node) },
+    { label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true },
+  ].filter((row) => row.value);
+  return { rows };
 });
 
 function isTooltipDisabled(): boolean {
@@ -828,17 +809,8 @@ const {
   connectionStore.reorderSidebarEntries(draggedIds, targetId, position);
 });
 
-const isFavoriteDraggable = computed(() => {
-  if (props.dragDisabled) return false;
-  const node = activeNode.value;
-  if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return false;
-  const key = connectionStore.favoriteKeyForNode(node);
-  return !!key && connectionStore.isFavoritedKey(key);
-});
-
 const isDraggable = computed(() => {
   if (props.dragDisabled) return false;
-  if (isFavoriteDraggable.value) return true;
   return activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
 });
 
@@ -1005,12 +977,7 @@ function startTableReferenceMouseDrag(event: MouseEvent) {
 }
 
 function onRowMouseDown(event: MouseEvent) {
-  if (isFavoriteDraggable.value) {
-    // Drag the favorite by its structured key so the drop handler can look
-    // it up without re-deriving the fav:v1 key format from a tree node.
-    const favKey = connectionStore.favoriteKeyForNode(activeNode.value);
-    if (favKey) startDrag(event, favKey, "favorites-item");
-  } else if (isDraggable.value) {
+  if (isDraggable.value) {
     startDrag(event, activeNode.value.id, activeNode.value.type);
   } else if (canDragTableReference.value) {
     startTableReferenceMouseDrag(event);
@@ -1222,7 +1189,6 @@ function onKeydown(event: KeyboardEvent) {
             :style="{ marginLeft: `${trailingCommentGapPx}px`, maxWidth: `${trailingCommentMaxWidth}px` }"
             >{{ trailingComment }}</span
           >
-          <span v-if="resolveFavoriteGroupLabel()" ref="favoriteGroupLabelRef" class="sidebar-favorite-group-label shrink-0 truncate" :class="{ 'ml-auto': !trailingComment }" :title="resolveFavoriteGroupLabel() ?? undefined">{{ resolveFavoriteGroupLabel() }}</span>
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
@@ -1291,32 +1257,6 @@ function onKeydown(event: KeyboardEvent) {
   font-size: 14px;
   font-weight: 500;
   opacity: 1;
-}
-
-/* Small tag rendered after the trailing comment to show which favorites
- * group the table/view belongs to. Uses an outlined pill so it stays
- * visually distinct from the muted comment text without dominating the
- * row. */
-.sidebar-favorite-group-label {
-  display: inline-flex;
-  align-items: center;
-  height: 14px;
-  max-width: 120px;
-  padding: 0 6px;
-  border-radius: 9999px;
-  border: 1px solid hsl(var(--primary) / 0.45);
-  background-color: hsl(var(--primary) / 0.08);
-  color: hsl(var(--primary));
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 500;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
-}
-:root.dark .sidebar-favorite-group-label {
-  background-color: hsl(var(--primary) / 0.18);
-  border-color: hsl(var(--primary) / 0.55);
 }
 
 .tree-item-connection-tint {

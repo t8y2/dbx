@@ -11,8 +11,6 @@ import type {
   DatabaseConnectionInfo,
   DatabaseStorageInfo,
   CatalogInfo,
-  FavoriteGroup,
-  FavoriteItem,
   ForeignKeyInfo,
   ObjectInfo,
   ObjectStatistics,
@@ -74,14 +72,10 @@ import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompa
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 import {
-  buildFavoritesGroupSubnode,
-  buildFavoritesPlaceholderNode,
   buildObjectGroupPlaceholderNodes,
   buildGroupedObjectTreeNodes,
   buildSimpleObjectTreeNodes,
   buildTableTreeNodes,
-  favoritesNodeParentId,
-  isFavoritesPlaceholderNode,
   appendTableTreeLoadMoreNode,
   expandCachedObjectBrowserNodes,
   filterSimpleSidebarSupplementalObjects,

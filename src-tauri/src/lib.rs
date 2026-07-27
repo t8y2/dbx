@@ -1335,8 +1335,6 @@ pub fn run() {
             commands::app_settings::get_driver_store_path,
             commands::app_settings::load_pinned_tree_node_ids,
             commands::app_settings::save_pinned_tree_node_ids,
-            commands::app_settings::load_favorites_state,
-            commands::app_settings::save_favorites_state,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
             commands::app_settings::load_editor_settings,

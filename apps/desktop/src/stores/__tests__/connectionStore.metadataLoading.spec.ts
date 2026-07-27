@@ -308,7 +308,7 @@ describe("connectionStore metadata loading", () => {
     expect(result).toBe("done");
     expect(listTables).toHaveBeenCalledWith(connection.id, "app", "public", undefined, 1001, 0);
     expect(listObjects).toHaveBeenCalled();
-    const tableLabels = schemaNode.children?.filter((node) => node.type !== "favorites").map((node) => node.label) ?? [];
+    const tableLabels = schemaNode.children?.map((node) => node.label) ?? [];
     expect(tableLabels).toEqual(["users"]);
   });
 

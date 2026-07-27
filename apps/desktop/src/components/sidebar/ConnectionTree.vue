@@ -24,8 +24,6 @@ import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHan
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
 import TreeItem from "./TreeItem.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
-import { useFavoriteEditDialog } from "@/composables/useFavoriteEditDialog";
-import FavoriteEditDialog from "./FavoriteEditDialog.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -809,29 +807,6 @@ function bindSidebarTreeRuntimeHost(host: Element | ComponentPublicInstance | nu
 const pendingRenameGroupId = ref<string | null>(null);
 const highlightedNodeId = ref<string | null>(null);
 let highlightTimer: number | undefined;
-
-const favoriteEditDialog = useFavoriteEditDialog();
-const favoriteEditDialogState = favoriteEditDialog.state;
-
-function onFavoriteEditSubmit(value: string) {
-  const dialogState = favoriteEditDialogState.value;
-  if (!dialogState) return;
-  if (dialogState.mode === "note" && dialogState.favoriteKey) {
-    store.updateFavoriteNote(dialogState.favoriteKey, value);
-  } else if (dialogState.mode === "group" && dialogState.connectionId && dialogState.database !== undefined) {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      favoriteEditDialog.close();
-      return;
-    }
-    if (dialogState.groupId) {
-      store.renameFavoriteGroup(dialogState.groupId, trimmed);
-    } else {
-      store.createFavoriteGroup(dialogState.connectionId, dialogState.database, trimmed);
-    }
-  }
-  favoriteEditDialog.close();
-}
 
 // 等待虚拟列表渲染后再高亮。
 function waitForSidebarRenderFrame(): Promise<void> {

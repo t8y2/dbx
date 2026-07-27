@@ -615,14 +615,6 @@ export async function savePinnedTreeNodeIds(ids: string[]): Promise<void> {
   return invoke("save_pinned_tree_node_ids", { ids });
 }
 
-export async function loadFavoritesState(): Promise<unknown> {
-  return invoke("load_favorites_state");
-}
-
-export async function saveFavoritesState(favorites: unknown): Promise<void> {
-  return invoke("save_favorites_state", { favorites });
-}
-
 export async function listSystemFonts(): Promise<string[]> {
   return invoke("list_system_fonts");
 }

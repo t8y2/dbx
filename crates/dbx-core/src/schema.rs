@@ -2886,6 +2886,7 @@ mod tests {
         ConnectionConfig {
             id: "test".to_string(),
             name: "test".to_string(),
+            note: String::new(),
             db_type,
             driver_profile: None,
             driver_label: None,

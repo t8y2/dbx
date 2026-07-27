@@ -3579,6 +3579,7 @@ mod tests {
         ConnectionConfig {
             id: "conn-1".to_string(),
             name: "Connection".to_string(),
+            note: String::new(),
             db_type,
             driver_profile: None,
             driver_label: None,
@@ -4660,6 +4661,7 @@ mod tests {
         let config = ConnectionConfig {
             id: "jdbc-1".to_string(),
             name: "JDBC".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Jdbc,
             driver_profile: None,
             driver_label: None,

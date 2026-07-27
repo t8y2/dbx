@@ -213,6 +213,7 @@ function initialConfigTab(): ConfigTab {
 
 const defaultForm = (): ConnectionForm => ({
   name: "",
+  note: "",
   db_type: "mysql",
   driver_profile: "mysql",
   driver_label: "MySQL",
@@ -1922,6 +1923,7 @@ watch(
       const profileConfig = driverProfiles[profile];
       form.value = {
         name: config.name,
+        note: config.note || "",
         db_type: oceanbasePatch?.db_type || profileConfig?.type || config.db_type,
         driver_profile: oceanbasePatch?.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
@@ -3035,6 +3037,7 @@ function generateConnectionName(): string {
 function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionConfig {
   const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   config.database_info = undefined;
+  config.note = config.note?.trim() || undefined;
   if (selectedType.value === "oceanbase" && (config.driver_profile === "oceanbase" || config.driver_profile === "oceanbase-oracle")) {
     Object.assign(config, oceanbaseModeConnectionPatch(oceanbaseSubMode.value));
   }
@@ -4763,6 +4766,11 @@ function openExternalUrl(url: string) {
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.name") }}</Label>
                   <Input v-model="form.name" v-connection-dialog-auto-focus class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
+                </div>
+
+                <div class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelClass">{{ t("connection.note") }}</Label>
+                  <Input v-model="form.note" class="col-span-3" :placeholder="t('connection.notePlaceholder')" />
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">

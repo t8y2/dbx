@@ -177,6 +177,8 @@ export default withEnglishFallback({
     title: "建立連線",
     name: "名稱",
     namePlaceholder: "連線名稱，留空則自動產生",
+    note: "備註",
+    notePlaceholder: "請勿在備註中以明文儲存密碼",
     type: "類型",
     host: "主機",
     filePath: "檔案路徑",

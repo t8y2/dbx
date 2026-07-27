@@ -20,6 +20,7 @@ fn live_postgres_config(
     ConnectionConfig {
         id: id.to_string(),
         name: id.to_string(),
+        note: String::new(),
         db_type: DatabaseType::Postgres,
         driver_profile: None,
         driver_label: None,

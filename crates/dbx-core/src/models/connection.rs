@@ -72,6 +72,8 @@ pub fn database_info_from_protocol_value(value: &Value) -> Option<DatabaseConnec
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -536,6 +538,8 @@ pub enum DatabaseType {
 struct ConnectionConfigData {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -631,6 +635,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
         Self {
             id: data.id,
             name: data.name,
+            note: data.note,
             db_type: data.db_type,
             driver_profile: data.driver_profile,
             driver_label: data.driver_label,
@@ -2175,6 +2180,7 @@ mod tests {
         ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,
@@ -2241,6 +2247,20 @@ mod tests {
         .unwrap();
         assert!(serde_json::to_value(&legacy).unwrap().get("mcp_access").is_none());
         assert!(!legacy.read_only);
+    }
+
+    #[test]
+    fn connection_note_is_optional_and_round_trips_when_present() {
+        let config = mysql_config("root", "secret", Some("app"));
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("note").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note.is_empty());
+
+        let mut config = config;
+        config.note = "Production reporting".to_string();
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["note"], "Production reporting");
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note, config.note);
     }
 
     #[test]

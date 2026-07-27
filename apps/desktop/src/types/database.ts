@@ -116,6 +116,7 @@ export interface CompletionAssistantResponse {
 export interface ConnectionConfig {
   id: string;
   name: string;
+  note?: string;
   db_type: DatabaseType;
   driver_profile?: string;
   driver_label?: string;

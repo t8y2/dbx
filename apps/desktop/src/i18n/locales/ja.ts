@@ -176,6 +176,8 @@ export default withEnglishFallback({
     title: "新しい接続",
     name: "名前",
     namePlaceholder: "接続名（空の場合は自動生成）",
+    note: "メモ",
+    notePlaceholder: "メモにパスワードを平文で保存しないでください",
     type: "タイプ",
     host: "ホスト",
     filePath: "ファイルパス",

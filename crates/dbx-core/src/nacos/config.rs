@@ -286,6 +286,7 @@ mod tests {
         ConnectionConfig {
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,

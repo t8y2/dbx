@@ -15,6 +15,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
     dbx_core::models::connection::ConnectionConfig {
         id: id.to_string(),
         name: id.to_string(),
+        note: String::new(),
         db_type: DatabaseType::SqlServer,
         driver_profile: None,
         driver_label: None,

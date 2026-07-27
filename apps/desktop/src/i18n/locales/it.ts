@@ -176,6 +176,8 @@ export default withEnglishFallback({
     title: "Nuova Connessione",
     name: "Nome",
     namePlaceholder: "Nome connessione, generato automaticamente se vuoto",
+    note: "Note",
+    notePlaceholder: "Non salvare password in chiaro nelle note",
     type: "Tipo",
     host: "Host",
     filePath: "Percorso File",

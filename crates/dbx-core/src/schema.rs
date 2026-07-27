@@ -7301,7 +7301,7 @@ mod ddl_tests {
                 privilege("table\"owner", "z manager", "SELECT", true, None),
                 privilege("table\"owner", "z manager", "SELECT", true, Some("customer_name")),
                 privilege("z manager", "a delegate", "SELECT", true, None),
-                privilege("a delegate", "reader role", "SELECT", false, None),
+                privilege("a delegate", "reader role", "SELECT", false, Some("customer_name")),
                 privilege("z manager", "reader role", "SELECT", false, Some("customer_name")),
                 privilege("table\"owner", "PUBLIC", "INSERT", false, Some("customer_name")),
                 privilege("table\"owner", "PUBLIC", "INSERT", false, Some("amount")),
@@ -7331,7 +7331,8 @@ mod ddl_tests {
         ));
         assert!(ddl[manager_role..delegate_role]
             .contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"a delegate\" WITH GRANT OPTION;"));
-        assert!(ddl[delegate_role..].contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"reader role\";"));
+        assert!(ddl[delegate_role..]
+            .contains("GRANT SELECT (\"customer_name\") ON TABLE \"app\".\"orders\" TO \"reader role\";"));
     }
 
     #[test]
@@ -7761,9 +7762,9 @@ fn postgres_grant_scope_covers(parent: &PostgresGrant, child: &PostgresGrant) ->
         return false;
     }
     match (&parent.column_name, &child.column_name) {
-        (None, None) => true,
+        (None, _) => true,
         (Some(parent), Some(child)) => parent == child,
-        _ => false,
+        (Some(_), None) => false,
     }
 }
 

@@ -4812,6 +4812,7 @@ async fn native_postgres_metadata_pool(
 
     let mut postgres_config = database_connection_config(config, Some(database));
     postgres_config.db_type = DatabaseType::Postgres;
+    postgres_config.validate_native_url_params()?;
     let (host, port) = state.connection_host_port(connection_id, &postgres_config).await?;
     let url = connection_url_for_endpoint(&postgres_config, &host, port);
     let connect_timeout = Duration::from_secs(postgres_config.effective_connect_timeout_secs());

@@ -1345,10 +1345,19 @@ fn parse_elasticsearch_rest_response(
         return Ok(raw_json_response_result(status, body_text, start));
     }
 
-    if serde_json::from_str::<serde_json::Value>(body_text).is_ok() {
-        // Validate the payload as JSON, but retain the HTTP body verbatim so
-        // numeric literals are not changed by a parse/serialize round trip.
-        return Ok(raw_json_response_result(status, body_text, start));
+    if let Ok(body) = serde_json::from_str::<serde_json::Value>(body_text) {
+        // Prefer a tabular view for search hits (_source columns), SQL API
+        // responses, and aggregations so the desktop data grid can display and
+        // copy rows like relational results. Other JSON (mapping, cluster
+        // info, …) stays as a lossless status/response panel with the raw body.
+        let mut result = parse_elasticsearch_response(status, body, start)?;
+        if result.columns == ["status".to_string(), "response".to_string()] {
+            return Ok(raw_json_response_result(status, body_text, start));
+        }
+        // Attach the raw response body so the UI can toggle between the
+        // table and the original JSON for Elasticsearch REST results.
+        result.elasticsearch_raw_body = Some(body_text.to_string());
+        return Ok(result);
     }
 
     // CAT APIs default to text/plain for human-readable output. Keep those
@@ -2935,6 +2944,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parses_search_rest_response_as_source_table() {
+        let body = r#"{"took":1,"hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"Alice","age":30}},{"_id":"2","_routing":"shard-a","_source":{"name":"Bob","city":"NYC"}}]}}"#;
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
+
+        assert_ne!(result.columns, vec!["status", "response"]);
+        assert!(result.columns.contains(&"name".to_string()));
+        assert!(result.columns.contains(&"_id".to_string()));
+        assert_eq!(result.rows.len(), 2);
+        let name_idx = result.columns.iter().position(|c| c == "name").unwrap();
+        let id_idx = result.columns.iter().position(|c| c == "_id").unwrap();
+        assert_eq!(result.rows[0][name_idx], json!("Alice"));
+        assert_eq!(result.rows[0][id_idx], json!("1"));
+        let city_idx = result.columns.iter().position(|c| c == "city").unwrap();
+        assert_eq!(result.rows[1][city_idx], json!("NYC"));
+        let routing_idx = result.columns.iter().position(|c| c == "_routing").unwrap();
+        assert_eq!(result.rows[1][routing_idx], json!("shard-a"));
+        assert_eq!(result.affected_rows, 2);
+        assert_eq!(result.elasticsearch_raw_body.as_deref(), Some(body));
+    }
+
+    #[test]
+    fn parses_empty_search_rest_response_as_empty_table() {
+        let body = r#"{"took":1,"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}"#;
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
+
+        assert_eq!(result.columns, vec!["_id"]);
+        assert!(result.rows.is_empty());
+        assert_eq!(result.affected_rows, 0);
+    }
+
     #[tokio::test]
     async fn execute_rest_query_keeps_json_error_response() {
         use tokio::io::AsyncWriteExt;
@@ -3040,11 +3080,13 @@ mod tests {
             super::execute_rest_query(&client, "POST /products/_search\n{\"query\":{\"match_all\":{}}}").await.unwrap();
         server.await.unwrap();
 
-        assert_eq!(result.columns, vec!["status", "response"]);
-        assert_eq!(result.rows[0][0], json!(200));
-        let response = result.rows[0][1].as_str().unwrap();
-        assert_eq!(response, response_body);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(response).unwrap(), body);
+        // The response now parses hits+aggs into a tabular result (aggregation
+        // columns) instead of the raw status/response JSON panel.
+        assert!(result.columns.contains(&"key".to_string()));
+        assert!(result.columns.contains(&"doc_count".to_string()));
+        assert_ne!(result.columns, vec!["status", "response"]);
+        // Raw body is attached for JSON toggle in the UI.
+        assert!(result.elasticsearch_raw_body.is_some());
     }
 
     #[tokio::test]

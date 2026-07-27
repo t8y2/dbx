@@ -349,6 +349,19 @@ const activeStatementExecutionMarkers = computed(() =>
   ),
 );
 const activeElasticsearchJsonResponse = computed(() => elasticsearchJsonResponseForResult(activeEffectiveDatabaseType.value, activeResultSql.value, props.activeTab.result));
+/** Whether the active result is an Elasticsearch _source table that also has a raw JSON toggle. */
+const activeElasticsearchRawBody = computed(() => {
+  if (activeEffectiveDatabaseType.value !== "elasticsearch") return undefined;
+  return props.activeTab.result?.elasticsearch_raw_body;
+});
+/** Toggle between the _source table and the raw JSON panel for Elasticsearch REST results. */
+const showElasticsearchRawJson = ref(false);
+watch(
+  () => props.activeTab.result?.elasticsearch_raw_body,
+  () => {
+    showElasticsearchRawJson.value = false;
+  },
+);
 const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
@@ -1160,6 +1173,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
             <template v-else>
               <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
+              <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
               <DataGrid
                 v-else-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
@@ -1209,6 +1223,18 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               >
                 <template #result-toolbar-leading="{ compact }">
                   <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse" :compact="compact" @select-view="emit('update:activeOutputView', $event)" />
+                  <template v-if="activeElasticsearchRawBody">
+                    <div class="mx-1 h-4 w-px bg-border" />
+                    <button
+                      type="button"
+                      class="inline-flex h-5 shrink-0 items-center rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
+                      :class="showElasticsearchRawJson ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
+                      :aria-pressed="showElasticsearchRawJson"
+                      @click="showElasticsearchRawJson = !showElasticsearchRawJson"
+                    >
+                      {{ showElasticsearchRawJson ? t("tabs.tableData") : t("redis.jsonView") }}
+                    </button>
+                  </template>
                 </template>
                 <template #result-toolbar-actions="{ compact }">
                   <QueryResultToolbarActions

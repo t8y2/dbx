@@ -1235,6 +1235,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         truncated: false,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 

@@ -6225,16 +6225,43 @@ async fn mysql_object_source(
     kind: &db::ObjectSourceKind,
 ) -> Result<String, String> {
     use mysql_async::prelude::*;
-    let sql = mysql_object_source_sql(database, name, kind);
+
+    let primary_sql = mysql_object_source_sql(database, name, kind);
+    let primary_column_index = mysql_object_source_ddl_column_index(kind);
     let mut conn = db::mysql::get_conn_with_timeout(pool, db::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+
+    match read_mysql_object_source_row(&mut conn, &primary_sql, primary_column_index).await {
+        Ok(source) => Ok(source),
+        Err(primary_err) if matches!(kind, db::ObjectSourceKind::MaterializedView) => {
+            // StarRocks predating PR 73396 rejects SHOW CREATE MATERIALIZED VIEW for
+            // sync MVs. Fall back to the persistent definition exposed by
+            // information_schema.materialized_views. The fallback returns a single
+            // column (MATERIALIZED_VIEW_DEFINITION) so the column index is always 0.
+            let fallback_sql = db::mysql::mysql_materialized_view_definition_sql(database, name);
+            read_mysql_object_source_row(&mut conn, &fallback_sql, 0).await.map_err(|fallback_err| {
+                format!(
+                    "SHOW CREATE MATERIALIZED VIEW failed ({primary_err}); \
+                         fallback query against information_schema.materialized_views failed ({fallback_err})"
+                )
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn read_mysql_object_source_row(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    ddl_column_index: usize,
+) -> Result<String, String> {
+    use mysql_async::prelude::*;
+    let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let row = rows.first().ok_or("Object source not found")?;
-    let index = mysql_object_source_ddl_column_index(kind);
-    row.get_opt::<String, usize>(index)
+    row.get_opt::<String, usize>(ddl_column_index)
         .and_then(|result| result.ok())
         .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(index)
+            row.get_opt::<Vec<u8>, usize>(ddl_column_index)
                 .and_then(|result| result.ok())
                 .map(|b| String::from_utf8_lossy(&b).to_string())
         })

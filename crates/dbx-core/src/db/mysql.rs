@@ -2411,6 +2411,29 @@ fn starrocks_materialized_views_sql(database: &str) -> String {
     )
 }
 
+/// Fallback DDL source for StarRocks materialized views when `SHOW CREATE
+/// MATERIALIZED VIEW` fails (e.g. on versions predating starrocks/starrocks#73396,
+/// merged 2026-05-19, which reject the statement for sync MVs with "Table not
+/// found" because sync MVs are not registered as separate Tables).
+///
+/// `information_schema.materialized_views` is documented as the authoritative
+/// list of all materialized views, with a column distinguishing SYNC from
+/// ASYNC. See
+/// https://docs.starrocks.io/docs/sql-reference/information_schema/materialized_views/.
+///
+/// Made `pub(super)` so the dispatch site in `schema::mysql_object_source` can
+/// rely on it without rewriting the escape convention.
+pub(super) fn mysql_materialized_view_definition_sql(database: &str, name: &str) -> String {
+    format!(
+        "SELECT MATERIALIZED_VIEW_DEFINITION \
+         FROM information_schema.materialized_views \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         LIMIT 1",
+        quote_value(database),
+        quote_value(name)
+    )
+}
+
 async fn list_starrocks_materialized_view_names(pool: &MySqlPool, database: &str) -> Result<HashSet<String>, String> {
     let sql = starrocks_materialized_views_sql(database);
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
@@ -2425,8 +2448,8 @@ async fn list_starrocks_materialized_view_names(pool: &MySqlPool, database: &str
         .collect())
 }
 
-fn classify_starrocks_materialized_views(
-    tables: &mut [TableInfo],
+fn merge_starrocks_materialized_views(
+    tables: &mut Vec<TableInfo>,
     materialized_view_names: Result<HashSet<String>, String>,
     database: &str,
 ) {
@@ -2440,12 +2463,33 @@ fn classify_starrocks_materialized_views(
         }
     };
 
-    // Trust `information_schema.materialized_views` as the authoritative source so that
-    // both synchronous MVs (which `SHOW FULL TABLES` reports as `VIEW`) and asynchronous
-    // MVs (which `SHOW FULL TABLES` reports as `BASE TABLE`) are classified consistently.
-    for table in tables {
+    // Snapshot the names already returned by SHOW FULL TABLES so the second pass can
+    // append MVs that are absent from SHOW FULL TABLES without duplicating rows.
+    let known_names: HashSet<&str> = tables.iter().map(|table| table.name.as_str()).collect();
+
+    // Step 1 — reclassify: rows whose name appears in `information_schema.materialized_views`
+    // are MVs even when SHOW FULL TABLES labeled them as VIEW (sync MVs) or BASE TABLE
+    // (async MVs). See https://docs.starrocks.io/docs/sql-reference/information_schema/materialized_views/
+    // for the authoritative distinction between the two MV kinds.
+    for table in tables.iter_mut() {
         if materialized_view_names.contains(&table.name) {
             table.table_type = "MATERIALIZED_VIEW".to_string();
+        }
+    }
+
+    // Step 2 — union: on StarRocks versions predating starrocks/starrocks#73396 (merged
+    // 2026-05-19), sync MVs "are not registered as separate Tables" so SHOW FULL TABLES
+    // omits them entirely. Append those rows from the system view so they appear in the
+    // sidebar and the DDL source path has something to resolve.
+    for name in &materialized_view_names {
+        if !known_names.contains(name.as_str()) {
+            tables.push(TableInfo {
+                name: name.clone(),
+                table_type: "MATERIALIZED_VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            });
         }
     }
 }
@@ -2459,7 +2503,7 @@ async fn list_starrocks_tables_with_status(
         list_starrocks_materialized_view_names(pool, database)
     );
     let (mut tables, status) = tables?;
-    classify_starrocks_materialized_views(&mut tables, materialized_view_names, database);
+    merge_starrocks_materialized_views(&mut tables, materialized_view_names, database);
     Ok((tables, status))
 }
 
@@ -4402,7 +4446,7 @@ mod tests {
         ];
         let materialized_views = HashSet::from(["orders_mv".to_string(), "orders_mv".to_string()]);
 
-        classify_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
 
         assert_eq!(tables.len(), 3);
         assert_eq!(
@@ -4434,7 +4478,7 @@ mod tests {
         ];
         let materialized_views = HashSet::from(["orders_async_mv".to_string()]);
 
-        classify_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
 
         assert_eq!(
             tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
@@ -4452,9 +4496,41 @@ mod tests {
             parent_name: None,
         }];
 
-        classify_starrocks_materialized_views(&mut tables, Err("permission denied".to_string()), "analytics");
+        merge_starrocks_materialized_views(&mut tables, Err("permission denied".to_string()), "analytics");
 
         assert_eq!(tables[0].table_type, "VIEW");
+    }
+
+    #[test]
+    fn starrocks_sync_mv_absent_from_show_full_tables_is_appended_from_information_schema() {
+        // StarRocks versions predating starrocks/starrocks#73396 (merged
+        // 2026-05-19) report sync MVs as "not registered as separate Tables",
+        // so SHOW FULL TABLES omits them. The merger must union names from
+        // information_schema.materialized_views so the sidebar and DDL path
+        // still resolve them.
+        let mut tables = vec![TableInfo {
+            name: "orders".to_string(),
+            table_type: "BASE TABLE".to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }];
+        let materialized_views = HashSet::from([
+            "orders_mv".to_string(),       // already present (reclassify path)
+            "daily_orders_mv".to_string(), // absent from SHOW FULL TABLES (union path)
+        ]);
+
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+
+        assert_eq!(tables.len(), 3);
+        assert_eq!(
+            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
+            vec![
+                ("orders", "BASE TABLE"),
+                ("orders_mv", "MATERIALIZED_VIEW"),
+                ("daily_orders_mv", "MATERIALIZED_VIEW"),
+            ]
+        );
     }
 
     #[test]
@@ -4464,6 +4540,24 @@ mod tests {
         assert_eq!(
             sql,
             "SELECT TABLE_NAME FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics'"
+        );
+    }
+
+    #[test]
+    fn mysql_materialized_view_definition_fallback_is_scoped_to_db_and_name() {
+        // StarRocks predating PR 73396 (merged 2026-05-19) rejects
+        // `SHOW CREATE MATERIALIZED VIEW` for sync MVs with "Table not found"
+        // because sync MVs are not registered as separate Tables. The fallback
+        // path queries information_schema.materialized_views directly. The
+        // regression guards the SQL shape and the value escaping used by that
+        // fallback so the wire format isn't accidentally regressed.
+        assert_eq!(
+            mysql_materialized_view_definition_sql("shop", "daily_sales_mv"),
+            "SELECT MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'shop' AND TABLE_NAME = 'daily_sales_mv' LIMIT 1"
+        );
+        assert_eq!(
+            mysql_materialized_view_definition_sql("tenant's analytics", "weird'name"),
+            "SELECT MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics' AND TABLE_NAME = 'weird\\'name' LIMIT 1"
         );
     }
 

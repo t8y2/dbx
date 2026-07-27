@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendTableTreeLoadMoreNode, buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableTreePageChildren, tablePartitionGroups, withoutTableTreeLoadMoreNodes } from "@/lib/table/tableTree";
+import { appendTableTreeLoadMoreNode, buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren, tablePartitionGroups, withoutTableTreeLoadMoreNodes } from "@/lib/table/tableTree";
 import type { ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 
 const context = {
@@ -7,6 +7,37 @@ const context = {
   connectionId: "connection",
   database: "db",
 };
+
+describe("case-sensitive database objects", () => {
+  const views: ObjectInfo[] = [
+    { name: "dbx_issue4529_case_V1", object_type: "VIEW", schema: "dbx_test" },
+    { name: "dbx_issue4529_case_v1", object_type: "VIEW", schema: "dbx_test" },
+  ];
+
+  it("keeps table metadata entries whose names differ only by case", () => {
+    const tables: TableInfo[] = views.map((view) => ({ name: view.name, table_type: "VIEW", comment: null }));
+
+    const merged = mergeTableInfosIntoObjects([], tables, "dbx_test");
+
+    expect(merged.map((object) => object.name)).toEqual(["dbx_issue4529_case_V1", "dbx_issue4529_case_v1"]);
+  });
+
+  it("keeps simple tree nodes whose names differ only by case", () => {
+    const nodes = buildSimpleObjectTreeNodes({ ...context, schema: "dbx_test", objects: views });
+
+    expect(nodes.map((node) => node.label)).toEqual(["dbx_issue4529_case_V1", "dbx_issue4529_case_v1"]);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(2);
+  });
+
+  it("keeps grouped tree nodes whose names differ only by case", () => {
+    const groups = buildGroupedObjectTreeNodes({ ...context, schema: "dbx_test", objects: views });
+    const viewGroup = groups.find((node) => node.type === "group-views");
+
+    expect(viewGroup?.objectCount).toBe(2);
+    expect(viewGroup?.children?.map((node) => node.label)).toEqual(["dbx_issue4529_case_V1", "dbx_issue4529_case_v1"]);
+    expect(new Set(viewGroup?.children?.map((node) => node.id) ?? []).size).toBe(2);
+  });
+});
 
 describe("PostgreSQL overloaded routines", () => {
   it("keeps routines with the same name distinct by identity arguments", () => {
@@ -64,6 +95,20 @@ describe("programmable database objects", () => {
 });
 
 describe("PostgreSQL table hierarchy", () => {
+  it("matches partition parents case-insensitively", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "public",
+      tables: [
+        { name: "Orders", table_type: "PARTITIONED TABLE", comment: null },
+        { name: "orders_2026", table_type: "TABLE", comment: null, parent_schema: "PUBLIC", parent_name: "orders" },
+      ],
+    });
+
+    expect(nodes.map((node) => node.label)).toEqual(["Orders"]);
+    expect(tablePartitionGroups(nodes[0])[0].children?.map((node) => node.label)).toEqual(["orders_2026"]);
+  });
+
   it("keeps schema pagination visible at the table-group root when a page ends inside nested partitions", () => {
     const nodes = buildTableTreeNodes({
       ...context,

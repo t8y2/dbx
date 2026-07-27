@@ -90,7 +90,7 @@ function makeTableTreeEntry({
   if (normalizedParentName) node.partitionParentName = normalizedParentName;
 
   return {
-    key: objectIdentityKey(objectType, schema, name),
+    key: partitionObjectLookupKey(objectType, schema, name),
     objectType,
     schema,
     parentSchema: normalizedParentSchema,
@@ -99,7 +99,11 @@ function makeTableTreeEntry({
   };
 }
 
-function objectIdentityKey(objectType: string, schema: string | undefined, name: string) {
+function exactObjectIdentityKey(objectType: string, schema: string | undefined, name: string, signature = "") {
+  return `${objectType}\0${schema || ""}\0${name}\0${signature}`;
+}
+
+function partitionObjectLookupKey(objectType: string, schema: string | undefined, name: string) {
   return `${objectType}\0${(schema || "").toLowerCase()}\0${name.toLowerCase()}`;
 }
 
@@ -223,7 +227,7 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
     merged.map((obj) => {
       const name = normalizeDatabaseObjectName(obj.name);
       const objectSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
-      return `${normalizeObjectType(obj.object_type)}\0${objectSchema.toLowerCase()}\0${name.toLowerCase()}`;
+      return exactObjectIdentityKey(normalizeObjectType(obj.object_type), objectSchema, name);
     }),
   );
 
@@ -234,11 +238,11 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
     if (!name) continue;
     const matchingObject = objects.find((obj) => {
       const objName = normalizeDatabaseObjectName(obj.name);
-      if (objName.toLowerCase() !== name.toLowerCase()) return false;
+      if (objName !== name) return false;
       return normalizeObjectType(obj.object_type) === objectType;
     });
     const tableSchema = schema ?? (matchingObject?.schema ? normalizeDatabaseObjectName(matchingObject.schema) : undefined);
-    const key = `${objectType}\0${(tableSchema || "").toLowerCase()}\0${name.toLowerCase()}`;
+    const key = exactObjectIdentityKey(objectType, tableSchema, name);
     if (seen.has(key)) {
       // Table already in objects — merge comment if missing
       if (matchingObject && table.comment && !matchingObject.comment) {
@@ -283,7 +287,7 @@ function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, dat
   for (const entry of orderedEntries) {
     if (entry.objectType !== "TABLE" || !entry.parentName) continue;
     const parentSchema = entry.parentSchema || entry.schema;
-    const parentKey = objectIdentityKey("TABLE", parentSchema, entry.parentName);
+    const parentKey = partitionObjectLookupKey("TABLE", parentSchema, entry.parentName);
     const parent = byKey.get(parentKey);
     if (!parent || parent.key === entry.key) continue;
     const children = childrenByParent.get(parent.key) ?? [];
@@ -384,7 +388,7 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
   const nodesByKey = new Map<string, TreeNode>();
   const rootKeys = new Set<string>();
 
-  const nodeKey = (node: TreeNode) => objectIdentityKey("TABLE", node.schema, node.label);
+  const nodeKey = (node: TreeNode) => partitionObjectLookupKey("TABLE", node.schema, node.label);
   const collect = (nodes: readonly TreeNode[]) => {
     for (const node of nodes) {
       if (node.type === "table") {
@@ -440,7 +444,7 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
 
     const parentName = node.partitionParentName;
     const parentSchema = node.partitionParentSchema || node.schema;
-    const parentKey = parentName ? objectIdentityKey("TABLE", parentSchema, parentName) : "";
+    const parentKey = parentName ? partitionObjectLookupKey("TABLE", parentSchema, parentName) : "";
     const parent = parentKey ? nodesByKey.get(parentKey) : undefined;
     nodesByKey.set(key, node);
     if (parent && parent !== node) {
@@ -513,7 +517,7 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
 
     const childSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
     const signature = obj.signature?.trim() || "";
-    const dedupeKey = `${objectType}\0${(childSchema || "").toLowerCase()}\0${name.toLowerCase()}\0${signature.toLowerCase()}`;
+    const dedupeKey = exactObjectIdentityKey(objectType, childSchema, name, signature);
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
@@ -669,7 +673,7 @@ export function buildGroupedObjectTreeNodes({ nodeId, connectionId, database, sc
     const t = normalizeObjectType(obj.object_type);
     const objectSchema = obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
     const signature = (obj.signature ?? "").trim();
-    const key = `${t}\0${objectSchema.toLowerCase()}\0${name.toLowerCase()}\0${signature.toLowerCase()}`;
+    const key = exactObjectIdentityKey(t, objectSchema, name, signature);
     if (seen.has(key)) continue;
     seen.add(key);
     const arr = buckets.get(t) ?? [];

@@ -445,6 +445,23 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
+
+function resizeNoteTextarea() {
+  const textarea = noteTextareaRef.value;
+  if (!textarea) return;
+
+  const style = window.getComputedStyle(textarea);
+  const lineHeight = Number.parseFloat(style.lineHeight) || 20;
+  const paddingHeight = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0);
+  const borderHeight = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0);
+  const maxContentHeight = lineHeight * 3 + paddingHeight;
+
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.min(textarea.scrollHeight, maxContentHeight) + borderHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maxContentHeight ? "auto" : "hidden";
+}
+
 const showJdbcDependencyDriverManagerAction = computed(() => form.value.db_type === "jdbc" && isJdbcMissingRuntimeDependencyError(connectionErrorDetail.value));
 
 function externalConfigRecord(value: unknown): Record<string, unknown> {
@@ -518,6 +535,9 @@ const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
 const selectedDbCategory = ref<DbCategoryKey>("sql");
 const configTab = ref<ConfigTab>("connection");
+watch([() => form.value.note, configTab, dialogStep, open], () => {
+  void nextTick(resizeNoteTextarea);
+});
 const MQ_KAFKA_SECURITY_PROTOCOL_AUTO = "__auto";
 const mqAdminUrl = ref("http://127.0.0.1:8080");
 const mqSystemKind = ref<MqSystemKind>("pulsar");
@@ -4747,7 +4767,7 @@ function openExternalUrl(url: string) {
             </div>
 
             <TabsContent value="connection" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2">
+              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2 pb-2">
                 <div v-if="!isJdbcConnection && form.db_type !== 'nacos'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
@@ -4766,11 +4786,6 @@ function openExternalUrl(url: string) {
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.name") }}</Label>
                   <Input v-model="form.name" v-connection-dialog-auto-focus class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
-                </div>
-
-                <div class="grid grid-cols-4 items-center gap-4">
-                  <Label :class="connectionLabelClass">{{ t("connection.note") }}</Label>
-                  <Input v-model="form.note" class="col-span-3" :placeholder="t('connection.notePlaceholder')" />
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">
@@ -6155,6 +6170,18 @@ function openExternalUrl(url: string) {
                       </dl>
                     </PopoverContent>
                   </Popover>
+                </div>
+
+                <div class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
+                  <textarea
+                    ref="noteTextareaRef"
+                    v-model="form.note"
+                    rows="1"
+                    class="col-span-3 min-h-8 w-full min-w-0 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
+                    :placeholder="t('connection.notePlaceholder')"
+                    @input="resizeNoteTextarea"
+                  />
                 </div>
               </div>
             </TabsContent>

@@ -2950,6 +2950,25 @@ mod tests {
     }
 
     #[test]
+    fn copy_insert_keeps_json_cells_as_single_json_literals() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Elasticsearch),
+            table_meta: None,
+            columns: vec!["id".to_string(), "active".to_string(), "profile".to_string()],
+            column_types: Some(vec![Some("number".to_string()), Some("boolean".to_string()), Some("json".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!(7), json!(true), json!(r#"{"name":"Ada","roles":["admin"]}"#)]],
+            exclude_primary_keys: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO table_name (\"id\", \"active\", \"profile\") VALUES (7, TRUE, '{\"name\":\"Ada\",\"roles\":[\"admin\"]}');")
+        );
+    }
+
+    #[test]
     fn builds_copy_insert_without_primary_keys_when_primary_keys_are_hidden() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),

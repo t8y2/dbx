@@ -2,7 +2,7 @@ use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTRO
 use reqwest::{Client as HttpClient, Method, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::time::Duration;
 
@@ -31,6 +31,9 @@ const ELASTICSEARCH_QUERY_VALUE_ENCODE_SET: &AsciiSet =
     &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'%').add(b'&').add(b'+').add(b'/').add(b'=').add(b'?');
 
 const KIBANA_PROXY_STATUS_HEADER: &str = "x-console-proxy-status-code";
+const ELASTICSEARCH_REST_TABLE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const ELASTICSEARCH_REST_TABLE_MAX_ROWS: usize = 2_000;
+const ELASTICSEARCH_REST_TABLE_MAX_CELLS: usize = 200_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ElasticsearchTransportMode {
@@ -1216,7 +1219,7 @@ async fn execute_search_query(
 
 fn parse_elasticsearch_response(
     status: u16,
-    body: serde_json::Value,
+    mut body: serde_json::Value,
     start: std::time::Instant,
 ) -> Result<crate::types::QueryResult, String> {
     if let Some(result) = parse_sql_response(&body, start) {
@@ -1240,60 +1243,17 @@ fn parse_elasticsearch_response(
         } else {
             Ok(json_response_result(status, &body, start))
         }
-    } else if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()) {
+    } else if let Some(hits) = body.pointer_mut("/hits/hits").and_then(serde_json::Value::as_array_mut) {
         // Treat any `_search`-shaped body as the hits result, even when empty —
         // a 0-row match is a valid empty result, not a reason to fall back to
         // the raw-JSON status/response view.
-        let mut all_keys = Vec::<String>::new();
-        let docs: Vec<serde_json::Map<String, serde_json::Value>> = hits
-            .iter()
-            .map(|hit| {
-                let mut row = serde_json::Map::new();
-                if let Some(source) = hit.get("_source").and_then(|s| s.as_object()) {
-                    for (k, v) in source {
-                        row.insert(k.clone(), v.clone());
-                    }
-                }
-                row.insert("_id".to_string(), hit.get("_id").cloned().unwrap_or(serde_json::Value::Null));
-                if let Some(routing) = hit.get("_routing") {
-                    row.insert("_routing".to_string(), routing.clone());
-                }
-                for k in row.keys() {
-                    if !all_keys.contains(k) {
-                        all_keys.push(k.clone());
-                    }
-                }
-                row
-            })
-            .collect();
-        if all_keys.is_empty() {
-            // 0 hits → there's no doc to derive columns from; surface `_id`
-            // so the grid at least shows a column header for the empty set.
-            all_keys.push("_id".to_string());
-        }
-
-        let rows: Vec<Vec<serde_json::Value>> = docs
-            .iter()
-            .map(|doc| {
-                all_keys
-                    .iter()
-                    .map(|k| {
-                        doc.get(k)
-                            .map(|v| match v {
-                                serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
-                                other => serde_json::Value::String(other.to_string()),
-                            })
-                            .unwrap_or(serde_json::Value::Null)
-                    })
-                    .collect()
-            })
-            .collect();
-
+        let hits = std::mem::take(hits);
+        let (columns, column_types, rows) = parse_elasticsearch_search_hits(hits);
         let row_count = rows.len() as u64;
 
         Ok(crate::types::QueryResult {
-            columns: all_keys,
-            column_types: Vec::new(),
+            columns,
+            column_types,
             column_sortables: vec![],
             rows,
             affected_rows: row_count,
@@ -1306,6 +1266,148 @@ fn parse_elasticsearch_response(
     } else {
         Ok(json_response_result(status, &body, start))
     }
+}
+
+fn parse_elasticsearch_search_hits(
+    hits: Vec<serde_json::Value>,
+) -> (Vec<String>, Vec<String>, Vec<Vec<serde_json::Value>>) {
+    let mut columns = Vec::<String>::new();
+    let mut column_indexes = HashMap::<String, usize>::new();
+    let mut json_column_indexes = HashSet::<usize>::new();
+    let mut rows = Vec::<Vec<serde_json::Value>>::with_capacity(hits.len());
+
+    for mut hit in hits {
+        let mut row = vec![serde_json::Value::Null; columns.len()];
+        if let Some(source) = hit.get_mut("_source").and_then(serde_json::Value::as_object_mut) {
+            for (key, value) in std::mem::take(source) {
+                append_elasticsearch_json_cell(
+                    &mut columns,
+                    &mut column_indexes,
+                    &mut json_column_indexes,
+                    &mut rows,
+                    &mut row,
+                    key,
+                    value,
+                );
+            }
+        }
+        let id = hit.get_mut("_id").map(serde_json::Value::take).unwrap_or(serde_json::Value::Null);
+        append_elasticsearch_json_cell(
+            &mut columns,
+            &mut column_indexes,
+            &mut json_column_indexes,
+            &mut rows,
+            &mut row,
+            "_id".to_string(),
+            id,
+        );
+        if let Some(routing) = hit.get_mut("_routing") {
+            append_elasticsearch_json_cell(
+                &mut columns,
+                &mut column_indexes,
+                &mut json_column_indexes,
+                &mut rows,
+                &mut row,
+                "_routing".to_string(),
+                routing.take(),
+            );
+        }
+        rows.push(row);
+    }
+
+    if columns.is_empty() {
+        columns.push("_id".to_string());
+    }
+    let column_types = infer_elasticsearch_json_column_types(&rows, columns.len(), &json_column_indexes);
+    (columns, column_types, rows)
+}
+
+fn append_elasticsearch_json_cell(
+    columns: &mut Vec<String>,
+    column_indexes: &mut HashMap<String, usize>,
+    json_column_indexes: &mut HashSet<usize>,
+    previous_rows: &mut [Vec<serde_json::Value>],
+    row: &mut Vec<serde_json::Value>,
+    column: String,
+    value: serde_json::Value,
+) {
+    let is_json_cell = matches!(value, serde_json::Value::Array(_) | serde_json::Value::Object(_));
+    let value = if is_json_cell { serde_json::Value::String(value.to_string()) } else { value };
+    if let Some(index) = column_indexes.get(&column).copied() {
+        if is_json_cell {
+            json_column_indexes.insert(index);
+        }
+        row[index] = value;
+        return;
+    }
+
+    let index = columns.len();
+    if is_json_cell {
+        json_column_indexes.insert(index);
+    }
+    column_indexes.insert(column.clone(), index);
+    columns.push(column);
+    for previous_row in previous_rows {
+        previous_row.push(serde_json::Value::Null);
+    }
+    row.push(value);
+}
+
+fn infer_elasticsearch_json_column_types(
+    rows: &[Vec<serde_json::Value>],
+    column_count: usize,
+    json_column_indexes: &HashSet<usize>,
+) -> Vec<String> {
+    (0..column_count)
+        .map(|column_index| {
+            if json_column_indexes.contains(&column_index) {
+                return "json".to_string();
+            }
+            let mut inferred = None;
+            for value in rows.iter().filter_map(|row| row.get(column_index)) {
+                let value_type = match value {
+                    serde_json::Value::Null => continue,
+                    serde_json::Value::Bool(_) => "boolean",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "text",
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => "json",
+                };
+                inferred = match inferred {
+                    None => Some(value_type),
+                    Some(existing) if existing == value_type => Some(existing),
+                    Some(_) => Some("json"),
+                };
+                if inferred == Some("json") {
+                    break;
+                }
+            }
+            inferred.unwrap_or("unknown").to_string()
+        })
+        .collect()
+}
+
+fn elasticsearch_rest_search_exceeds_table_limits(body: &serde_json::Value) -> bool {
+    let Some(hits) = body.pointer("/hits/hits").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if hits.len() > ELASTICSEARCH_REST_TABLE_MAX_ROWS {
+        return true;
+    }
+
+    let mut columns = HashSet::<&str>::new();
+    columns.insert("_id");
+    for hit in hits {
+        if hit.get("_routing").is_some() {
+            columns.insert("_routing");
+        }
+        if let Some(source) = hit.get("_source").and_then(serde_json::Value::as_object) {
+            columns.extend(source.keys().map(String::as_str));
+        }
+        if hits.len().saturating_mul(columns.len()) > ELASTICSEARCH_REST_TABLE_MAX_CELLS {
+            return true;
+        }
+    }
+    false
 }
 
 fn json_response_result(status: u16, body: &serde_json::Value, start: std::time::Instant) -> crate::types::QueryResult {
@@ -1345,7 +1447,14 @@ fn parse_elasticsearch_rest_response(
         return Ok(raw_json_response_result(status, body_text, start));
     }
 
+    if body_text.len() > ELASTICSEARCH_REST_TABLE_MAX_BODY_BYTES {
+        return Ok(raw_json_response_result(status, body_text, start));
+    }
+
     if let Ok(body) = serde_json::from_str::<serde_json::Value>(body_text) {
+        if elasticsearch_rest_search_exceeds_table_limits(&body) {
+            return Ok(raw_json_response_result(status, body_text, start));
+        }
         // Prefer a tabular view for search hits (_source columns), SQL API
         // responses, and aggregations so the desktop data grid can display and
         // copy rows like relational results. Other JSON (mapping, cluster
@@ -2946,7 +3055,7 @@ mod tests {
 
     #[test]
     fn parses_search_rest_response_as_source_table() {
-        let body = r#"{"took":1,"hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"Alice","age":30}},{"_id":"2","_routing":"shard-a","_source":{"name":"Bob","city":"NYC"}}]}}"#;
+        let body = r#"{"took":1,"hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"Alice","age":30,"active":true,"deleted_at":null,"profile":{"team":"core"},"tags":["admin","reader"]}},{"_id":"2","_routing":"shard-a","_source":{"name":"Bob","city":"NYC"}}]}}"#;
         let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
 
         assert_ne!(result.columns, vec!["status", "response"]);
@@ -2957,6 +3066,20 @@ mod tests {
         let id_idx = result.columns.iter().position(|c| c == "_id").unwrap();
         assert_eq!(result.rows[0][name_idx], json!("Alice"));
         assert_eq!(result.rows[0][id_idx], json!("1"));
+        let age_idx = result.columns.iter().position(|c| c == "age").unwrap();
+        let active_idx = result.columns.iter().position(|c| c == "active").unwrap();
+        let deleted_at_idx = result.columns.iter().position(|c| c == "deleted_at").unwrap();
+        let profile_idx = result.columns.iter().position(|c| c == "profile").unwrap();
+        let tags_idx = result.columns.iter().position(|c| c == "tags").unwrap();
+        assert_eq!(result.rows[0][age_idx], json!(30));
+        assert_eq!(result.rows[0][active_idx], json!(true));
+        assert_eq!(result.rows[0][deleted_at_idx], serde_json::Value::Null);
+        assert_eq!(result.rows[0][profile_idx], json!(r#"{"team":"core"}"#));
+        assert_eq!(result.rows[0][tags_idx], json!(r#"["admin","reader"]"#));
+        assert_eq!(result.column_types[age_idx], "number");
+        assert_eq!(result.column_types[active_idx], "boolean");
+        assert_eq!(result.column_types[profile_idx], "json");
+        assert_eq!(result.column_types[tags_idx], "json");
         let city_idx = result.columns.iter().position(|c| c == "city").unwrap();
         assert_eq!(result.rows[1][city_idx], json!("NYC"));
         let routing_idx = result.columns.iter().position(|c| c == "_routing").unwrap();
@@ -2973,6 +3096,25 @@ mod tests {
         assert_eq!(result.columns, vec!["_id"]);
         assert!(result.rows.is_empty());
         assert_eq!(result.affected_rows, 0);
+    }
+
+    #[test]
+    fn sparse_search_response_over_table_cell_limit_falls_back_to_raw_json() {
+        let hits = (0..450)
+            .map(|index| {
+                let mut source = serde_json::Map::new();
+                source.insert(format!("field_{index}"), json!(index));
+                json!({ "_id": index.to_string(), "_source": source })
+            })
+            .collect::<Vec<_>>();
+        let body = json!({ "hits": { "hits": hits } }).to_string();
+
+        let result = super::parse_elasticsearch_rest_response(200, &body, std::time::Instant::now()).unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1], json!(body));
+        assert_eq!(result.elasticsearch_raw_body, None);
     }
 
     #[tokio::test]

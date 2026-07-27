@@ -777,7 +777,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function copySelectionJson() {
     if (!hasCellSelection.value) return;
-    await copyText(formatSelectionAsJson(selectedCells.value));
+    const selection = selectedCells.value;
+    const matrix = selectedCellMatrix.value;
+    const selectedColumnTypes = matrix && columnTypes.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => columnTypes.value?.[columnIndex]) : undefined;
+    await copyText(formatSelectionAsJson({ ...selection, columnTypes: selectedColumnTypes }));
   }
 
   async function copySelectionSqlInList() {
@@ -807,7 +810,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
     const obj: Record<string, unknown> = {};
     columns.value.forEach((col, i) => {
-      obj[col] = item.data[i];
+      const value = item.data[i];
+      if (typeof value === "string" && columnTypes.value?.[i]?.trim().toLowerCase() === "json") {
+        try {
+          obj[col] = JSON.parse(value);
+          return;
+        } catch {}
+      }
+      obj[col] = value;
     });
     return obj;
   }

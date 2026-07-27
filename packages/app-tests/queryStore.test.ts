@@ -5544,6 +5544,108 @@ POST /dbx-orders/_search
   }
 });
 
+test("Elasticsearch REST result clears previous SQL pagination and sort state", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  settingsStore.updateEditorSettings({ autoCalculateTotalRows: false });
+  connectionStore.addEphemeralConnection(elasticsearchConn("es-rest-state"));
+  const tabId = store.createTab("es-rest-state", "", "Elasticsearch query");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      return new Response(
+        JSON.stringify({
+          sqlToExecute: "SELECT * FROM logs LIMIT 100 OFFSET 0",
+          pageSql: "SELECT * FROM logs LIMIT 100 OFFSET 0",
+          pageLimit: 100,
+          pageOffset: 0,
+          countSql: "SELECT COUNT(*) FROM logs",
+          useAgentResultSession: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-multi") {
+      return new Response(JSON.stringify([{ columns: ["id"], rows: [[1]], affected_rows: 1, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "unsupported" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/close-session") {
+      return new Response("true", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/execute") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(body.sql, 'POST /logs/_search\n{"size":1}');
+      return new Response(
+        JSON.stringify({
+          columns: ["id", "profile"],
+          column_types: ["number", "json"],
+          rows: [[1, '{"team":"core"}']],
+          affected_rows: 1,
+          execution_time_ms: 1,
+          elasticsearch_raw_body: '{"hits":{"hits":[]}}',
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "SELECT * FROM logs");
+    assert.equal(tab.resultPageLimit, 100);
+    assert.equal(tab.resultPageOffset, 0);
+    assert.equal(tab.resultCountSql, "SELECT COUNT(*) FROM logs");
+
+    tab.resultSortColumn = "id";
+    tab.resultSortColumnIndex = 0;
+    tab.resultSortDirection = "desc";
+    tab.resultSortMode = "local";
+    tab.resultSortedSql = "SELECT * FROM logs ORDER BY id DESC";
+    tab.resultLocalSortOriginalRows = [[1]];
+    tab.orderByInput = "id DESC";
+    tab.resultTotalRowCount = 500;
+    tab.resultTotalRowCountLoading = true;
+    tab.resultSessionId = "old-session";
+
+    await store.executeTabSql(tabId, 'POST /logs/_search\n{"size":1}');
+
+    assert.deepEqual(tab.result?.rows, [[1, '{"team":"core"}']]);
+    assert.equal(tab.resultPageSql, undefined);
+    assert.equal(tab.resultPageLimit, undefined);
+    assert.equal(tab.resultPageOffset, undefined);
+    assert.equal(tab.resultCountSql, undefined);
+    assert.equal(tab.resultTotalRowCount, undefined);
+    assert.equal(tab.resultTotalRowCountLoading, false);
+    assert.equal(tab.resultSortColumn, undefined);
+    assert.equal(tab.resultSortColumnIndex, undefined);
+    assert.equal(tab.resultSortDirection, undefined);
+    assert.equal(tab.resultSortMode, undefined);
+    assert.equal(tab.resultSortedSql, undefined);
+    assert.equal(tab.resultLocalSortOriginalRows, undefined);
+    assert.equal(tab.orderByInput, undefined);
+    assert.equal(tab.resultSessionId, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("Elasticsearch execute all stops after an HTTP error by default", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

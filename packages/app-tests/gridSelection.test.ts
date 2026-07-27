@@ -101,6 +101,17 @@ test("formats selected cells as TSV, CSV, JSON, and SQL values", () => {
   assert.equal(formatSelectionAsSqlInList(selection), "('Ada', 'math', 'Bob', 'quote \"here\"', 'O''Hara', NULL)");
 });
 
+test("keeps JSON cells structured when copying JSON and SQL values", () => {
+  const selection = {
+    columns: ["id", "active", "profile", "tags"],
+    columnTypes: ["number", "boolean", "json", "json"],
+    rows: [[7, true, '{"name":"Ada","team":"core"}', '["admin","reader"]']],
+  };
+
+  assert.equal(formatSelectionAsJson(selection), JSON.stringify([{ id: 7, active: true, profile: { name: "Ada", team: "core" }, tags: ["admin", "reader"] }], null, 2));
+  assert.equal(formatSelectionAsSqlInList(selection), `(7, TRUE, '{"name":"Ada","team":"core"}', '["admin","reader"]')`);
+});
+
 test("parses clipboard table text with spreadsheet line endings", () => {
   assert.deepEqual(parseClipboardTable("0"), [["0"]]);
   assert.deepEqual(parseClipboardTable("a\tb\r\nc\td\r\n"), [

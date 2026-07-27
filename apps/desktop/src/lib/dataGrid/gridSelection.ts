@@ -14,6 +14,7 @@ export interface CellSelectionRange {
 
 export interface SelectionData {
   columns: string[];
+  columnTypes?: Array<string | undefined>;
   rows: GridCellValue[][];
 }
 
@@ -152,9 +153,17 @@ export function formatSelectionAsCsv(selection: SelectionData): string {
 
 export function formatSelectionAsJson(selection: SelectionData): string {
   const objects = selection.rows.map((row) => {
-    const item: Record<string, GridCellValue> = {};
+    const item: Record<string, unknown> = {};
     selection.columns.forEach((column, index) => {
-      item[column] = row[index] ?? null;
+      const value = row[index] ?? null;
+      const columnType = selection.columnTypes?.[index]?.trim().toLowerCase();
+      if (typeof value === "string" && columnType === "json") {
+        try {
+          item[column] = JSON.parse(value);
+          return;
+        } catch {}
+      }
+      item[column] = value;
     });
     return item;
   });

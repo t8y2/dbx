@@ -55,7 +55,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, buildSshAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
-import { getAiConfigModelIds, isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
 import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
@@ -150,6 +150,15 @@ const sshRuntime = computed(() => (props.tab?.mode === "ssh" ? sshTerminalRuntim
 const sshProfile = computed(() => sshRuntime.value?.profile);
 const isSshTarget = computed(() => props.tab?.mode === "ssh" && !!sshProfile.value);
 const hasAiTarget = computed(() => !!props.connection || isSshTarget.value);
+const sshCommandExecutionAllowed = computed(() => settings.mcpGlobalPolicy.allowSshCommands);
+
+watch(
+  isSshTarget,
+  (sshTarget) => {
+    if (sshTarget) void settings.initMcpGlobalPolicy().catch(() => undefined);
+  },
+  { immediate: true },
+);
 
 const prompt = ref("");
 const messages = ref<ChatMessage[]>([]);
@@ -163,6 +172,10 @@ const conversations = ref<AiConversation[]>([]);
 const showConversationList = ref(false);
 const showTemplateSelector = ref(false);
 const modeActionOpen = ref(false);
+
+watch([isSshTarget, sshCommandExecutionAllowed], ([sshTarget, allowed]) => {
+  if (sshTarget && !allowed && assistantMode.value !== "ask") assistantMode.value = "ask";
+});
 
 // Prompt template selection (panel-session scope)
 const activeTemplateIds = ref<string[]>([]);
@@ -778,29 +791,7 @@ function sendProposalReply(positive: boolean) {
   send();
 }
 
-const activePlaceholder = computed(() => (isSshTarget.value ? t("sshTerminal.aiPlaceholder") : `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`));
-const activeModeHint = computed(() => t(`ai.modeHints.${assistantMode.value}`));
-const assistantModeItems = computed(() => [
-  {
-    value: "ask",
-    label: t("ai.modes.ask"),
-    title: t("ai.modeHints.ask"),
-    icon: MessageSquarePlus,
-  },
-  {
-    value: "agent",
-    label: t("ai.modes.agent"),
-    title: t("ai.modeHints.agent"),
-    icon: Bot,
-  },
-]);
-const actionMenuItems = computed(() =>
-  actionButtons.value.map((button) => ({
-    value: button.action,
-    label: t(button.key),
-    icon: button.icon,
-  })),
-);
+const activePlaceholder = computed(() => (isSshTarget.value ? t(sshCommandExecutionAllowed.value ? "sshTerminal.aiPlaceholder" : "sshTerminal.aiPlaceholderAskOnly") : `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`));
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
 
 const showActionButtons = computed(() => {
@@ -819,6 +810,7 @@ const modeActionTriggerLabel = computed(() => {
 });
 
 function switchModeActionTab(mode: "ask" | "agent") {
+  if (mode === "agent" && isSshTarget.value && !sshCommandExecutionAllowed.value) return;
   activeAction.value = resolveDefaultAction(mode);
   if (assistantMode.value !== mode) {
     // Set the mode after the action so the tab label and picker stay aligned.
@@ -1723,7 +1715,7 @@ async function send() {
   scrollToBottom({ force: true });
 
   const requestedAction = activeAction.value;
-  const requestedMode = assistantMode.value;
+  const requestedMode = sshTarget && !sshCommandExecutionAllowed.value ? "ask" : assistantMode.value;
   // Detect user-typed short confirmation (e.g. "可以"/"go ahead") as an alternative
   // path to the proposal ✅ button. Delegates to the shared pure function so the
   // component and its unit tests share the same gating logic.
@@ -2576,8 +2568,10 @@ async function openExternalUrl(url: string) {
                   </button>
                   <button
                     type="button"
-                    class="flex-1 flex items-center justify-center gap-1.5 rounded-sm px-2 py-1 text-xs"
+                    class="flex-1 flex items-center justify-center gap-1.5 rounded-sm px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50"
                     :class="assistantMode === 'agent' ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted'"
+                    :disabled="isSshTarget && !sshCommandExecutionAllowed"
+                    :title="isSshTarget && !sshCommandExecutionAllowed ? t('sshTerminal.agentExecutionDisabled') : t('ai.modeHints.agent')"
                     @click="switchModeActionTab('agent')"
                   >
                     <Bot class="h-3 w-3" />

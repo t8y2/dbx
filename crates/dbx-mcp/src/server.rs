@@ -236,6 +236,8 @@ impl DbxMcpServer {
                 "dbx_remove_connection",
                 "dbx_open_table",
                 "dbx_execute_and_show",
+                "dbx_open_session",
+                "dbx_close_session",
             ] {
                 tool_router.disable_route(route);
             }
@@ -547,6 +549,16 @@ impl DbxMcpServer {
     async fn execute_ssh_command(&self, Parameters(request): Parameters<ExecuteSshCommandRequest>) -> CallToolResult {
         if self.scope.target_kind.as_deref() != Some("ssh") {
             return tool_error("SSH_SCOPE_REQUIRED", "This MCP session is not scoped to an SSH host.");
+        }
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if !policy.allow_ssh_commands {
+            return tool_error(
+                "SSH_COMMAND_EXECUTION_DISABLED",
+                "SSH remote command execution is disabled in DBX Settings. Enable it explicitly before using this tool.",
+            );
         }
         let Some(profile_id) = self.scope.connection_ids.first() else {
             return tool_error("SSH_PROFILE_REQUIRED", "No SSH profile is scoped for this MCP session.");
@@ -1400,7 +1412,7 @@ mod tests {
     #[test]
     fn ssh_scoped_server_exposes_the_remote_command_tool() {
         let server = DbxMcpServer::with_runtime_options(
-            Arc::new(FakeBackend { connections: Vec::new() }),
+            Arc::new(FakeBackend::default()),
             McpScope {
                 connection_ids: vec!["ssh-local".to_string()],
                 target_kind: Some("ssh".to_string()),
@@ -1411,6 +1423,29 @@ mod tests {
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
 
         assert_eq!(names, vec!["dbx_execute_ssh_command"]);
+    }
+
+    #[tokio::test]
+    async fn ssh_command_execution_is_denied_by_default() {
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend::default()),
+            McpScope {
+                connection_ids: vec!["ssh-local".to_string()],
+                target_kind: Some("ssh".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+
+        let result = server
+            .execute_ssh_command(Parameters(ExecuteSshCommandRequest {
+                command: "uname -s".to_string(),
+                timeout_secs: None,
+            }))
+            .await;
+
+        assert!(result.is_error == Some(true));
+        assert!(result_text(&result).contains("SSH_COMMAND_EXECUTION_DISABLED"));
     }
 
     #[test]
@@ -1475,7 +1510,12 @@ mod tests {
     fn local_mongo_aggregate_cannot_write_to_a_production_database() {
         let mut mongo = connection("mongo", "mongo", "mongodb", "staging");
         mongo.production_databases = vec!["production".to_string()];
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
 
         let error = validate_mongo_command(
             &mongo,
@@ -1512,8 +1552,12 @@ mod tests {
         assert_eq!(normalize_confirmed_write_sql(Some(" \n ".to_string())), None);
 
         let read_only = ConnectionConfig { read_only: true, ..connection("readonly", "readonly", "postgres", "app") };
-        let writable_policy =
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let writable_policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
         let read_only_error =
             validate_sql_policy(&read_only, &writable_policy, "app", "DELETE FROM sessions", false).unwrap_err();
         assert!(result_text(&read_only_error).contains("CONNECTION_READ_ONLY"));
@@ -1562,7 +1606,12 @@ mod tests {
 
         // 1. mcp_permissions (Redis/Mongo path) must NOT elevate allow_dangerous.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
         let permissions = mcp_permissions(&connection, &policy);
         assert!(!permissions.allow_dangerous, "confirmed SQL must NOT elevate allow_dangerous for Redis/Mongo paths");
         assert!(permissions.allow_writes);
@@ -1585,8 +1634,12 @@ mod tests {
 
         // 4. Confirmed SQL must not bypass global read_only.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let read_only_policy =
-            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let read_only_policy = McpGlobalPolicy {
+            read_only: true,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
         let error = validate_sql_policy(&connection, &read_only_policy, "app", "CREATE TABLE metrics (id INT)", false)
             .unwrap_err();
         assert!(result_text(&error).contains("MCP_READ_ONLY"), "confirmed SQL must not bypass global read_only");
@@ -1595,7 +1648,12 @@ mod tests {
     #[test]
     fn use_statements_require_a_session() {
         let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
 
         let blocked = validate_sql_policy(&starrocks, &policy, "default_catalog", "USE analytics", false).unwrap_err();
         assert!(result_text(&blocked).contains("SQL_BLOCKED"));

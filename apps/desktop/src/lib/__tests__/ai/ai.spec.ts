@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildSshAiContext, buildSystemPrompt, type AiContext } from "@/lib/ai/ai";
 import { setLocale } from "@/i18n";
+
+const assistantSource = readFileSync(new URL("../../../components/editor/AiAssistant.vue", import.meta.url), "utf8");
 
 function context(overrides: Partial<AiContext> = {}): AiContext {
   return {
@@ -81,5 +84,12 @@ describe("AI SQL dialect prompt", () => {
     expect(agentPrompt).toContain("[END UNTRUSTED TERMINAL TRANSCRIPT]");
     expect(agentPrompt).toContain("uname -s");
     expect(agentPrompt).not.toContain(profile.password);
+  });
+
+  it("forces SSH conversations into Ask mode while command execution is disabled", () => {
+    expect(assistantSource).toContain('if (mode === "agent" && isSshTarget.value && !sshCommandExecutionAllowed.value) return;');
+    expect(assistantSource).toContain(':disabled="isSshTarget && !sshCommandExecutionAllowed"');
+    expect(assistantSource).toContain('if (sshTarget && !allowed && assistantMode.value !== "ask") assistantMode.value = "ask";');
+    expect(assistantSource).toContain('const requestedMode = sshTarget && !sshCommandExecutionAllowed.value ? "ask" : assistantMode.value;');
   });
 });

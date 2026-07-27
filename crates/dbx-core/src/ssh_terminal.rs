@@ -34,9 +34,10 @@ fn default_terminal_type() -> String {
     "xterm-256color".to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SshAuthMethod {
     #[serde(rename = "password")]
+    #[default]
     Password,
     #[serde(rename = "key")]
     Key,
@@ -46,12 +47,6 @@ pub enum SshAuthMethod {
     KeyPassword,
     #[serde(rename = "none")]
     None,
-}
-
-impl Default for SshAuthMethod {
-    fn default() -> Self {
-        Self::Password
-    }
 }
 
 impl SshAuthMethod {
@@ -421,6 +416,8 @@ impl SshTerminalDriver for RusshTerminalDriver {
         }
         let timeout_secs = timeout_secs.clamp(1, 300);
         let session = connect_and_authenticate(
+            profile.host.trim(),
+            profile.port,
             profile.host.trim(),
             profile.port,
             profile.username.trim(),

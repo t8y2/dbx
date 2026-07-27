@@ -403,6 +403,13 @@ async fn execute_ssh_command(
     ssh_profile_id: Option<&str>,
 ) -> Result<String, String> {
     let profile_id = ssh_profile_id.ok_or_else(|| "No SSH profile is active for this Agent run".to_string())?;
+    let policy = state.storage.load_mcp_global_policy().await?.policy();
+    if !policy.allow_ssh_commands {
+        return Err(
+            "SSH_COMMAND_EXECUTION_DISABLED: SSH remote command execution is disabled in DBX Settings. Ask mode remains available."
+                .to_string(),
+        );
+    }
     let command = tool_call
         .arguments
         .get("command")
@@ -1028,6 +1035,23 @@ mod tests {
 
         assert_eq!(names, vec!["execute_ssh_command"]);
         assert!(!tools[0].parallel_ok);
+    }
+
+    #[tokio::test]
+    async fn ssh_agent_command_execution_is_denied_by_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = ToolCall {
+            id: "ssh-policy-test".to_string(),
+            name: "execute_ssh_command".to_string(),
+            arguments: serde_json::json!({ "command": "uname -s" }),
+            provider_payload: None,
+        };
+
+        let error = execute_ssh_command(&call, &state, Some("missing-profile")).await.unwrap_err();
+
+        assert!(error.starts_with("SSH_COMMAND_EXECUTION_DISABLED:"));
     }
 
     #[test]

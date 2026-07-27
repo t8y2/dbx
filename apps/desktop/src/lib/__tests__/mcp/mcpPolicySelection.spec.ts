@@ -2,11 +2,18 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { groupMcpScopeConnections, isMcpPolicyMutationBlocked, matchesMcpSearchQuery, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, toggleMcpAllowedConnectionId, updateMcpAllowedConnectionIds } from "@/lib/mcp/mcpPolicySelection";
+import { DEFAULT_MCP_GLOBAL_POLICY, normalizeMcpGlobalPolicy } from "@/stores/settingsStore";
 
 const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const scopePickerSource = readFileSync(new URL("../../../components/settings/McpConnectionScopePicker.vue", import.meta.url), "utf8");
 
 describe("MCP execution permission selection", () => {
+  it("keeps SSH command execution disabled unless explicitly enabled", () => {
+    expect(DEFAULT_MCP_GLOBAL_POLICY.allowSshCommands).toBe(false);
+    expect(normalizeMcpGlobalPolicy({}).allowSshCommands).toBe(false);
+    expect(normalizeMcpGlobalPolicy({ allowSshCommands: true }).allowSshCommands).toBe(true);
+  });
+
   it("maps the persisted policy to the three UI modes", () => {
     expect(mcpExecutionModeFromPolicy({ readOnly: true, allowDangerousSql: false })).toBe("read_only");
     expect(mcpExecutionModeFromPolicy({ readOnly: false, allowDangerousSql: false })).toBe("safe_write");
@@ -82,6 +89,8 @@ describe("MCP policy settings state", () => {
     expect(settingsDialogSource).toContain("if (mcpPolicyControlsDisabled.value) return;");
     expect(settingsDialogSource).toContain(':disabled="mcpPolicyControlsDisabled"');
     expect(settingsDialogSource).toContain('@update:allowed-connection-ids="onMcpAllowedConnectionIdsChange"');
+    expect(settingsDialogSource).toContain(':model-value="settingsStore.mcpGlobalPolicy.allowSshCommands"');
+    expect(settingsDialogSource).toContain('window.confirm(t("settings.mcpSshCommandExecutionConfirm"))');
 
     const loadingStart = settingsDialogSource.indexOf("mcpPolicyLoading.value = true;");
     const policyLoad = settingsDialogSource.indexOf("await settingsStore.initMcpGlobalPolicy(true);");

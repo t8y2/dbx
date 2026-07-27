@@ -16,7 +16,8 @@ test("AI composer keeps templates available without connections", () => {
 
   assert.notEqual(contextRowStart, -1, "the composer context row should exist");
   assert.notEqual(contextRowEnd, -1, "the connection context row should end before mention suggestions");
-  assert.match(contextRow, /<template v-if="connectionStore\.connections\.length">/);
+  assert.match(contextRow, /<template v-if="isSshTarget">/);
+  assert.match(contextRow, /<template v-else-if="connectionStore\.connections\.length">/);
   assert.match(contextRow, /<Popover v-model:open="showTemplateSelector">/);
   assert.match(contextRow, /max-w-\[40%\]/);
   assert.match(contextRow, /<span class="truncate">\{\{ templateSelectorTriggerLabel \}\}<\/span>/);

@@ -1500,7 +1500,13 @@ mod tests {
     use super::*;
 
     fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
-        McpGlobalPolicyState { configured, read_only, allow_dangerous_sql: false, allowed_connection_ids: None }
+        McpGlobalPolicyState {
+            configured,
+            read_only,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        }
     }
 
     #[test]

@@ -293,6 +293,22 @@ async fn handle_ssh_execute_command(state: &Arc<AppState>, body: &str, stream: &
             return;
         }
     };
+    match state.storage.load_mcp_global_policy().await {
+        Ok(policy) if policy.allow_ssh_commands => {}
+        Ok(_) => {
+            respond_error(
+                stream,
+                "403 Forbidden",
+                "SSH_COMMAND_EXECUTION_DISABLED: SSH remote command execution is disabled in DBX Settings.",
+            )
+            .await;
+            return;
+        }
+        Err(error) => {
+            respond_error(stream, "500 Internal Server Error", &error).await;
+            return;
+        }
+    }
     let profile = match state.storage.load_ssh_profiles().await.and_then(|profiles| {
         profiles
             .into_iter()
@@ -478,19 +494,29 @@ mod tests {
 
     #[test]
     fn mcp_allowlist_distinguishes_all_subset_and_none() {
-        let all = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let all = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: None,
+        };
         assert!(ensure_connection_in_mcp_scope(&all, "conn-1").is_ok());
 
         let subset = McpGlobalPolicy {
             read_only: false,
             allow_dangerous_sql: false,
+            allow_ssh_commands: false,
             allowed_connection_ids: Some(vec!["conn-1".to_string()]),
         };
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-1").is_ok());
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-2").unwrap_err().starts_with("CONNECTION_OUT_OF_SCOPE:"));
 
-        let none =
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: Some(Vec::new()) };
+        let none = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allow_ssh_commands: false,
+            allowed_connection_ids: Some(Vec::new()),
+        };
         assert!(ensure_connection_in_mcp_scope(&none, "conn-1").is_err());
     }
 

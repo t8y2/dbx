@@ -186,6 +186,8 @@ pub struct McpGlobalPolicy {
     pub read_only: bool,
     #[serde(default)]
     pub allow_dangerous_sql: bool,
+    #[serde(default)]
+    pub allow_ssh_commands: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
 }
 
@@ -195,6 +197,7 @@ pub struct McpGlobalPolicyState {
     pub configured: bool,
     pub read_only: bool,
     pub allow_dangerous_sql: bool,
+    pub allow_ssh_commands: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
 }
 
@@ -203,6 +206,7 @@ impl McpGlobalPolicyState {
         McpGlobalPolicy {
             read_only: self.read_only,
             allow_dangerous_sql: self.allow_dangerous_sql,
+            allow_ssh_commands: self.allow_ssh_commands,
             allowed_connection_ids: self.allowed_connection_ids.clone(),
         }
     }
@@ -1614,6 +1618,7 @@ impl Storage {
                         configured: false,
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
+                        allow_ssh_commands: policy.allow_ssh_commands,
                         allowed_connection_ids: policy.allowed_connection_ids,
                     });
                 };
@@ -1625,6 +1630,7 @@ impl Storage {
                         configured: false,
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
+                        allow_ssh_commands: policy.allow_ssh_commands,
                         allowed_connection_ids: policy.allowed_connection_ids,
                     });
                 };
@@ -1634,6 +1640,7 @@ impl Storage {
                     configured: true,
                     read_only: policy.read_only,
                     allow_dangerous_sql: policy.allow_dangerous_sql,
+                    allow_ssh_commands: policy.allow_ssh_commands,
                     allowed_connection_ids: policy.allowed_connection_ids,
                 })
             })
@@ -4718,6 +4725,7 @@ mod tests {
                 configured: false,
                 read_only: false,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: None,
             }
         );
@@ -4727,6 +4735,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: true,
                 allow_dangerous_sql: true,
+                allow_ssh_commands: true,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
             })
             .await
@@ -4738,6 +4747,7 @@ mod tests {
                 configured: true,
                 read_only: true,
                 allow_dangerous_sql: true,
+                allow_ssh_commands: true,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
             }
         );
@@ -4818,6 +4828,7 @@ mod tests {
         let policy = storage.load_mcp_global_policy().await.unwrap();
         assert!(policy.configured);
         assert!(!policy.allow_dangerous_sql);
+        assert!(!policy.allow_ssh_commands);
     }
 
     #[tokio::test]
@@ -4832,6 +4843,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: false,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: Some(vec![kept.id.clone()]),
             })
             .await
@@ -4855,6 +4867,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: true,
                 allow_dangerous_sql: false,
+                allow_ssh_commands: false,
                 allowed_connection_ids: None,
             })
             .await

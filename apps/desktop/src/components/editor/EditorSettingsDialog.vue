@@ -1494,7 +1494,7 @@ const mcpPolicyControlsDisabled = computed(() =>
   }),
 );
 
-async function saveMcpPolicy(partial: { readOnly?: boolean; allowDangerousSql?: boolean; allowedConnectionIds?: string[] | null }) {
+async function saveMcpPolicy(partial: { readOnly?: boolean; allowDangerousSql?: boolean; allowSshCommands?: boolean; allowedConnectionIds?: string[] | null }) {
   if (mcpPolicyControlsDisabled.value) return;
   mcpPolicySaving.value = true;
   try {
@@ -1504,6 +1504,11 @@ async function saveMcpPolicy(partial: { readOnly?: boolean; allowDangerousSql?: 
   } finally {
     mcpPolicySaving.value = false;
   }
+}
+
+function onSshCommandExecutionChange(enabled: boolean) {
+  if (enabled && !window.confirm(t("settings.mcpSshCommandExecutionConfirm"))) return;
+  void saveMcpPolicy({ allowSshCommands: enabled });
 }
 
 function onMcpExecutionModeChange(mode: McpExecutionMode) {
@@ -5510,6 +5515,13 @@ onUnmounted(cleanupPreviewEditor);
                 </p>
                 <McpConnectionScopePicker :connections="mcpSelectableConnections" :allowed-connection-ids="mcpAllowedConnectionIds" :disabled="mcpPolicyControlsDisabled" :busy="mcpPolicyLoading || mcpPolicySaving" @update:allowed-connection-ids="onMcpAllowedConnectionIdsChange" />
                 <div class="space-y-3 rounded-md border bg-muted/20 p-3">
+                  <div class="flex items-center justify-between gap-4 border-b pb-3">
+                    <div class="min-w-0 space-y-1">
+                      <Label for="mcp-ssh-command-execution">{{ t("settings.mcpSshCommandExecution") }}</Label>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.mcpSshCommandExecutionDescription") }}</p>
+                    </div>
+                    <Switch id="mcp-ssh-command-execution" :model-value="settingsStore.mcpGlobalPolicy.allowSshCommands" :disabled="mcpPolicyControlsDisabled" @update:model-value="onSshCommandExecutionChange" />
+                  </div>
                   <div class="space-y-1">
                     <Label id="mcp-execution-mode-label">{{ t("settings.mcpExecutionMode") }}</Label>
                     <p class="text-xs text-muted-foreground">

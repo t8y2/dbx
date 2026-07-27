@@ -477,16 +477,7 @@ pub async fn run_agent_loop(
                 let perms = sql_permissions.clone();
                 let ssh_profile_id = ssh_profile_id.clone();
                 async move {
-                    agent_tools::execute_tool(
-                        &tc,
-                        &state,
-                        &conn,
-                        &db,
-                        &db_type,
-                        perms,
-                        ssh_profile_id.as_deref(),
-                    )
-                    .await
+                    agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, perms, ssh_profile_id.as_deref()).await
                 }
             })
             .collect();

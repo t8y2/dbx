@@ -183,6 +183,7 @@ export interface DesktopSettings {
 export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
+  allowSshCommands: boolean;
   allowedConnectionIds: string[] | null;
   configured: boolean;
 }

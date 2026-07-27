@@ -843,6 +843,7 @@ mod tests {
         let writable_policy = McpGlobalPolicy {
             read_only: false,
             allow_dangerous_sql: false,
+            allow_ssh_commands: false,
             allowed_connection_ids: Some(vec![connection.id.clone()]),
         };
         state.app.storage.save_mcp_global_policy(&writable_policy).await.unwrap();
@@ -889,6 +890,7 @@ mod tests {
             .save_mcp_global_policy(&McpGlobalPolicy {
                 read_only: false,
                 allow_dangerous_sql: true,
+                allow_ssh_commands: false,
                 allowed_connection_ids: Some(vec!["different-connection".to_string()]),
             })
             .await

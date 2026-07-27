@@ -241,6 +241,7 @@ describe("normalizeMcpGlobalPolicy", () => {
     expect(normalizeMcpGlobalPolicy(undefined)).toEqual({
       readOnly: false,
       allowDangerousSql: false,
+      allowSshCommands: false,
       allowedConnectionIds: null,
       configured: false,
     });
@@ -257,6 +258,7 @@ describe("normalizeMcpGlobalPolicy", () => {
     ).toEqual({
       readOnly: true,
       allowDangerousSql: true,
+      allowSshCommands: false,
       allowedConnectionIds: ["connection-1", "connection-2"],
       configured: true,
     });
@@ -388,6 +390,7 @@ describe("settingsStore MCP policy persistence", () => {
     const previous = {
       readOnly: true,
       allowDangerousSql: false,
+      allowSshCommands: false,
       allowedConnectionIds: ["connection-1"],
       configured: true,
     };
@@ -397,6 +400,7 @@ describe("settingsStore MCP policy persistence", () => {
     expect(store.mcpGlobalPolicy).toEqual({
       readOnly: false,
       allowDangerousSql: false,
+      allowSshCommands: false,
       allowedConnectionIds: [],
       configured: true,
     });

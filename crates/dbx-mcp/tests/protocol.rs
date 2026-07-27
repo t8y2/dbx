@@ -133,6 +133,7 @@ async fn enforces_global_connection_scope_and_read_only_policy() {
         policy: McpGlobalPolicy {
             read_only: true,
             allow_dangerous_sql: false,
+            allow_ssh_commands: false,
             allowed_connection_ids: Some(vec!["allowed".to_string()]),
         },
         connections: vec![test_connection("allowed", "allowed-db"), test_connection("blocked", "blocked-db")],

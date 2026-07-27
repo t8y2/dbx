@@ -124,12 +124,46 @@ describe("nacosAdmin helpers", () => {
     expect(diff.preview).toContain("+ c");
   });
 
+  it("uses the same terminal newline semantics for diff summaries", () => {
+    expect(summarizeNacosConfigDiff("aa", "aa\nbb")).toMatchObject({ changed: true, addedLines: 1, removedLines: 0 });
+    expect(summarizeNacosConfigDiff("aa", "aa\n")).toEqual({ changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." });
+    expect(summarizeNacosConfigDiff("aa\r\n", "aa\n")).toEqual({ changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." });
+  });
+
   it("builds side-by-side config diff rows with inline segments", () => {
     const rows = buildNacosSideBySideDiff('cloud:\n  secret: "aaa"\n', 'cloud:\n  secret: "aaa1"\n  enabled: true\n');
     expect(rows[0]).toMatchObject({ leftLineNumber: 1, rightLineNumber: 1, leftType: "equal", rightType: "equal" });
     expect(rows[1]).toMatchObject({ leftLineNumber: 2, rightLineNumber: 2, leftType: "modify", rightType: "modify" });
     expect(rows[1].rightInline.some((segment) => segment.changed && segment.value === "1")).toBe(true);
     expect(rows[2]).toMatchObject({ leftLineNumber: null, rightLineNumber: 3, leftType: "padding", rightType: "insert" });
+  });
+
+  it("keeps unchanged lines when appending without a trailing newline", () => {
+    const rows = buildNacosSideBySideDiff("aa", "aa\nbb");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ leftLineNumber: 1, rightLineNumber: 1, leftContent: "aa", rightContent: "aa", leftType: "equal", rightType: "equal" });
+    expect(rows[1]).toMatchObject({ leftLineNumber: null, rightLineNumber: 2, leftContent: "", rightContent: "bb", leftType: "padding", rightType: "insert" });
+
+    const inlineRows = buildNacosInlineDiff("aa", "aa\nbb");
+    expect(inlineRows).toMatchObject([
+      { lineNumber: 1, content: "aa", type: "equal" },
+      { lineNumber: 2, content: "bb", type: "insert" },
+    ]);
+    expect(inlineRows.some((row) => row.type === "delete")).toBe(false);
+  });
+
+  it("normalizes line endings and ignores terminal newline-only differences", () => {
+    expect(buildNacosSideBySideDiff("aa\n", "aa\nbb\n")).toMatchObject([
+      { leftContent: "aa", rightContent: "aa", leftType: "equal", rightType: "equal" },
+      { leftLineNumber: null, rightContent: "bb", leftType: "padding", rightType: "insert" },
+    ]);
+    expect(buildNacosSideBySideDiff("aa\r\n", "aa\n")).toMatchObject([{ leftContent: "aa", rightContent: "aa", leftType: "equal", rightType: "equal" }]);
+    expect(buildNacosSideBySideDiff("aa\n", "aa")).toMatchObject([{ leftContent: "aa", rightContent: "aa", leftType: "equal", rightType: "equal" }]);
+  });
+
+  it("handles empty config content as line insertions", () => {
+    expect(buildNacosSideBySideDiff("", "bb")).toMatchObject([{ leftLineNumber: null, rightLineNumber: 1, rightContent: "bb", leftType: "padding", rightType: "insert" }]);
+    expect(buildNacosSideBySideDiff("", "")).toEqual([]);
   });
 
   it("builds inline config diff rows with character-level changed segments", () => {

@@ -3,7 +3,7 @@ import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, sha
 import { CaseLower, CaseUpper, Code2, FileCode, Pencil, PencilRuler, Play, Copy, List, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
-import { Transaction } from "@codemirror/state";
+import { Transaction, StateEffect } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
@@ -299,7 +299,7 @@ interface EditorGestureEvent extends Event {
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let codeMirrorPrec: typeof import("@codemirror/state").Prec | null = null;
 let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelection | null = null;
-let hoverCloseEffect: import("@codemirror/state").StateEffect<unknown> | null = null;
+let hoverCloseEffect: StateEffect<unknown> | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
@@ -407,12 +407,46 @@ let hoverSqlHighlighter: SqlHighlighter | null = null;
 function formatColumnType(c: ColumnInfo): string {
   const baseType = c.data_type.replace(/\([^()]*\)$/, "").trim();
   if (c.character_maximum_length != null && c.numeric_scale == null) return `${baseType}(${c.character_maximum_length})`;
-  if (c.numeric_scale != null && c.numeric_precision != null) return `${baseType}(${c.numeric_precision},${c.numeric_scale})`;
+  if (c.numeric_scale != null && c.numeric_precision != null) {
+    if (c.numeric_scale === 0) return `${baseType}(${c.numeric_precision})`;
+    return `${baseType}(${c.numeric_precision},${c.numeric_scale})`;
+  }
   return baseType;
 }
 
-function buildHoverTableSql(tableName: string, columns: ColumnInfo[], indexes: IndexInfo[]): string {
-  const lines: string[] = [`create table ${tableName} (`];
+function formatDefaultValue(value: string): string {
+  // Already quoted string literal — keep as-is.
+  if (/^'/.test(value)) return value;
+  // Numeric values — no quotes.
+  if (/^-?\d+(\.\d+)?$/.test(value)) return value;
+  // Expression default (wrapped in parentheses) — keep as-is.
+  if (/^\(/.test(value)) return value;
+  // SQL keywords (NULL, TRUE, FALSE, etc.) — no quotes.
+  if (isSqlKeyword(value)) return value;
+  // Well-known SQL functions commonly used as defaults — no quotes.
+  if (/^(current_timestamp|current_date|current_time|localtimestamp|localtime|now|random|gen_random_uuid|uuid)\s*(?:\(.*\))?$/i.test(value)) return value;
+  // Other bare string values (e.g. ENUM defaults like 'DIRECT') — wrap in quotes.
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function quoteIdentifier(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+function quoteQualifiedName(qualifiedName: string): string {
+  const segments = qualifiedName.split(".");
+  return segments.map((seg) => (seg.startsWith('"') ? seg : quoteIdentifier(seg))).join(".");
+}
+
+function buildHoverTableSql(qualifiedName: string, columns: ColumnInfo[], indexes: IndexInfo[], tableComment?: string): string {
+  const primaryKeyIndex = indexes.find((idx) => idx.is_primary);
+  let pkColumns = primaryKeyIndex?.columns ?? [];
+  // Fallback to column-level flags when the PK index is not reported by
+  // the driver (e.g., listIndexes failed or the database omits it).
+  if (pkColumns.length === 0) {
+    pkColumns = columns.filter((c) => c.is_primary_key).map((c) => c.name);
+  }
+  const lines: string[] = [`create table ${qualifiedName} (`];
   const nameWidth = Math.max(...columns.map((c) => c.name.length), 4);
   const typeWidth = Math.max(
     ...columns.map((c) => {
@@ -425,23 +459,35 @@ function buildHoverTableSql(tableName: string, columns: ColumnInfo[], indexes: I
     const type = formatColumnType(c);
     const namePad = " ".repeat(nameWidth - c.name.length);
     const typePad = " ".repeat(typeWidth - type.length);
-    const def = `  ${c.name}${namePad}  ${type}${typePad}`;
+    const def = `  ${quoteIdentifier(c.name)}${namePad}  ${type}${typePad}`;
     const extras: string[] = [];
     if (!c.is_nullable) extras.push("not null");
-    if (c.column_default != null) extras.push(`default ${c.column_default}`);
-    if (c.is_primary_key) extras.push("primary key");
+    if (c.column_default != null) extras.push(`default ${formatDefaultValue(c.column_default)}`);
+    // Column-level primary key is omitted; a table-level primary key is
+    // generated once from the primary key index to correctly represent
+    // composite keys (e.g. primary key (tenant_id, order_id)).
     if (c.extra) extras.push(c.extra);
     if (c.comment) extras.push(`comment '${c.comment.replace(/'/g, "''")}'`);
     lines.push(extras.length > 0 ? `${def}  ${extras.join("  ")},` : `${def},`);
   }
-  lines.push(");");
+  if (columns.length === 0) {
+    lines.push(");");
+    return lines.join("\n");
+  }
+  const lastColumnIndex = columns.length - 1;
+  lines[lastColumnIndex] = lines[lastColumnIndex].replace(/,$/, "");
+  if (pkColumns.length > 0) {
+    lines.push(`  primary key (${pkColumns.map(quoteIdentifier).join(", ")})`);
+  }
+  const closeSuffix = tableComment && tableComment.trim() ? ` comment '${tableComment.replace(/'/g, "''")}';` : ";";
+  lines.push(`)${closeSuffix}`);
   const nonPrimaryIndexes = indexes.filter((idx) => !idx.is_primary);
   if (nonPrimaryIndexes.length > 0) {
     lines.push("");
     for (const idx of nonPrimaryIndexes) {
-      const uniqueKeyword = idx.is_unique ? "unique " : "";
-      lines.push(`create ${uniqueKeyword}index ${idx.name}`);
-      lines.push(`  on ${tableName} (${idx.columns.join(", ")});`);
+      const uniquePrefix = idx.is_unique ? "unique " : "";
+      lines.push(`create ${uniquePrefix}index ${quoteIdentifier(idx.name)}`);
+      lines.push(`  on ${qualifiedName} (${idx.columns.map((c) => quoteIdentifier(c)).join(", ")});`);
     }
   }
   return lines.join("\n");
@@ -1762,42 +1808,63 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   const parts = splitQualifiedIdentifier(identifier);
   const name = parts[parts.length - 1] ?? identifier;
   const qualifier = parts.length > 1 ? parts[parts.length - 2] : undefined;
-  const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED
-    ? buildSqlSemanticModel(sql, pos, {
+  let semanticModel: ReturnType<typeof buildSqlSemanticModel> | null = null;
+  if (SEMANTIC_SQL_COMPLETION_ENABLED) {
+    try {
+      semanticModel = buildSqlSemanticModel(sql, pos, {
         databaseType: props.databaseType,
         dialect: props.syntaxDialect ?? props.dialect,
-      })
-    : null;
+      });
+    } catch (error) {
+      semanticModel = null;
+      console.warn(`[DBX] Failed to build semantic model for hover tooltip:`, error);
+    }
+  }
   const semanticTarget = semanticModel ? resolveSqlSemanticNavigationTarget(semanticModel, parts) : null;
   const semanticQualifierIsRowSource = !!qualifier && !!semanticTarget && (semanticTarget.alias?.toLowerCase() === qualifier.toLowerCase() || semanticTarget.source.name.toLowerCase() === qualifier.toLowerCase());
   const tableLookupName = semanticTarget && !semanticQualifierIsRowSource ? semanticTarget.name : name;
   const qualifiedTableLookup = semanticTarget?.schema ? `${semanticTarget.schema}.${semanticTarget.name}` : identifier;
 
+  // Resolve the database/schema for cross-database qualified references early,
+  // so all table lookups (including the initial listCompletionTables call) use
+  // the correct target instead of always searching props.database.
+  const resolvedLookupDatabase = (semanticTarget?.database || props.database) as string;
+  const resolvedLookupSchema = (semanticTarget?.schema || props.schema) as string | undefined;
+
   try {
-    // Use a local variable for hover-specific table lookups to avoid
-    // polluting the shared `cachedTables` used by the completion feature.
     let hoverTables: SqlCompletionTable[] = [];
     if (cachedTables.length === 0) {
       hoverTables = usesLocalOnlyCompletionMetadata()
-        ? connectionStore.lookupLocalCompletionTables(props.connectionId, props.database, tableLookupName, MAX_COMPLETION_TABLES, props.schema)
-        : await connectionStore.listCompletionTables(props.connectionId, props.database, tableLookupName, MAX_COMPLETION_TABLES, props.schema, false, props.schema);
+        ? connectionStore.lookupLocalCompletionTables(props.connectionId, resolvedLookupDatabase, tableLookupName, MAX_COMPLETION_TABLES, resolvedLookupSchema)
+        : await connectionStore.listCompletionTables(props.connectionId, resolvedLookupDatabase, tableLookupName, MAX_COMPLETION_TABLES, resolvedLookupSchema, false, resolvedLookupSchema);
+      // Share the result with the completion feature only when looking up the
+      // current tab's database, to avoid polluting completion with tables from
+      // a different database on cross-database qualified references.
+      if (resolvedLookupDatabase === props.database) {
+        cachedTables = hoverTables;
+      }
     } else {
       hoverTables = cachedTables;
     }
 
     let table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     if (!table && !usesLocalOnlyCompletionMetadata()) {
-      const remoteHoverTables = await connectionStore.listCompletionTables(props.connectionId, props.database, tableLookupName, MAX_COMPLETION_TABLES, semanticTarget?.schema ?? props.schema, false, props.schema);
+      const remoteHoverTables = await connectionStore.listCompletionTables(props.connectionId, resolvedLookupDatabase, tableLookupName, MAX_COMPLETION_TABLES, resolvedLookupSchema, false, resolvedLookupSchema);
       hoverTables = mergeCompletionTables(hoverTables, remoteHoverTables);
+      // Only share with completion cache when looking up the current tab's database.
+      if (resolvedLookupDatabase === props.database) {
+        cachedTables = hoverTables;
+      }
       table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     }
     if (table && !semanticQualifierIsRowSource && (!qualifier || table.schema?.toLowerCase() === qualifier.toLowerCase() || table.name === name)) {
-      // Use semantic target's database/schema when available so qualified
-      // references like other_db.public.orders resolve to the correct database.
-      const hoverDatabase: string = semanticTarget?.database ?? props.database ?? "";
-      const hoverSchema = semanticTarget?.schema ?? table.schema ?? props.schema;
+      const hoverDatabase: string = resolvedLookupDatabase;
+      const hoverSchema = resolvedLookupSchema ?? table.schema ?? "";
+      const hoverQualifiedName = [hoverDatabase, hoverSchema, table.name].filter(Boolean).join(".");
       let fullColumns: ColumnInfo[] = [];
       let fullIndexes: IndexInfo[] = [];
+      let tableComment: string | undefined;
+      let metadataLoadFailed = false;
       try {
         const result: TableMetadataLoadResult = await loadTableMetadata({
           connectionId: props.connectionId,
@@ -1808,15 +1875,28 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
         });
         fullColumns = result.metadata.columns;
         fullIndexes = result.metadata.indexes;
-      } catch {
-        // Fall back to simple hover if metadata fetch fails
+      } catch (error) {
+        metadataLoadFailed = true;
+        console.warn(`[DBX] Failed to load table metadata for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
       }
-      const sqlContent = fullColumns.length > 0 ? buildHoverTableSql(table.name, fullColumns, fullIndexes) : undefined;
+      if (!metadataLoadFailed) {
+        try {
+          const commentResult = await api.getTableComment(props.connectionId, hoverDatabase, hoverSchema, table.name);
+          if (commentResult) tableComment = commentResult;
+        } catch (error) {
+          console.warn(`[DBX] Failed to load table comment for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
+        }
+      }
+      // Re-check after async metadata load — the context menu may have opened
+      // while loadTableMetadata was in flight, and we must not display a hover
+      // tooltip on top of an open context menu.
+      if (contextMenuOpen.value) return null;
+      const sqlContent = fullColumns.length > 0 ? buildHoverTableSql(quoteQualifiedName(hoverQualifiedName), fullColumns, fullIndexes, tableComment) : undefined;
       return {
         pos: range.from,
         end: range.to,
         create: () => ({
-          dom: createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent),
+          dom: createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
         }),
       };
     }
@@ -3240,20 +3320,6 @@ function refreshCompletionCache() {
 onMounted(async () => {
   if (!editorRef.value) return;
 
-  // Reset context menu flag on left-click or Escape (global, independent of EditorView)
-  const onGlobalPointerDown = (e: PointerEvent) => {
-    if (contextMenuOpen.value && e.button === 0) {
-      contextMenuOpen.value = false;
-    }
-  };
-  const onGlobalKeydown = (e: KeyboardEvent) => {
-    if (contextMenuOpen.value && e.key === "Escape") {
-      contextMenuOpen.value = false;
-    }
-  };
-  document.addEventListener("pointerdown", onGlobalPointerDown);
-  document.addEventListener("keydown", onGlobalKeydown);
-
   // Pre-load SQL highlighter for hover tooltips (non-blocking)
   void (async () => {
     try {
@@ -4011,16 +4077,15 @@ onMounted(async () => {
 
   // Register context-menu scroll listener on the actual EditorView scrollDOM
   // (deferred until after creation so view.value is non-null).
+  const scrollDOM = view.value.scrollDOM;
   const onEditorScroll = () => {
     if (contextMenuOpen.value) {
       contextMenuOpen.value = false;
     }
   };
-  view.value.scrollDOM.addEventListener("scroll", onEditorScroll);
+  scrollDOM.addEventListener("scroll", onEditorScroll);
   contextMenuPointerCleanup = () => {
-    document.removeEventListener("pointerdown", onGlobalPointerDown);
-    document.removeEventListener("keydown", onGlobalKeydown);
-    view.value?.scrollDOM.removeEventListener("scroll", onEditorScroll);
+    scrollDOM.removeEventListener("scroll", onEditorScroll);
     contextMenuPointerCleanup = null;
   };
 
@@ -4428,7 +4493,7 @@ defineExpose({
 
 <template>
   <div class="h-full w-full overflow-hidden relative" @gesturestart="onEditorGestureStart" @gesturechange="onEditorGestureChange" @gestureend="onEditorGestureEnd">
-    <CustomContextMenu :items="contextMenuItems" v-slot="{ onContextMenu }">
+    <CustomContextMenu :items="contextMenuItems" @close="contextMenuOpen = false" v-slot="{ onContextMenu }">
       <div
         ref="editorRef"
         data-query-editor-root
@@ -4439,8 +4504,8 @@ defineExpose({
               syncContextMenuStateAtEvent(view, e);
               closeHoverOnContextMenu();
             }
-            contextMenuOpen = true;
             onContextMenu(e);
+            contextMenuOpen = true;
           }
         "
       />

@@ -1664,14 +1664,14 @@ impl NacosAdmin for NacosOpenApiAdmin {
                 None
             }
         };
-        let mut config_count = match configs_result {
+        let config_count = match configs_result {
             Ok(result) => Some(result.total_count),
             Err(error) => {
                 warnings.push(error);
                 None
             }
         };
-        let mut service_count = match services_result {
+        let service_count = match services_result {
             Ok(result) => Some(result.total_count),
             Err(error) => {
                 warnings.push(error);
@@ -1685,7 +1685,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
                 None
             }
         };
-        merge_prometheus_dashboard(&mut metrics, &mut config_count, &mut service_count, prometheus.as_ref());
+        merge_prometheus_dashboard(&mut metrics, prometheus.as_ref());
 
         Ok(NacosDashboardSnapshot {
             namespace,
@@ -1814,21 +1814,12 @@ fn parse_dashboard_metrics(value: Value) -> NacosDashboardMetrics {
 
 fn merge_prometheus_dashboard(
     metrics: &mut Option<NacosDashboardMetrics>,
-    config_count: &mut Option<u64>,
-    service_count: &mut Option<u64>,
     prometheus: Option<&NacosPrometheusSnapshot>,
 ) {
     let Some(prometheus) = prometheus else {
         return;
     };
     let metrics = metrics.get_or_insert_with(NacosDashboardMetrics::default);
-    if let Some(value) = finite_u64(prometheus.config.config_count) {
-        *config_count = Some(value);
-    }
-    if let Some(value) = finite_u64(prometheus.naming.service_count) {
-        *service_count = Some(value);
-        metrics.service_count = Some(value);
-    }
     if let Some(value) = finite_u64(prometheus.naming.instance_count) {
         metrics.instance_count = Some(value);
     }
@@ -2655,15 +2646,15 @@ mod tests {
     }
 
     #[test]
-    fn prometheus_metrics_override_openapi_dashboard_values() {
+    fn prometheus_metrics_preserve_namespace_dashboard_values() {
         let mut metrics = Some(NacosDashboardMetrics {
             service_count: Some(1),
             instance_count: Some(2),
             cpu: Some(0.1),
             ..Default::default()
         });
-        let mut config_count = Some(3);
-        let mut service_count = Some(1);
+        let config_count = Some(3);
+        let service_count = Some(1);
         let prometheus = NacosPrometheusSnapshot {
             resource: NacosPrometheusResourceMetrics { cpu_ratio: Some(0.5), ..Default::default() },
             config: NacosPrometheusConfigMetrics { config_count: Some(7.0), ..Default::default() },
@@ -2675,12 +2666,12 @@ mod tests {
             ..Default::default()
         };
 
-        merge_prometheus_dashboard(&mut metrics, &mut config_count, &mut service_count, Some(&prometheus));
+        merge_prometheus_dashboard(&mut metrics, Some(&prometheus));
 
         let metrics = metrics.unwrap();
-        assert_eq!(config_count, Some(7));
-        assert_eq!(service_count, Some(8));
-        assert_eq!(metrics.service_count, Some(8));
+        assert_eq!(config_count, Some(3));
+        assert_eq!(service_count, Some(1));
+        assert_eq!(metrics.service_count, Some(1));
         assert_eq!(metrics.instance_count, Some(9));
         assert_eq!(metrics.cpu, Some(0.5));
     }
@@ -4067,7 +4058,7 @@ mod tests {
                     "/v3/console/cs/config/list" => r#"{"code":0,"data":{"totalCount":21,"pageItems":[]}}"#,
                     "/v3/console/ns/service/list" => r#"{"code":0,"data":{"count":3,"serviceList":[]}}"#,
                     "/actuator/prometheus" => {
-                        "# TYPE system_cpu_usage gauge\nsystem_cpu_usage 0.25\n# TYPE nacos_monitor gauge\nnacos_monitor{module=\"naming\",name=\"serviceCount\"} 4\nnacos_monitor{module=\"naming\",name=\"ipCount\"} 14\n"
+                        "# TYPE system_cpu_usage gauge\nsystem_cpu_usage 0.25\n# TYPE nacos_monitor gauge\nnacos_monitor{module=\"config\",name=\"configCount\"} 12\nnacos_monitor{module=\"naming\",name=\"serviceCount\"} 4\nnacos_monitor{module=\"naming\",name=\"ipCount\"} 14\n"
                     }
                     path => panic!("unexpected dashboard request path: {path}"),
                 };
@@ -4082,7 +4073,7 @@ mod tests {
         assert_eq!(snapshot.namespace, "dev");
         assert_eq!(snapshot.namespace_count, Some(2));
         assert_eq!(snapshot.config_count, Some(21));
-        assert_eq!(snapshot.service_count, Some(4));
+        assert_eq!(snapshot.service_count, Some(3));
         assert_eq!(snapshot.metrics.as_ref().and_then(|metrics| metrics.instance_count), Some(14));
         assert_eq!(snapshot.prometheus.as_ref().and_then(|metrics| metrics.resource.cpu_ratio), Some(0.25));
         assert_eq!(snapshot.nodes.len(), 1);

@@ -94,7 +94,7 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
     if (!contextPath) contextPath = options.contextPath?.trim() || "/nacos";
     if (hasNacos3UiSuffix) warnings.push("The Nacos 3 console route was removed from the API context.");
   } else if (!contextPath) {
-    contextPath = options.contextPath?.trim() || (detectedImplementation === "nacos" ? "/nacos" : "");
+    contextPath = options.contextPath?.trim() || (versionMode === "v2" ? "/nacos" : "");
   }
   url.pathname = "/";
   url.search = "";

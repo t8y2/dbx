@@ -53,6 +53,15 @@ describe("nacosAdmin helpers", () => {
       contextPath: "/",
       detectedVersion: "v3",
     });
+    const savedAutoRootEndpoint = normalizeNacosEndpoint("http://127.0.0.1:8080", { implementation: "nacos", versionMode: "auto" });
+    expect(savedAutoRootEndpoint).toMatchObject({ serverAddr: "http://127.0.0.1:8080", contextPath: "" });
+    expect(
+      normalizeNacosEndpoint(savedAutoRootEndpoint.serverAddr, {
+        implementation: "nacos",
+        versionMode: "auto",
+        contextPath: savedAutoRootEndpoint.contextPath || undefined,
+      }),
+    ).toMatchObject({ serverAddr: "http://127.0.0.1:8080", contextPath: "" });
     expect(normalizeNacosEndpoint("http://rnacos.example:8848/nacos", { implementation: "rnacos" })).toMatchObject({
       serverAddr: "http://rnacos.example:8848",
       contextPath: "/nacos",

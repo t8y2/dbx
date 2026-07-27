@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { CaseLower, CaseUpper, Code2, FileCode, Pencil, PencilRuler, Play, Copy, List, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
+import { CaseLower, CaseUpper, Code2, Download, FileCode, Pencil, PencilRuler, Play, Copy, List, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import { Transaction } from "@codemirror/state";
@@ -135,6 +135,7 @@ const emit = defineEmits<{
   formatError: [message: string];
   execute: [source: SqlExecutionOverride];
   executeInNewResultTab: [source: SqlExecutionOverride];
+  exportQuery: [payload: { sql: string; format: "csv" | "xlsx" | "txt" }];
   save: [];
   clickTable: [target: SqlObjectNavigationTarget];
   viewTableData: [target: SqlObjectNavigationTarget];
@@ -983,6 +984,12 @@ function executeInNewResultTabFromContextMenu() {
   focusEditor();
 }
 
+function exportQueryFromContextMenu(format: "csv" | "xlsx" | "txt") {
+  const sql = executableSql.value;
+  if (!sql.trim()) return;
+  emit("exportQuery", { sql, format });
+}
+
 async function copySelectedSqlFromContextMenu() {
   if (!canCopySelectedSql.value) return;
   try {
@@ -1256,6 +1263,16 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             disabled: !canExecuteContextSql.value,
             icon: Play,
             shortcut: shortcuts.executeSqlInNewResultTab,
+          },
+          {
+            label: t("editor.contextMenu.export"),
+            icon: Download,
+            disabled: !canExecuteContextSql.value,
+            children: [
+              { label: t("editor.contextMenu.exportQueryResultTo", { format: "CSV" }), action: () => exportQueryFromContextMenu("csv") },
+              { label: t("editor.contextMenu.exportQueryResultTo", { format: "XLSX" }), action: () => exportQueryFromContextMenu("xlsx") },
+              { label: t("editor.contextMenu.exportQueryResultTo", { format: "TXT" }), action: () => exportQueryFromContextMenu("txt") },
+            ],
           },
         ]),
     ...queryContextObjectActions(contextObjectTarget.value?.type).map(contextObjectMenuItem),

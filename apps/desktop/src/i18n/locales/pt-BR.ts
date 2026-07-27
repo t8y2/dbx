@@ -770,6 +770,8 @@ export default withEnglishFallback({
     contextMenu: {
       executeSelection: "Executar seleção",
       executeCurrent: "Executar SQL",
+      export: "Exportar",
+      exportQueryResultTo: "Exportar conjunto de resultados da consulta atual para {format}",
       copySelection: "Copiar seleção",
       sendToAi: "Enviar para IA",
       uppercaseSelection: "Converter para maiúsculas",

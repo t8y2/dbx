@@ -791,6 +791,8 @@ export default {
     contextMenu: {
       executeSelection: "Execute selection",
       executeCurrent: "Execute SQL",
+      export: "Export",
+      exportQueryResultTo: "Export current query result to {format}",
       copySelection: "Copy selection",
       sendToAi: "Send to AI",
       uppercaseSelection: "Convert to uppercase",

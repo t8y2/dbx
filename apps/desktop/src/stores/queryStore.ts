@@ -56,6 +56,7 @@ import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { useExportTracker } from "@/composables/useExportTracker";
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { formatError } from "@/lib/backend/errorUtils";
@@ -4699,6 +4700,57 @@ export const useQueryStore = defineStore("query", () => {
     };
   }
 
+  async function exportQuerySqlDirect(id: string, sql: string, format: "csv" | "xlsx" | "txt", filePath: string) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab || tab.mode !== "query" || !sql.trim()) return;
+
+    const connStore = useConnectionStore();
+    await connStore.ensureConnected(tab.connectionId);
+    const conn = connStore.getConfig(tab.connectionId);
+    const settings = useSettingsStore().editorSettings;
+    const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
+    if (!effectiveDbType) return;
+
+    const request: api.QueryResultExportRequest = {
+      exportId: uuid(),
+      connectionId: tab.connectionId,
+      database: tab.database,
+      schema: tab.schema,
+      sql,
+      queryBaseSql: sql,
+      databaseType: effectiveDbType,
+      useAgentCursor: usesAgentCursorForQuery(conn?.db_type),
+      filePath,
+      format,
+      pageSize: settings.exportBatchSize,
+      rowLimit: settings.exportRowLimitEnabled ? settings.exportRowLimit : null,
+      totalRows: null,
+      timeoutSecs: queryTimeoutSecsForConnection(conn),
+      keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
+      clientSessionId: tabClientSessionId(tab, "export"),
+      executionId: uuid(),
+      numericColumnRightAlign: settings.numericColumnRightAlign,
+    };
+
+    const tracker = useExportTracker();
+    tracker.addTask("Query Result", format, filePath, request.exportId);
+    tracker.registerTaskCancelHandler(request.exportId, () => api.cancelQueryResultExport(request.exportId, request.executionId));
+
+    void (async () => {
+      try {
+        await api.startQueryResultExport(request, (progress) => tracker.updateTableExportTask(request.exportId, progress));
+      } catch (error: any) {
+        const task = tracker.tasks.value.find((item) => item.exportId === request.exportId);
+        if (task) {
+          task.status = "Error";
+          task.errorMessage = error?.message || String(error);
+        }
+      } finally {
+        tracker.unregisterTaskCancelHandler(request.exportId);
+      }
+    })();
+  }
+
   return {
     tabs,
     activeTabId,
@@ -4800,6 +4852,7 @@ export const useQueryStore = defineStore("query", () => {
     importResultArchive,
     fetchTabResultForExport,
     buildQueryResultExportRequest,
+    exportQuerySqlDirect,
     getResourceLifecycleDiagnostics: () => resourceLifecycleDiagnostics(tabs.value),
     notifyConnectionMayBeLost,
   };

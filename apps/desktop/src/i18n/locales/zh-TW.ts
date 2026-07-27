@@ -769,6 +769,8 @@ export default withEnglishFallback({
     contextMenu: {
       executeSelection: "執行選取 SQL",
       executeCurrent: "執行 SQL",
+      export: "匯出",
+      exportQueryResultTo: "匯出目前查詢結果集到 {format}",
       copySelection: "複製選取內容",
       sendToAi: "傳送至 AI",
       uppercaseSelection: "轉為大寫",

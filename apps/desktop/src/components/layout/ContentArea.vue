@@ -67,6 +67,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
 import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems } from "@/lib/tabs/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
@@ -864,6 +865,20 @@ function requestQueryEditorExecuteInNewResultTab() {
   return queryEditorRef.value?.requestExecuteInNewResultTab();
 }
 
+async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt" }) {
+  const tab = props.activeTab;
+  if (!tab || tab.mode !== "query") return;
+  let filePath = `query-result.${payload.format}`;
+  if (isTauriRuntime()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const filterName = payload.format === "csv" ? "CSV" : payload.format === "xlsx" ? "Excel" : "Text";
+    const picked = await save({ defaultPath: filePath, filters: [{ name: filterName, extensions: [payload.format] }] });
+    if (!picked) return;
+    filePath = picked as string;
+  }
+  await queryStore.exportQuerySqlDirect(tab.id, payload.sql, payload.format, filePath);
+}
+
 function pasteClipboardAsSqlInCondition() {
   return queryEditorRef.value?.pasteClipboardAsSqlInCondition();
 }
@@ -931,6 +946,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               @format-error="emit('formatError')"
               @execute="emit('execute', $event)"
               @execute-in-new-result-tab="emit('executeInNewResultTab', $event)"
+              @export-query="handleExportQuery"
               @save="emit('saveSql')"
               @click-table="onHandleClickTable"
               @view-table-data="onHandleViewTableData"

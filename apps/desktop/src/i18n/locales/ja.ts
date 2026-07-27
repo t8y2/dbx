@@ -768,6 +768,8 @@ export default withEnglishFallback({
     contextMenu: {
       executeSelection: "選択範囲を実行",
       executeCurrent: "SQLを実行",
+      export: "エクスポート",
+      exportQueryResultTo: "現在のクエリ結果セットを {format} にエクスポート",
       copySelection: "選択範囲をコピー",
       sendToAi: "AIに送信",
       uppercaseSelection: "大文字に変換",

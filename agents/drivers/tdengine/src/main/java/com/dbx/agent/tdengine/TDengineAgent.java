@@ -10,7 +10,6 @@ import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
-import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
@@ -23,6 +22,7 @@ import com.taosdata.jdbc.rs.RestfulConnection;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -48,6 +48,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class TDengineAgent extends BaseDatabaseAgent {
+    private static final int METADATA_ENRICHMENT_TIMEOUT_SECS = 5;
     private static final DateTimeFormatter TDENGINE_TIMESTAMP_FORMAT =
         new DateTimeFormatterBuilder()
             .appendPattern("yyyy-MM-dd HH:mm:ss")
@@ -118,19 +119,23 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         if (!normalized.tableTypeAllowed("TABLE")) {
             return Collections.emptyList();
         }
-        try {
-            return queryConstrainedTables(schema, normalized);
-        } catch (RuntimeException ignored) {
-            // TDengine 2.x does not expose information_schema.ins_stables/ins_tables.
-            return normalized.filterTables(listTablesLegacy(schema));
-        }
+        return normalized.filterTables(listTablesFromShow(schema, normalized));
     }
 
-    private List<TableInfo> listTablesLegacy(String schema) {
+    private List<TableInfo> listTablesFromShow(String schema, MetadataListConstraints constraints) {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE"));
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE"));
+            int maxRows = constraints.hasFilter() ? 0 : metadataReadMaxRows(constraints);
+            // Keep the metadata listing to TDengine's SHOW statements. The more
+            // elaborate information_schema UNION query used here previously is not
+            // accepted by every supported TDengine 3.x / JDBC combination, even
+            // though a connection itself can be established successfully.
+            // A filter can also match table comments. Fetch and enrich all rows
+            // before applying it locally, otherwise either comment-only matches
+            // or matches after the first sidebar page would be omitted.
+            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE", false, maxRows));
+            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE", true, maxRows));
+            enrichTableMetadata(schema, result);
 
             Map<String, TableInfo> distinct = new LinkedHashMap<>();
             for (TableInfo table : result) {
@@ -276,95 +281,99 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         });
     }
 
-    private List<TableInfo> queryTables(String sql, String tableType) throws Exception {
-        List<TableInfo> result = new ArrayList<>();
-        try (java.sql.Statement stmt = requireConnected().createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                result.add(new TableInfo(rs.getString(1), tableType, null));
-            }
+    private static int metadataReadMaxRows(MetadataListConstraints constraints) {
+        if (!constraints.hasLimit()) {
+            return 0;
         }
+        long offset = constraints.hasOffset() ? constraints.getOffset() : 0L;
+        return (int) Math.min(Integer.MAX_VALUE, offset + constraints.getLimit());
+    }
+
+    private void enrichTableMetadata(String schema, List<TableInfo> tables) {
+        try {
+            Map<String, TableMetadata> metadata = loadTableMetadata(schema);
+            for (TableInfo table : tables) {
+                TableMetadata details = metadata.get(table.getTable_type() + ":" + table.getName());
+                if (details == null) {
+                    continue;
+                }
+                table.setComment(details.comment());
+                if (table.getParent_name() == null && details.parentName() != null) {
+                    table.setParent_name(details.parentName());
+                }
+            }
+        } catch (Exception ignored) {
+            // Metadata comments are optional. Keep the SHOW result available if a
+            // server exposes incompatible or slow information_schema views.
+        }
+    }
+
+    private Map<String, TableMetadata> loadTableMetadata(String schema) throws Exception {
+        Map<String, TableMetadata> result = new LinkedHashMap<>();
+        appendTableMetadata(
+            result,
+            "SELECT stable_name, table_comment FROM information_schema.ins_stables WHERE db_name = ?",
+            schema,
+            "STABLE",
+            false
+        );
+        appendTableMetadata(
+            result,
+            "SELECT table_name, stable_name, table_comment FROM information_schema.ins_tables WHERE db_name = ?",
+            schema,
+            "TABLE",
+            true
+        );
         return result;
     }
 
-    private List<TableInfo> queryConstrainedTables(String database, MetadataListConstraints constraints) {
-        return unchecked(() -> {
-            TableMetadataQuery query = buildTableMetadataQuery(database, constraints);
-            List<TableInfo> result = new ArrayList<>();
-            try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(query.sql())) {
-                MetadataSqlSupport.bind(stmt, query.args());
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new TableInfo(
-                            rs.getString(1),
-                            rs.getString(2),
-                            optionalString(rs, 3),
-                            null,
-                            optionalString(rs, 4)
-                        ));
-                    }
+    private void appendTableMetadata(
+        Map<String, TableMetadata> result,
+        String sql,
+        String schema,
+        String tableType,
+        boolean includesStableName
+    ) throws Exception {
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setQueryTimeout(METADATA_ENRICHMENT_TIMEOUT_SECS);
+            stmt.setString(1, schema);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String tableName = rs.getString(1);
+                    String parentName = includesStableName ? optionalString(rs, 2) : null;
+                    String comment = optionalString(rs, includesStableName ? 3 : 2);
+                    result.put(tableType + ":" + tableName, new TableMetadata(parentName, comment));
                 }
             }
-            MetadataListConstraints postFilter = constraints.hasLimit() ? constraints.withoutPaging() : constraints;
-            return postFilter.filterTables(result);
-        });
+        }
     }
 
-    static TableMetadataQuery buildTableMetadataQuery(String database, MetadataListConstraints constraints) {
-        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
-        List<Object> args = new ArrayList<>();
-        StringBuilder sql = new StringBuilder("""
-            SELECT table_name, table_type, table_comment, parent_name
-            FROM (
-                SELECT stable_name AS table_name,
-                       'STABLE' AS table_type,
-                       table_comment,
-                       CAST(NULL AS VARCHAR(192)) AS parent_name,
-                       stable_name AS hierarchy_name,
-                       0 AS hierarchy_rank
-                FROM information_schema.ins_stables
-                WHERE db_name = ?
-                UNION ALL
-                SELECT table_name,
-                       'TABLE' AS table_type,
-                       table_comment,
-                       stable_name AS parent_name,
-                       CASE WHEN stable_name IS NULL THEN table_name ELSE stable_name END AS hierarchy_name,
-                       1 AS hierarchy_rank
-                FROM information_schema.ins_tables
-                WHERE db_name = ?
-            ) metadata
-            WHERE 1 = 1
-            """.stripIndent().trim());
-        args.add(database);
-        args.add(database);
-        if (normalized.hasFilter()) {
-            String pattern = normalized.fuzzyLikePattern();
-            sql.append(" AND (table_name LIKE ? OR table_comment LIKE ?)");
-            args.add(pattern);
-            args.add(pattern);
-        }
-        sql.append(" ORDER BY hierarchy_name, hierarchy_rank, table_name");
-        MetadataSqlSupport.appendLiteralLimitOffset(sql, normalized);
-        return new TableMetadataQuery(sql.toString(), args);
+    private record TableMetadata(String parentName, String comment) {
     }
 
-    static final class TableMetadataQuery {
-        private final String sql;
-        private final List<Object> args;
-
-        TableMetadataQuery(String sql, List<Object> args) {
-            this.sql = sql;
-            this.args = args;
+    private List<TableInfo> queryTables(String sql, String tableType, boolean includesStableName, int maxRows) throws Exception {
+        List<TableInfo> result = new ArrayList<>();
+        try (java.sql.Statement stmt = requireConnected().createStatement()) {
+            if (maxRows > 0) {
+                // The sidebar always asks for a page plus one look-ahead row.
+                // Let Connector/J enforce the same bound instead of collecting
+                // every subtable before the local constraint filter runs.
+                stmt.setMaxRows(maxRows);
+            }
+            try (ResultSet rs = stmt.executeQuery(sql)) {
+                while (rs.next()) {
+                    // SHOW TABLES returns the owning STABLE as its fourth column. It
+                    // is absent for ordinary tables and older servers, where this
+                    // best-effort read simply leaves the table at the root level.
+                    String parentName = includesStableName ? optionalString(rs, 4) : null;
+                    if (parentName != null && parentName.trim().isEmpty()) {
+                        parentName = null;
+                    }
+                    result.add(new TableInfo(rs.getString(1), tableType, null, null, parentName));
+                }
+            }
         }
-
-        String sql() {
-            return sql;
-        }
-
-        List<Object> args() {
-            return args;
-        }
+        return result;
     }
 
     static void sortTablesForHierarchy(List<TableInfo> tables) {

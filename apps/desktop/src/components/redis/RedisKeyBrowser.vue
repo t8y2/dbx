@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, shallowRef, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
+import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock, Copy } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -14,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { OptionHelpPanel } from "@/components/ui/option-help-panel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
+import DateTimePicker from "@/components/ui/date-time-picker/DateTimePicker.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import RedisValueViewer from "./RedisValueViewer.vue";
@@ -37,8 +39,9 @@ import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
 import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldActivateRedisCreateKeyTypeHelpOnFocus } from "@/lib/redis/redisCreateKeyTypeHelp";
 import { optionHelpPanelOffsetTop } from "@/lib/common/optionHelpPanelOffset";
+import { applyRedisExpiryPolicy, type RedisExpiryMode, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
@@ -66,6 +69,11 @@ const props = defineProps<{
   db: number;
   blockDangerousRedisCommands: boolean;
 }>();
+
+const redisExpiryTransport = {
+  setTtl: api.redisSetTtl,
+  setExpireAt: api.redisSetExpireAt,
+};
 
 const flatKeys = shallowRef<RedisKeyInfo[]>([]);
 const treeKeys = ref<RedisKeyTreeNode[]>([]);
@@ -102,10 +110,13 @@ const createKeyValue = ref("");
 const createKeyField = ref("");
 const createKeyScore = ref("0");
 const createKeyError = ref("");
+const createKeyExpiryMode = ref<RedisExpiryMode>("none");
 const createKeyTtl = ref("");
+const createKeyExpireAt = shallowRef<CalendarDateTime | null>(null);
 const createKeyEntries = ref<CreateKeyEntry[]>([]);
 const createKeyRawMode = ref(false);
 const createKeyEntryId = ref("*");
+const createKeyPartiallyWritten = ref(false);
 const jsonModuleAvailable = ref<boolean | null>(null);
 const checkingJsonModule = ref(false);
 const activeCreateKeyTypeHelp = ref<RedisCreateKeyType>();
@@ -481,16 +492,23 @@ function onRowClick(node: RedisKeyTreeNode) {
   activeSidePanel.value = "detail";
 }
 
-function onKeyDeleted() {
-  if (!selectedKeyRaw.value) return;
-  loadedKeyRaws.delete(selectedKeyRaw.value);
-  flatKeys.value = flatKeys.value.filter((key) => key.key_raw !== selectedKeyRaw.value);
-  selectedKeyRaw.value = null;
+function removeKnownKey(keyRaw: string) {
+  if (!flatKeys.value.some((key) => key.key_raw === keyRaw)) return;
+  loadedKeyRaws.delete(keyRaw);
+  flatKeys.value = flatKeys.value.filter((key) => key.key_raw !== keyRaw);
+  if (selectedKeyRaw.value === keyRaw) selectedKeyRaw.value = null;
+  const nextChecked = new Set(checkedKeys.value);
+  nextChecked.delete(keyRaw);
+  checkedKeys.value = nextChecked;
   rebuildTree(false);
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
     loaded: isSearchMode.value ? undefined : flatKeys.value.length,
     totalDelta: -1,
   });
+}
+
+function onKeyDeleted(keyRaw: string) {
+  removeKnownKey(keyRaw);
 }
 
 function redisValueToKeyInfo(value: RedisValue): RedisKeyInfo {
@@ -505,6 +523,10 @@ function redisValueToKeyInfo(value: RedisValue): RedisKeyInfo {
 }
 
 function onKeyLoaded(value: RedisValue) {
+  if (value.redis_type === "none") {
+    removeKnownKey(value.key_raw);
+    return;
+  }
   const keyInfo = redisValueToKeyInfo(value);
   const existingIndex = flatKeys.value.findIndex((key) => key.key_raw === keyInfo.key_raw);
   if (existingIndex < 0) return;
@@ -705,6 +727,10 @@ function removeEntry(idx: number) {
   }
 }
 
+function removeWrittenCreateKeyEntry(entryId: number) {
+  createKeyEntries.value = createKeyEntries.value.filter((entry) => entry.id !== entryId);
+}
+
 function resetCreateKeyForm() {
   createKeyName.value = "";
   createKeyType.value = "string";
@@ -712,9 +738,12 @@ function resetCreateKeyForm() {
   createKeyField.value = "";
   createKeyScore.value = "0";
   createKeyError.value = "";
+  createKeyExpiryMode.value = "none";
   createKeyTtl.value = "";
+  createKeyExpireAt.value = null;
   createKeyRawMode.value = false;
   createKeyEntryId.value = "*";
+  createKeyPartiallyWritten.value = false;
   jsonModuleAvailable.value = null;
   checkingJsonModule.value = false;
   activeCreateKeyTypeHelp.value = undefined;
@@ -723,7 +752,14 @@ function resetCreateKeyForm() {
   resetEntries();
 }
 
+function expiryValidationMessage(reason: "ttl" | "date" | "past"): string {
+  if (reason === "ttl") return t("redis.expiryTtlInvalid");
+  if (reason === "date") return t("redis.expiryDateRequired");
+  return t("redis.expiryDatePast");
+}
+
 function onCreateKeyTypeChange(type: any) {
+  if (creatingKey.value || createKeyPartiallyWritten.value) return;
   createKeyType.value = (type || "string") as RedisCreateKeyType;
   createKeyRawMode.value = false;
   jsonModuleAvailable.value = null;
@@ -760,6 +796,12 @@ function openCreateKeyDialog() {
   showCreateKeyDialog.value = true;
 }
 
+function onCreateKeyDialogOpenChange(open: boolean) {
+  // A create request may have already written a Redis value; keep its recovery state visible.
+  if (!open && creatingKey.value) return;
+  showCreateKeyDialog.value = open;
+}
+
 function upsertCreatedKey(value: RedisValue) {
   const keyInfo: RedisKeyInfo = {
     key_display: value.key_display,
@@ -784,7 +826,42 @@ function upsertCreatedKey(value: RedisValue) {
   });
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRedisMissingKeyError(error: unknown): boolean {
+  return /^Redis(?:JSON)? key no longer exists(?:;|$)/.test(errorMessage(error));
+}
+
+async function syncWrittenKey(keyRaw: string): Promise<boolean> {
+  const created = await api.redisGetValue(props.connectionId, props.db, keyRaw);
+  if (created.redis_type === "none") {
+    removeKnownKey(keyRaw);
+    return false;
+  }
+  upsertCreatedKey(created);
+  return true;
+}
+
+async function reflectWrittenKey(keyRaw: string) {
+  try {
+    await syncWrittenKey(keyRaw);
+  } catch (error) {
+    // RedisJSON can lose a key between TYPE and JSON.GET. Confirm the race
+    // before removing a possibly recreated key from the browser.
+    if (!isRedisMissingKeyError(error)) return;
+    try {
+      await syncWrittenKey(keyRaw);
+    } catch (retryError) {
+      if (isRedisMissingKeyError(retryError)) removeKnownKey(keyRaw);
+    }
+  }
+}
+
 async function createRedisKey() {
+  if (creatingKey.value) return;
+
   const keyName = createKeyName.value.trim();
   if (!keyName) {
     createKeyError.value = t("redis.createKeyNameRequired");
@@ -792,74 +869,137 @@ async function createRedisKey() {
     return;
   }
 
+  const expiryValidation = validateRedisExpiry(createKeyExpiryMode.value, createKeyTtl.value, createKeyExpireAt.value);
+  if (!expiryValidation.valid) {
+    const message = expiryValidationMessage(expiryValidation.reason);
+    createKeyError.value = message;
+    toast(message, 3000);
+    return;
+  }
+
+  const keyType = createKeyType.value;
+  const rawMode = createKeyRawMode.value;
   creatingKey.value = true;
   createKeyError.value = "";
+  let wroteValue = false;
+  let writtenKeyRaw: string | null = null;
+  let writingStructuredEntries = false;
   try {
     const keyRaw = redisKeyTextToRaw(keyName);
-    const ttl = createKeyTtl.value ? Number.parseInt(createKeyTtl.value) || undefined : undefined;
+    writtenKeyRaw = keyRaw;
+    const expiry = expiryValidation.policy;
 
-    if (createKeyType.value === "string" || createKeyType.value === "json" || createKeyRawMode.value) {
+    if (keyType === "string" || keyType === "json" || rawMode) {
       // Raw text/JSON mode — single value
-      if (createKeyType.value === "string") {
-        await api.redisSetString(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl ?? -1);
-      } else if (createKeyType.value === "json") {
-        await api.redisJsonSet(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
-      } else if (createKeyType.value === "hash") {
-        await api.redisHashSet(props.connectionId, props.db, keyRaw, createKeyField.value, createKeyValue.value, ttl);
-      } else if (createKeyType.value === "list") {
-        await api.redisListPush(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
-      } else if (createKeyType.value === "set") {
-        await api.redisSetAdd(props.connectionId, props.db, keyRaw, createKeyValue.value, ttl);
-      } else if (createKeyType.value === "zset") {
+      if (keyType === "string") {
+        await api.redisSetString(props.connectionId, props.db, keyRaw, createKeyValue.value);
+        wroteValue = true;
+      } else if (keyType === "json") {
+        await api.redisJsonSet(props.connectionId, props.db, keyRaw, createKeyValue.value);
+        wroteValue = true;
+      } else if (keyType === "hash") {
+        await api.redisHashSet(props.connectionId, props.db, keyRaw, createKeyField.value, createKeyValue.value);
+        wroteValue = true;
+      } else if (keyType === "list") {
+        await api.redisListPush(props.connectionId, props.db, keyRaw, createKeyValue.value);
+        wroteValue = true;
+      } else if (keyType === "set") {
+        await api.redisSetAdd(props.connectionId, props.db, keyRaw, createKeyValue.value);
+        wroteValue = true;
+      } else if (keyType === "zset") {
         const score = Number.parseFloat(createKeyScore.value || "0");
-        await api.redisZadd(props.connectionId, props.db, keyRaw, createKeyValue.value, score, ttl);
+        await api.redisZadd(props.connectionId, props.db, keyRaw, createKeyValue.value, score);
+        wroteValue = true;
       }
     } else {
-      // Structured entries mode — insert each entry, then set TTL once
-      if (createKeyType.value === "hash") {
-        for (const entry of createKeyEntries.value) {
+      // Write every member first so a single policy is applied to every key type.
+      writingStructuredEntries = true;
+      const pendingEntries = createKeyEntries.value.slice();
+      if (keyType === "hash") {
+        for (const entry of pendingEntries) {
           if (entry.field && entry.field.trim()) {
             await api.redisHashSet(props.connectionId, props.db, keyRaw, entry.field, entry.value);
+            wroteValue = true;
+            createKeyPartiallyWritten.value = true;
+            removeWrittenCreateKeyEntry(entry.id);
           }
         }
-      } else if (createKeyType.value === "list") {
-        for (const entry of createKeyEntries.value) {
+      } else if (keyType === "list") {
+        for (const entry of pendingEntries) {
           if (entry.value) {
             await api.redisListPush(props.connectionId, props.db, keyRaw, entry.value);
+            wroteValue = true;
+            createKeyPartiallyWritten.value = true;
+            removeWrittenCreateKeyEntry(entry.id);
           }
         }
-      } else if (createKeyType.value === "set") {
-        for (const entry of createKeyEntries.value) {
+      } else if (keyType === "set") {
+        for (const entry of pendingEntries) {
           if (entry.value) {
             await api.redisSetAdd(props.connectionId, props.db, keyRaw, entry.value);
+            wroteValue = true;
+            createKeyPartiallyWritten.value = true;
+            removeWrittenCreateKeyEntry(entry.id);
           }
         }
-      } else if (createKeyType.value === "zset") {
-        for (const entry of createKeyEntries.value) {
+      } else if (keyType === "zset") {
+        for (const entry of pendingEntries) {
           if (entry.value) {
             const s = Number.parseFloat(entry.score || "0");
             if (!Number.isNaN(s)) {
               await api.redisZadd(props.connectionId, props.db, keyRaw, entry.value, s);
+              wroteValue = true;
+              createKeyPartiallyWritten.value = true;
+              removeWrittenCreateKeyEntry(entry.id);
             }
           }
         }
-      } else if (createKeyType.value === "stream") {
-        const fields: [string, string][] = createKeyEntries.value.filter((e) => e.field && e.field.trim()).map((e) => [e.field!.trim(), e.value]);
+      } else if (keyType === "stream") {
+        const fields: [string, string][] = pendingEntries.filter((e) => e.field && e.field.trim()).map((e) => [e.field!.trim(), e.value]);
         if (fields.length > 0) {
           const entryId = createKeyEntryId.value.trim() || "*";
-          await api.redisStreamAdd(props.connectionId, props.db, keyRaw, entryId, fields, ttl);
+          await api.redisStreamAdd(props.connectionId, props.db, keyRaw, entryId, fields);
+          wroteValue = true;
         }
       }
-      if (ttl) {
-        await api.redisSetTtl(props.connectionId, props.db, keyRaw, ttl);
-      }
+      writingStructuredEntries = false;
     }
 
-    const created = await api.redisGetValue(props.connectionId, props.db, keyRaw);
-    upsertCreatedKey(created);
+    if (!wroteValue) {
+      const message = keyType === "hash" || keyType === "stream" ? t("redis.fieldRequired") : t("redis.valueRequired");
+      createKeyError.value = message;
+      toast(message, 3000);
+      return;
+    }
+
+    // Do not roll back a successful write if this separate policy command fails.
+    await applyRedisExpiryPolicy(redisExpiryTransport, props.connectionId, props.db, keyRaw, expiry);
+
+    if (!(await syncWrittenKey(keyRaw))) {
+      showCreateKeyDialog.value = false;
+      toast(t("redis.keyExpiredBeforeDisplay"), 3000);
+      return;
+    }
     showCreateKeyDialog.value = false;
   } catch (error) {
-    createKeyError.value = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
+    if (writingStructuredEntries) {
+      if (wroteValue && writtenKeyRaw) {
+        await reflectWrittenKey(writtenKeyRaw);
+        createKeyError.value = `${message} ${t("redis.createKeyPartialWrite")}`;
+        toast(message, 5000);
+      } else {
+        createKeyError.value = message;
+      }
+      return;
+    }
+    if (wroteValue && writtenKeyRaw) {
+      await reflectWrittenKey(writtenKeyRaw);
+      showCreateKeyDialog.value = false;
+      toast(message, 5000);
+      return;
+    }
+    createKeyError.value = message;
   } finally {
     creatingKey.value = false;
   }
@@ -1371,8 +1511,8 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 
     <DangerConfirmDialog v-model:open="showDangerConfirm" :message="dangerMessage" :details="dangerDetails" :confirm-label="dangerConfirmLabel" @confirm="applyDangerAction" />
 
-    <Dialog v-model:open="showCreateKeyDialog">
-      <DialogContent class="sm:max-w-md" :style="editorFontFamilyStyle">
+    <Dialog :open="showCreateKeyDialog" @update:open="onCreateKeyDialogOpenChange">
+      <DialogContent class="sm:max-w-md" :show-close-button="!creatingKey" :style="editorFontFamilyStyle">
         <DialogHeader>
           <DialogTitle>{{ t("redis.createKey") }}</DialogTitle>
         </DialogHeader>
@@ -1380,12 +1520,12 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
         <div class="grid gap-3">
           <label class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createKeyName") }}</span>
-            <Input v-model="createKeyName" class="dbx-editor-font-family h-8 text-xs" :placeholder="t('redis.createKeyNamePlaceholder')" @keydown.enter="createRedisKey" />
+            <Input v-model="createKeyName" class="dbx-editor-font-family h-8 text-xs" :disabled="creatingKey || createKeyPartiallyWritten" :placeholder="t('redis.createKeyNamePlaceholder')" @keydown.enter="createRedisKey" />
           </label>
 
           <label class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createKeyType") }}</span>
-            <Select :model-value="createKeyType" @update:open="onCreateKeyTypeSelectOpen" @update:model-value="onCreateKeyTypeChange">
+            <Select :model-value="createKeyType" :disabled="creatingKey || createKeyPartiallyWritten" @update:open="onCreateKeyTypeSelectOpen" @update:model-value="onCreateKeyTypeChange">
               <SelectTrigger class="h-8 text-xs" @keydown.capture="onCreateKeyTypeTriggerKeydown">
                 <SelectValue />
               </SelectTrigger>
@@ -1404,25 +1544,41 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 
           <label v-if="createKeyType === 'hash' && createKeyRawMode" class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createField") }}</span>
-            <Input v-model="createKeyField" class="dbx-editor-font-family h-8 text-xs" :placeholder="t('redis.createFieldPlaceholder')" @keydown.enter="createRedisKey" />
+            <Input v-model="createKeyField" class="dbx-editor-font-family h-8 text-xs" :disabled="creatingKey" :placeholder="t('redis.createFieldPlaceholder')" @keydown.enter="createRedisKey" />
           </label>
 
           <label v-if="createKeyType === 'zset' && createKeyRawMode" class="grid gap-1.5 text-xs font-medium">
             <span>{{ t("redis.createScore") }}</span>
-            <Input v-model="createKeyScore" class="dbx-editor-font-family h-8 text-xs" placeholder="0" @keydown.enter="createRedisKey" />
+            <Input v-model="createKeyScore" class="dbx-editor-font-family h-8 text-xs" :disabled="creatingKey" placeholder="0" @keydown.enter="createRedisKey" />
           </label>
 
-          <!-- TTL input -- always visible -->
-          <label class="grid gap-1.5 text-xs font-medium">
-            <span>{{ t("redis.createKeyTtl") }}</span>
-            <Input v-model="createKeyTtl" class="dbx-editor-font-family h-8 text-xs" type="number" min="0" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="createRedisKey" />
-          </label>
+          <div class="grid gap-1.5 text-xs font-medium">
+            <span>{{ t("redis.expiry") }}</span>
+            <Select v-model="createKeyExpiryMode" :disabled="creatingKey">
+              <SelectTrigger class="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">{{ t("redis.expiryNone") }}</SelectItem>
+                <SelectItem value="ttl">{{ t("redis.expiryTtl") }}</SelectItem>
+                <SelectItem value="at">{{ t("redis.expiryAt") }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <label v-if="createKeyExpiryMode === 'ttl'" class="grid gap-1.5 text-xs font-medium">
+              <span>{{ t("redis.createKeyTtl") }}</span>
+              <Input v-model="createKeyTtl" class="dbx-editor-font-family h-8 text-xs" :disabled="creatingKey" inputmode="numeric" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="createRedisKey" />
+            </label>
+            <label v-else-if="createKeyExpiryMode === 'at'" class="grid gap-1.5 text-xs font-medium">
+              <span>{{ t("redis.expiryAt") }}</span>
+              <DateTimePicker v-model="createKeyExpireAt" full-width :locale="locale" :disabled="creatingKey" />
+            </label>
+          </div>
 
           <!-- Raw mode toggle (non-string, non-stream, non-json types) -->
           <div v-if="createKeyType !== 'string' && createKeyType !== 'stream' && createKeyType !== 'json'" class="flex items-center justify-end gap-1.5">
             <label class="flex items-center gap-1.5 text-xs text-muted-foreground">
               <span>{{ t("redis.createKeyRawMode") }}</span>
-              <Switch size="sm" v-model="createKeyRawMode" />
+              <Switch size="sm" v-model="createKeyRawMode" :disabled="creatingKey || createKeyPartiallyWritten" />
             </label>
           </div>
 
@@ -1431,13 +1587,13 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <!-- Stream entry ID -->
             <label v-if="createKeyType === 'stream'" class="grid gap-1.5 text-xs font-medium">
               <span>{{ t("redis.createKeyEntryId") }}</span>
-              <Input v-model="createKeyEntryId" class="dbx-editor-font-family h-8 text-xs font-mono" placeholder="*" />
+              <Input v-model="createKeyEntryId" class="dbx-editor-font-family h-8 text-xs font-mono" :disabled="creatingKey" placeholder="*" />
             </label>
 
             <div class="grid gap-2">
               <div class="flex items-center justify-between">
                 <span class="text-xs font-medium">{{ t("redis.createKeyEntries") }}</span>
-                <Button variant="outline" size="sm" class="h-6 gap-1 text-xs" @click="addEntry">
+                <Button variant="outline" size="sm" class="h-6 gap-1 text-xs" :disabled="creatingKey" @click="addEntry">
                   <Plus class="h-3 w-3" />
                   {{ t("redis.createKeyAddEntry") }}
                 </Button>
@@ -1445,19 +1601,19 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
               <div v-for="(entry, idx) in createKeyEntries" :key="entry.id" class="flex items-start gap-2">
                 <!-- Hash / Stream: field + value -->
                 <template v-if="createKeyType === 'hash' || createKeyType === 'stream'">
-                  <Input v-model="entry.field" class="dbx-editor-font-family h-8 w-2/5 text-xs" :placeholder="t('redis.createFieldPlaceholder')" />
-                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :placeholder="t('redis.createValuePlaceholder')" />
+                  <Input v-model="entry.field" class="dbx-editor-font-family h-8 w-2/5 text-xs" :disabled="creatingKey" :placeholder="t('redis.createFieldPlaceholder')" />
+                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :disabled="creatingKey" :placeholder="t('redis.createValuePlaceholder')" />
                 </template>
                 <!-- ZSet: score + member -->
                 <template v-else-if="createKeyType === 'zset'">
-                  <Input v-model="entry.score" class="dbx-editor-font-family h-8 w-20 text-xs" type="number" step="any" placeholder="0" />
-                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :placeholder="t('redis.createMember')" />
+                  <Input v-model="entry.score" class="dbx-editor-font-family h-8 w-20 text-xs" :disabled="creatingKey" type="number" step="any" placeholder="0" />
+                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :disabled="creatingKey" :placeholder="t('redis.createMember')" />
                 </template>
                 <!-- List / Set: single value -->
                 <template v-else>
-                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :placeholder="t('redis.createValuePlaceholder')" />
+                  <Input v-model="entry.value" class="dbx-editor-font-family h-8 flex-1 text-xs" :disabled="creatingKey" :placeholder="t('redis.createValuePlaceholder')" />
                 </template>
-                <Button variant="ghost" size="sm" class="h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-destructive" :disabled="createKeyEntries.length <= 1" @click="removeEntry(idx)">
+                <Button variant="ghost" size="sm" class="h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-destructive" :disabled="creatingKey || createKeyEntries.length <= 1" @click="removeEntry(idx)">
                   <Trash2 class="h-3.5 w-3.5" />
                 </Button>
               </div>
@@ -1467,7 +1623,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           <!-- Raw value textarea (string, json, or raw mode for other types) -->
           <label v-if="createKeyType === 'string' || createKeyType === 'json' || createKeyRawMode" class="grid gap-1.5 text-xs font-medium">
             <span>{{ t(createKeyType === "set" || createKeyType === "zset" ? "redis.createMember" : "redis.createValue") }}</span>
-            <textarea v-model="createKeyValue" class="dbx-editor-font-family min-h-28 resize-y rounded-md border bg-background p-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" spellcheck="false" :placeholder="t('redis.createValuePlaceholder')" />
+            <textarea v-model="createKeyValue" class="dbx-editor-font-family min-h-28 resize-y rounded-md border bg-background p-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :disabled="creatingKey" spellcheck="false" :placeholder="t('redis.createValuePlaceholder')" />
           </label>
 
           <p v-if="createKeyError" class="text-xs text-destructive">{{ createKeyError }}</p>

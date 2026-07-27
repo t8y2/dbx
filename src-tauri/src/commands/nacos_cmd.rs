@@ -148,6 +148,15 @@ pub async fn nacos_update_instance(
 }
 
 #[tauri::command]
+pub async fn nacos_get_dashboard(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    query: dbx_core::nacos::NacosDashboardQuery,
+) -> Result<dbx_core::nacos::NacosDashboardSnapshot, String> {
+    dbx_core::nacos::service::nacos_get_dashboard_core(&state, &connection_id, query).await
+}
+
+#[tauri::command]
 pub async fn nacos_raw_request(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

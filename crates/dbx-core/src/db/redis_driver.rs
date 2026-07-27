@@ -2689,9 +2689,31 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     if ttl > 0 {
-        redis::cmd("EXPIRE").arg(key).arg(ttl).query_async::<()>(con).await.map_err(|e| e.to_string())
+        let applied =
+            redis::cmd("EXPIRE").arg(key).arg(ttl).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+        if applied == 1 {
+            Ok(())
+        } else {
+            Err("Redis key no longer exists; EXPIRE was not applied".to_string())
+        }
     } else {
+        // Redis treats PERSIST as idempotent: a zero reply also means the key
+        // was already persistent. Follow-up reads in the UI handle a key that
+        // disappeared concurrently without requiring an extra ACL permission.
         redis::cmd("PERSIST").arg(key).query_async::<()>(con).await.map_err(|e| e.to_string())
+    }
+}
+
+pub async fn set_expire_at<C>(con: &mut C, key: &[u8], expire_at: i64) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let applied =
+        redis::cmd("EXPIREAT").arg(key).arg(expire_at).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+    if applied == 1 {
+        Ok(())
+    } else {
+        Err("Redis key no longer exists; EXPIREAT was not applied".to_string())
     }
 }
 
@@ -3198,6 +3220,48 @@ mod tests {
         assert!(con.commands[0].contains("\r\nSET\r\n"));
         assert!(!con.commands[0].contains("\r\nKEEPTTL\r\n"));
         assert!(!con.commands[0].contains("\r\nEXPIRE\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_expire_at_uses_expireat_with_the_unix_timestamp() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+
+        super::set_expire_at(&mut con, b"session", 1_735_689_600).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nEXPIREAT\r\n"));
+        assert!(con.commands[0].contains("\r\n1735689600\r\n"));
+        assert_eq!(con.command_count("EVAL"), 0);
+    }
+
+    #[tokio::test]
+    async fn set_expire_at_reports_when_the_key_disappears_before_expiration_is_applied() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::set_expire_at(&mut con, b"session", 1_735_689_600).await.unwrap_err();
+
+        assert!(error.contains("EXPIREAT was not applied"));
+    }
+
+    #[tokio::test]
+    async fn set_ttl_reports_when_positive_expiration_is_not_applied() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::set_ttl(&mut con, b"session", 60).await.unwrap_err();
+
+        assert!(error.contains("EXPIRE was not applied"));
+    }
+
+    #[tokio::test]
+    async fn persist_is_idempotent_for_an_already_persistent_key() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        super::set_ttl(&mut con, b"session", 0).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(con.command_count("PERSIST"), 1);
+        assert_eq!(con.command_count("EXISTS"), 0);
+        assert_eq!(con.command_count("EVAL"), 0);
     }
 
     #[tokio::test]

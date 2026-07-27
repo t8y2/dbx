@@ -626,6 +626,10 @@ mod tests {
             Err("unused".to_string())
         }
 
+        async fn get_dashboard(&self, _: NacosDashboardQuery) -> Result<NacosDashboardSnapshot, String> {
+            Err("unused".to_string())
+        }
+
         async fn raw_request(&self, _: NacosRawRequest) -> Result<NacosRawResponse, String> {
             Err("unused".to_string())
         }

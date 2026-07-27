@@ -162,6 +162,15 @@ pub async fn nacos_update_instance_core(
     admin.update_instance(req).await
 }
 
+pub async fn nacos_get_dashboard_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosDashboardQuery,
+) -> Result<NacosDashboardSnapshot, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.get_dashboard(query).await
+}
+
 pub async fn nacos_raw_request_core(
     state: &AppState,
     conn_id: &str,

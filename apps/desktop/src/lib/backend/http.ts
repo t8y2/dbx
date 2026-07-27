@@ -166,6 +166,8 @@ import type {
   NacosInstanceInfo,
   NacosInstanceQuery,
   NacosInstanceUpdate,
+  NacosDashboardQuery,
+  NacosDashboardSnapshot,
   NacosNamespaceCreate,
   NacosNamespaceInfo,
   NacosNamespaceUpdate,
@@ -2012,6 +2014,10 @@ export async function redisSetTtl(connectionId: string, db: number, keyRaw: stri
   return post("/api/redis/set-ttl", { connectionId, db, keyRaw, ttl });
 }
 
+export async function redisSetExpireAt(connectionId: string, db: number, keyRaw: string, expireAt: number): Promise<void> {
+  return post("/api/redis/set-expire-at", { connectionId, db, keyRaw, expireAt });
+}
+
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
   return post("/api/redis/delete-keys", { connectionId, db, keyRaws });
 }
@@ -2250,6 +2256,10 @@ export async function nacosListInstances(connectionId: string, query: NacosInsta
 
 export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdate): Promise<void> {
   return post("/api/nacos/instances/update", { connectionId, req });
+}
+
+export async function nacosGetDashboard(connectionId: string, query: NacosDashboardQuery): Promise<NacosDashboardSnapshot> {
+  return post("/api/nacos/dashboard", { connectionId, query });
 }
 
 export async function nacosRawRequest(connectionId: string, req: NacosRawRequest): Promise<NacosRawResponse> {

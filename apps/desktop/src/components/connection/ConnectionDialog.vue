@@ -17,7 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, IdentifierCase, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
-import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
+import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
@@ -57,7 +57,7 @@ import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { normalizeNacosEndpoint } from "@/lib/nacos/nacosAdmin";
+import { nacosMetricsCandidates, normalizeNacosEndpoint, normalizeNacosMetricsUrl } from "@/lib/nacos/nacosAdmin";
 import {
   ArrowLeft,
   ArrowDown,
@@ -604,6 +604,8 @@ const nacosAuthKind = ref<NacosAuthKind>("none");
 const nacosUsername = ref("nacos");
 const nacosPassword = ref("");
 const nacosTlsSkipVerify = ref(false);
+const nacosMetricsMode = ref<NacosMetricsMode>("auto");
+const nacosMetricsUrl = ref("");
 const nacosPageSize = ref(20);
 const nacosPrimaryAddressLabel = computed(() => {
   if (nacosImplementation.value === "rnacos") return t("connection.nacosPrimaryAddressRNacos");
@@ -612,8 +614,7 @@ const nacosPrimaryAddressLabel = computed(() => {
   return t("connection.nacosPrimaryAddressAuto");
 });
 const nacosPrimaryAddressPlaceholder = computed(() => {
-  if (nacosImplementation.value === "rnacos" || nacosVersionMode.value === "v2") return "http://127.0.0.1:8848/nacos";
-  return "http://127.0.0.1:8080";
+  return "http://127.0.0.1:8848/nacos";
 });
 const nacosNormalizedPreview = computed(() => {
   if (!nacosServerAddr.value.trim()) return "";
@@ -630,7 +631,7 @@ const nacosNormalizedPreview = computed(() => {
 });
 const nacosEffectiveContextPath = computed(() => {
   if (!nacosServerAddr.value.trim()) {
-    return nacosContextPathCustomized.value ? nacosContextPath.value.trim() || "/" : nacosImplementation.value === "rnacos" || nacosVersionMode.value === "v2" ? "/nacos" : "/";
+    return nacosContextPathCustomized.value ? nacosContextPath.value.trim() || "/" : "/nacos";
   }
   try {
     const normalized = normalizeNacosEndpoint(nacosServerAddr.value, {
@@ -649,6 +650,28 @@ const nacosContextPathInput = computed({
     nacosContextPathCustomized.value = true;
     nacosContextPath.value = value;
   },
+});
+const nacosMetricsAutoPreview = computed(() => {
+  if (!nacosNormalizedPreview.value) return "";
+  try {
+    const normalized = normalizeNacosEndpoint(nacosServerAddr.value, {
+      implementation: nacosImplementation.value,
+      versionMode: nacosVersionMode.value,
+      contextPath: nacosContextPathCustomized.value ? nacosContextPath.value : undefined,
+    });
+    return nacosMetricsCandidates(normalized.serverAddr, normalized.contextPath, nacosImplementation.value).join(" · ");
+  } catch {
+    return "";
+  }
+});
+const nacosMetricsUrlError = computed(() => {
+  if (nacosMetricsMode.value !== "custom") return "";
+  try {
+    normalizeNacosMetricsUrl(nacosMetricsUrl.value);
+    return "";
+  } catch {
+    return t("connection.nacosMetricsUrlInvalid");
+  }
 });
 
 function resetNacosContextPathCustomization() {
@@ -1090,6 +1113,8 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   nacosConsoleUsername.value = consoleAuth.kind === "usernamePassword" ? consoleAuth.username : "";
   nacosConsolePassword.value = consoleAuth.kind === "usernamePassword" ? consoleAuth.password : "";
   nacosTlsSkipVerify.value = !!config?.tlsSkipVerify;
+  nacosMetricsMode.value = config?.metricsMode || "auto";
+  nacosMetricsUrl.value = config?.metricsUrl || "";
   nacosPageSize.value = Number(config?.pageSize) > 0 ? Number(config?.pageSize) : 20;
   const auth = (config?.auth || { kind: "none" }) as NacosAuthConfig;
   nacosAuthKind.value = auth.kind || "none";
@@ -1298,6 +1323,14 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
   }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
+  let metricsUrl: string | undefined;
+  if (nacosMetricsMode.value === "custom") {
+    try {
+      metricsUrl = normalizeNacosMetricsUrl(nacosMetricsUrl.value);
+    } catch {
+      throw new Error(t("connection.nacosMetricsUrlInvalid"));
+    }
+  }
   if (rnacosConsoleConfigured) {
     if (nacosConsoleAuthKind.value === "inherit") {
       if (nacosAuthKind.value !== "usernamePassword") throw new Error(t("connection.nacosConsoleAuthSeparateRequired"));
@@ -1321,6 +1354,8 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     rnacosConsoleAuth,
     auth: buildNacosAuth(),
     tlsSkipVerify: nacosTlsSkipVerify.value || undefined,
+    metricsMode: nacosMetricsMode.value,
+    metricsUrl,
     pageSize: Number(nacosPageSize.value) > 0 ? Number(nacosPageSize.value) : 20,
   };
 }
@@ -5311,6 +5346,30 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.nacosNamespace") }}</Label>
                     <Input v-model="nacosNamespace" class="col-span-3" placeholder="public" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosMetrics") }}</Label>
+                    <Select v-model="nacosMetricsMode">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">{{ t("connection.nacosMetricsAuto") }}</SelectItem>
+                        <SelectItem value="disabled">{{ t("connection.nacosMetricsDisabled") }}</SelectItem>
+                        <SelectItem value="custom">{{ t("connection.nacosMetricsCustom") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div v-if="nacosMetricsMode === 'auto' && nacosMetricsAutoPreview" class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 m-0 break-all text-xs leading-5 text-muted-foreground">{{ t("connection.nacosMetricsAutoHint", { addresses: nacosMetricsAutoPreview }) }}</p>
+                  </div>
+                  <div v-if="nacosMetricsMode === 'custom'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosMetricsUrl") }}</Label>
+                    <div class="col-span-3">
+                      <Input v-model="nacosMetricsUrl" :aria-invalid="!!nacosMetricsUrlError" :class="{ 'border-destructive focus-visible:ring-destructive': nacosMetricsUrlError }" placeholder="http://127.0.0.1:8818/nacos/actuator/prometheus" />
+                      <p v-if="nacosMetricsUrlError" class="mt-1 text-xs text-destructive">{{ nacosMetricsUrlError }}</p>
+                    </div>
                   </div>
                   <template v-if="nacosImplementation === 'rnacos'">
                     <div class="grid grid-cols-4 items-center gap-4">

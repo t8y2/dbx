@@ -111,6 +111,13 @@ pub(crate) struct InstanceUpdateReq {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DashboardReq {
+    connection_id: String,
+    query: dbx_core::nacos::NacosDashboardQuery,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RawReq {
     connection_id: String,
     req: dbx_core::nacos::NacosRawRequest,
@@ -320,6 +327,16 @@ pub async fn update_instance(
         .await
         .map_err(AppError::from)?;
     Ok(Json(()))
+}
+
+pub async fn get_dashboard(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<DashboardReq>,
+) -> Result<Json<dbx_core::nacos::NacosDashboardSnapshot>, AppError> {
+    let result = dbx_core::nacos::service::nacos_get_dashboard_core(&state.app, &req.connection_id, req.query)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn raw_request(

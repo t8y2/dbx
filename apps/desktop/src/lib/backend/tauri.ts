@@ -1731,6 +1731,10 @@ export async function redisSetTtl(connectionId: string, db: number, keyRaw: stri
   return invoke("redis_set_ttl", { connectionId, db, keyRaw, ttl });
 }
 
+export async function redisSetExpireAt(connectionId: string, db: number, keyRaw: string, expireAt: number): Promise<void> {
+  return invoke("redis_set_expire_at", { connectionId, db, keyRaw, expireAt });
+}
+
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
   return invoke("redis_delete_keys", { connectionId, db, keyRaws });
 }

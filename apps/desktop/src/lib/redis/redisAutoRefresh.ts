@@ -41,3 +41,16 @@ export function shouldStopAutoRefresh(ttl: number): boolean {
 export function computeDisplayTtl(autoRefreshEnabled: boolean, countdownTtl: number, serverTtl: number): number {
   return autoRefreshEnabled ? Math.max(countdownTtl, 0) : serverTtl;
 }
+
+/**
+ * Choose the TTL used to initialize an expiry edit.
+ *
+ * A zero countdown can be a transient state while the final background refresh
+ * is still in flight. Do not turn a last-confirmed positive Redis TTL into
+ * PERSIST during that window.
+ */
+export function computeTtlForExpiryEdit(autoRefreshEnabled: boolean, countdownTtl: number, serverTtl: number): number {
+  if (serverTtl <= 0) return serverTtl;
+  const displayedTtl = computeDisplayTtl(autoRefreshEnabled, countdownTtl, serverTtl);
+  return displayedTtl > 0 ? displayedTtl : serverTtl;
+}

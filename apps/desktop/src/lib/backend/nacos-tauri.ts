@@ -17,6 +17,8 @@ import type {
   NacosConfigRollbackRequest,
   NacosConfigUpsert,
   NacosConnectionInfo,
+  NacosDashboardQuery,
+  NacosDashboardSnapshot,
   NacosRNacosConsoleCaptcha,
   NacosInstanceInfo,
   NacosInstanceQuery,
@@ -125,6 +127,10 @@ export async function nacosListInstances(connectionId: string, query: NacosInsta
 
 export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdate): Promise<void> {
   return invoke("nacos_update_instance", { connectionId, req });
+}
+
+export async function nacosGetDashboard(connectionId: string, query: NacosDashboardQuery): Promise<NacosDashboardSnapshot> {
+  return invoke("nacos_get_dashboard", { connectionId, query });
 }
 
 export async function nacosRawRequest(connectionId: string, req: NacosRawRequest): Promise<NacosRawResponse> {

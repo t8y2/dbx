@@ -1481,7 +1481,7 @@ pub async fn get_table_comment_core(
                     && !db_config.as_ref().is_some_and(is_doris_family_config)
                     && !db_config.as_ref().is_some_and(is_manticoresearch_config) =>
             {
-                db::mysql::get_table_comment(p, schema, table).await
+                db::mysql::get_table_comment(p, database, table).await
             }
             PoolKind::Postgres(p) if !db_config.as_ref().is_some_and(is_questdb_config) => {
                 db::postgres::get_table_comment(p, schema, table).await

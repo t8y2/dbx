@@ -24,7 +24,7 @@ const props = defineProps<{
   items: ContextMenuItemsSource;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   close: [];
 }>();
 
@@ -52,9 +52,10 @@ function close() {
   subAnchorRect = null;
   activeItems.value = [];
   show.value = false;
+  emit("close");
 }
 
-defineExpose({ close });
+defineExpose({ close, menuRef, subRef });
 
 function onPointerDownOutside(e: PointerEvent) {
   // Only respond to primary (left) button presses. This avoids a macOS

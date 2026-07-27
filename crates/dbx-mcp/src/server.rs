@@ -793,7 +793,18 @@ fn mcp_permissions(
     dbx_core::agent_tools::AgentSqlPermissions {
         allow_writes: !policy.read_only && !connection.read_only,
         allow_dangerous: !policy.read_only && !connection.read_only && policy.allow_dangerous_sql,
+        confirmed_write_sql: mcp_confirmed_write_sql_from_env(),
     }
+}
+
+/// Read the DBX_MCP_CONFIRMED_WRITE_SQL env var (set by the CLI agent when the
+/// user confirmed a specific write SQL). Returns None when the var is unset or
+/// empty, so desktop-embedded MCP contexts (which don't set this var) continue
+/// to work without a confirmed-SQL binding.
+fn mcp_confirmed_write_sql_from_env() -> Option<String> {
+    let v = std::env::var("DBX_MCP_CONFIRMED_WRITE_SQL").ok()?;
+    let trimmed = v.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.

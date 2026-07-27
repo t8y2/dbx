@@ -636,7 +636,7 @@ impl DbxBackend for WebBackend {
         database: &str,
         tool_name: &str,
         arguments: Value,
-        _permissions: AgentSqlPermissions,
+        permissions: AgentSqlPermissions,
     ) -> ToolResult {
         let result = async {
             if tool_name != "execute_query" {
@@ -649,6 +649,32 @@ impl DbxBackend for WebBackend {
             }
             self.ensure_connected(connection).await?;
             let sql = arguments.get("sql").and_then(Value::as_str).ok_or("Missing SQL query")?;
+
+            // Replicate the confirmed-SQL binding check here because the
+            // /api/query/execute endpoint performs its own risk checks but
+            // does NOT receive the confirmed_write_sql binding from the MCP
+            // layer.  Without this, a CLI/MCP agent could execute a different
+            // write/DDL statement after a single user confirmation.
+            let risk = dbx_core::sql_risk::classify_sql_risk_for_database(
+                sql,
+                connection.db_type,
+            )
+            .map_err(|error| format!("SQL risk classification failed: {error}"))?;
+            if risk != dbx_core::sql_risk::SqlRisk::ReadOnly {
+                if let Some(ref confirmed) = permissions.confirmed_write_sql {
+                    let normalized = agent_tools::normalize_sql_for_confirmation(sql);
+                    let normalized_confirmed = agent_tools::normalize_sql_for_confirmation(confirmed);
+                    if normalized != normalized_confirmed {
+                        return Err(format!(
+                            "Blocked: the executed SQL does not match the user-confirmed SQL.\n\
+                             Confirmed: {}\n\
+                             Attempted: {}",
+                            confirmed, sql,
+                        ));
+                    }
+                }
+            }
+
             let max_rows = arguments.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
             let response = self
                 .request(

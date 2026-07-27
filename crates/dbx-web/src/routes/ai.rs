@@ -86,6 +86,9 @@ pub struct AiAgentStreamRequest {
     pub mode: String,
     #[serde(default)]
     pub allow_write_sql: bool,
+    /// When allow_write_sql is true, the specific SQL the user confirmed.
+    #[serde(default)]
+    pub confirmed_write_sql: Option<String>,
 }
 
 fn default_agent_mode() -> String {
@@ -336,6 +339,12 @@ pub async fn ai_agent_stream(
         log::warn!("Failed to load max_agent_turns setting, using default: {err}");
         dbx_core::agent_loop::DEFAULT_MAX_AGENT_TURNS
     });
+    // Writes are only allowed when a specific SQL statement was confirmed —
+    // an empty confirmed_write_sql is treated as "no confirmation" so the
+    // agent cannot execute arbitrary write/DDL statements.
+    let write_sql_confirmed = !production_database
+        && body.allow_write_sql
+        && body.confirmed_write_sql.as_ref().is_some_and(|s| !s.trim().is_empty());
     let agent_ctx = AgentLoopContext {
         state: state.app.clone(),
         connection_id: body.connection_id,
@@ -343,8 +352,9 @@ pub async fn ai_agent_stream(
         db_type: parsed_db_type,
         cli_mcp_server_command: None,
         sql_permissions: dbx_core::agent_tools::AgentSqlPermissions {
-            allow_writes: !production_database && body.allow_write_sql,
-            allow_dangerous: !production_database && body.allow_write_sql,
+            allow_writes: write_sql_confirmed,
+            allow_dangerous: write_sql_confirmed,
+            confirmed_write_sql: if write_sql_confirmed { body.confirmed_write_sql.clone() } else { None },
         },
         max_agent_turns,
     };

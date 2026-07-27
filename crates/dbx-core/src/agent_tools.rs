@@ -27,10 +27,14 @@ const BROWSE_COLLECTION_LIMIT: usize = 20;
 /// Absolute maximum rows any query tool may request.
 const MAX_ALLOWED_ROWS: usize = 100;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentSqlPermissions {
     pub allow_writes: bool,
     pub allow_dangerous: bool,
+    /// When present, write/DDL execute_query calls must match this SQL
+    /// (after trimming only surrounding whitespace). Set by the frontend
+    /// when the user confirms a specific write-SQL proposal.
+    pub confirmed_write_sql: Option<String>,
 }
 
 fn sql_risk_allowed(risk: SqlRisk, permissions: AgentSqlPermissions) -> bool {
@@ -434,6 +438,36 @@ async fn execute_get_columns(
 }
 
 /// Execute a read-only SQL query via the execute_query tool.
+
+/// Normalize a SQL string for confirmation comparison.
+///
+/// Confirmation is intentionally fail-closed: only surrounding whitespace is
+/// ignored. SQL case, internal whitespace, comments, literals, and quoted
+/// identifiers can all affect execution semantics across supported dialects.
+pub fn normalize_sql_for_confirmation(sql: &str) -> String {
+    sql.trim().to_string()
+}
+
+fn truncate_sql_for_error(sql: &str) -> String {
+    let s = sql.trim();
+    let char_count = s.chars().count();
+    if char_count <= 120 {
+        s.to_string()
+    } else {
+        format!("{}...", s.chars().take(117).collect::<String>())
+    }
+}
+
+/// Check whether `executed_sql` matches the user-confirmed write SQL. Returns
+/// `true` when no confirmation is required (confirmed is `None`) or when the
+/// trimmed forms match.
+fn sql_matches_confirmed_write(executed_sql: &str, confirmed: &Option<String>) -> bool {
+    match confirmed {
+        None => true,
+        Some(confirmed) => normalize_sql_for_confirmation(executed_sql) == normalize_sql_for_confirmation(confirmed),
+    }
+}
+
 async fn execute_execute_query(
     tool_call: &ToolCall,
     state: &Arc<AppState>,
@@ -463,7 +497,7 @@ async fn execute_execute_query(
             return Err("Blocked: AI agents cannot execute writes or DDL on a production database. Return the SQL for the user to review and execute manually in DBX.".to_string());
         }
     }
-    if !sql_risk_allowed(risk, sql_permissions) {
+    if !sql_risk_allowed(risk, sql_permissions.clone()) {
         if risk == SqlRisk::Transaction {
             return Err("Blocked: transaction control statements are not available to the AI agent.".to_string());
         }
@@ -471,6 +505,21 @@ async fn execute_execute_query(
             "Blocked: {} statement detected. Ask the user to confirm the proposed database change before executing it.",
             risk
         ));
+    }
+
+    // When the user confirmed a specific write SQL, the agent must
+    // execute only that SQL — not an arbitrary different statement.
+    if risk != SqlRisk::ReadOnly {
+        if !sql_matches_confirmed_write(sql, &sql_permissions.confirmed_write_sql) {
+            let confirmed = sql_permissions.confirmed_write_sql.as_deref().unwrap_or("");
+            return Err(format!(
+                "Blocked: the executed SQL does not match the user-confirmed SQL.\n\
+                 Confirmed: {}\n\
+                 Attempted: {}",
+                truncate_sql_for_error(confirmed),
+                truncate_sql_for_error(sql),
+            ));
+        }
     }
 
     // Execute query using existing infrastructure
@@ -838,7 +887,10 @@ mod tests {
 
     #[test]
     fn confirmed_sql_permissions_update_execute_query_contract() {
-        let tools = all_tools(DatabaseType::Mysql, AgentSqlPermissions { allow_writes: true, allow_dangerous: true });
+        let tools = all_tools(
+            DatabaseType::Mysql,
+            AgentSqlPermissions { allow_writes: true, allow_dangerous: true, confirmed_write_sql: None },
+        );
         let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
 
         assert!(execute_query.description.contains("explicitly confirmed"));
@@ -849,10 +901,13 @@ mod tests {
     fn sql_permissions_keep_writes_blocked_until_confirmation() {
         assert!(!sql_risk_allowed(SqlRisk::Write, AgentSqlPermissions::default()));
         assert!(!sql_risk_allowed(SqlRisk::Ddl, AgentSqlPermissions::default()));
-        assert!(sql_risk_allowed(SqlRisk::Ddl, AgentSqlPermissions { allow_writes: true, allow_dangerous: true }));
+        assert!(sql_risk_allowed(
+            SqlRisk::Ddl,
+            AgentSqlPermissions { allow_writes: true, allow_dangerous: true, confirmed_write_sql: None }
+        ));
         assert!(!sql_risk_allowed(
             SqlRisk::Transaction,
-            AgentSqlPermissions { allow_writes: true, allow_dangerous: true }
+            AgentSqlPermissions { allow_writes: true, allow_dangerous: true, confirmed_write_sql: None }
         ));
     }
 
@@ -945,5 +1000,97 @@ mod tests {
     fn build_browse_query_rejects_unsupported_type() {
         let result = build_browse_query(&DatabaseType::Postgres, "articles", "", 10);
         assert!(result.is_err());
+    }
+
+    // ── SQL confirmation binding tests ──────────────────────────────────────
+
+    #[test]
+    fn normalize_sql_only_trims_outer_whitespace() {
+        assert_eq!(normalize_sql_for_confirmation("  CREATE TABLE users (id INT);\n"), "CREATE TABLE users (id INT);");
+    }
+
+    #[test]
+    fn confirmed_sql_binding_rejects_quoted_identifier_case_change() {
+        let confirmed = Some("DROP TABLE \"Users\"".to_string());
+        assert!(!sql_matches_confirmed_write("DROP TABLE \"users\"", &confirmed));
+    }
+
+    #[test]
+    fn confirmed_sql_binding_rejects_keyword_case_or_reformatting() {
+        let confirmed = Some("DELETE FROM AuditLog WHERE id = 1".to_string());
+        assert!(!sql_matches_confirmed_write("delete from AuditLog where id = 1", &confirmed));
+        assert!(!sql_matches_confirmed_write("DELETE FROM AuditLog\nWHERE id = 1", &confirmed));
+    }
+
+    #[test]
+    fn confirmed_sql_binding_rejects_line_comment_newline_change() {
+        let confirmed = Some("DELETE FROM users -- only one record\nWHERE id = 1".to_string());
+        assert!(!sql_matches_confirmed_write("DELETE FROM users -- only one record WHERE id = 1", &confirmed));
+    }
+
+    #[test]
+    fn sql_matches_when_no_confirmation_required() {
+        assert!(sql_matches_confirmed_write("DELETE FROM users WHERE id = 1", &None));
+    }
+
+    #[test]
+    fn sql_matches_when_only_outer_whitespace_differs() {
+        // The confirmed statement itself must be unchanged; only surrounding
+        // whitespace is ignored before comparison.
+        let confirmed = Some("CREATE TABLE users (id INT)".to_string());
+        assert!(sql_matches_confirmed_write("  CREATE TABLE users (id INT)  ", &confirmed,));
+    }
+
+    #[test]
+    fn sql_mismatch_rejected_when_executed_differs_from_confirmed() {
+        let confirmed = Some("CREATE TABLE users (id INT)".to_string());
+        assert!(!sql_matches_confirmed_write("DROP TABLE users", &confirmed,));
+    }
+
+    #[test]
+    fn confirmed_sql_binding_rejects_same_table_different_statement() {
+        let confirmed = Some("INSERT INTO users (id, name) VALUES (1, 'test')".to_string());
+        assert!(!sql_matches_confirmed_write("DELETE FROM users WHERE id = 1", &confirmed,));
+    }
+
+    #[test]
+    fn confirmed_sql_binding_rejects_different_case_in_data_values() {
+        // Confirmed VALUES ('Alice') must NOT match executed VALUES ('alice').
+        // String-literal data values are preserved verbatim.
+        let confirmed = Some("INSERT INTO users (name) VALUES ('Alice')".to_string());
+        assert!(!sql_matches_confirmed_write("INSERT INTO users (name) VALUES ('alice')", &confirmed,));
+    }
+
+    #[test]
+    fn confirmed_sql_binding_rejects_different_whitespace_in_data_values() {
+        // Confirmed VALUES ('a b') must NOT match executed VALUES ('a  b').
+        let confirmed = Some("INSERT INTO t (c) VALUES ('a b')".to_string());
+        assert!(!sql_matches_confirmed_write("INSERT INTO t (c) VALUES ('a  b')", &confirmed,));
+    }
+
+    #[test]
+    fn confirmed_sql_default_is_none() {
+        let perms = AgentSqlPermissions::default();
+        assert_eq!(perms.confirmed_write_sql, None);
+    }
+
+    #[test]
+    fn confirmed_sql_preserved_through_permission_construction() {
+        let perms = AgentSqlPermissions {
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("CREATE TABLE t (c INT)".to_string()),
+        };
+        assert_eq!(perms.confirmed_write_sql.as_deref(), Some("CREATE TABLE t (c INT)"));
+    }
+
+    #[test]
+    fn write_allowed_when_confirmed_sql_is_none_and_writes_enabled() {
+        // confirmed_write_sql=None + allow_writes=true: write SQL is allowed
+        // (the check passes because sql_matches_confirmed_write returns true
+        // when no confirmation is required). This documents the current
+        // contract — the frontend is responsible for only sending
+        // allow_write_sql=true when a specific SQL was confirmed.
+        assert!(sql_matches_confirmed_write("INSERT INTO t VALUES (1)", &None));
     }
 }

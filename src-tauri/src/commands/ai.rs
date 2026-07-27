@@ -87,6 +87,7 @@ pub async fn ai_agent_stream(
     db_type: String,
     mode: Option<String>,
     allow_write_sql: Option<bool>,
+    confirmed_write_sql: Option<String>,
 ) -> Result<String, String> {
     let request = resolve_cli_provider_request(request);
 
@@ -110,16 +111,23 @@ pub async fn ai_agent_stream(
         log::warn!("Failed to load max_agent_turns setting, using default: {err}");
         dbx_core::agent_loop::DEFAULT_MAX_AGENT_TURNS
     });
+    // Explicit confirmation grants write access only to this agent run, never to
+    // production.  Writes are only allowed when a specific SQL statement was
+    // confirmed — an empty confirmed_write_sql is treated as "no confirmation"
+    // so the agent cannot execute arbitrary write/DDL statements.
+    let write_sql_confirmed = !production_database
+        && allow_write_sql.unwrap_or(false)
+        && confirmed_write_sql.as_ref().is_some_and(|s| !s.trim().is_empty());
     let agent_ctx = AgentLoopContext {
         state: state.inner().clone(),
         connection_id,
         database,
         db_type: parsed_db_type,
         cli_mcp_server_command,
-        // Explicit confirmation grants write access only to this agent run, never to production.
         sql_permissions: dbx_core::agent_tools::AgentSqlPermissions {
-            allow_writes: !production_database && allow_write_sql.unwrap_or(false),
-            allow_dangerous: !production_database && allow_write_sql.unwrap_or(false),
+            allow_writes: write_sql_confirmed,
+            allow_dangerous: write_sql_confirmed,
+            confirmed_write_sql: if write_sql_confirmed { confirmed_write_sql } else { None },
         },
         max_agent_turns,
     };

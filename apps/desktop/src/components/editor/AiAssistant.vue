@@ -79,7 +79,7 @@ import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } fr
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
-import { looksLikeActionProposal, containsChinese } from "@/lib/ai/aiProposalDetect";
+import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 
@@ -566,19 +566,17 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
 });
 
 let allowWriteSqlForNextRun = false;
+/** The specific write SQL embedded in the confirmed proposal, for binding to the agent run. */
+let confirmedWriteSqlText: string | undefined = undefined;
 
 const productionContext = computed(() => productionContextForDatabase(props.connection, props.tab?.database));
-
-function proposalContainsWriteSql(content: string) {
-  return /\b(insert|update|delete|replace|merge|create|alter|drop|truncate|rename|grant|revoke)\b/i.test(content);
-}
 
 function sendProposalReply(positive: boolean) {
   // Disable while a stream is in flight or no proposal is currently active.
   if (isGenerating.value) return;
   const target = proposalConfirmMessage.value;
   if (!target) return;
-  if (positive && productionContext.value.active && proposalContainsWriteSql(target.content)) {
+  if (positive && productionContext.value.active && looksLikeWriteSqlProposal(target.content)) {
     const sql = extractFirstSqlCodeBlock(target.content);
     if (sql) emit("replaceSql", sql);
     toast(t("production.aiReviewRequired"), 5000);
@@ -588,7 +586,15 @@ function sendProposalReply(positive: boolean) {
   const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
   const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
   prompt.value = isZh ? replyZh : replyEn;
-  allowWriteSqlForNextRun = positive && assistantMode.value === "agent" && proposalContainsWriteSql(target.content);
+  if (positive && assistantMode.value === "agent" && looksLikeWriteSqlProposal(target.content)) {
+    confirmedWriteSqlText = extractFirstSqlCodeBlock(target.content);
+    if (confirmedWriteSqlText) {
+      allowWriteSqlForNextRun = true;
+    }
+    // When no SQL code block is found in the proposal, treat the
+    // confirmation as rejected — we cannot bind the agent to a
+    // specific SQL statement, so we must not grant blanket write access.
+  }
   // Use the existing send pipeline so the message is added to history, persisted, etc.
   send();
 }
@@ -1503,9 +1509,41 @@ async function send() {
 
   const requestedAction = activeAction.value;
   const requestedMode = assistantMode.value;
+  // Detect user-typed short confirmation (e.g. "可以"/"go ahead") as an alternative
+  // path to the proposal ✅ button. Delegates to the shared pure function so the
+  // component and its unit tests share the same gating logic.
+  if (!allowWriteSqlForNextRun) {
+    allowWriteSqlForNextRun = shouldGrantWriteSqlOnShortAffirmative({
+      mode: requestedMode,
+      alreadyGranted: false,
+      isProduction: productionContext.value.active,
+      userText: text,
+      // Pass the history BEFORE the just-pushed user message so the function skips it.
+      messages: messages.value.slice(0, -1),
+    });
+    if (allowWriteSqlForNextRun) {
+      // Extract the confirmed SQL from the assistant's proposal message.
+      // If no SQL code block is found, treat the confirmation as rejected —
+      // we cannot bind the agent to a specific SQL statement.
+      for (let i = messages.value.length - 2; i >= 0; i--) {
+        const msg = messages.value[i];
+        if (msg.kind === "contextSummary") continue;
+        if (msg.role === "assistant" && msg.content) {
+          confirmedWriteSqlText = extractFirstSqlCodeBlock(msg.content);
+          break;
+        }
+        if (msg.role === "user") break;
+      }
+      if (!confirmedWriteSqlText) {
+        allowWriteSqlForNextRun = false;
+      }
+    }
+  }
   // Agent confirmation cannot grant autonomous writes while the active database is production.
   const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
+  const confirmedWriteSql = allowWriteSql ? confirmedWriteSqlText : undefined;
   allowWriteSqlForNextRun = false;
+  confirmedWriteSqlText = undefined;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
@@ -1527,6 +1565,7 @@ async function send() {
         instruction: modelInstruction,
         context,
         allowWriteSql,
+        confirmedWriteSql,
       },
       history,
       (event: AgentEvent) => {

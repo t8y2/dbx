@@ -583,6 +583,10 @@ export interface QueryResult {
   truncated?: boolean;
   session_id?: string | null;
   has_more?: boolean;
+  /** For Elasticsearch REST search results parsed into a _source table,
+   *  this carries the raw HTTP response body so the UI can toggle between
+   *  the tabular view and the original JSON. */
+  elasticsearch_raw_body?: string;
   sourceLabel?: string;
   sourceStatement?: string;
   /** Absolute offsets in the editor document at execution time. */

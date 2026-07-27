@@ -2294,6 +2294,7 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
+      // Reload: list indices.
       await loadElasticsearchIndices(connectionId);
     } else if (config.db_type === "milvus") {
       await loadMilvusDatabases(connectionId);
@@ -3076,6 +3077,25 @@ export const useConnectionStore = defineStore("connection", () => {
       throw e;
     } finally {
       node.isLoading = false;
+    }
+  }
+
+  /**
+   * Connect an Elasticsearch root without expanding or listing indices.
+   * Used when first opening a connection (test/connect) — connectivity uses
+   * GET / or the configured check path via ensureConnected/test_connection.
+   * Expanding the node lists indices via loadElasticsearchIndices.
+   */
+  async function openElasticsearchConnectionTree(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    // Only ensure connectivity (GET / or configured path); do not expand or list indices.
+    try {
+      await ensureConnected(connectionId);
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
     }
   }
 
@@ -6135,6 +6155,7 @@ export const useConnectionStore = defineStore("connection", () => {
     updateRedisDbKeyStats,
     loadMongoDatabases,
     loadMilvusDatabases,
+    openElasticsearchConnectionTree,
     loadElasticsearchIndices,
     loadVectorCollections,
     loadMongoCollections,

@@ -44,6 +44,8 @@ pub struct EsClient {
     fallback_base_urls: Vec<String>,
     auth: Option<(String, String)>,
     transport_mode: ElasticsearchTransportMode,
+    /// GET path used for connect / health / test (default "/").
+    connectivity_check_path: String,
 }
 
 impl EsClient {
@@ -54,7 +56,15 @@ impl EsClient {
         accept_invalid_certs: bool,
         timeout: Duration,
     ) -> Self {
-        Self::new_with_mode(url, username, password, accept_invalid_certs, timeout, ElasticsearchTransportMode::Direct)
+        Self::new_with_mode(
+            url,
+            username,
+            password,
+            accept_invalid_certs,
+            timeout,
+            ElasticsearchTransportMode::Direct,
+            "/".to_string(),
+        )
     }
 
     fn new_with_mode(
@@ -64,6 +74,7 @@ impl EsClient {
         accept_invalid_certs: bool,
         timeout: Duration,
         transport_mode: ElasticsearchTransportMode,
+        connectivity_check_path: String,
     ) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = match (username, password) {
@@ -73,7 +84,7 @@ impl EsClient {
         let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
         let http = builder.build().unwrap_or_else(|_| HttpClient::new());
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self { http, base_url, fallback_base_urls, auth, transport_mode }
+        Self { http, base_url, fallback_base_urls, auth, transport_mode, connectivity_check_path }
     }
 
     pub fn from_config(
@@ -92,6 +103,7 @@ impl EsClient {
             ElasticsearchTransportMode::Direct
         };
         let base_url = format!("{}{}", url.trim_end_matches('/'), kibana_base_path.as_deref().unwrap_or(""));
+        let connectivity_check_path = elasticsearch_connectivity_check_path(external_config);
         Self::new_with_mode(
             &base_url,
             username,
@@ -99,6 +111,7 @@ impl EsClient {
             elasticsearch_accept_invalid_certs(tls_enabled, url_params),
             timeout,
             transport_mode,
+            connectivity_check_path,
         )
     }
 
@@ -162,6 +175,7 @@ impl Clone for EsClient {
             fallback_base_urls: self.fallback_base_urls.clone(),
             auth: self.auth.clone(),
             transport_mode: self.transport_mode,
+            connectivity_check_path: self.connectivity_check_path.clone(),
         }
     }
 }
@@ -177,17 +191,52 @@ fn elasticsearch_kibana_base_path(external_config: Option<&Value>) -> Option<Str
     Some(if base_path.is_empty() { String::new() } else { format!("/{base_path}") })
 }
 
+/// Path used for connectivity checks (test / open / health). Defaults to `/`.
+/// Accepts bare paths (`my-index/_search`) or a single-line `GET path` paste.
+pub fn elasticsearch_connectivity_check_path(external_config: Option<&Value>) -> String {
+    let raw = external_config
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("connectivityCheckPath"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if raw.is_empty() {
+        return "/".to_string();
+    }
+
+    // First line only — ignore accidental body lines from console paste.
+    let line = raw.lines().next().unwrap_or("").trim();
+    let without_method = line
+        .strip_prefix("GET ")
+        .or_else(|| line.strip_prefix("get "))
+        .or_else(|| line.strip_prefix("Get "))
+        .unwrap_or(line)
+        .trim();
+    if without_method.is_empty() || without_method == "/" {
+        return "/".to_string();
+    }
+
+    if without_method.starts_with('/') {
+        without_method.to_string()
+    } else {
+        format!("/{without_method}")
+    }
+}
+
 pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result<(), String> {
     let mut errors = Vec::new();
     let urls = std::iter::once(client.base_url.clone()).chain(client.fallback_base_urls.clone());
+    let check_path = client.connectivity_check_path.clone();
 
     for base_url in urls {
         client.base_url = base_url.clone();
+        let path = check_path.clone();
         let resp = with_connection_timeout("Elasticsearch", timeout, async {
-            client.get("/").send().await.map_err(|e| {
+            client.get(&path).send().await.map_err(|e| {
                 format!(
-                    "Elasticsearch connection failed for {}: {}",
+                    "Elasticsearch connection failed for {} ({}): {}",
                     redact_elasticsearch_url(&base_url),
+                    path,
                     format_reqwest_error(&e)
                 )
             })
@@ -205,7 +254,7 @@ pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result
         let status = client.response_status(&resp);
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Elasticsearch error ({status}): {body}"));
+            return Err(format!("Elasticsearch error ({status}) for {check_path}: {body}"));
         }
         return Ok(());
     }
@@ -1186,6 +1235,7 @@ fn parse_elasticsearch_response(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             })
         } else {
             Ok(json_response_result(status, &body, start))
@@ -1251,6 +1301,7 @@ fn parse_elasticsearch_response(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     } else {
         Ok(json_response_result(status, &body, start))
@@ -1277,6 +1328,7 @@ fn raw_json_response_result(
         truncated: false,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 
@@ -1314,6 +1366,7 @@ fn parse_elasticsearch_rest_response(
         truncated: false,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -1732,6 +1785,7 @@ fn parse_sql_response(body: &serde_json::Value, start: std::time::Instant) -> Op
         truncated: false,
         session_id: body.get("cursor").and_then(|cursor| cursor.as_str()).map(str::to_string),
         has_more: body.get("cursor").and_then(|cursor| cursor.as_str()).is_some(),
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -1958,6 +2012,73 @@ mod tests {
 
         assert_eq!(client.base_url, "https://localhost:9200");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:9200"]);
+        assert_eq!(client.connectivity_check_path, "/");
+    }
+
+    #[test]
+    fn connectivity_check_path_normalizes_get_path_and_defaults() {
+        assert_eq!(super::elasticsearch_connectivity_check_path(None), "/");
+        assert_eq!(super::elasticsearch_connectivity_check_path(Some(&json!({ "connectivityCheckPath": "" }))), "/");
+        assert_eq!(
+            super::elasticsearch_connectivity_check_path(Some(&json!({
+                "connectivityCheckPath": "GET pro-jmsau-nwm-applog-*/_search"
+            }))),
+            "/pro-jmsau-nwm-applog-*/_search"
+        );
+        assert_eq!(
+            super::elasticsearch_connectivity_check_path(Some(&json!({
+                "connectivityCheckPath": "my-index/_search\n{\"query\":{\"match_all\":{}}}"
+            }))),
+            "/my-index/_search"
+        );
+
+        let client = EsClient::from_config(
+            "https://localhost:5601/",
+            None,
+            None,
+            false,
+            None,
+            Some(&json!({
+                "mode": "kibana",
+                "connectivityCheckPath": "GET pro-logs-*/_search"
+            })),
+            Duration::from_secs(1),
+        );
+        assert_eq!(client.connectivity_check_path, "/pro-logs-*/_search");
+    }
+
+    #[tokio::test]
+    async fn test_connection_uses_configured_connectivity_check_path() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /pro-logs-*/_search "), "unexpected request: {request}");
+            let body = r#"{"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut client = EsClient::from_config(
+            &format!("http://{addr}"),
+            None,
+            None,
+            false,
+            None,
+            Some(&json!({ "connectivityCheckPath": "/pro-logs-*/_search" })),
+            Duration::from_secs(2),
+        );
+        super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
+        server.await.unwrap();
     }
 
     #[test]

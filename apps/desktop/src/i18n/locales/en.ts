@@ -222,6 +222,8 @@ export default {
     elasticsearchKibanaProxyMode: "Kibana Proxy",
     elasticsearchKibanaHost: "Kibana Host",
     elasticsearchKibanaBasePath: "Base Path",
+    elasticsearchConnectivityCheckPath: "Connectivity Path",
+    elasticsearchConnectivityCheckPathPlaceholder: "/ or /my-index/_search",
     version: "Version",
     driverInstallHintPrefix: "Install the required driver from ",
     driverInstallHintSuffix: " in the top toolbar before connecting.",

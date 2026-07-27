@@ -377,6 +377,7 @@ async fn fetch_table_export_batch(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 

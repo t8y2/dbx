@@ -618,6 +618,8 @@ export default withEnglishFallback({
     elasticsearchKibanaProxyMode: "Kibana プロキシ",
     elasticsearchKibanaHost: "Kibana ホスト",
     elasticsearchKibanaBasePath: "ベースパス",
+    elasticsearchConnectivityCheckPath: "接続確認パス",
+    elasticsearchConnectivityCheckPathPlaceholder: "/ または /my-index/_search",
     mqSystemRocketMq: "Apache RocketMQ",
     rocketmqNamesrvAddr: "NameServer アドレス",
     rocketmqNamesrvAddrPlaceholder: "127.0.0.1:9876",

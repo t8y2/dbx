@@ -3352,6 +3352,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let tables = presto_like_tables_from_query_result(&result);
@@ -3396,6 +3397,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let columns = presto_like_columns_from_query_result(&result);
@@ -3682,6 +3684,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         assert_eq!(oracle_table_comment_from_query_result(result).unwrap().as_deref(), Some("Customer table"));
@@ -3696,6 +3699,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         assert_eq!(oracle_table_comment_from_query_result(empty).unwrap(), None);
@@ -3728,6 +3732,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let comments = oracle_table_comments_from_query_result(result);
@@ -3847,6 +3852,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let columns = oracle_columns_from_query_result(result);
@@ -3948,6 +3954,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let stats = oracle_object_statistics_from_query_result(result);

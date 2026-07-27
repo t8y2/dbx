@@ -350,6 +350,7 @@ fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         },
         messages,
     ))
@@ -394,6 +395,7 @@ async fn collect_first_result_limited(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -836,6 +838,7 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
             truncated: result.truncated,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 }
@@ -2011,6 +2014,7 @@ pub async fn execute_query_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         ))
@@ -2028,6 +2032,7 @@ pub async fn execute_query_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         ))
@@ -2058,6 +2063,7 @@ pub async fn execute_batch_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         )]);
@@ -2118,6 +2124,7 @@ pub async fn execute_simple_batch_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 
@@ -2327,6 +2334,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
         let result = query_result_with_server_messages(empty, vec!["DBCC execution completed".to_string()]);
         assert_eq!(result.columns, vec!["Message"]);
@@ -2342,6 +2350,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
         let result = query_result_with_server_messages(select, vec!["informational".to_string()]);
         assert_eq!(result.columns, vec!["id"]);
@@ -3016,6 +3025,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         strip_dbx_sqlserver_row_number_column(&mut result, sql);

@@ -224,6 +224,8 @@ export default withEnglishFallback({
     elasticsearchKibanaProxyMode: "Kibana 代理",
     elasticsearchKibanaHost: "Kibana 主机",
     elasticsearchKibanaBasePath: "基础路径",
+    elasticsearchConnectivityCheckPath: "连通性检查路径",
+    elasticsearchConnectivityCheckPathPlaceholder: "/ 或 /my-index/_search",
     version: "版本",
     driverInstallHintPrefix: "需要在顶部导航栏「",
     driverInstallHintSuffix: "」中安装对应的驱动才能连接。",

@@ -1780,8 +1780,8 @@ fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
         } else if key.eq_ignore_ascii_case("host")
             || key.eq_ignore_ascii_case("hostaddr")
             || key.eq_ignore_ascii_case("port")
+            || key.eq_ignore_ascii_case("stringtype")
         {
-        } else if key.eq_ignore_ascii_case("stringtype") {
         } else if key.eq_ignore_ascii_case("charset")
             || key.eq_ignore_ascii_case("require_ssl")
             || key.eq_ignore_ascii_case("verify_ca")

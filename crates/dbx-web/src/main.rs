@@ -497,6 +497,14 @@ async fn main() {
         .route("/zookeeper/get", post(routes::zookeeper::get))
         .route("/zookeeper/put", post(routes::zookeeper::put))
         .route("/zookeeper/delete", post(routes::zookeeper::delete))
+        // HBase REST
+        .route("/hbase/table-schema", post(routes::hbase::get_table_schema))
+        .route("/hbase/scan-rows", post(routes::hbase::scan_rows))
+        .route("/hbase/get-row", post(routes::hbase::get_row))
+        .route("/hbase/put-row", post(routes::hbase::put_row))
+        .route("/hbase/delete-row", post(routes::hbase::delete_row))
+        .route("/hbase/create-table", post(routes::hbase::create_table))
+        .route("/hbase/delete-table", post(routes::hbase::delete_table))
         // Nacos
         .route("/nacos/test-connection", post(routes::nacos::test_connection))
         .route("/nacos/namespaces/list", post(routes::nacos::list_namespaces))

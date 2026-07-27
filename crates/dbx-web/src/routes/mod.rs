@@ -7,6 +7,7 @@ pub mod data_compare;
 pub mod database_export;
 pub mod document_store;
 pub mod etcd;
+pub mod hbase;
 pub mod history;
 pub mod jdbc;
 pub mod layout;

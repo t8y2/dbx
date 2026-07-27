@@ -16,6 +16,7 @@ pub mod duckdb_worker_runtime;
 pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
 pub mod file_validator;
+pub mod hbase_driver;
 pub mod http_tunnel;
 pub mod influxdb_driver;
 pub mod manticoresearch;

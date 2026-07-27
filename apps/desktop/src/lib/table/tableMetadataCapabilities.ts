@@ -31,6 +31,12 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     triggers: false,
     ddl: false,
   },
+  hbase: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
   qdrant: {
     indexes: false,
     foreignKeys: false,

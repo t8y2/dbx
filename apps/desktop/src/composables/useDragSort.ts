@@ -15,6 +15,7 @@ interface DragState {
 export interface DragSortStartOptions {
   autoScroll?: boolean;
   scrollContainer?: HTMLElement | null;
+  onEnd?: () => void;
 }
 
 export interface DragSortAutoScrollInput {
@@ -50,8 +51,10 @@ let pending: {
   sourceEl: HTMLElement | null;
   autoScroll: boolean;
   scrollContainer: HTMLElement | null;
+  onEnd: (() => void) | null;
 } | null = null;
 let onDropCallback: ((draggedId: string, targetId: string, position: DropPosition) => void) | null = null;
+let onDragEndCallback: (() => void) | null = null;
 let ghostEl: HTMLElement | null = null;
 let autoScrollContainer: HTMLElement | null = null;
 let autoScrollFrame = 0;
@@ -132,6 +135,8 @@ function cancelAutoScroll() {
 }
 
 function refreshDropTargetAtPointer(container: HTMLElement) {
+  state.targetId = null;
+  state.dropPosition = null;
   if (typeof document.elementFromPoint !== "function") return;
   const rect = container.getBoundingClientRect();
   const targetX = Math.min(Math.max(pointerX, rect.left + 1), rect.right - 1);
@@ -226,6 +231,7 @@ function onMouseMove(event: MouseEvent) {
       ghostEl = createGhost(pending.sourceEl, event.clientX, event.clientY);
     }
     autoScrollContainer = pending.autoScroll ? (pending.scrollContainer ?? pending.sourceEl?.closest<HTMLElement>(".connection-tree-scroller") ?? null) : null;
+    onDragEndCallback = pending.onEnd;
     pending = null;
     document.body.style.cursor = "grabbing";
     document.body.style.userSelect = "none";
@@ -245,6 +251,7 @@ function onMouseUp() {
 }
 
 function reset() {
+  const endCallback = onDragEndCallback ?? pending?.onEnd ?? null;
   state.active = false;
   state.draggedId = null;
   state.draggedType = null;
@@ -253,6 +260,7 @@ function reset() {
   state.startX = 0;
   state.startY = 0;
   pending = null;
+  onDragEndCallback = null;
   autoScrollContainer = null;
   pointerX = 0;
   pointerY = 0;
@@ -260,6 +268,7 @@ function reset() {
   removeGhost();
   document.body.style.cursor = "";
   document.body.style.userSelect = "";
+  endCallback?.();
 }
 
 let listenersAttached = false;
@@ -286,6 +295,7 @@ export function useDragSort(onDrop: (draggedId: string, targetId: string, positi
       sourceEl: el,
       autoScroll: options.autoScroll === true,
       scrollContainer: options.scrollContainer ?? null,
+      onEnd: options.onEnd ?? null,
     };
   }
 

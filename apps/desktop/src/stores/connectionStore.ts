@@ -319,6 +319,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarTableStorageInFlight = new Map<string, Promise<ObjectStatistics[]>>();
   const pinnedTreeNodeOrder = ref<string[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
+  const activePinnedTreeNodeReorderKey = ref<string | null>(null);
   let pinnedTreeNodePersistQueue: Promise<void> = Promise.resolve();
   const connectedIds = ref<Set<string>>(new Set());
   const identifierQuotes = ref<Record<string, string>>({});
@@ -1922,13 +1923,40 @@ export const useConnectionStore = defineStore("connection", () => {
     return null;
   }
 
+  function collectPinnedTreeNodeReorderTargets(draggedKey: string): Set<string> {
+    const dragged = findPinnedTreeNodeLocation(treeNodes.value, draggedKey);
+    if (!dragged || !isTreeNodePinned(dragged.node) || isFixedPriorityTreeNode(dragged.node)) return new Set();
+
+    const targets = new Set<string>();
+    for (const sibling of dragged.siblings) {
+      const siblingKey = treeNodePinKey(sibling);
+      if (siblingKey === draggedKey || !isTreeNodePinned(sibling) || isFixedPriorityTreeNode(sibling)) continue;
+      targets.add(siblingKey);
+    }
+    return targets;
+  }
+
+  const activePinnedTreeNodeReorderTargets = computed(() => {
+    const draggedKey = activePinnedTreeNodeReorderKey.value;
+    return draggedKey ? collectPinnedTreeNodeReorderTargets(draggedKey) : new Set<string>();
+  });
+
+  function beginPinnedTreeNodeReorder(draggedKey: string) {
+    activePinnedTreeNodeReorderKey.value = draggedKey || null;
+  }
+
+  function endPinnedTreeNodeReorder() {
+    activePinnedTreeNodeReorderKey.value = null;
+  }
+
+  function isPinnedTreeNodeReorderTarget(targetKey: string): boolean {
+    return !!targetKey && targetKey !== activePinnedTreeNodeReorderKey.value && activePinnedTreeNodeReorderTargets.value.has(targetKey);
+  }
+
   function canReorderPinnedTreeNodes(draggedKey: string, targetKey: string): boolean {
     if (!draggedKey || !targetKey || draggedKey === targetKey) return false;
-    const dragged = findPinnedTreeNodeLocation(treeNodes.value, draggedKey);
-    const target = findPinnedTreeNodeLocation(treeNodes.value, targetKey);
-    if (!dragged || !target || dragged.siblings !== target.siblings) return false;
-    if (!isTreeNodePinned(dragged.node) || !isTreeNodePinned(target.node)) return false;
-    return !isFixedPriorityTreeNode(dragged.node) && !isFixedPriorityTreeNode(target.node);
+    if (activePinnedTreeNodeReorderKey.value === draggedKey) return activePinnedTreeNodeReorderTargets.value.has(targetKey);
+    return collectPinnedTreeNodeReorderTargets(draggedKey).has(targetKey);
   }
 
   function reorderPinnedTreeNodes(draggedKey: string, targetKey: string, position: DropPosition): boolean {
@@ -6089,6 +6117,9 @@ export const useConnectionStore = defineStore("connection", () => {
     isTreeNodePinned,
     orderByPinnedTreeNodes,
     toggleTreeNodePin,
+    beginPinnedTreeNodeReorder,
+    endPinnedTreeNodeReorder,
+    isPinnedTreeNodeReorderTarget,
     canReorderPinnedTreeNodes,
     reorderPinnedTreeNodes,
     addConnection,

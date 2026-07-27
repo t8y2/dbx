@@ -820,7 +820,7 @@ function isPinnedOrderDrag(): boolean {
 
 const dragVisual = computed(() => {
   const targetId = isPinnedOrderDrag() ? pinnedSortKey() : activeNode.value.id;
-  const isDropTarget = isPinnedOrderDrag() ? !!dragState.draggedId && connectionStore.canReorderPinnedTreeNodes(dragState.draggedId, pinnedSortKey()) : activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
+  const isDropTarget = isPinnedOrderDrag() ? connectionStore.isPinnedTreeNodeReorderTarget(pinnedSortKey()) : activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
 
   return {
     isDropTarget,
@@ -832,10 +832,13 @@ const dragVisual = computed(() => {
 });
 
 function startPinnedOrderDrag(event: MouseEvent) {
-  if (!canDragPinnedOrder()) return;
-  startDrag(event, pinnedSortKey(), PINNED_TREE_NODE_DRAG_TYPE, {
+  if (event.button !== 0 || !canDragPinnedOrder()) return;
+  const draggedKey = pinnedSortKey();
+  connectionStore.beginPinnedTreeNodeReorder(draggedKey);
+  startDrag(event, draggedKey, PINNED_TREE_NODE_DRAG_TYPE, {
     autoScroll: true,
     scrollContainer: rowRef.value?.closest<HTMLElement>(".connection-tree-scroller") ?? null,
+    onEnd: connectionStore.endPinnedTreeNodeReorder,
   });
 }
 

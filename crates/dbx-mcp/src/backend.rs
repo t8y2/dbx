@@ -655,11 +655,8 @@ impl DbxBackend for WebBackend {
             // does NOT receive the confirmed_write_sql binding from the MCP
             // layer.  Without this, a CLI/MCP agent could execute a different
             // write/DDL statement after a single user confirmation.
-            let risk = dbx_core::sql_risk::classify_sql_risk_for_database(
-                sql,
-                connection.db_type,
-            )
-            .map_err(|error| format!("SQL risk classification failed: {error}"))?;
+            let risk = dbx_core::sql_risk::classify_sql_risk_for_database(sql, connection.db_type)
+                .map_err(|error| format!("SQL risk classification failed: {error}"))?;
             if risk != dbx_core::sql_risk::SqlRisk::ReadOnly {
                 if let Some(ref confirmed) = permissions.confirmed_write_sql {
                     let normalized = agent_tools::normalize_sql_for_confirmation(sql);

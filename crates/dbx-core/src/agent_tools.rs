@@ -37,6 +37,24 @@ pub struct AgentSqlPermissions {
     pub confirmed_write_sql: Option<String>,
 }
 
+/// Build the write permissions for one AI-agent run from an explicit user
+/// confirmation. Both Desktop and Web use this fail-closed boundary so an
+/// empty confirmation or a production target cannot enable writes.
+pub fn confirmed_write_sql_permissions(
+    production_database: bool,
+    allow_write_sql: bool,
+    confirmed_write_sql: Option<String>,
+) -> AgentSqlPermissions {
+    let confirmed_write_sql = confirmed_write_sql.filter(|sql| !sql.trim().is_empty());
+    let write_sql_confirmed = !production_database && allow_write_sql && confirmed_write_sql.is_some();
+
+    AgentSqlPermissions {
+        allow_writes: write_sql_confirmed,
+        allow_dangerous: write_sql_confirmed,
+        confirmed_write_sql: write_sql_confirmed.then_some(confirmed_write_sql).flatten(),
+    }
+}
+
 fn sql_risk_allowed(risk: SqlRisk, permissions: AgentSqlPermissions) -> bool {
     match risk {
         SqlRisk::ReadOnly => true,
@@ -1072,6 +1090,29 @@ mod tests {
     fn confirmed_sql_default_is_none() {
         let perms = AgentSqlPermissions::default();
         assert_eq!(perms.confirmed_write_sql, None);
+    }
+
+    #[test]
+    fn confirmed_write_permissions_bind_only_a_nonproduction_nonempty_confirmation() {
+        let confirmed_sql = Some("DELETE FROM sessions WHERE id = 7".to_string());
+        let permissions = confirmed_write_sql_permissions(false, true, confirmed_sql.clone());
+
+        assert!(permissions.allow_writes);
+        assert!(permissions.allow_dangerous);
+        assert_eq!(permissions.confirmed_write_sql, confirmed_sql);
+        assert!(!sql_matches_confirmed_write("DROP TABLE sessions", &permissions.confirmed_write_sql));
+    }
+
+    #[test]
+    fn confirmed_write_permissions_fail_closed_for_production_or_empty_confirmation() {
+        for (production_database, confirmed_write_sql) in
+            [(true, Some("DELETE FROM sessions".to_string())), (false, None), (false, Some("  \n".to_string()))]
+        {
+            let permissions = confirmed_write_sql_permissions(production_database, true, confirmed_write_sql);
+            assert!(!permissions.allow_writes);
+            assert!(!permissions.allow_dangerous);
+            assert_eq!(permissions.confirmed_write_sql, None);
+        }
     }
 
     #[test]

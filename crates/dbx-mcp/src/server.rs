@@ -802,9 +802,12 @@ fn mcp_permissions(
 /// empty, so desktop-embedded MCP contexts (which don't set this var) continue
 /// to work without a confirmed-SQL binding.
 fn mcp_confirmed_write_sql_from_env() -> Option<String> {
-    let v = std::env::var("DBX_MCP_CONFIRMED_WRITE_SQL").ok()?;
-    let trimmed = v.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    normalize_confirmed_write_sql(std::env::var("DBX_MCP_CONFIRMED_WRITE_SQL").ok())
+}
+
+fn normalize_confirmed_write_sql(value: Option<String>) -> Option<String> {
+    let trimmed = value?.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -1235,5 +1238,27 @@ mod tests {
             explain_data: None,
         });
         assert!(result_text(&result).contains("Error [MCP_READ_ONLY]: policy changed"));
+    }
+
+    #[test]
+    fn mcp_confirmation_and_policy_guards_fail_closed() {
+        assert_eq!(
+            normalize_confirmed_write_sql(Some("  DELETE FROM sessions WHERE id = 7  ".to_string())),
+            Some("DELETE FROM sessions WHERE id = 7".to_string())
+        );
+        assert_eq!(normalize_confirmed_write_sql(Some(" \n ".to_string())), None);
+
+        let read_only = ConnectionConfig { read_only: true, ..connection("readonly", "readonly", "postgres", "app") };
+        let writable_policy =
+            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let read_only_error =
+            validate_sql_policy(&read_only, &writable_policy, "app", "DELETE FROM sessions").unwrap_err();
+        assert!(result_text(&read_only_error).contains("CONNECTION_READ_ONLY"));
+
+        let mut production = connection("production", "production", "postgres", "app");
+        production.production_databases = vec!["app".to_string()];
+        let production_error =
+            validate_sql_policy(&production, &writable_policy, "app", "DROP TABLE sessions").unwrap_err();
+        assert!(result_text(&production_error).contains("PRODUCTION_WRITE_BLOCKED"));
     }
 }

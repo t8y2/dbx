@@ -77,6 +77,30 @@ pub fn dbx_mcp_scope_env(options: &CliAgentRunOptions) -> Vec<(&'static str, Str
     env
 }
 
+#[cfg(test)]
+mod scope_env_tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_write_sql_is_passed_to_the_scoped_mcp_subprocess() {
+        let options = CliAgentRunOptions {
+            connection_id: "connection-1".to_string(),
+            connection_name: "staging".to_string(),
+            database: "app".to_string(),
+            agent_mode: true,
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("DELETE FROM sessions WHERE id = 7".to_string()),
+            mcp_server_command: None,
+        };
+
+        let env = dbx_mcp_scope_env(&options);
+        assert!(env.contains(&("DBX_MCP_CONFIRMED_WRITE_SQL", "DELETE FROM sessions WHERE id = 7".to_string())));
+        assert!(env.contains(&("DBX_MCP_ALLOW_WRITES", "1".to_string())));
+        assert!(env.contains(&("DBX_MCP_ALLOW_DANGEROUS_SQL", "1".to_string())));
+    }
+}
+
 pub fn append_config_overrides(args: &mut Vec<String>, overrides: impl IntoIterator<Item = String>) {
     for override_arg in overrides {
         args.push("-c".to_string());

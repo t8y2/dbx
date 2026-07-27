@@ -342,20 +342,18 @@ pub async fn ai_agent_stream(
     // Writes are only allowed when a specific SQL statement was confirmed —
     // an empty confirmed_write_sql is treated as "no confirmation" so the
     // agent cannot execute arbitrary write/DDL statements.
-    let write_sql_confirmed = !production_database
-        && body.allow_write_sql
-        && body.confirmed_write_sql.as_ref().is_some_and(|s| !s.trim().is_empty());
+    let sql_permissions = dbx_core::agent_tools::confirmed_write_sql_permissions(
+        production_database,
+        body.allow_write_sql,
+        body.confirmed_write_sql,
+    );
     let agent_ctx = AgentLoopContext {
         state: state.app.clone(),
         connection_id: body.connection_id,
         database: body.database,
         db_type: parsed_db_type,
         cli_mcp_server_command: None,
-        sql_permissions: dbx_core::agent_tools::AgentSqlPermissions {
-            allow_writes: write_sql_confirmed,
-            allow_dangerous: write_sql_confirmed,
-            confirmed_write_sql: if write_sql_confirmed { body.confirmed_write_sql.clone() } else { None },
-        },
+        sql_permissions,
         max_agent_turns,
     };
 

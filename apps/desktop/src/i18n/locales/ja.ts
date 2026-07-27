@@ -1323,6 +1323,8 @@ export default withEnglishFallback({
     tablesCount: "{current} / {total} テーブル",
     statementsCount: "{done}成功、{failed}失敗",
     elapsed: "経過時間: {duration}",
+    showFailureDetails: "失敗の詳細（{count}）",
+    hideFailureDetails: "失敗の詳細を閉じる",
   },
   welcome: {
     title: "データベースワークスペース",

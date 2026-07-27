@@ -1324,6 +1324,8 @@ export default withEnglishFallback({
     tablesCount: "{current} / {total} tabelas",
     statementsCount: "{done} com sucesso, {failed} com falha",
     elapsed: "Decorrido: {duration}",
+    showFailureDetails: "Detalhes das falhas ({count})",
+    hideFailureDetails: "Ocultar detalhes das falhas",
   },
   welcome: {
     title: "Área de Trabalho do Banco de Dados",

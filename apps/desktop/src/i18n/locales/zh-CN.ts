@@ -1382,6 +1382,8 @@ export default withEnglishFallback({
     tablesCount: "{current} / {total} 张表",
     statementsCount: "成功 {done}，失败 {failed}",
     elapsed: "耗时：{duration}",
+    showFailureDetails: "失败详情（{count}）",
+    hideFailureDetails: "收起失败详情",
   },
   welcome: {
     title: "数据库工作台",

@@ -161,6 +161,24 @@ describe("data transfer task duration", () => {
   });
 });
 
+describe("data transfer failure details", () => {
+  it("preserves per-table failures after the terminal summary and deduplicates table updates", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("failure-details", "users and orders", 2);
+
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error", false), table: "users", error: "permission denied" });
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error", false), table: "orders", error: "table missing" });
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error", false), table: "users", error: "permission denied by policy" });
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error"), table: "", error: "2 table(s) failed: users, orders" });
+
+    expect(task.errorMessage).toBe("2 table(s) failed: users, orders");
+    expect(task.transferFailures).toEqual([
+      { table: "users", error: "permission denied by policy" },
+      { table: "orders", error: "table missing" },
+    ]);
+  });
+});
+
 describe("formatDataTransferDuration", () => {
   it("formats millisecond, second, minute, and hour boundaries", () => {
     expect(formatDataTransferDuration(Number.NaN)).toBe("0 ms");

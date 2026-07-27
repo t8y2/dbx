@@ -91,4 +91,44 @@ describe("ExportProgressPopover data transfer duration", () => {
     expect(document.body.textContent).toContain("Elapsed: 1m 5s");
     expect(document.body.textContent?.match(/Elapsed:/g)).toHaveLength(1);
   });
+
+  it("expands complete per-table transfer failure details", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("failed-transfer", "source to target", 2);
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "users",
+      tableIndex: 0,
+      totalTables: 2,
+      rowsTransferred: 0,
+      totalRows: null,
+      status: "error",
+      error: "permission denied for relation users",
+      terminal: false,
+    });
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "",
+      tableIndex: 2,
+      totalTables: 2,
+      rowsTransferred: 0,
+      totalRows: null,
+      status: "error",
+      error: "1 table(s) failed: users",
+      terminal: true,
+    });
+
+    await mountPopover();
+
+    const detailsButton = document.body.querySelector<HTMLButtonElement>('button[aria-expanded="false"]');
+    expect(detailsButton?.textContent).toContain("Failure details (1)");
+    expect(document.body.textContent).not.toContain("permission denied for relation users");
+
+    detailsButton?.click();
+    await nextTick();
+
+    expect(detailsButton?.getAttribute("aria-expanded")).toBe("true");
+    expect(document.body.textContent).toContain("users");
+    expect(document.body.textContent).toContain("permission denied for relation users");
+  });
 });

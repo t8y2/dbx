@@ -5,6 +5,11 @@ import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Done" | "Error" | "Cancelled";
 
+export interface DataTransferFailure {
+  table: string;
+  error: string;
+}
+
 export interface ExportTask {
   exportId: string;
   kind: BackgroundTaskKind;
@@ -32,6 +37,7 @@ export interface ExportTask {
   targetDatabase?: string;
   targetSchema?: string;
   targetTables?: string[];
+  transferFailures?: DataTransferFailure[];
 }
 
 const taskMap = reactive<Map<string, ExportTask>>(new Map());
@@ -190,6 +196,7 @@ export function useExportTracker() {
       totalTables,
       currentTable: "",
       startedAt: Date.now(),
+      transferFailures: [],
     });
     taskMap.set(transferId, task);
     return task;
@@ -294,6 +301,15 @@ export function useExportTracker() {
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {
     const task = taskMap.get(transferId);
     if (!task) return;
+    if (progress.status === "error" && !progress.terminal && progress.table && progress.error) {
+      task.transferFailures ??= [];
+      const existingFailure = task.transferFailures.find((failure) => failure.table === progress.table);
+      if (existingFailure) {
+        existingFailure.error = progress.error;
+      } else {
+        task.transferFailures.push({ table: progress.table, error: progress.error });
+      }
+    }
     const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
     const hadError = task.status === "Error";
     task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;

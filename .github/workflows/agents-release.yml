@@ -236,6 +236,7 @@ jobs:
             ["macos-aarch64"]="mac/aarch64"
             ["macos-x64"]="mac/x64"
             ["linux-aarch64"]="linux/aarch64"
+            ["windows-aarch64"]="windows/aarch64"
             ["windows-x64"]="windows/x64"
           )
           for platform in "${!PLATFORMS[@]}"; do
@@ -453,7 +454,7 @@ jobs:
           {
             "jres": {
               "21": {
-                "version": "21.0.12+kerberos.1",
+                "version": "21.0.12+kerberos.ec.2",
                 "platforms": {
           ${JRE21_PLATFORMS}
                 }

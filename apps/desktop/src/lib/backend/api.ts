@@ -165,6 +165,7 @@ export const listConstraints = forward("listConstraints");
 export const listPartitions = forward("listPartitions");
 export const listSubpartitions = forward("listSubpartitions");
 export const getTableDdl = forward("getTableDdl");
+export const getTableDisplayDdl = forward("getTableDisplayDdl");
 export const listFunctions = forward("listFunctions");
 export const listSequences = forward("listSequences");
 export const listRules = forward("listRules");

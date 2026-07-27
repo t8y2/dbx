@@ -1248,9 +1248,9 @@ async function generateDdlTemplate() {
     const schema = node.schema || node.database;
     let ddl: string;
     if (node.type === "table") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
+      ddl = await api.getTableDisplayDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
     } else if (node.type === "materialized_view") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
+      ddl = await api.getTableDisplayDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
     } else {
       const result = await api.getObjectSource(node.connectionId, node.database, schema, node.label, "VIEW");
       ddl = await buildViewDdl({

@@ -155,7 +155,7 @@ async function fetchDdl() {
   if (!props.connectionId || !props.database || !props.tableName || ddlFetched.value || !tableMetadataCapabilities.value.ddl) return;
   ddlLoading.value = true;
   try {
-    const ddl = await api.getTableDdl(props.connectionId, props.database, metadataSchema.value, props.tableName, undefined, props.catalog);
+    const ddl = await api.getTableDisplayDdl(props.connectionId, props.database, metadataSchema.value, props.tableName, undefined, props.catalog);
     ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
     ddlFetched.value = true;
   } catch (e: any) {
@@ -960,7 +960,7 @@ async function hydrateRestoredDraftFromDatabase() {
     let nextColumns = await api.getColumns(connectionId, database, schema, tableName, catalog);
     if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
       try {
-        const ddl = await api.getTableDdl(connectionId, database, schema, tableName, undefined, catalog);
+        const ddl = await api.getTableDisplayDdl(connectionId, database, schema, tableName, undefined, catalog);
         ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
         ddlFetched.value = true;
         nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
@@ -1256,7 +1256,7 @@ async function loadStructure(silent = false, scope: TableStructureRefreshScope =
     if (nextColumns) {
       if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
         try {
-          const ddl = await api.getTableDdl(connectionId, database, schema, tableName, undefined, catalog);
+          const ddl = await api.getTableDisplayDdl(connectionId, database, schema, tableName, undefined, catalog);
           ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);

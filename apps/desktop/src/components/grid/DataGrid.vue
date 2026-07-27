@@ -7130,7 +7130,7 @@ async function fetchDdl() {
   ddlLoading.value = true;
   try {
     // Preserve view identity so the backend loads the stored view source instead of synthesizing table DDL.
-    ddlContent.value = await api.getTableDdl(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, tableObjectSourceKind(props.tableMeta.tableType), props.tableMeta.catalog);
+    ddlContent.value = await api.getTableDisplayDdl(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, tableObjectSourceKind(props.tableMeta.tableType), props.tableMeta.catalog);
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e}`;
   } finally {

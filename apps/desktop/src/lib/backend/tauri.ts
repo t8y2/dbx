@@ -1202,6 +1202,10 @@ export async function getTableDdl(connectionId: string, database: string, schema
   return invoke("get_table_ddl", { connectionId, database, schema, table, objectType, catalog });
 }
 
+export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
+  return invoke("get_table_ddl", { connectionId, database, schema, table, objectType, catalog, includePostgresAccess: true });
+}
+
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
   return invoke("prepare_schema_diff", { options });
 }

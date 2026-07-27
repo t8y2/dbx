@@ -3,7 +3,7 @@ use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -5646,6 +5646,29 @@ pub async fn get_table_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false).await
+}
+
+pub async fn get_table_display_ddl_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true).await
+}
+
+async fn get_table_ddl_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+    include_postgres_access: bool,
+) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
     }
@@ -5801,6 +5824,11 @@ pub async fn get_table_ddl_core(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             cloudberry_ddl(p, schema, table).await
         }
+        PoolKind::Postgres(p)
+            if include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) =>
+        {
+            pg_display_ddl(p, schema, table).await
+        }
         PoolKind::Postgres(p) => pg_ddl(p, schema, table).await,
         PoolKind::Sqlite(p) => sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
@@ -5816,6 +5844,10 @@ async fn connection_config(state: &AppState, connection_id: &str) -> Option<Conn
 fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
         || matches!(config.driver_profile.as_deref(), Some("opengauss" | "gaussdb"))
+}
+
+fn is_native_postgres_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Postgres && matches!(config.driver_profile.as_deref(), None | Some("postgres"))
 }
 
 fn is_cloudberry_config(config: &ConnectionConfig) -> bool {
@@ -7245,6 +7277,52 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_display_ddl_includes_owner_and_direct_grants() {
+        use db::postgres::{PostgresTableAccessInfo, PostgresTablePrivilegeInfo};
+
+        let privilege = |grantee: &str, privilege_type: &str, is_grantable: bool, column_name: Option<&str>| {
+            PostgresTablePrivilegeInfo {
+                grantee: grantee.to_string(),
+                privilege_type: privilege_type.to_string(),
+                is_grantable,
+                column_name: column_name.map(str::to_string),
+            }
+        };
+        let access = PostgresTableAccessInfo {
+            owner: "table\"owner".to_string(),
+            privileges: vec![
+                privilege("table\"owner", "SELECT", true, None),
+                privilege("reader role", "SELECT", false, None),
+                privilege("reader role", "SELECT", false, Some("customer_name")),
+                privilege("reader role", "UPDATE", false, Some("customer_name")),
+                privilege("reader role", "UPDATE", false, Some("amount")),
+                privilege("audit role", "SELECT", true, None),
+                privilege("audit role", "SELECT", false, None),
+                privilege("audit role", "SELECT", true, Some("customer_name")),
+                privilege("audit role", "SELECT", false, Some("customer_name")),
+                privilege("PUBLIC", "INSERT", false, Some("customer_name")),
+                privilege("PUBLIC", "INSERT", false, Some("amount")),
+            ],
+        };
+
+        let ddl = append_postgres_access_ddl(
+            "CREATE TABLE \"app\".\"orders\" (\n  \"id\" bigint\n);\n".to_string(),
+            "app",
+            "orders",
+            &access,
+        );
+
+        assert!(ddl.contains("ALTER TABLE \"app\".\"orders\" OWNER TO \"table\"\"owner\";"));
+        assert!(ddl.contains("GRANT INSERT (\"amount\", \"customer_name\") ON TABLE \"app\".\"orders\" TO PUBLIC;"));
+        assert!(ddl.contains(
+            "GRANT SELECT, UPDATE (\"amount\", \"customer_name\") ON TABLE \"app\".\"orders\" TO \"reader role\";"
+        ));
+        assert!(ddl.contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"audit role\" WITH GRANT OPTION;"));
+        assert_eq!(ddl.matches("GRANT SELECT ON TABLE").count(), 1, "ddl: {ddl}");
+        assert!(!ddl.contains("TO \"table\"\"owner\" WITH GRANT OPTION"), "ddl: {ddl}");
+    }
+
+    #[test]
     fn postgres_table_ddl_omits_table_comment_when_empty() {
         let columns = vec![column("id", "integer")];
 
@@ -7544,6 +7622,86 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
         ),
         &trigger_definitions,
     ))
+}
+
+async fn pg_display_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+    let (ddl, access) = tokio::join!(pg_ddl(pool, schema, table), db::postgres::get_table_access(pool, schema, table));
+    let ddl = ddl?;
+    match access {
+        Ok(access) => Ok(append_postgres_access_ddl(ddl, schema, table, &access)),
+        Err(error) => {
+            log::warn!(
+                "[schema][postgres:table-access-ddl-fallback] schema={} table={} error={}",
+                schema,
+                table,
+                error
+            );
+            Ok(ddl)
+        }
+    }
+}
+
+fn append_postgres_access_ddl(
+    mut ddl: String,
+    schema: &str,
+    table: &str,
+    access: &db::postgres::PostgresTableAccessInfo,
+) -> String {
+    let table_name = format!("{}.{}", pg_ident(schema), pg_ident(table));
+    ddl = ddl.trim_end().to_string();
+    if !ddl.ends_with(';') {
+        ddl.push(';');
+    }
+    ddl.push_str(&format!("\n\nALTER TABLE {table_name} OWNER TO {};", pg_ident(&access.owner)));
+
+    let mut table_privileges = BTreeMap::<(String, String), bool>::new();
+    let mut column_privileges = BTreeMap::<(String, String, String), bool>::new();
+    for privilege in access.privileges.iter().filter(|privilege| privilege.grantee != access.owner) {
+        if let Some(column) = privilege.column_name.as_deref() {
+            *column_privileges
+                .entry((privilege.grantee.clone(), privilege.privilege_type.clone(), column.to_string()))
+                .or_default() |= privilege.is_grantable;
+        } else {
+            *table_privileges.entry((privilege.grantee.clone(), privilege.privilege_type.clone())).or_default() |=
+                privilege.is_grantable;
+        }
+    }
+
+    let mut grants = BTreeMap::<(String, bool), BTreeMap<String, BTreeSet<String>>>::new();
+
+    for ((grantee, privilege), is_grantable) in &table_privileges {
+        grants.entry((grantee.clone(), *is_grantable)).or_default().entry(privilege.clone()).or_default();
+    }
+    for ((grantee, privilege, column), is_grantable) in column_privileges {
+        let table_grantable = table_privileges.get(&(grantee.clone(), privilege.clone()));
+        if table_grantable.is_some_and(|table_grantable| *table_grantable || !is_grantable) {
+            continue;
+        }
+        grants.entry((grantee, is_grantable)).or_default().entry(privilege).or_default().insert(column);
+    }
+
+    for ((grantee, is_grantable), privileges) in grants {
+        let privileges = privileges
+            .into_iter()
+            .map(|(privilege, columns)| {
+                if columns.is_empty() {
+                    privilege
+                } else {
+                    format!(
+                        "{} ({})",
+                        privilege,
+                        columns.into_iter().map(|column| pg_ident(&column)).collect::<Vec<_>>().join(", ")
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let grantee = if grantee == "PUBLIC" { grantee } else { pg_ident(&grantee) };
+        let grant_option = if is_grantable { " WITH GRANT OPTION" } else { "" };
+        ddl.push_str(&format!("\nGRANT {privileges} ON TABLE {table_name} TO {grantee}{grant_option};"));
+    }
+
+    ddl
 }
 
 pub async fn opengauss_table_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {

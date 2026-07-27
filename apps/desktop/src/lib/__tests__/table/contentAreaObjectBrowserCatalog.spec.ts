@@ -24,7 +24,7 @@ describe("ContentArea external catalog wiring", () => {
   });
 
   it("forwards the DDL dialog catalog to the metadata API", () => {
-    expect(ddlViewDialogSource).toMatch(/api\.getTableDdl\([\s\S]*?props\.objectType, props\.catalog\)/);
+    expect(ddlViewDialogSource).toMatch(/api\.getTableDisplayDdl\([\s\S]*?props\.objectType, props\.catalog\)/);
   });
 });
 

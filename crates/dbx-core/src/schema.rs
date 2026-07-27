@@ -7277,31 +7277,34 @@ mod ddl_tests {
     }
 
     #[test]
-    fn postgres_display_ddl_includes_owner_and_direct_grants() {
+    fn postgres_display_ddl_preserves_owner_revokes_and_grant_chain() {
         use db::postgres::{PostgresTableAccessInfo, PostgresTablePrivilegeInfo};
 
-        let privilege = |grantee: &str, privilege_type: &str, is_grantable: bool, column_name: Option<&str>| {
-            PostgresTablePrivilegeInfo {
-                grantee: grantee.to_string(),
-                privilege_type: privilege_type.to_string(),
-                is_grantable,
-                column_name: column_name.map(str::to_string),
-            }
-        };
+        let privilege =
+            |grantor: &str, grantee: &str, privilege_type: &str, is_grantable: bool, column_name: Option<&str>| {
+                PostgresTablePrivilegeInfo {
+                    grantor: grantor.to_string(),
+                    grantee: grantee.to_string(),
+                    privilege_type: privilege_type.to_string(),
+                    is_grantable,
+                    column_name: column_name.map(str::to_string),
+                }
+            };
         let access = PostgresTableAccessInfo {
             owner: "table\"owner".to_string(),
+            owner_default_privileges: vec!["DELETE", "INSERT", "SELECT", "UPDATE"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             privileges: vec![
-                privilege("table\"owner", "SELECT", true, None),
-                privilege("reader role", "SELECT", false, None),
-                privilege("reader role", "SELECT", false, Some("customer_name")),
-                privilege("reader role", "UPDATE", false, Some("customer_name")),
-                privilege("reader role", "UPDATE", false, Some("amount")),
-                privilege("audit role", "SELECT", true, None),
-                privilege("audit role", "SELECT", false, None),
-                privilege("audit role", "SELECT", true, Some("customer_name")),
-                privilege("audit role", "SELECT", false, Some("customer_name")),
-                privilege("PUBLIC", "INSERT", false, Some("customer_name")),
-                privilege("PUBLIC", "INSERT", false, Some("amount")),
+                privilege("table\"owner", "table\"owner", "SELECT", false, None),
+                privilege("table\"owner", "z manager", "SELECT", true, None),
+                privilege("table\"owner", "z manager", "SELECT", true, Some("customer_name")),
+                privilege("z manager", "a delegate", "SELECT", true, None),
+                privilege("a delegate", "reader role", "SELECT", false, None),
+                privilege("z manager", "reader role", "SELECT", false, Some("customer_name")),
+                privilege("table\"owner", "PUBLIC", "INSERT", false, Some("customer_name")),
+                privilege("table\"owner", "PUBLIC", "INSERT", false, Some("amount")),
             ],
         };
 
@@ -7313,13 +7316,42 @@ mod ddl_tests {
         );
 
         assert!(ddl.contains("ALTER TABLE \"app\".\"orders\" OWNER TO \"table\"\"owner\";"));
+        assert!(ddl.contains("REVOKE DELETE, INSERT, UPDATE ON TABLE \"app\".\"orders\" FROM \"table\"\"owner\";"));
         assert!(ddl.contains("GRANT INSERT (\"amount\", \"customer_name\") ON TABLE \"app\".\"orders\" TO PUBLIC;"));
-        assert!(ddl.contains(
-            "GRANT SELECT, UPDATE (\"amount\", \"customer_name\") ON TABLE \"app\".\"orders\" TO \"reader role\";"
+        assert!(ddl.contains("GRANT SELECT (\"customer_name\") ON TABLE \"app\".\"orders\" TO \"reader role\";"));
+
+        let owner_role = ddl.find("SET ROLE \"table\"\"owner\";").unwrap();
+        let manager_role = ddl.find("SET ROLE \"z manager\";").unwrap();
+        let delegate_role = ddl.find("SET ROLE \"a delegate\";").unwrap();
+        assert!(owner_role < manager_role && manager_role < delegate_role, "ddl: {ddl}");
+        assert!(ddl[owner_role..manager_role]
+            .contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"z manager\" WITH GRANT OPTION;"));
+        assert!(ddl[owner_role..manager_role].contains(
+            "GRANT SELECT (\"customer_name\") ON TABLE \"app\".\"orders\" TO \"z manager\" WITH GRANT OPTION;"
         ));
-        assert!(ddl.contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"audit role\" WITH GRANT OPTION;"));
-        assert_eq!(ddl.matches("GRANT SELECT ON TABLE").count(), 1, "ddl: {ddl}");
-        assert!(!ddl.contains("TO \"table\"\"owner\" WITH GRANT OPTION"), "ddl: {ddl}");
+        assert!(ddl[manager_role..delegate_role]
+            .contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"a delegate\" WITH GRANT OPTION;"));
+        assert!(ddl[delegate_role..].contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"reader role\";"));
+    }
+
+    #[test]
+    fn postgres_display_ddl_can_revoke_all_owner_ordinary_privileges() {
+        let access = db::postgres::PostgresTableAccessInfo {
+            owner: "locked_owner".to_string(),
+            owner_default_privileges: vec!["INSERT", "SELECT", "UPDATE"].into_iter().map(str::to_string).collect(),
+            privileges: vec![],
+        };
+
+        let ddl = append_postgres_access_ddl(
+            "CREATE TABLE \"app\".\"locked\" (\"id\" bigint);".to_string(),
+            "app",
+            "locked",
+            &access,
+        );
+
+        assert!(ddl.contains("SET ROLE \"locked_owner\";"));
+        assert!(ddl.contains("REVOKE INSERT, SELECT, UPDATE ON TABLE \"app\".\"locked\" FROM \"locked_owner\";"));
+        assert!(ddl.ends_with("RESET ROLE;"));
     }
 
     #[test]
@@ -7654,54 +7686,183 @@ fn append_postgres_access_ddl(
     }
     ddl.push_str(&format!("\n\nALTER TABLE {table_name} OWNER TO {};", pg_ident(&access.owner)));
 
-    let mut table_privileges = BTreeMap::<(String, String), bool>::new();
-    let mut column_privileges = BTreeMap::<(String, String, String), bool>::new();
-    for privilege in access.privileges.iter().filter(|privilege| privilege.grantee != access.owner) {
-        if let Some(column) = privilege.column_name.as_deref() {
-            *column_privileges
-                .entry((privilege.grantee.clone(), privilege.privilege_type.clone(), column.to_string()))
-                .or_default() |= privilege.is_grantable;
-        } else {
-            *table_privileges.entry((privilege.grantee.clone(), privilege.privilege_type.clone())).or_default() |=
-                privilege.is_grantable;
+    let owner_privileges = access
+        .privileges
+        .iter()
+        .filter(|privilege| {
+            privilege.grantor == access.owner && privilege.grantee == access.owner && privilege.column_name.is_none()
+        })
+        .map(|privilege| privilege.privilege_type.clone())
+        .collect::<BTreeSet<_>>();
+    let owner_revokes = access
+        .owner_default_privileges
+        .iter()
+        .filter(|privilege| !owner_privileges.contains(*privilege))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let grants = normalized_postgres_grants(access);
+    let grantor_order = postgres_grantor_order(&access.owner, !owner_revokes.is_empty(), &grants);
+
+    // PostgreSQL records the active granting role, so each batch must run in that role's context.
+    for grantor in grantor_order {
+        ddl.push_str(&format!("\n\nSET ROLE {};", pg_ident(&grantor)));
+        if grantor == access.owner && !owner_revokes.is_empty() {
+            ddl.push_str(&format!(
+                "\nREVOKE {} ON TABLE {table_name} FROM {};",
+                owner_revokes.iter().cloned().collect::<Vec<_>>().join(", "),
+                pg_ident(&access.owner)
+            ));
         }
-    }
-
-    let mut grants = BTreeMap::<(String, bool), BTreeMap<String, BTreeSet<String>>>::new();
-
-    for ((grantee, privilege), is_grantable) in &table_privileges {
-        grants.entry((grantee.clone(), *is_grantable)).or_default().entry(privilege.clone()).or_default();
-    }
-    for ((grantee, privilege, column), is_grantable) in column_privileges {
-        let table_grantable = table_privileges.get(&(grantee.clone(), privilege.clone()));
-        if table_grantable.is_some_and(|table_grantable| *table_grantable || !is_grantable) {
-            continue;
-        }
-        grants.entry((grantee, is_grantable)).or_default().entry(privilege).or_default().insert(column);
-    }
-
-    for ((grantee, is_grantable), privileges) in grants {
-        let privileges = privileges
-            .into_iter()
-            .map(|(privilege, columns)| {
-                if columns.is_empty() {
-                    privilege
-                } else {
-                    format!(
-                        "{} ({})",
-                        privilege,
-                        columns.into_iter().map(|column| pg_ident(&column)).collect::<Vec<_>>().join(", ")
-                    )
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let grantee = if grantee == "PUBLIC" { grantee } else { pg_ident(&grantee) };
-        let grant_option = if is_grantable { " WITH GRANT OPTION" } else { "" };
-        ddl.push_str(&format!("\nGRANT {privileges} ON TABLE {table_name} TO {grantee}{grant_option};"));
+        append_postgres_grants_for_role(&mut ddl, &table_name, &grantor, &grants);
+        ddl.push_str("\nRESET ROLE;");
     }
 
     ddl
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostgresGrant {
+    grantor: String,
+    grantee: String,
+    privilege_type: String,
+    is_grantable: bool,
+    column_name: Option<String>,
+}
+
+fn normalized_postgres_grants(access: &db::postgres::PostgresTableAccessInfo) -> Vec<PostgresGrant> {
+    let mut grants = BTreeMap::<(String, String, String, Option<String>), bool>::new();
+    for privilege in &access.privileges {
+        if privilege.grantor == access.owner && privilege.grantee == access.owner && privilege.column_name.is_none() {
+            continue;
+        }
+        *grants
+            .entry((
+                privilege.grantor.clone(),
+                privilege.grantee.clone(),
+                privilege.privilege_type.clone(),
+                privilege.column_name.clone(),
+            ))
+            .or_default() |= privilege.is_grantable;
+    }
+    grants
+        .into_iter()
+        .map(|((grantor, grantee, privilege_type, column_name), is_grantable)| PostgresGrant {
+            grantor,
+            grantee,
+            privilege_type,
+            is_grantable,
+            column_name,
+        })
+        .collect()
+}
+
+fn postgres_grant_scope_covers(parent: &PostgresGrant, child: &PostgresGrant) -> bool {
+    if parent.privilege_type != child.privilege_type {
+        return false;
+    }
+    match (&parent.column_name, &child.column_name) {
+        (None, None) => true,
+        (Some(parent), Some(child)) => parent == child,
+        _ => false,
+    }
+}
+
+fn postgres_grantor_order(owner: &str, include_owner: bool, grants: &[PostgresGrant]) -> Vec<String> {
+    let mut remaining = grants.iter().map(|grant| grant.grantor.clone()).collect::<BTreeSet<_>>();
+    if include_owner {
+        remaining.insert(owner.to_string());
+    }
+
+    let mut dependencies = BTreeMap::<String, BTreeSet<String>>::new();
+    for child in grants.iter().filter(|grant| grant.grantor != owner) {
+        for parent in grants.iter().filter(|grant| {
+            grant.grantee == child.grantor
+                && grant.is_grantable
+                && grant.grantor != child.grantor
+                && postgres_grant_scope_covers(grant, child)
+        }) {
+            dependencies.entry(child.grantor.clone()).or_default().insert(parent.grantor.clone());
+        }
+    }
+
+    let mut order = Vec::with_capacity(remaining.len());
+    if remaining.remove(owner) {
+        order.push(owner.to_string());
+    }
+    while !remaining.is_empty() {
+        let ready = remaining
+            .iter()
+            .filter(|grantor| {
+                dependencies.get(*grantor).is_none_or(|required| required.iter().all(|role| !remaining.contains(role)))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            order.extend(remaining);
+            break;
+        }
+        for grantor in ready {
+            remaining.remove(&grantor);
+            order.push(grantor);
+        }
+    }
+    order
+}
+
+fn append_postgres_grants_for_role(ddl: &mut String, table_name: &str, grantor: &str, grants: &[PostgresGrant]) {
+    let mut table_grants = BTreeMap::<(String, bool), BTreeSet<String>>::new();
+    let mut column_grants = BTreeMap::<(String, bool), BTreeMap<String, BTreeSet<String>>>::new();
+    for grant in grants.iter().filter(|grant| grant.grantor == grantor) {
+        if let Some(column) = &grant.column_name {
+            column_grants
+                .entry((grant.grantee.clone(), grant.is_grantable))
+                .or_default()
+                .entry(grant.privilege_type.clone())
+                .or_default()
+                .insert(column.clone());
+        } else {
+            table_grants
+                .entry((grant.grantee.clone(), grant.is_grantable))
+                .or_default()
+                .insert(grant.privilege_type.clone());
+        }
+    }
+
+    for ((grantee, is_grantable), privileges) in table_grants {
+        append_postgres_grant_statement(
+            ddl,
+            table_name,
+            &grantee,
+            is_grantable,
+            privileges.into_iter().collect::<Vec<_>>().join(", "),
+        );
+    }
+    for ((grantee, is_grantable), privileges) in column_grants {
+        let privileges = privileges
+            .into_iter()
+            .map(|(privilege, columns)| {
+                format!(
+                    "{} ({})",
+                    privilege,
+                    columns.into_iter().map(|column| pg_ident(&column)).collect::<Vec<_>>().join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        append_postgres_grant_statement(ddl, table_name, &grantee, is_grantable, privileges);
+    }
+}
+
+fn append_postgres_grant_statement(
+    ddl: &mut String,
+    table_name: &str,
+    grantee: &str,
+    is_grantable: bool,
+    privileges: String,
+) {
+    let grantee = if grantee == "PUBLIC" { grantee.to_string() } else { pg_ident(grantee) };
+    let grant_option = if is_grantable { " WITH GRANT OPTION" } else { "" };
+    ddl.push_str(&format!("\nGRANT {privileges} ON TABLE {table_name} TO {grantee}{grant_option};"));
 }
 
 pub async fn opengauss_table_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {

@@ -401,10 +401,26 @@ The installer will be in `src-tauri/target/release/bundle/`.
 
 DBX is free and open source, but ongoing maintenance, database compatibility testing, infrastructure, and release work require sustained time and resources.
 
+### Infrastructure Sponsor
+
+<table>
+  <tr>
+    <td align="center" width="180">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
+        <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="RainYun" height="48" />
+      </a>
+    </td>
+    <td>
+      RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.
+    </td>
+    <td align="center" width="140">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">Visit RainYun</a>
+    </td>
+  </tr>
+</table>
+
 - [Support DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) — voluntary donations via WeChat or Alipay
 - [Sponsors & Partners](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) — sponsorship, infrastructure, tools, and community collaboration
-
-Support does not affect access to DBX or guarantee feature prioritization. With mutual confirmation, sponsors and partners may be listed on the sponsors page.
 
 ## FAQ
 

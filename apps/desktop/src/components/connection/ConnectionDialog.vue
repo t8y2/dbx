@@ -39,6 +39,7 @@ import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
+import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
 import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
@@ -1292,9 +1293,12 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   if (nacosImplementation.value === "rnacos" && normalized.warnings.length) {
     throw new Error(t("connection.nacosRNacosOpenApiRequired"));
   }
+  const rnacosConsoleConfigured = nacosImplementation.value === "rnacos" && !!nacosRNacosConsoleAddr.value.trim();
+  if (nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value && !rnacosConsoleConfigured) {
+    throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
+  }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
-  if (nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value) {
-    if (!nacosRNacosConsoleAddr.value.trim()) throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
+  if (rnacosConsoleConfigured) {
     if (nacosConsoleAuthKind.value === "inherit") {
       if (nacosAuthKind.value !== "usernamePassword") throw new Error(t("connection.nacosConsoleAuthSeparateRequired"));
       rnacosConsoleAuth = { kind: "inherit" };
@@ -1312,7 +1316,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     serverAddr: normalized.serverAddr,
     namespace: nacosNamespace.value.trim() || undefined,
     contextPath: normalized.contextPath || undefined,
-    rnacosConsoleAddr: nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value ? nacosRNacosConsoleAddr.value.trim() || undefined : undefined,
+    rnacosConsoleAddr: nacosImplementation.value === "rnacos" ? nacosRNacosConsoleAddr.value.trim() || undefined : undefined,
     rnacosHistoryEnabled: nacosImplementation.value === "rnacos" ? nacosHistoryEnabled.value : undefined,
     rnacosConsoleAuth,
     auth: buildNacosAuth(),
@@ -2431,7 +2435,7 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "redis", "etcd", "clickhouse", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "dameng", "redis", "etcd", "clickhouse", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch");
@@ -2442,6 +2446,37 @@ const mysqlCleartextPasswordAuth = computed({
   get: () => mysqlCleartextPasswordAuthEnabled(form.value.url_params),
   set: (value: boolean) => {
     form.value.url_params = setMysqlCleartextPasswordAuthEnabled(form.value.url_params, value);
+  },
+});
+// DM8 configures SSL through JDBC URL parameters, so the TLS form and Advanced tab share one source of truth.
+const tlsEnabled = computed({
+  get: () => !!form.value.ssl || (form.value.db_type === "dameng" && damengSslFormConfig(form.value.url_params).enabled),
+  set: (enabled: boolean) => {
+    form.value.ssl = enabled;
+    if (form.value.db_type === "dameng" && !enabled) {
+      form.value.url_params = applyDamengSslUrlParams(form.value.url_params, false, "", "", "");
+    }
+  },
+});
+const damengSslFilesPath = computed({
+  get: () => damengSslFormConfig(form.value.url_params).sslFilesPath,
+  set: (value: string) => {
+    const current = damengSslFormConfig(form.value.url_params);
+    form.value.url_params = applyDamengSslUrlParams(form.value.url_params, true, value, current.sslKeystorePassword, current.sslProtocol);
+  },
+});
+const damengSslKeystorePassword = computed({
+  get: () => damengSslFormConfig(form.value.url_params).sslKeystorePassword,
+  set: (value: string) => {
+    const current = damengSslFormConfig(form.value.url_params);
+    form.value.url_params = applyDamengSslUrlParams(form.value.url_params, true, current.sslFilesPath, value, current.sslProtocol);
+  },
+});
+const damengSslProtocol = computed({
+  get: () => damengSslFormConfig(form.value.url_params).sslProtocol,
+  set: (value: string) => {
+    const current = damengSslFormConfig(form.value.url_params);
+    form.value.url_params = applyDamengSslUrlParams(form.value.url_params, true, current.sslFilesPath, current.sslKeystorePassword, value);
   },
 });
 const mysqlTlsMode = computed({
@@ -2686,7 +2721,8 @@ const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLega
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
-  return shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
+  const widthClass = shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
+  return `${widthClass} connection-dialog-content--config`;
 });
 const connectionLabelClass = "justify-self-start text-left";
 const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
@@ -3016,6 +3052,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   config.keepalive_interval_secs = Number.isFinite(keepaliveInterval) && keepaliveInterval >= 0 ? keepaliveInterval : 30;
   if (config.db_type === "manticoresearch") {
     config.url_params = "";
+  }
+  if (config.db_type === "dameng") {
+    const damengSsl = damengSslFormConfig(config.url_params);
+    config.ssl = !!config.ssl || damengSsl.enabled;
+    config.url_params = applyDamengSslUrlParams(config.url_params, config.ssl, damengSsl.sslFilesPath, damengSsl.sslKeystorePassword, damengSsl.sslProtocol);
   }
   if (config.db_type === "hive") {
     if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
@@ -4063,15 +4104,16 @@ function isLegacySshAgentMethod(hop: Partial<SshTunnelConfig> | null | undefined
 function updateSelectedSshAuthMethod(value: unknown) {
   const layer = selectedSshLayer.value;
   if (!layer) return;
-  layer.auth_method = value === "key" ? "key" : value === "none" ? "none" : "password";
+  layer.auth_method = value === "key" ? "key" : value === "key+password" ? "key+password" : value === "none" ? "none" : "password";
   // Scrub credential fields that do not apply to the selected method so
   // they are not accidentally submitted or used by the backend fallback.
-  if (layer.auth_method !== "password") layer.password = "";
-  if (layer.auth_method !== "key") {
+  // "key+password" keeps both key and password fields.
+  if (layer.auth_method !== "password" && layer.auth_method !== "key+password") layer.password = "";
+  if (layer.auth_method !== "key" && layer.auth_method !== "key+password") {
     layer.key_path = "";
     layer.key_passphrase = "";
   }
-  if (layer.auth_method !== "key") {
+  if (layer.auth_method !== "key" && layer.auth_method !== "key+password") {
     layer.use_ssh_agent = false;
   }
   resetTestState();
@@ -4194,6 +4236,20 @@ async function browseCaCertPath() {
     });
     if (selected && typeof selected === "string") {
       form.value.ca_cert_path = selected;
+    }
+  }
+}
+
+async function browseDamengSslFilesPath() {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: t("connection.damengSslFilesPathBrowse"),
+      directory: true,
+      multiple: false,
+    });
+    if (selected && typeof selected === "string") {
+      damengSslFilesPath.value = selected;
     }
   }
 }
@@ -5274,11 +5330,15 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                     </div>
-                    <template v-if="nacosHistoryEnabled">
-                      <div class="grid grid-cols-4 items-center gap-4">
-                        <Label :class="connectionLabelClass">{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
-                        <Input v-model="nacosRNacosConsoleAddr" class="col-span-3" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
-                      </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
+                      <Input v-model="nacosRNacosConsoleAddr" class="col-span-3" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">{{ t("connection.nacosRNacosConsoleUrlHint") }}</p>
+                    </div>
+                    <template v-if="nacosRNacosConsoleAddr.trim()">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.nacosConsoleAuthentication") }}</Label>
                         <div class="col-span-3 flex gap-2">
@@ -6037,10 +6097,45 @@ function openExternalUrl(url: string) {
                 <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" v-model="form.ssl" class="mr-0" />
+                    <input type="checkbox" v-model="tlsEnabled" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.sslEnable") }}</span>
                   </label>
                 </div>
+
+                <template v-if="form.db_type === 'dameng'">
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.damengSslFilesPath") }}</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <div class="flex items-center gap-1">
+                        <Input v-model="damengSslFilesPath" class="flex-1" :placeholder="t('connection.damengSslFilesPathPlaceholder')" :disabled="!tlsEnabled" />
+                        <Tooltip v-if="isDesktop">
+                          <TooltipTrigger as-child>
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!tlsEnabled" @click="browseDamengSslFilesPath">
+                              <FolderOpen class="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>{{ t("connection.damengSslFilesPathBrowse") }}</TooltipContent>
+                        </Tooltip>
+                      </div>
+                      <p class="text-[11px] leading-4 text-muted-foreground">{{ t("connection.damengSslHint") }}</p>
+                    </div>
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.damengSslKeystorePassword") }}</Label>
+                    <PasswordInput v-model="damengSslKeystorePassword" class="col-span-3" :disabled="!tlsEnabled" />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.damengSslProtocol") }}</Label>
+                    <Input v-model="damengSslProtocol" class="col-span-3" :placeholder="t('connection.damengSslProtocolPlaceholder')" :disabled="!tlsEnabled" />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-[11px] leading-4 text-muted-foreground">{{ t("connection.damengSslVerificationHint") }}</p>
+                  </div>
+                </template>
 
                 <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.redisTlsInsecure") }}</Label>
@@ -6518,12 +6613,13 @@ function openExternalUrl(url: string) {
                         <SelectContent>
                           <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
                           <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+                          <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
                           <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
                           <SelectItem v-if="isLegacySshAgentMethod(selectedSshLayer)" value="agent" disabled>{{ t("connection.sshAuthMethodAgentLegacy") }}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
-                    <div v-if="selectedSshLayer.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedSshLayer.auth_method === 'key' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPath") }}</Label>
                       <div class="col-span-3 flex items-center gap-1">
                         <Input v-model="selectedSshLayer.key_path" class="flex-1" placeholder="~/.ssh/id_rsa" :disabled="selectedSshLayer.enabled === false" />
@@ -6537,11 +6633,11 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                     </div>
-                    <div v-if="selectedSshLayer.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedSshLayer.auth_method === 'key' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPassphrase") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
-                    <div v-if="!selectedSshLayer.auth_method || selectedSshLayer.auth_method === 'password'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="!selectedSshLayer.auth_method || selectedSshLayer.auth_method === 'password' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshPassword") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
@@ -6889,6 +6985,22 @@ function openExternalUrl(url: string) {
   display: flex;
   flex-direction: column;
   max-height: calc(var(--dbx-viewport-height) - 2rem);
+}
+
+.connection-dialog-content--config {
+  min-height: 0;
+}
+
+@media (max-height: 720px) {
+  .connection-dialog-content--config {
+    /* A definite flex height lets tab bodies shrink and scroll above the fixed footer. */
+    height: calc(var(--dbx-viewport-height) - 2rem);
+  }
+
+  .connection-dialog-content--config .connection-form-body {
+    /* Keep grid rows compact when the scroll viewport is taller than the form. */
+    align-content: start;
+  }
 }
 
 /* Legacy responsive layout rules live in public/connection-dialog-legacy.css

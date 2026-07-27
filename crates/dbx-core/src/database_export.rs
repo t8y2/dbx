@@ -11,7 +11,7 @@ use crate::object_source_sql::build_export_object_source_sql;
 use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_single_row_insert_statements};
 use crate::transfer::{
     format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra, quote_identifier,
-    selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
+    quote_postgres_string_literal, selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
     wrap_dameng_identity_insert_sql_for_table,
 };
 use crate::types::ObjectSourceKind;
@@ -361,7 +361,7 @@ fn format_postgres_json_export_literal(value: &Value) -> String {
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
     // PostgreSQL standard strings keep backslashes literal; JSON text needs its
     // own escape sequences, so only SQL-escape the surrounding string delimiter.
-    postgres_string_literal(&text)
+    quote_postgres_string_literal(&text)
 }
 
 fn format_postgres_vector_export_literal(value: &Value) -> String {
@@ -375,7 +375,7 @@ fn format_postgres_vector_export_literal(value: &Value) -> String {
         Value::String(text) => text.to_string(),
         _ => value.to_string(),
     };
-    postgres_string_literal(&text)
+    quote_postgres_string_literal(&text)
 }
 
 fn format_postgres_vector_export_text(arr: &[Value]) -> String {
@@ -400,6 +400,7 @@ fn quote_export_sql_string(text: &str) -> String {
 fn quote_export_sql_string_for_database(text: &str, database_type: Option<DatabaseType>) -> String {
     match database_type {
         Some(DatabaseType::Dameng) => quote_dameng_export_sql_string(text),
+        Some(DatabaseType::Postgres) => quote_postgres_string_literal(text),
         database_type if is_mysql_compatible_export_literal_target(database_type) => {
             quote_mysql_compatible_export_sql_string(text)
         }
@@ -988,10 +989,6 @@ fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String
     }
 }
 
-fn postgres_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 fn generate_postgres_sequence_create_ddl(sequence: &PostgresExportSequence, schema: &str) -> String {
     let qualified_name = postgres_sequence_qualified_name(schema, &sequence.name);
     let cycle = if sequence.cycle { "CYCLE" } else { "NO CYCLE" };
@@ -1023,7 +1020,7 @@ fn generate_postgres_sequence_setval_sql(sequence: &PostgresExportSequence, sche
         return None;
     }
 
-    let sequence_literal = postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name));
+    let sequence_literal = quote_postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name));
     match (sequence.owner_table.as_deref(), sequence.owner_column.as_deref()) {
         (Some(owner_table), Some(owner_column)) => {
             let owner_table = crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres);
@@ -2439,7 +2436,7 @@ mod tests {
     }
 
     #[test]
-    fn postgres_export_inserts_keep_literal_control_characters() {
+    fn postgres_export_inserts_escape_control_characters() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
             schema: Some("public".to_string()),
@@ -2453,7 +2450,35 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(statements, vec!["INSERT INTO \"public\".\"notes\" (\"body\") VALUES ('line1\nline2\tend');"]);
+        assert_eq!(statements, vec!["INSERT INTO \"public\".\"notes\" (\"body\") VALUES (E'line1\\nline2\\tend');"]);
+    }
+
+    #[test]
+    fn postgres_export_inserts_escape_quotes_and_backslashes_without_changing_plain_strings() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("notes".to_string()),
+            qualified_table_name: None,
+            columns: vec!["carriage_return".to_string(), "quote".to_string(), "path".to_string(), "plain".to_string()],
+            column_types: vec![
+                Some("text".to_string()),
+                Some("text".to_string()),
+                Some("text".to_string()),
+                Some("text".to_string()),
+            ],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!("line1\rline2"), json!("O'Hara"), json!(r"C:\tmp"), json!("plain")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO "public"."notes" ("carriage_return", "quote", "path", "plain") VALUES (E'line1\rline2', 'O''Hara', E'C:\\tmp', 'plain');"#
+            ]
+        );
     }
 
     #[test]
@@ -2474,7 +2499,7 @@ mod tests {
         assert_eq!(
             statements,
             vec![
-                r#"INSERT INTO "public"."events" ("payload") VALUES ('{"text":"say \"hi\"","path":"C:\\tmp","quote":"O''Hara"}');"#
+                r#"INSERT INTO "public"."events" ("payload") VALUES (E'{"text":"say \\"hi\\"","path":"C:\\\\tmp","quote":"O''Hara"}');"#
             ]
         );
     }

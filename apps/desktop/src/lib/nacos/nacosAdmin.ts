@@ -1,4 +1,4 @@
-import type { NacosConfigHistoryItem, NacosConfigItem, NacosImplementation, NacosInstanceInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
+import type { NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
 import { diffChars, diffLines } from "diff";
 
 export type NacosRawTemplateKey = "serverState" | "namespaceList" | "configDetail" | "serviceList" | "instanceList";
@@ -163,6 +163,11 @@ export function isNacosRawMutation(method: string): boolean {
   return method.trim().toUpperCase() !== "GET";
 }
 
+export function isNacosErrorCode(error: unknown, code: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes(`NACOS_ERROR[${code}]`);
+}
+
 export function formatNacosConfigIdentity(item: Pick<NacosConfigItem, "namespace" | "dataId" | "group">, fallbackNamespace = ""): string {
   return [`namespace=${item.namespace || fallbackNamespace || "public"}`, `dataId=${item.dataId}`, `group=${item.group || "DEFAULT_GROUP"}`].join("\n");
 }
@@ -177,6 +182,232 @@ export function buildNacosConfigCopy(item: NacosConfigItem, content: string): st
 
 export function resolveNacosConfigCopyText(selectionText: string, editorText: string | undefined, stateText: string): string {
   return selectionText || editorText || stateText;
+}
+
+export interface NacosLatestRequestGuard {
+  begin(): number;
+  invalidate(): void;
+  isCurrent(requestId: number): boolean;
+}
+
+export function createNacosLatestRequestGuard(): NacosLatestRequestGuard {
+  let sequence = 0;
+  return {
+    begin() {
+      sequence += 1;
+      return sequence;
+    },
+    invalidate() {
+      sequence += 1;
+    },
+    isCurrent(requestId) {
+      return requestId === sequence;
+    },
+  };
+}
+
+export interface NacosConfigSaveSnapshot {
+  requestId: number;
+  editorSessionId: number;
+  connectionId: string;
+  wasCreating: boolean;
+  originalKey: NacosConfigKey | null;
+  targetKey: NacosConfigKey;
+  config: NacosConfigItem;
+  content: string;
+  configType: string;
+}
+
+export interface NacosConfigSaveSnapshotInput {
+  requestId: number;
+  editorSessionId: number;
+  connectionId: string;
+  fallbackNamespace?: string;
+  originalKey: NacosConfigKey | null;
+  config: NacosConfigItem;
+  content: string;
+  configType: string;
+}
+
+export function createNacosConfigSaveSnapshot(input: NacosConfigSaveSnapshotInput): NacosConfigSaveSnapshot {
+  const dataId = input.config.dataId.trim();
+  const group = input.config.group.trim() || "DEFAULT_GROUP";
+  const namespace = input.originalKey?.namespace || input.config.namespace || input.fallbackNamespace || undefined;
+  const configType = input.configType || "text";
+  const config: NacosConfigItem = {
+    ...input.config,
+    namespace: namespace || "",
+    dataId,
+    group,
+    content: input.content,
+    configType,
+  };
+  return {
+    requestId: input.requestId,
+    editorSessionId: input.editorSessionId,
+    connectionId: input.connectionId,
+    wasCreating: !input.originalKey,
+    originalKey: input.originalKey ? { ...input.originalKey } : null,
+    targetKey: { namespace, dataId, group },
+    config,
+    content: input.content,
+    configType,
+  };
+}
+
+export interface NacosConfigEditorComparableState {
+  latestRequestId: number;
+  editorSessionId: number;
+  connectionId: string;
+  originalKey: NacosConfigKey | null;
+  config: NacosConfigItem | null;
+  content: string;
+  configType: string;
+}
+
+function sameNacosConfigKey(left: NacosConfigKey | null, right: NacosConfigKey | null): boolean {
+  if (!left || !right) return left === right;
+  return (left.namespace || "") === (right.namespace || "") && left.dataId === right.dataId && (left.group || "DEFAULT_GROUP") === (right.group || "DEFAULT_GROUP");
+}
+
+export function isNacosConfigSaveSnapshotSameEditor(snapshot: NacosConfigSaveSnapshot, current: NacosConfigEditorComparableState): boolean {
+  const config = current.config;
+  return (
+    snapshot.requestId === current.latestRequestId &&
+    snapshot.editorSessionId === current.editorSessionId &&
+    snapshot.connectionId === current.connectionId &&
+    sameNacosConfigKey(snapshot.originalKey, current.originalKey) &&
+    !!config &&
+    snapshot.config.dataId === config.dataId.trim() &&
+    snapshot.config.group === (config.group.trim() || "DEFAULT_GROUP") &&
+    (snapshot.config.namespace || "") === (config.namespace || snapshot.targetKey.namespace || "")
+  );
+}
+
+export function isNacosConfigSaveSnapshotCurrent(snapshot: NacosConfigSaveSnapshot, current: NacosConfigEditorComparableState): boolean {
+  const config = current.config;
+  return (
+    isNacosConfigSaveSnapshotSameEditor(snapshot, current) &&
+    !!config &&
+    snapshot.content === current.content &&
+    snapshot.configType === current.configType &&
+    (snapshot.config.appName || "") === (config.appName || "") &&
+    (snapshot.config.desc || "") === (config.desc || "") &&
+    (snapshot.config.tags || "") === (config.tags || "")
+  );
+}
+
+export type NacosConfigSaveCompletion =
+  | { kind: "stale" }
+  | {
+      kind: "saved" | "saved-with-later-edits";
+      originalKey: NacosConfigKey;
+      savedConfig: NacosConfigItem;
+      baseline: {
+        content: string;
+        configType: string;
+        appName: string;
+        desc: string;
+        tags: string;
+      };
+    };
+
+export function resolveNacosConfigSaveCompletion(snapshot: NacosConfigSaveSnapshot, current: NacosConfigEditorComparableState): NacosConfigSaveCompletion {
+  if (!isNacosConfigSaveSnapshotSameEditor(snapshot, current)) return { kind: "stale" };
+  return {
+    kind: isNacosConfigSaveSnapshotCurrent(snapshot, current) ? "saved" : "saved-with-later-edits",
+    originalKey: { ...snapshot.targetKey },
+    savedConfig: { ...snapshot.config },
+    baseline: {
+      content: snapshot.content,
+      configType: snapshot.configType,
+      appName: snapshot.config.appName || "",
+      desc: snapshot.config.desc || "",
+      tags: snapshot.config.tags || "",
+    },
+  };
+}
+
+export function canDeleteNacosConfig(readOnly: boolean, originalKey: NacosConfigKey | null): boolean {
+  return !readOnly && !!originalKey;
+}
+
+export interface NacosConfigMutationGuardState {
+  readOnly: boolean;
+  saving: boolean;
+  deleting: boolean;
+  hasPendingDelete: boolean;
+  hasPendingSave: boolean;
+}
+
+export function canStartNacosConfigSave(state: NacosConfigMutationGuardState): boolean {
+  return !state.readOnly && !state.saving && !state.deleting && !state.hasPendingDelete;
+}
+
+export function canStartNacosConfigDelete(state: NacosConfigMutationGuardState, originalKey: NacosConfigKey | null): boolean {
+  return canDeleteNacosConfig(state.readOnly, originalKey) && !state.saving && !state.deleting && !state.hasPendingSave && !state.hasPendingDelete;
+}
+
+export interface NacosConfigDeleteSnapshot {
+  connectionId: string;
+  key: NacosConfigKey;
+  config: NacosConfigItem;
+}
+
+export function createNacosConfigDeleteSnapshot(connectionId: string, key: NacosConfigKey, config: NacosConfigItem): NacosConfigDeleteSnapshot {
+  return {
+    connectionId,
+    key: {
+      namespace: key.namespace || undefined,
+      dataId: key.dataId,
+      group: key.group || "DEFAULT_GROUP",
+    },
+    config: {
+      ...config,
+      namespace: key.namespace || "",
+      dataId: key.dataId,
+      group: key.group || "DEFAULT_GROUP",
+    },
+  };
+}
+
+export function isNacosConfigDeleteSnapshotInScope(snapshot: NacosConfigDeleteSnapshot, connectionId: string, namespace?: string): boolean {
+  return snapshot.connectionId === connectionId && (snapshot.key.namespace || "") === (namespace || "");
+}
+
+export interface NacosLiteralMatchSegment {
+  text: string;
+  matched: boolean;
+}
+
+export function splitNacosContentLiteralMatches(text: string, query: string): NacosLiteralMatchSegment[] {
+  if (!text || !query) return text ? [{ text, matched: false }] : [];
+  const segments: NacosLiteralMatchSegment[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const matchIndex = text.indexOf(query, cursor);
+    if (matchIndex < 0) {
+      segments.push({ text: text.slice(cursor), matched: false });
+      break;
+    }
+    if (matchIndex > cursor) {
+      segments.push({ text: text.slice(cursor, matchIndex), matched: false });
+    }
+    segments.push({ text: text.slice(matchIndex, matchIndex + query.length), matched: true });
+    cursor = matchIndex + query.length;
+  }
+  return segments;
+}
+
+function nacosSearchCsvCell(value: string | number): string {
+  let text = String(value);
+  if (/^[\t\r ]*[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+export function buildNacosContentSearchCsv(matches: readonly NacosContentMatch[]): string {
+  const rows: Array<Array<string | number>> = [["namespace", "group", "dataId", "lineNumber", "snippet"], ...matches.map((match) => [match.namespace || "public", match.group || "DEFAULT_GROUP", match.dataId, match.lineNumber, match.snippet])];
+  return `\uFEFF${rows.map((row) => row.map(nacosSearchCsvCell).join(",")).join("\r\n")}\r\n`;
 }
 
 export function sanitizeNacosConfigFileNameSegment(value: string): string {

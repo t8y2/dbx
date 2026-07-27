@@ -1198,6 +1198,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeTab.title"
                 @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
+                @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
@@ -1231,9 +1232,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 @cancel="emit('cancel')"
               />
               <div v-else-if="activeTab.resultEvicted && activeTab.resultCacheState === 'missing'" class="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-                <div>{{ t("editor.cachedResultUnavailable") }}</div>
+                <div>{{ t("grid.cachedResultUnavailable") }}</div>
                 <Button v-if="(activeTab.lastExecutedSql ?? activeTab.sql)?.trim()" variant="secondary" size="sm" @click="queryStore.reloadEvictedTab(activeTab.id, { reexecuteOnMissing: true })">
-                  {{ t("editor.reexecuteQuery") }}
+                  {{ t("grid.reexecuteQuery") }}
                 </Button>
               </div>
               <div v-else-if="!activeTab.result" class="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-muted-foreground text-sm">
@@ -1525,6 +1526,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
           :export-file-base-name="activeTab.title"
           @update:where-input="(v: string) => (activeTab.whereInput = v)"
           @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
+          @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
@@ -1612,7 +1614,17 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
     <template v-else-if="activeTab.mode === 'nacos'">
       <div class="flex-1 min-h-0">
-        <NacosAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :namespace="activeTab.nacosNamespace" :namespace-name="activeTab.nacosNamespaceName" :read-only="activeConnection?.read_only ?? false" />
+        <NacosAdminConsole
+          :key="activeTab.id"
+          :connection-id="activeTab.connectionId"
+          :namespace="activeTab.nacosNamespace"
+          :namespace-name="activeTab.nacosNamespaceName"
+          :target-data-id="activeTab.nacosTargetDataId"
+          :target-group="activeTab.nacosTargetGroup"
+          :target-keyword="activeTab.nacosTargetKeyword"
+          :target-request-id="activeTab.nacosTargetRequestId"
+          :read-only="activeConnection?.read_only ?? false"
+        />
       </div>
     </template>
 

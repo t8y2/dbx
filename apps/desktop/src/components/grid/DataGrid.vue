@@ -211,6 +211,7 @@ import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableI
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
+import { restoreDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { dataGridConditionColumnOptions } from "@/lib/dataGrid/dataGridConditionCompletion";
 import { isMacOS } from "@/lib/backend/platform";
@@ -344,6 +345,7 @@ const emit = defineEmits<{
   sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
+  "local-column-filters-change": [value: Record<string, string[]>];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({ canRefresh: computed(() => !isSaving.value && !props.loading), refresh: onToolbarRefresh });
@@ -624,7 +626,7 @@ type FilterMode = DataGridContextFilterMode;
 
 type StructuredFilterRule = DataGridStructuredFilterRule;
 
-const localColumnFilters = ref<Record<number, Set<string>>>({});
+const localColumnFilters = ref<Record<number, Set<string>>>(restoreDataGridLocalColumnFilters(props.result.local_column_filters, props.result.columns.length));
 const localFilterOpenColumn = ref<number | null>(null);
 const headerActionMenuOpenColumn = ref<number | null>(null);
 const headerSortMenuOpenColumn = ref<number | null>(null);
@@ -641,6 +643,8 @@ const serverFilterValueByKey = ref<Map<string, CellValue>>(new Map());
 const serverColumnFilters = ref<Record<number, DataGridCachedServerColumnFilter>>({});
 let serverFilterRequestId = 0;
 let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
+
+watch(localColumnFilters, (filters) => emit("local-column-filters-change", serializeDataGridLocalColumnFilters(filters)), { deep: true });
 const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
@@ -8711,7 +8715,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             </template>
           </div>
           <!-- Table Info Drawer -->
-          <div v-if="showTableInfo" class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0" :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]" :style="ddlDrawerStyle" @contextmenu="onDrawerContextMenu">
+          <div
+            v-if="showTableInfo"
+            data-native-clipboard
+            class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0"
+            :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]"
+            :style="ddlDrawerStyle"
+            @contextmenu="onDrawerContextMenu"
+          >
             <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize" @mousedown.prevent="onDdlResizeStart" />
             <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />

@@ -2958,13 +2958,26 @@ function buildTableItems(
   const { prefix } = context;
   const qualifierSchema = context.qualifier?.split(".").filter(Boolean).pop();
   const existingAliases = new Set(referencedTables.map((ref) => ref.alias?.toLowerCase()).filter((alias): alias is string => !!alias));
-  return tables
-    .filter((table) => matchesPrefix(table.name, prefix))
+  const matchingTables = tables.filter((table) => matchesPrefix(table.name, prefix));
+  const schemasByTableName = new Map<string, Set<string>>();
+  for (const table of matchingTables) {
+    const tableName = normalizeIdentifierPart(table.name);
+    const schemas = schemasByTableName.get(tableName) ?? new Set<string>();
+    schemas.add(normalizeIdentifierPart(table.schema ?? ""));
+    schemasByTableName.set(tableName, schemas);
+  }
+  return matchingTables
     .map((table) => {
       const qualifiedByContext = !!qualifierSchema && !!table.schema && normalizeIdentifierPart(qualifierSchema) === normalizeIdentifierPart(table.schema);
       const oracleSchemaQualification = databaseType === "oracle" && table.schema && table.schema.toUpperCase() !== "PUBLIC" && (!currentSchema || normalizeIdentifierPart(table.schema) !== normalizeIdentifierPart(currentSchema));
-      const defaultApplyName = oracleSchemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
-      const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : (table.applyName ?? defaultApplyName);
+      // A bare table name is ambiguous when metadata contains the same name in multiple schemas.
+      // Keep Oracle's current-schema behavior, but qualify the generic/PostgreSQL/SQL Server paths.
+      const ambiguousTableName = databaseType !== "oracle" && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
+      const schemaQualification = !!table.schema && (oracleSchemaQualification || ambiguousTableName);
+      const defaultApplyName = schemaQualification ? `${quoteSqlIdentifier(table.schema!, dialect)}.${quoteSqlIdentifier(table.name, dialect)}` : quoteSqlIdentifier(table.name, dialect);
+      const suppliedApplyName = table.applyName?.trim();
+      const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
+      const applyName = qualifiedByContext ? quoteSqlIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";
       return {
         label: table.name,
@@ -2972,7 +2985,7 @@ function buildTableItems(
         detail: table.detail ?? (table.schema ? `${table.schema}.${table.name}` : table.type),
         apply: formatTableAliasApply(applyName, alias, databaseType),
         boost: computeBoost(table.name, prefix) + 1000 + (table.boost ?? 0),
-        dedupeKey: table.applyName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
+        dedupeKey: table.applyName || ambiguousTableName || (databaseType === "oracle" && table.schema) ? applyName : undefined,
       };
     })
     .sort(compareCompletionItems)

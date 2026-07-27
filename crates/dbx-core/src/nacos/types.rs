@@ -133,6 +133,172 @@ pub struct NacosConfigList {
     pub items: Vec<NacosConfigItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosNamespaceScope {
+    #[default]
+    CurrentNamespace,
+    AllNamespaces,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosContentSearchRequest {
+    pub operation_id: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub scope: NacosNamespaceScope,
+    pub query: String,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub data_id: Option<String>,
+    #[serde(default)]
+    pub max_results: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosContentMatch {
+    pub namespace: String,
+    pub group: String,
+    pub data_id: String,
+    pub line_number: u64,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosSearchFailure {
+    pub namespace: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosSearchProgress {
+    pub operation_id: String,
+    pub phase: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    pub scanned: u64,
+    #[serde(default)]
+    pub total: Option<u64>,
+    pub matched: u64,
+    #[serde(default)]
+    pub matches: Vec<NacosContentMatch>,
+    #[serde(default)]
+    pub failures: Vec<NacosSearchFailure>,
+    pub truncated: bool,
+    pub cancelled: bool,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosContentSearchResult {
+    pub operation_id: String,
+    pub scanned: u64,
+    pub matches: Vec<NacosContentMatch>,
+    pub failures: Vec<NacosSearchFailure>,
+    pub truncated: bool,
+    pub cancelled: bool,
+    pub incomplete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosConfigSelectionScope {
+    Selected,
+    Filtered,
+    #[default]
+    Namespace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosConfigSelector {
+    pub namespace: String,
+    #[serde(default)]
+    pub scope: NacosConfigSelectionScope,
+    #[serde(default)]
+    pub keys: Vec<NacosConfigKey>,
+    #[serde(default)]
+    pub query: Option<NacosConfigQuery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NacosConflictPolicy {
+    #[default]
+    Abort,
+    Skip,
+    Overwrite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosBatchPreviewItem {
+    pub namespace: String,
+    pub group: String,
+    pub data_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosBatchPreview {
+    pub plan_hash: String,
+    pub total: u64,
+    pub created: u64,
+    pub conflicts: u64,
+    pub invalid: u64,
+    pub items: Vec<NacosBatchPreviewItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosBatchItemResult {
+    pub namespace: String,
+    pub group: String,
+    pub data_id: String,
+    pub status: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosBatchReport {
+    pub operation_id: String,
+    #[serde(default)]
+    pub plan_hash: Option<String>,
+    pub total: u64,
+    pub created: u64,
+    pub overwritten: u64,
+    pub skipped: u64,
+    pub failed: u64,
+    pub aborted: bool,
+    pub partial: bool,
+    pub cancelled: bool,
+    pub items: Vec<NacosBatchItemResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NacosConfigTransferRequest {
+    pub operation_id: String,
+    pub source_connection_id: String,
+    pub target_connection_id: String,
+    pub source: NacosConfigSelector,
+    pub target_namespace: String,
+    #[serde(default)]
+    pub conflict_policy: NacosConflictPolicy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NacosConfigUpsert {

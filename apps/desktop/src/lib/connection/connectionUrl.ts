@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { h2JdbcUrlHasPasswordParam, h2JdbcUrlHasUserParam, parseH2JdbcUrl } from "@/lib/database/h2Connection";
+import { damengSslFormConfig } from "@/lib/database/damengSslOptions";
 
 export interface ParsedConnectionUrl {
   name?: string;
@@ -226,6 +227,10 @@ function extractMysqlCredentialParams(params: string): { username?: string; pass
 }
 
 function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
+  if (dbType === "dameng") {
+    return damengSslFormConfig(params).enabled;
+  }
+
   if (dbType === "mysql") {
     const requireSsl = queryParamValue(params, "require_ssl")?.toLowerCase();
     if (requireSsl === "true" || requireSsl === "1" || requireSsl === "yes") return true;

@@ -34,21 +34,25 @@ const xuguListSchemasSQL = `
 SELECT SCHEMA_NAME
 FROM ALL_SCHEMAS
 ORDER BY SCHEMA_NAME`
+const xuguCatalogTableNameSelectSQL = `
+SELECT s.SCHEMA_NAME, t.TABLE_NAME
+FROM ALL_TABLES t
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID`
 const xuguPrimaryKeyColumnsSQL = `
 SELECT c.DEFINE
 FROM ALL_CONSTRAINTS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
   AND c.CONS_TYPE = 'P'`
 const xuguListColumnsSQL = `
 SELECT c.COL_NAME, c.TYPE_NAME, c.NOT_NULL, c.DEF_VAL, c.ON_NULL, c.COMMENTS, c.SCALE, c."VARYING"
 FROM ALL_COLUMNS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
   AND (c.IS_HIDE IS NULL OR c.IS_HIDE = FALSE)
 ORDER BY c.COL_NO`
 const xuguLegacyListColumnsSQL = `
@@ -56,8 +60,8 @@ SELECT c.COL_NAME, c.TYPE_NAME, c.NOT_NULL, c.DEF_VAL, c.COMMENTS, c.SCALE, c."V
 FROM ALL_COLUMNS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
   AND (c.IS_HIDE IS NULL OR c.IS_HIDE = FALSE)
 ORDER BY c.COL_NO`
 const xuguListIndexesSQL = `
@@ -65,8 +69,8 @@ SELECT i.INDEX_NAME, i.KEYS, i.IS_UNIQUE, i.IS_PRIMARY, i.INDEX_TYPE, i.FILTER
 FROM ALL_INDEXES i
 JOIN ALL_TABLES t ON t.DB_ID = i.DB_ID AND t.TABLE_ID = i.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
 ORDER BY i.INDEX_NAME`
 const xuguTableMetadataSQL = `
 SELECT t.TEMP_TYPE, t.ON_COMMIT_DEL, t.PCTFREE, t.COPY_NUM,
@@ -75,30 +79,48 @@ SELECT t.TEMP_TYPE, t.ON_COMMIT_DEL, t.PCTFREE, t.COPY_NUM,
        t.SUBPARTI_TYPE, t.SUBPARTI_NUM, t.SUBPARTI_KEY, t.COMMENTS
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)`
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?`
 const xuguTableIdentitySQL = `
-SELECT c.COL_NAME, q.MIN_VAL, q.STEP_VAL
+SELECT c.COL_NAME, q.MIN_VAL, q.STEP_VAL, q.IS_SYS
 FROM ALL_COLUMNS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 JOIN ALL_SEQUENCES q ON q.DB_ID = c.DB_ID AND q.SEQ_ID = c.SERIAL_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
   AND c.IS_SERIAL = TRUE`
 const xuguTableConstraintsSQL = `
 SELECT c.CONS_NAME, c.CONS_TYPE, c.DEFINE,
        rs.SCHEMA_NAME, rt.TABLE_NAME,
        c.MATCH_TYPE, c.UPDATE_ACTION, c.DELETE_ACTION,
-       c.DEFERRABLE, c.INITDEFERRED, c.ENABLE, c.VALID
+       c.DEFERRABLE, c.INITDEFERRED, c.ENABLE, c.VALID, c.IS_SYS
 FROM ALL_CONSTRAINTS c
 JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 LEFT JOIN ALL_TABLES rt ON rt.DB_ID = c.DB_ID AND rt.TABLE_ID = c.REF_TABLE_ID
 LEFT JOIN ALL_SCHEMAS rs ON rs.DB_ID = rt.DB_ID AND rs.SCHEMA_ID = rt.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
   AND c.CONS_TYPE <> 'F'
+ORDER BY c.CONS_NAME`
+
+// Keep foreign keys separate from the generic constraint query. The desktop
+// presents them in their own group, while table DDL must replay them only after
+// CREATE TABLE so that self-referencing tables can be restored safely.
+const xuguTableForeignKeysSQL = `
+SELECT c.CONS_NAME, c.CONS_TYPE, c.DEFINE,
+       rs.SCHEMA_NAME, rt.TABLE_NAME,
+       c.MATCH_TYPE, c.UPDATE_ACTION, c.DELETE_ACTION,
+       c.DEFERRABLE, c.INITDEFERRED, c.ENABLE, c.VALID, c.IS_SYS
+FROM ALL_CONSTRAINTS c
+JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+LEFT JOIN ALL_TABLES rt ON rt.DB_ID = c.DB_ID AND rt.TABLE_ID = c.REF_TABLE_ID
+LEFT JOIN ALL_SCHEMAS rs ON rs.DB_ID = rt.DB_ID AND rs.SCHEMA_ID = rt.SCHEMA_ID
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
+  AND c.CONS_TYPE = 'F'
 ORDER BY c.CONS_NAME`
 const xuguTablePartitionsSQL = `
 SELECT p.PARTI_NO, p.PARTI_NAME, p.PARTI_VAL, p.ONLINE,
@@ -106,8 +128,8 @@ SELECT p.PARTI_NO, p.PARTI_NAME, p.PARTI_VAL, p.ONLINE,
 FROM ALL_PARTIS p
 JOIN ALL_TABLES t ON t.DB_ID = p.DB_ID AND t.TABLE_ID = p.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
 ORDER BY p.PARTI_NO`
 const xuguTableSubpartitionsSQL = `
 SELECT p.SUBPARTI_NO, p.SUBPARTI_NAME, p.SUBPARTI_VAL,
@@ -115,8 +137,8 @@ SELECT p.SUBPARTI_NO, p.SUBPARTI_NAME, p.SUBPARTI_VAL,
 FROM ALL_SUBPARTIS p
 JOIN ALL_TABLES t ON t.DB_ID = p.DB_ID AND t.TABLE_ID = p.TABLE_ID
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
+WHERE s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
 ORDER BY p.SUBPARTI_NO`
 
 var xuguDataTypes = []string{
@@ -298,6 +320,7 @@ type indexInfo struct {
 	IndexType       *string  `json:"index_type"`
 	IncludedColumns []string `json:"included_columns"`
 	Comment         *string  `json:"comment"`
+	keys            []xuguIndexKey
 }
 
 func (i indexInfo) MarshalJSON() ([]byte, error) {
@@ -380,9 +403,21 @@ type xuguTableMetadata struct {
 }
 
 type xuguIdentityInfo struct {
-	Column string
-	Start  int64
-	Step   int64
+	Column          string
+	Start           int64
+	Step            int64
+	SystemGenerated bool
+}
+
+// xuguIndexKey preserves the catalog spelling and SQL semantics of an index
+// key. In particular, an index key can be a normal identifier, an identifier
+// with ASC/DESC ordering, or an arbitrary expression such as LOWER("CODE").
+// Only the first form can be compared to a table constraint column list.
+type xuguIndexKey struct {
+	Raw         string
+	Column      string
+	Direction   string
+	PlainColumn bool
 }
 
 type xuguConstraintInfo struct {
@@ -398,6 +433,7 @@ type xuguConstraintInfo struct {
 	InitiallyDeferred bool
 	Enabled           bool
 	Valid             bool
+	SystemGenerated   bool
 }
 
 type xuguPartitionInfo struct {
@@ -1693,11 +1729,11 @@ func xuguFuzzyLikePattern(value string) string {
 }
 
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
+	schema, table = catalogSchema, catalogTable
 	primaryKeys, err := s.primaryKeyColumns(schema, table)
 	if err != nil {
 		return nil, err
@@ -1728,7 +1764,7 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 		item.DataType = normalizeXuguColumnType(item.DataType, varying)
 		item.IsNullable = !truthy(notNull)
 		item.DefaultOnNull = xuguInt(onNull)
-		item.IsPrimaryKey = primaryKeys[strings.ToUpper(item.Name)]
+		item.IsPrimaryKey = primaryKeys[item.Name]
 		item.NumericPrecision, item.NumericScale, item.CharacterMaximumLength = decodeXuguScale(item.DataType, scale)
 		result = append(result, item)
 	}
@@ -1736,15 +1772,14 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 }
 
 func (s *server) queryColumnRows(schema, table string) (*sql.Rows, bool, error) {
-	args := []any{schema, table}
-	rows, err := s.queryRows(xuguListColumnsSQL, args)
+	rows, err := s.queryRows(xuguTableCatalogQuery(xuguListColumnsSQL, schema, table), nil)
 	if err == nil {
 		return rows, true, nil
 	}
 	if !isXuguMissingOnNullColumnError(err) {
 		return nil, false, err
 	}
-	rows, err = s.queryRows(xuguLegacyListColumnsSQL, args)
+	rows, err = s.queryRows(xuguTableCatalogQuery(xuguLegacyListColumnsSQL, schema, table), nil)
 	return rows, false, err
 }
 
@@ -1766,7 +1801,7 @@ func (s *server) columnsFromSelect(schema, table string, primaryKeys map[string]
 		item := columnInfo{
 			Name:         columnType.Name(),
 			DataType:     columnType.DatabaseTypeName(),
-			IsPrimaryKey: primaryKeys[strings.ToUpper(columnType.Name())],
+			IsPrimaryKey: primaryKeys[columnType.Name()],
 		}
 		if nullable, ok := columnType.Nullable(); ok {
 			item.IsNullable = nullable
@@ -1783,7 +1818,7 @@ func (s *server) columnsFromSelect(schema, table string, primaryKeys map[string]
 }
 
 func (s *server) primaryKeyColumns(schema, table string) (map[string]bool, error) {
-	rows, err := s.queryRows(xuguPrimaryKeyColumnsSQL, []any{schema, table})
+	rows, err := s.queryRows(xuguTableCatalogQuery(xuguPrimaryKeyColumnsSQL, schema, table), nil)
 	if err != nil {
 		if isXuguMetadataAccessError(err) {
 			return map[string]bool{}, nil
@@ -1798,19 +1833,18 @@ func (s *server) primaryKeyColumns(schema, table string) (map[string]bool, error
 			return nil, err
 		}
 		for _, column := range parseQuotedIdentifiers(define) {
-			result[strings.ToUpper(column)] = true
+			result[column] = true
 		}
 	}
 	return result, rows.Err()
 }
 
 func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.ToUpper(strings.TrimSpace(table))
-	rows, err := s.queryRows(xuguListIndexesSQL, []any{schema, table})
+	rows, err := s.queryRows(xuguTableCatalogQuery(xuguListIndexesSQL, catalogSchema, catalogTable), nil)
 	if err != nil {
 		if isXuguMetadataAccessError(err) {
 			return []indexInfo{}, nil
@@ -1828,7 +1862,8 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 		if err := rows.Scan(&item.Name, &keys, &unique, &primary, &indexType, &item.Filter); err != nil {
 			return nil, err
 		}
-		item.Columns = parseIndexKeys(keys)
+		item.keys = parseXuguIndexKeys(keys)
+		item.Columns = indexKeyDisplayNames(item.keys)
 		item.IsUnique = truthy(unique)
 		item.IsPrimary = truthy(primary)
 		item.IndexType = stringPtr(indexTypeName(indexType))
@@ -1844,37 +1879,22 @@ func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error)
 		return nil, err
 	}
 	table = strings.ToUpper(strings.TrimSpace(table))
-	rows, err := s.queryRows(`
-SELECT c.CONS_NAME, c.DEFINE, rs.SCHEMA_NAME, rt.TABLE_NAME, c.UPDATE_ACTION, c.DELETE_ACTION
-FROM ALL_CONSTRAINTS c
-JOIN ALL_TABLES t ON t.DB_ID = c.DB_ID AND t.TABLE_ID = c.TABLE_ID
-JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
-LEFT JOIN ALL_TABLES rt ON rt.DB_ID = c.DB_ID AND rt.TABLE_ID = c.REF_TABLE_ID
-LEFT JOIN ALL_SCHEMAS rs ON rs.DB_ID = rt.DB_ID AND rs.SCHEMA_ID = rt.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
-  AND UPPER(t.TABLE_NAME) = UPPER(?)
-  AND c.CONS_TYPE = 'F'
-ORDER BY c.CONS_NAME`, []any{schema, table})
+	constraints, err := s.tableForeignKeys(schema, table)
 	if err != nil {
 		if isXuguMetadataAccessError(err) {
 			return []foreignKeyInfo{}, nil
 		}
 		return nil, err
 	}
-	defer s.closeRows(rows)
 	var result []foreignKeyInfo
-	for rows.Next() {
-		var name, define, refSchema, refTable, updateAction, deleteAction any
-		if err := rows.Scan(&name, &define, &refSchema, &refTable, &updateAction, &deleteAction); err != nil {
-			return nil, err
-		}
-		local, ref := parseForeignKeyColumns(xuguString(define))
+	for _, constraint := range constraints {
+		local, ref := parseForeignKeyColumns(constraint.Definition)
 		for i, column := range local {
 			item := foreignKeyInfo{
-				Name: xuguString(name), Column: column, RefTable: xuguString(refTable),
-				RefSchema: optionalString(xuguString(refSchema)),
-				OnUpdate:  optionalString(xuguReferentialAction(xuguString(updateAction))),
-				OnDelete:  optionalString(xuguReferentialAction(xuguString(deleteAction))),
+				Name: constraint.Name, Column: column, RefTable: constraint.ReferenceTable,
+				RefSchema: optionalString(constraint.ReferenceSchema),
+				OnUpdate:  optionalString(xuguReferentialAction(constraint.UpdateAction)),
+				OnDelete:  optionalString(xuguReferentialAction(constraint.DeleteAction)),
 			}
 			if i < len(ref) {
 				item.RefColumn = ref[i]
@@ -1882,7 +1902,7 @@ ORDER BY c.CONS_NAME`, []any{schema, table})
 			result = append(result, item)
 		}
 	}
-	return emptyIfNil(result), rows.Err()
+	return emptyIfNil(result), nil
 }
 
 func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
@@ -1938,9 +1958,9 @@ func (s *server) listConstraints(schema, table string) ([]constraintInfo, error)
 	var result []constraintInfo
 	for rows.Next() {
 		var name, kind, definition, refSchema, refTable any
-		var matchType, updateAction, deleteAction, deferrable, initiallyDeferred, enabled, valid any
+		var matchType, updateAction, deleteAction, deferrable, initiallyDeferred, enabled, valid, systemGenerated any
 		if err := rows.Scan(&name, &kind, &definition, &refSchema, &refTable, &matchType, &updateAction, &deleteAction,
-			&deferrable, &initiallyDeferred, &enabled, &valid); err != nil {
+			&deferrable, &initiallyDeferred, &enabled, &valid, &systemGenerated); err != nil {
 			return nil, err
 		}
 		item := constraintInfo{
@@ -2012,19 +2032,126 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 }
 
 func (s *server) getTableDDL(schema, table string) (string, error) {
-	var err error
-	schema, err = s.normalizeSchema(schema)
+	// Resolve the catalog's stored casing before issuing exact metadata lookups,
+	// so emitted DDL quotes the original names and preserves double-quoted
+	// schema/table/column spellings.
+	if strings.TrimSpace(schema) != "" {
+		if err := s.setSchema(schema); err != nil {
+			return "", err
+		}
+	}
+	catalogSchema, catalogTable, err := s.resolveCatalogTableName(schema, table)
 	if err != nil {
+		return "", err
+	}
+	if err := s.setSchema(catalogSchema); err != nil {
 		return "", err
 	}
 	// DBMS_METADATA.GET_DDL can block indefinitely on XuguDB, even when the
 	// table metadata itself is accessible. Reconstruct the DDL from the same
 	// ALL_* catalog views used by the object browser instead.
-	ddl, err := s.buildTableDDL(schema, table)
+	ddl, err := s.buildTableDDL(catalogSchema, catalogTable)
 	if err != nil {
 		return "", err
 	}
-	return s.appendTableIndexDDL(schema, table, ddl), nil
+	return s.appendTableIndexDDL(catalogSchema, catalogTable, ddl), nil
+}
+
+type xuguCatalogTableName struct {
+	Schema string
+	Table  string
+}
+
+// resolveCatalogTableName returns SCHEMA_NAME/TABLE_NAME exactly as stored in
+// ALL_SCHEMAS/ALL_TABLES. The lookup accepts a case-insensitive input only
+// when it has a single catalog candidate; otherwise it requires the exact
+// stored spelling rather than silently exporting a different quoted object.
+func (s *server) resolveCatalogTableName(schema, table string) (string, string, error) {
+	schema = strings.TrimSpace(schema)
+	table = strings.TrimSpace(table)
+	if schema == "" {
+		current, err := s.currentSchema()
+		if err != nil {
+			return "", "", err
+		}
+		schema = current
+	}
+	if table == "" {
+		return "", "", errors.New("table is required")
+	}
+	candidates, err := s.catalogTableNameCandidates(xuguCatalogTableNameQuery(schema, table, false))
+	if err != nil {
+		return "", "", err
+	}
+	if len(candidates) > 0 {
+		return selectXuguCatalogTableName(schema, table, candidates)
+	}
+
+	// This Xugu Go driver version does not bind mixed-case identifiers reliably
+	// inside catalog predicates. The query builder escapes literals and keeps the
+	// exact lookup above as the priority; this fallback is only for unquoted input.
+	candidates, err = s.catalogTableNameCandidates(xuguCatalogTableNameQuery(schema, table, true))
+	if err != nil {
+		return "", "", err
+	}
+	return selectXuguCatalogTableName(schema, table, candidates)
+}
+
+func xuguCatalogTableNameQuery(schema, table string, caseInsensitive bool) string {
+	schemaExpr := quoteStringLiteral(schema)
+	tableExpr := quoteStringLiteral(table)
+	if caseInsensitive {
+		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
+		tableExpr = quoteStringLiteral(strings.ToUpper(table))
+		return xuguCatalogTableNameSelectSQL + "\nWHERE UPPER(s.SCHEMA_NAME) = " + schemaExpr +
+			"\n  AND UPPER(t.TABLE_NAME) = " + tableExpr
+	}
+	return xuguCatalogTableNameSelectSQL + "\nWHERE s.SCHEMA_NAME = " + schemaExpr +
+		"\n  AND t.TABLE_NAME = " + tableExpr
+}
+
+// xuguTableCatalogQuery substitutes the two schema/table placeholders used by
+// the table metadata templates. Xugu's Go driver does not reliably bind
+// mixed-case catalog identifiers, so values are escaped as SQL literals only
+// after resolveCatalogTableName has located the intended catalog object.
+func xuguTableCatalogQuery(query, schema, table string) string {
+	query = strings.Replace(query, "?", quoteStringLiteral(schema), 1)
+	return strings.Replace(query, "?", quoteStringLiteral(table), 1)
+}
+
+func (s *server) catalogTableNameCandidates(query string) ([]xuguCatalogTableName, error) {
+	rows, err := s.queryRows(strings.TrimSpace(query), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var candidates []xuguCatalogTableName
+	for rows.Next() {
+		var candidate xuguCatalogTableName
+		if err := rows.Scan(&candidate.Schema, &candidate.Table); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+func selectXuguCatalogTableName(schema, table string, candidates []xuguCatalogTableName) (string, string, error) {
+	for _, candidate := range candidates {
+		if candidate.Schema == schema && candidate.Table == table {
+			return candidate.Schema, candidate.Table, nil
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0].Schema, candidates[0].Table, nil
+	}
+	if len(candidates) == 0 {
+		return "", "", fmt.Errorf("table not found: %s.%s", schema, table)
+	}
+	return "", "", fmt.Errorf("table name is ambiguous: %s.%s; specify the catalog's exact case", schema, table)
 }
 
 func (s *server) getExplainInfo(sqlText string) (string, error) {
@@ -2516,6 +2643,10 @@ func (s *server) buildTableDDL(schema, table string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	foreignKeys, err := s.tableForeignKeys(schema, table)
+	if err != nil {
+		return "", err
+	}
 	partitions, err := s.tablePartitions(schema, table, false)
 	if err != nil {
 		return "", err
@@ -2524,11 +2655,14 @@ func (s *server) buildTableDDL(schema, table string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return renderXuguTableDDL(schema, table, columns, metadata, identities, constraints, partitions, subpartitions), nil
+	allConstraints := make([]xuguConstraintInfo, 0, len(constraints)+len(foreignKeys))
+	allConstraints = append(allConstraints, constraints...)
+	allConstraints = append(allConstraints, foreignKeys...)
+	return renderXuguTableDDL(schema, table, columns, metadata, identities, allConstraints, partitions, subpartitions), nil
 }
 
 func (s *server) tableMetadata(schema, table string) (xuguTableMetadata, error) {
-	rows, err := s.queryRows(xuguTableMetadataSQL, []any{schema, table})
+	rows, err := s.queryRows(xuguTableCatalogQuery(xuguTableMetadataSQL, schema, table), nil)
 	if err != nil {
 		return xuguTableMetadata{}, err
 	}
@@ -2560,25 +2694,38 @@ func (s *server) tableMetadata(schema, table string) (xuguTableMetadata, error) 
 }
 
 func (s *server) tableIdentities(schema, table string) (map[string]xuguIdentityInfo, error) {
-	rows, err := s.queryRows(xuguTableIdentitySQL, []any{schema, table})
+	rows, err := s.queryRows(xuguTableCatalogQuery(xuguTableIdentitySQL, schema, table), nil)
 	if err != nil {
 		return nil, err
 	}
 	defer s.closeRows(rows)
 	result := map[string]xuguIdentityInfo{}
 	for rows.Next() {
-		var column, start, step any
-		if err := rows.Scan(&column, &start, &step); err != nil {
+		var column, start, step, systemGenerated any
+		if err := rows.Scan(&column, &start, &step, &systemGenerated); err != nil {
 			return nil, err
 		}
-		item := xuguIdentityInfo{Column: xuguString(column), Start: int64(xuguInt(start)), Step: int64(xuguInt(step))}
-		result[strings.ToUpper(item.Column)] = item
+		item := xuguIdentityInfo{
+			Column:          xuguString(column),
+			Start:           int64(xuguInt(start)),
+			Step:            int64(xuguInt(step)),
+			SystemGenerated: truthy(systemGenerated),
+		}
+		result[item.Column] = item
 	}
 	return result, rows.Err()
 }
 
 func (s *server) tableConstraints(schema, table string) ([]xuguConstraintInfo, error) {
-	rows, err := s.queryRows(xuguTableConstraintsSQL, []any{schema, table})
+	return s.readTableConstraints(xuguTableConstraintsSQL, schema, table)
+}
+
+func (s *server) tableForeignKeys(schema, table string) ([]xuguConstraintInfo, error) {
+	return s.readTableConstraints(xuguTableForeignKeysSQL, schema, table)
+}
+
+func (s *server) readTableConstraints(query, schema, table string) ([]xuguConstraintInfo, error) {
+	rows, err := s.queryRows(xuguTableCatalogQuery(query, schema, table), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2587,9 +2734,9 @@ func (s *server) tableConstraints(schema, table string) ([]xuguConstraintInfo, e
 	for rows.Next() {
 		var item xuguConstraintInfo
 		var name, constraintType, definition, referenceSchema, referenceTable any
-		var matchType, updateAction, deleteAction, deferrable, initiallyDeferred, enabled, valid any
+		var matchType, updateAction, deleteAction, deferrable, initiallyDeferred, enabled, valid, systemGenerated any
 		if err := rows.Scan(&name, &constraintType, &definition, &referenceSchema, &referenceTable,
-			&matchType, &updateAction, &deleteAction, &deferrable, &initiallyDeferred, &enabled, &valid); err != nil {
+			&matchType, &updateAction, &deleteAction, &deferrable, &initiallyDeferred, &enabled, &valid, &systemGenerated); err != nil {
 			return nil, err
 		}
 		item.Name = xuguString(name)
@@ -2604,6 +2751,7 @@ func (s *server) tableConstraints(schema, table string) ([]xuguConstraintInfo, e
 		item.InitiallyDeferred = truthy(initiallyDeferred)
 		item.Enabled = truthy(enabled)
 		item.Valid = truthy(valid)
+		item.SystemGenerated = truthy(systemGenerated)
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
@@ -2614,7 +2762,7 @@ func (s *server) tablePartitions(schema, table string, subpartition bool) ([]xug
 	if subpartition {
 		query = xuguTableSubpartitionsSQL
 	}
-	rows, err := s.queryRows(query, []any{schema, table})
+	rows, err := s.queryRows(xuguTableCatalogQuery(query, schema, table), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2635,7 +2783,7 @@ func (s *server) tablePartitions(schema, table string, subpartition bool) ([]xug
 }
 
 func (s *server) listPartitionMetadata(schema, table string) ([]partitionInfo, error) {
-	rows, err := s.queryRows(xuguTablePartitionsSQL, []any{schema, table})
+	rows, err := s.queryRows(xuguTableCatalogQuery(xuguTablePartitionsSQL, schema, table), nil)
 	if err != nil {
 		if isXuguMetadataAccessError(err) {
 			return []partitionInfo{}, nil
@@ -2667,7 +2815,7 @@ func (s *server) listPartitionMetadata(schema, table string) ([]partitionInfo, e
 }
 
 func (s *server) listSubpartitionMetadata(schema, table string) ([]subpartitionInfo, error) {
-	rows, err := s.queryRows(xuguTableSubpartitionsSQL, []any{schema, table})
+	rows, err := s.queryRows(xuguTableCatalogQuery(xuguTableSubpartitionsSQL, schema, table), nil)
 	if err != nil {
 		if isXuguMetadataAccessError(err) {
 			return []subpartitionInfo{}, nil
@@ -2711,20 +2859,22 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 		item.WriteString(quoteIdentifier(column.Name))
 		item.WriteByte(' ')
 		item.WriteString(columnTypeDDL(column))
-		if identity, ok := identities[strings.ToUpper(column.Name)]; ok {
+		if identity, ok := identities[column.Name]; ok {
 			item.WriteString(fmt.Sprintf(" IDENTITY(%d,%d)", identity.Start, identity.Step))
 		}
-		if column.ColumnDefault != nil && strings.TrimSpace(*column.ColumnDefault) != "" {
-			item.WriteString(" DEFAULT ")
-			switch column.DefaultOnNull {
-			case 1:
-				// ON_NULL=1 means that an explicit NULL is replaced during insert.
-				// The explicit spelling also covers the legacy DEFAULT ON NULL form.
-				item.WriteString("ON NULL FOR INSERT ONLY ")
-			case 2:
-				item.WriteString("ON NULL FOR INSERT AND UPDATE ")
+		if column.ColumnDefault != nil {
+			if def := normalizeXuguDefaultExpr(strings.TrimSpace(*column.ColumnDefault), column.DataType); def != "" {
+				item.WriteString(" DEFAULT ")
+				switch column.DefaultOnNull {
+				case 1:
+					// ON_NULL=1 means that an explicit NULL is replaced during insert.
+					// The explicit spelling also covers the legacy DEFAULT ON NULL form.
+					item.WriteString("ON NULL FOR INSERT ONLY ")
+				case 2:
+					item.WriteString("ON NULL FOR INSERT AND UPDATE ")
+				}
+				item.WriteString(def)
 			}
-			item.WriteString(strings.TrimSpace(*column.ColumnDefault))
 		}
 		if !column.IsNullable {
 			item.WriteString(" NOT NULL")
@@ -2735,7 +2885,23 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 		}
 		items = append(items, item.String())
 	}
+	// Inline only constraints that are valid inside CREATE TABLE. Foreign keys
+	// must be added with ALTER TABLE: Xugu rejects self-referencing FKs (and
+	// any FK whose parent is not yet visible) during CREATE, matching DBeaver's
+	// xugu-metadata exporter which always emits ALTER for F/PK/CHECK extras.
+	var foreignKeys []xuguConstraintInfo
 	for _, constraint := range constraints {
+		if strings.EqualFold(strings.TrimSpace(constraint.Type), "F") {
+			foreignKeys = append(foreignKeys, constraint)
+			continue
+		}
+		// Xugu exposes the implicit unique key that it creates for every
+		// IDENTITY column through ALL_CONSTRAINTS. Re-emitting it as an
+		// explicit UNIQUE clause makes CREATE TABLE fail with E5170 because
+		// the IDENTITY definition already supplies that uniqueness.
+		if shouldSkipXuguIdentityUniqueConstraint(constraint, identities) {
+			continue
+		}
 		if item := renderXuguConstraintDDL(constraint); item != "" {
 			items = append(items, "  "+item)
 		}
@@ -2762,6 +2928,12 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 		builder.WriteString("\nCOMMENT ")
 		builder.WriteString(quoteStringLiteral(strings.TrimSpace(metadata.Comment)))
 	}
+	for _, constraint := range foreignKeys {
+		if item := renderXuguForeignKeyAlterDDL(schema, table, constraint); item != "" {
+			builder.WriteString(";\n\n")
+			builder.WriteString(item)
+		}
+	}
 	for _, constraint := range constraints {
 		if !constraint.Enabled && strings.TrimSpace(constraint.Name) != "" {
 			builder.WriteString(";\n\nALTER TABLE ")
@@ -2772,7 +2944,24 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 			builder.WriteString(quoteIdentifier(constraint.Name))
 		}
 	}
-	return builder.String()
+	// A table DDL response is also used as a standalone script. Do not rely on
+	// appendTableIndexDDL to terminate the CREATE/ALTER statement: tables with
+	// no independent indexes must remain directly executable as well.
+	return terminateDDLScript(builder.String())
+}
+
+func shouldSkipXuguIdentityUniqueConstraint(constraint xuguConstraintInfo, identities map[string]xuguIdentityInfo) bool {
+	if !strings.EqualFold(strings.TrimSpace(constraint.Type), "U") || len(identities) == 0 {
+		return false
+	}
+	columns := parseQuotedIdentifiers(constraint.Definition)
+	if len(columns) != 1 {
+		return false
+	}
+	identity, isIdentity := identities[columns[0]]
+	// Both catalog objects must be system-generated: an identity column can
+	// still have a separate, user-declared UNIQUE constraint on the same column.
+	return isIdentity && identity.SystemGenerated && constraint.SystemGenerated
 }
 
 func renderXuguConstraintDDL(constraint xuguConstraintInfo) string {
@@ -2790,49 +2979,67 @@ func renderXuguConstraintDDL(constraint xuguConstraintInfo) string {
 	case "C":
 		return prefix + "CHECK (" + definition + ")"
 	case "F":
-		localColumns, referencedColumns := parseForeignKeyColumns(definition)
-		if len(localColumns) == 0 || len(referencedColumns) == 0 || strings.TrimSpace(constraint.ReferenceTable) == "" {
-			return ""
-		}
-		var builder strings.Builder
-		builder.WriteString(prefix)
-		builder.WriteString("FOREIGN KEY (")
-		builder.WriteString(quotedIdentifiers(localColumns))
-		builder.WriteString(") REFERENCES ")
-		if strings.TrimSpace(constraint.ReferenceSchema) != "" {
-			builder.WriteString(quoteIdentifier(constraint.ReferenceSchema))
-			builder.WriteByte('.')
-		}
-		builder.WriteString(quoteIdentifier(constraint.ReferenceTable))
-		builder.WriteString(" (")
-		builder.WriteString(quotedIdentifiers(referencedColumns))
-		builder.WriteByte(')')
-		if match := xuguMatchClause(constraint.MatchType); match != "" {
-			builder.WriteByte(' ')
-			builder.WriteString(match)
-		}
-		if action := xuguReferentialAction(constraint.UpdateAction); action != "" {
-			builder.WriteString(" ON UPDATE ")
-			builder.WriteString(action)
-		}
-		if action := xuguReferentialAction(constraint.DeleteAction); action != "" {
-			builder.WriteString(" ON DELETE ")
-			builder.WriteString(action)
-		}
-		if constraint.Deferrable {
-			builder.WriteString(" DEFERRABLE")
-			if constraint.InitiallyDeferred {
-				builder.WriteString(" INITIALLY DEFERRED")
-			} else {
-				builder.WriteString(" INITIALLY IMMEDIATE")
-			}
-		} else {
-			builder.WriteString(" NOT DEFERRABLE")
-		}
-		return builder.String()
+		// Foreign keys are rendered as ALTER TABLE statements; see renderXuguForeignKeyAlterDDL.
+		return ""
 	default:
 		return ""
 	}
+}
+
+// renderXuguForeignKeyAlterDDL emits FK constraints after CREATE TABLE. Self-
+// referencing trees (e.g. SHOP_CATEGORIES.PARENT_ID -> CATEGORY_ID) fail when
+// declared inline because the table does not exist yet during CREATE validation.
+func renderXuguForeignKeyAlterDDL(schema, table string, constraint xuguConstraintInfo) string {
+	name := strings.TrimSpace(constraint.Name)
+	definition := strings.TrimSpace(constraint.Definition)
+	if name == "" || definition == "" {
+		return ""
+	}
+	localColumns, referencedColumns := parseForeignKeyColumns(definition)
+	if len(localColumns) == 0 || len(referencedColumns) == 0 || strings.TrimSpace(constraint.ReferenceTable) == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString("ALTER TABLE ")
+	builder.WriteString(quoteIdentifier(schema))
+	builder.WriteByte('.')
+	builder.WriteString(quoteIdentifier(table))
+	builder.WriteString(" ADD CONSTRAINT ")
+	builder.WriteString(quoteIdentifier(name))
+	builder.WriteString(" FOREIGN KEY (")
+	builder.WriteString(quotedIdentifiers(localColumns))
+	builder.WriteString(") REFERENCES ")
+	if strings.TrimSpace(constraint.ReferenceSchema) != "" {
+		builder.WriteString(quoteIdentifier(constraint.ReferenceSchema))
+		builder.WriteByte('.')
+	}
+	builder.WriteString(quoteIdentifier(constraint.ReferenceTable))
+	builder.WriteString(" (")
+	builder.WriteString(quotedIdentifiers(referencedColumns))
+	builder.WriteByte(')')
+	if match := xuguMatchClause(constraint.MatchType); match != "" {
+		builder.WriteByte(' ')
+		builder.WriteString(match)
+	}
+	if action := xuguReferentialAction(constraint.UpdateAction); action != "" {
+		builder.WriteString(" ON UPDATE ")
+		builder.WriteString(action)
+	}
+	if action := xuguReferentialAction(constraint.DeleteAction); action != "" {
+		builder.WriteString(" ON DELETE ")
+		builder.WriteString(action)
+	}
+	if constraint.Deferrable {
+		builder.WriteString(" DEFERRABLE")
+		if constraint.InitiallyDeferred {
+			builder.WriteString(" INITIALLY DEFERRED")
+		} else {
+			builder.WriteString(" INITIALLY IMMEDIATE")
+		}
+	} else {
+		builder.WriteString(" NOT DEFERRABLE")
+	}
+	return builder.String()
 }
 
 func renderXuguPartitionDDL(metadata xuguTableMetadata, partitions, subpartitions []xuguPartitionInfo) string {
@@ -3037,9 +3244,15 @@ func (s *server) appendTableIndexDDL(schema, table, ddl string) string {
 	if err != nil || len(indexes) == 0 {
 		return ddl
 	}
+	// PRIMARY KEY / UNIQUE constraints already create backing indexes. Replaying
+	// CREATE UNIQUE INDEX for those columns fails with "identical index exists".
+	var uniqueConstraintColumns [][]string
+	if constraints, cerr := s.tableConstraints(schema, table); cerr == nil {
+		uniqueConstraintColumns = uniqueKeyColumnSets(constraints)
+	}
 	var builder strings.Builder
 	for _, index := range indexes {
-		if index.IsPrimary || len(index.Columns) == 0 {
+		if shouldSkipIndexForTableDDL(index, uniqueConstraintColumns) {
 			continue
 		}
 		if builder.Len() > 0 {
@@ -3056,11 +3269,11 @@ func (s *server) appendTableIndexDDL(schema, table, ddl string) string {
 		builder.WriteByte('.')
 		builder.WriteString(quoteIdentifier(table))
 		builder.WriteByte('(')
-		for i, column := range index.Columns {
+		for i, key := range xuguIndexKeysForDDL(index) {
 			if i > 0 {
 				builder.WriteString(", ")
 			}
-			builder.WriteString(quoteIdentifier(column))
+			builder.WriteString(renderXuguIndexKey(key))
 		}
 		builder.WriteByte(')')
 		if index.IndexType != nil && strings.TrimSpace(*index.IndexType) != "" {
@@ -3073,6 +3286,97 @@ func (s *server) appendTableIndexDDL(schema, table, ddl string) string {
 		return ddl
 	}
 	return appendDDLStatement(ddl, builder.String())
+}
+
+// uniqueKeyColumnSets returns column lists for PRIMARY KEY and UNIQUE constraints.
+// Xugu stores those definitions as quoted identifiers inside ALL_CONSTRAINTS.DEFINE.
+func uniqueKeyColumnSets(constraints []xuguConstraintInfo) [][]string {
+	var result [][]string
+	for _, constraint := range constraints {
+		switch strings.ToUpper(strings.TrimSpace(constraint.Type)) {
+		case "P", "U":
+			columns := parseQuotedIdentifiers(constraint.Definition)
+			if len(columns) == 0 {
+				continue
+			}
+			result = append(result, columns)
+		}
+	}
+	return result
+}
+
+// shouldSkipIndexForTableDDL drops indexes that CREATE TABLE already materializes
+// through PRIMARY KEY / UNIQUE constraints, so the exported script can be replayed.
+func shouldSkipIndexForTableDDL(index indexInfo, uniqueConstraintColumns [][]string) bool {
+	if index.IsPrimary || len(index.Columns) == 0 {
+		return true
+	}
+	if !index.IsUnique {
+		return false
+	}
+	indexColumns, plainColumns := xuguPlainIndexColumns(index)
+	if !plainColumns {
+		return false
+	}
+	for _, constraintColumns := range uniqueConstraintColumns {
+		if sameColumnList(indexColumns, constraintColumns) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameColumnList(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if strings.TrimSpace(left[i]) != strings.TrimSpace(right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeXuguDefaultExpr only rewrites complete catalog tokens whose Xugu
+// equivalents are known to be semantically identical. In particular, do not
+// lowercase an expression or replace text inside a string literal: exported DDL
+// must preserve metadata when a transformation cannot be proven safe.
+func normalizeXuguDefaultExpr(value, _ string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if inner, ok := unquoteXuguIdentifier(trimmed); ok {
+		inner = strings.TrimSpace(inner)
+		switch strings.ToUpper(inner) {
+		case "SYSDATE", "CURRENT_DATE", "CURRENT_TIMESTAMP", "CURRENT_TIME", "USER", "UID", "SYS_GUID":
+			return strings.ToUpper(inner)
+		}
+	}
+	// UUID() appears in catalog metadata from supported migrations. Transform
+	// only the entire function token, never a substring inside a literal or a
+	// larger expression.
+	if strings.EqualFold(trimmed, "UUID()") {
+		return "SYS_GUID()"
+	}
+	if strings.EqualFold(trimmed, "(GETDATE())") || strings.EqualFold(trimmed, "sysdate") {
+		return "SYSDATE"
+	}
+	// Catalog sometimes stores unary minus with a space: "- (1)" -> "-1".
+	if compact := compactUnaryMinusDefault(trimmed); compact != "" {
+		return compact
+	}
+	return trimmed
+}
+
+func compactUnaryMinusDefault(value string) string {
+	// Match patterns like "- (1)" / "- ( 12 )" produced by some migrations.
+	match := unaryMinusDefaultRegexp.FindStringSubmatch(strings.TrimSpace(value))
+	if len(match) != 2 {
+		return ""
+	}
+	return "-" + match[1]
 }
 
 func (s *server) tableComment(schema, table string) (string, error) {
@@ -3111,6 +3415,14 @@ func appendDDLStatement(ddl, extra string) string {
 		ddl += ";"
 	}
 	return ddl + "\n\n" + extra
+}
+
+func terminateDDLScript(ddl string) string {
+	ddl = strings.TrimRight(ddl, "\r\n\t ")
+	if ddl == "" || strings.HasSuffix(ddl, ";") {
+		return ddl
+	}
+	return ddl + ";"
 }
 
 func columnTypeDDL(column columnInfo) string {
@@ -3156,37 +3468,155 @@ func normalizeXuguColumnType(dataType string, varying any) string {
 	}
 }
 
-var quotedIdentifierRegexp = regexp.MustCompile(`"([^"]+)"`)
+var unaryMinusDefaultRegexp = regexp.MustCompile(`^-\s*\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)$`)
 
+// parseQuotedIdentifiers is a small SQL lexer for delimited identifiers. A
+// doubled double quote represents one quote inside an identifier, so a regular
+// expression such as "([^\"]+)" is insufficient for keys like "a""b".
 func parseQuotedIdentifiers(value string) []string {
-	matches := quotedIdentifierRegexp.FindAllStringSubmatch(value, -1)
-	result := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if len(match) == 2 {
-			result = append(result, match[1])
+	var result []string
+	for i := 0; i < len(value); {
+		if value[i] != '"' {
+			i++
+			continue
 		}
+		identifier, next, ok := readXuguQuotedIdentifier(value, i)
+		if !ok {
+			break
+		}
+		result = append(result, identifier)
+		i = next
 	}
-	return result
+	return emptyIfNil(result)
+}
+
+func unquoteXuguIdentifier(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) < 2 || value[0] != '"' {
+		return "", false
+	}
+	identifier, next, ok := readXuguQuotedIdentifier(value, 0)
+	return identifier, ok && strings.TrimSpace(value[next:]) == ""
+}
+
+func readXuguQuotedIdentifier(value string, start int) (string, int, bool) {
+	if start >= len(value) || value[start] != '"' {
+		return "", start, false
+	}
+	var builder strings.Builder
+	for i := start + 1; i < len(value); i++ {
+		if value[i] != '"' {
+			builder.WriteByte(value[i])
+			continue
+		}
+		if i+1 < len(value) && value[i+1] == '"' {
+			builder.WriteByte('"')
+			i++
+			continue
+		}
+		return builder.String(), i + 1, true
+	}
+	return "", start, false
 }
 
 func parseIndexKeys(value string) []string {
-	quoted := parseQuotedIdentifiers(value)
-	if len(quoted) > 0 {
-		return quoted
-	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
+	return indexKeyDisplayNames(parseXuguIndexKeys(value))
+}
+
+func parseXuguIndexKeys(value string) []xuguIndexKey {
+	parts := splitXuguTopLevel(value, ',')
+	keys := make([]xuguIndexKey, 0, len(parts))
 	for _, part := range parts {
-		part = strings.Trim(strings.TrimSpace(part), `"`)
-		if part != "" {
-			result = append(result, part)
+		if key, ok := parseXuguIndexKey(part); ok {
+			keys = append(keys, key)
 		}
 	}
-	return result
+	return emptyIfNil(keys)
+}
+
+func parseXuguIndexKey(value string) (xuguIndexKey, bool) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return xuguIndexKey{}, false
+	}
+	key := xuguIndexKey{Raw: raw}
+	if identifier, next, ok := readXuguQuotedIdentifier(raw, 0); ok {
+		remainder := strings.TrimSpace(raw[next:])
+		switch strings.ToUpper(remainder) {
+		case "":
+			key.Column = identifier
+			key.PlainColumn = true
+		case "ASC", "DESC":
+			key.Column = identifier
+			key.Direction = strings.ToUpper(remainder)
+			// Ordered keys are intentionally not constraint-equivalent: preserve
+			// their ordering when emitting CREATE INDEX.
+			key.PlainColumn = false
+		}
+	}
+	return key, true
+}
+
+func indexKeyDisplayNames(keys []xuguIndexKey) []string {
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key.PlainColumn {
+			result = append(result, key.Column)
+			continue
+		}
+		result = append(result, key.Raw)
+	}
+	return emptyIfNil(result)
+}
+
+func xuguIndexKeysForDDL(index indexInfo) []xuguIndexKey {
+	if len(index.keys) > 0 {
+		return index.keys
+	}
+	keys := make([]xuguIndexKey, 0, len(index.Columns))
+	for _, column := range index.Columns {
+		// indexInfo.Columns is the established metadata API: callers that build
+		// it directly already provide decoded column names, including names that
+		// contain commas or parentheses. Raw catalog keys are kept separately in
+		// indexInfo.keys and parsed above.
+		column = strings.TrimSpace(column)
+		if column != "" {
+			keys = append(keys, xuguIndexKey{Raw: column, Column: column, PlainColumn: true})
+		}
+	}
+	return keys
+}
+
+func xuguPlainIndexColumns(index indexInfo) ([]string, bool) {
+	keys := xuguIndexKeysForDDL(index)
+	if len(keys) == 0 {
+		return nil, false
+	}
+	columns := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if !key.PlainColumn {
+			return nil, false
+		}
+		columns = append(columns, key.Column)
+	}
+	return columns, true
+}
+
+func renderXuguIndexKey(key xuguIndexKey) string {
+	if key.PlainColumn || key.Direction != "" {
+		result := quoteIdentifier(key.Column)
+		if key.Direction != "" {
+			result += " " + key.Direction
+		}
+		return result
+	}
+	// Function/expression keys are already database-produced SQL. Requoting the
+	// whole value would turn LOWER("CODE") or "CODE" DESC into an identifier.
+	return key.Raw
 }
 
 func parseForeignKeyColumns(define string) ([]string, []string) {
-	groups := regexp.MustCompile(`\(([^()]*)\)`).FindAllStringSubmatch(define, -1)
+	groups := xuguParenthesizedGroups(define)
 	if len(groups) < 2 {
 		columns := parseQuotedIdentifiers(define)
 		if len(columns)%2 == 0 {
@@ -3195,7 +3625,96 @@ func parseForeignKeyColumns(define string) ([]string, []string) {
 		}
 		return columns, nil
 	}
-	return parseQuotedIdentifiers(groups[0][1]), parseQuotedIdentifiers(groups[1][1])
+	return parseIdentifierList(groups[0]), parseIdentifierList(groups[1])
+}
+
+func parseIdentifierList(value string) []string {
+	parts := splitXuguTopLevel(value, ',')
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if identifier, ok := unquoteXuguIdentifier(part); ok {
+			result = append(result, identifier)
+			continue
+		}
+		result = append(result, strings.Trim(part, `"`))
+	}
+	return result
+}
+
+func xuguParenthesizedGroups(value string) []string {
+	var result []string
+	depth, start := 0, -1
+	inQuote := false
+	for i := 0; i < len(value); i++ {
+		if inQuote {
+			if value[i] == '"' {
+				if i+1 < len(value) && value[i+1] == '"' {
+					i++
+				} else {
+					inQuote = false
+				}
+			}
+			continue
+		}
+		switch value[i] {
+		case '"':
+			inQuote = true
+		case '(':
+			if depth == 0 {
+				start = i + 1
+			}
+			depth++
+		case ')':
+			if depth == 0 {
+				continue
+			}
+			depth--
+			if depth == 0 && start >= 0 {
+				result = append(result, value[start:i])
+				start = -1
+			}
+		}
+	}
+	return result
+}
+
+func splitXuguTopLevel(value string, separator byte) []string {
+	var result []string
+	start, depth := 0, 0
+	inQuote := false
+	for i := 0; i < len(value); i++ {
+		if inQuote {
+			if value[i] == '"' {
+				if i+1 < len(value) && value[i+1] == '"' {
+					i++
+				} else {
+					inQuote = false
+				}
+			}
+			continue
+		}
+		switch value[i] {
+		case '"':
+			inQuote = true
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if value[i] == separator && depth == 0 {
+				result = append(result, value[start:i])
+				start = i + 1
+			}
+		}
+	}
+	result = append(result, value[start:])
+	return result
 }
 
 func truthy(value any) bool {
@@ -3363,7 +3882,74 @@ func errorResponse(id json.RawMessage, err error) response {
 }
 
 func trimStatementSQL(sqlText string) string {
-	return strings.TrimRight(strings.TrimSpace(sqlText), "; \t\r\n")
+	trimmed := strings.TrimSpace(sqlText)
+	if isXuguProgrammableObjectDDL(trimmed) {
+		// Xugu's compiler requires the terminator after END. The desktop
+		// statement splitter already removes only client-side delimiters, while
+		// retaining this one for Oracle-style procedural objects.
+		return trimmed
+	}
+	return strings.TrimRight(trimmed, "; \t\r\n")
+}
+
+func isXuguProgrammableObjectDDL(sqlText string) bool {
+	fields := strings.Fields(strings.ToUpper(stripLeadingSQLComments(sqlText)))
+	if len(fields) < 2 || fields[0] != "CREATE" {
+		return false
+	}
+
+	// Skip CREATE modifiers used by Xugu/Oracle-style programmable DDL:
+	// OR REPLACE, FORCE/NOFORCE, and EDITIONABLE/NONEDITIONABLE (any order).
+	index := 1
+	for index < len(fields) {
+		if index+1 < len(fields) && fields[index] == "OR" && fields[index+1] == "REPLACE" {
+			index += 2
+			continue
+		}
+		switch fields[index] {
+		case "FORCE", "NOFORCE", "EDITIONABLE", "NONEDITIONABLE":
+			index++
+			continue
+		}
+		break
+	}
+	if index >= len(fields) {
+		return false
+	}
+
+	switch fields[index] {
+	case "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE":
+		// PACKAGE also covers PACKAGE BODY (next token is BODY).
+		return true
+	case "TYPE":
+		// Only TYPE BODY needs the trailing END; terminator.
+		// Plain CREATE TYPE ... AS OBJECT (...); is ordinary SQL.
+		return index+1 < len(fields) && fields[index+1] == "BODY"
+	default:
+		return false
+	}
+}
+
+func stripLeadingSQLComments(sqlText string) string {
+	remaining := strings.TrimLeft(sqlText, " \t\r\n")
+	for {
+		switch {
+		case strings.HasPrefix(remaining, "--"):
+			lineEnd := strings.IndexByte(remaining, '\n')
+			if lineEnd < 0 {
+				return ""
+			}
+			remaining = strings.TrimLeft(remaining[lineEnd+1:], " \t\r\n")
+		case strings.HasPrefix(remaining, "/*"):
+			commentEnd := strings.Index(remaining[2:], "*/")
+			if commentEnd < 0 {
+				return ""
+			}
+			remaining = strings.TrimLeft(remaining[commentEnd+4:], " \t\r\n")
+		default:
+			return remaining
+		}
+	}
 }
 
 func isQuerySQL(sqlText string) bool {

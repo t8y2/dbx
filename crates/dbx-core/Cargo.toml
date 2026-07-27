@@ -40,6 +40,7 @@ sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+serde_yaml_ng = "0.10"
 json5 = "0.4"
 regex = "1"
 winnow = "1.0"

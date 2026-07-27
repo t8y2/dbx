@@ -1,5 +1,7 @@
+use std::path::Path;
 use std::sync::Arc;
 
+use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::commands::connection::AppState;
@@ -152,4 +154,90 @@ pub async fn nacos_raw_request(
     req: dbx_core::nacos::NacosRawRequest,
 ) -> Result<dbx_core::nacos::NacosRawResponse, String> {
     dbx_core::nacos::service::nacos_raw_request_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_search_config_content(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    req: dbx_core::nacos::NacosContentSearchRequest,
+    on_progress: Channel<dbx_core::nacos::NacosSearchProgress>,
+) -> Result<dbx_core::nacos::NacosContentSearchResult, String> {
+    dbx_core::nacos::service::nacos_search_config_content_core(&state, &connection_id, req, move |progress| {
+        let _ = on_progress.send(progress);
+        std::future::ready(())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn nacos_cancel_operation(operation_id: String) -> Result<bool, String> {
+    Ok(dbx_core::nacos::service::nacos_cancel_operation_core(&operation_id))
+}
+
+#[tauri::command]
+pub async fn nacos_export_configs(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    selector: dbx_core::nacos::NacosConfigSelector,
+    destination: String,
+) -> Result<(), String> {
+    dbx_core::nacos::batch::nacos_export_config_archive_core(&state, &connection_id, selector, Path::new(&destination))
+        .await
+        .map(|_| ())
+}
+
+#[tauri::command]
+pub async fn nacos_preview_config_import(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    target_namespace: String,
+    archive_path: String,
+) -> Result<dbx_core::nacos::NacosBatchPreview, String> {
+    dbx_core::nacos::batch::nacos_preview_config_import_core(
+        &state,
+        &connection_id,
+        &target_namespace,
+        Path::new(&archive_path),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn nacos_apply_config_import(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    operation_id: String,
+    target_namespace: String,
+    archive_path: String,
+    plan_hash: String,
+    conflict_policy: dbx_core::nacos::NacosConflictPolicy,
+) -> Result<dbx_core::nacos::NacosBatchReport, String> {
+    dbx_core::nacos::batch::nacos_apply_config_import_core(
+        &state,
+        &connection_id,
+        &target_namespace,
+        Path::new(&archive_path),
+        &operation_id,
+        &plan_hash,
+        &conflict_policy,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn nacos_preview_config_transfer(
+    state: State<'_, Arc<AppState>>,
+    req: dbx_core::nacos::NacosConfigTransferRequest,
+) -> Result<dbx_core::nacos::NacosBatchPreview, String> {
+    dbx_core::nacos::batch::nacos_preview_config_transfer_core(&state, &req).await
+}
+
+#[tauri::command]
+pub async fn nacos_apply_config_transfer(
+    state: State<'_, Arc<AppState>>,
+    req: dbx_core::nacos::NacosConfigTransferRequest,
+    plan_hash: String,
+) -> Result<dbx_core::nacos::NacosBatchReport, String> {
+    dbx_core::nacos::batch::nacos_apply_config_transfer_core(&state, &req, &plan_hash).await
 }

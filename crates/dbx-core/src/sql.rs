@@ -191,6 +191,7 @@ impl SqlDialectProfile {
                 | DatabaseType::Yashandb
                 | DatabaseType::Oscar
                 | DatabaseType::OceanbaseOracle
+                | DatabaseType::Xugu
         )
     }
 }
@@ -2084,56 +2085,117 @@ impl OraclePlSqlBlock {
             return false;
         }
 
-        let mut depth = 0usize;
+        // Package/type specifications have declarations and an outer END with
+        // no BEGIN. Bodies also own an outer END beyond nested routine END
+        // pairs so an inner END cannot finish the object.
+        let object_kind = self.create_object_kind();
+        let mut scopes = match object_kind {
+            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => {
+                vec![OraclePlSqlScope::Object]
+            }
+            None => Vec::new(),
+        };
         let mut saw_begin = false;
         let mut complete = false;
-        let mut pending_end: Option<bool> = None;
 
-        for token in &self.tokens {
+        for (index, token) in self.tokens.iter().enumerate() {
             if token.is_semicolon() {
-                if let Some(is_block_end) = pending_end.take() {
-                    if is_block_end && depth > 0 {
-                        depth -= 1;
-                        complete = depth == 0;
-                    }
-                }
-                continue;
-            }
-
-            if let Some(is_block_end) = pending_end.as_mut() {
-                if token.is_any_word(&["IF", "LOOP", "CASE"]) {
-                    *is_block_end = false;
-                }
                 continue;
             }
 
             if token.is_word("BEGIN") {
-                depth += 1;
+                scopes.push(OraclePlSqlScope::Block);
                 saw_begin = true;
                 complete = false;
+            } else if token.is_word("CASE") {
+                // Both CASE expressions and CASE statements own an END.
+                // The CASE token that follows END CASE is a suffix, not a scope start.
+                if previous_word_token(&self.tokens, index) != Some("END") {
+                    scopes.push(OraclePlSqlScope::Case);
+                }
             } else if token.is_word("END") {
-                pending_end = Some(true);
+                let next = self.tokens.get(index + 1).and_then(OraclePlSqlToken::as_word);
+                if matches!(next, Some("IF" | "LOOP")) {
+                    continue;
+                }
+                if matches!(next, Some("CASE")) && !matches!(scopes.last(), Some(OraclePlSqlScope::Case)) {
+                    continue;
+                }
+                if scopes.pop().is_some() {
+                    complete = scopes.is_empty();
+                }
             }
         }
 
-        saw_begin && complete
+        match object_kind {
+            // Specs complete on outer END [name]; without requiring BEGIN.
+            Some(OraclePlSqlCreateObjectKind::Spec) => complete,
+            _ => saw_begin && complete,
+        }
     }
 
     fn starts_create_plsql_object(tokens: &[OraclePlSqlToken]) -> bool {
-        let tokens = Self::skip_or_replace(tokens);
-        tokens.first().is_some_and(|token| token.is_any_word(&["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE", "TYPE"]))
+        let tokens = Self::skip_create_modifiers(tokens);
+        match tokens {
+            // PACKAGE BODY / TYPE BODY are programmable blocks with an outer END.
+            [object, body, ..] if object.is_any_word(&["PACKAGE", "TYPE"]) && body.is_word("BODY") => true,
+            // Plain CREATE TYPE ... AS OBJECT (...); ends with ");" — not a PL/SQL block.
+            [object, ..] if object.is_word("TYPE") => false,
+            [object, ..] if object.is_any_word(&["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE"]) => true,
+            _ => false,
+        }
     }
 
-    fn skip_or_replace(tokens: &[OraclePlSqlToken]) -> &[OraclePlSqlToken] {
-        match tokens {
-            [or, replace, rest @ ..] if or.is_word("OR") && replace.is_word("REPLACE") => rest,
-            _ => tokens,
+    fn create_object_kind(&self) -> Option<OraclePlSqlCreateObjectKind> {
+        if self.tokens.first().is_none_or(|token| !token.is_word("CREATE")) {
+            return None;
         }
+        let tokens = Self::skip_create_modifiers(&self.tokens[1..]);
+        match tokens {
+            [object, body, ..] if object.is_any_word(&["PACKAGE", "TYPE"]) && body.is_word("BODY") => {
+                Some(OraclePlSqlCreateObjectKind::Body)
+            }
+            // Only PACKAGE specs lack BEGIN; plain TYPE objects are ordinary SQL.
+            [object, ..] if object.is_word("PACKAGE") => Some(OraclePlSqlCreateObjectKind::Spec),
+            _ => None,
+        }
+    }
+
+    /// Skip OR REPLACE / FORCE / NOFORCE / EDITIONABLE modifiers after CREATE.
+    fn skip_create_modifiers(tokens: &[OraclePlSqlToken]) -> &[OraclePlSqlToken] {
+        let mut rest = tokens;
+        loop {
+            match rest {
+                [or, replace, tail @ ..] if or.is_word("OR") && replace.is_word("REPLACE") => {
+                    rest = tail;
+                }
+                [modifier, tail @ ..]
+                    if modifier.is_any_word(&["FORCE", "NOFORCE", "EDITIONABLE", "NONEDITIONABLE"]) =>
+                {
+                    rest = tail;
+                }
+                _ => break,
+            }
+        }
+        rest
     }
 
     fn is_transaction_begin_tail(token: &OraclePlSqlToken) -> bool {
         token.is_semicolon() || token.is_any_word(&["TRANSACTION", "WORK"])
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OraclePlSqlCreateObjectKind {
+    Spec,
+    Body,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OraclePlSqlScope {
+    Object,
+    Block,
+    Case,
 }
 
 impl OraclePlSqlToken {
@@ -3083,6 +3145,7 @@ END;";
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Oracle), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Dameng), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Gaussdb), vec![sql.to_string()]);
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Xugu), vec![sql.to_string()]);
     }
 
     #[test]
@@ -3230,6 +3293,10 @@ SELECT 1;";
             vec!["CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))\nRETURN VARCHAR(20)\nAS\n    res VARCHAR(20);\nBEGIN\n    RETURN '一';\nEND;", "SELECT 1"]
         );
         assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec!["CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))\nRETURN VARCHAR(20)\nAS\n    res VARCHAR(20);\nBEGIN\n    RETURN '一';\nEND;", "SELECT 1"]
+        );
+        assert_eq!(
             split_sql_statements_for_database(sql, DatabaseType::Dameng),
             vec!["CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))\nRETURN VARCHAR(20)\nAS\n    res VARCHAR(20);\nBEGIN\n    RETURN '一';\nEND;", "SELECT 1"]
         );
@@ -3254,6 +3321,13 @@ SELECT 1;";
                 "SELECT 1"
             ]
         );
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE PROCEDURE update_salary(p_id NUMBER, p_amount NUMBER)\nAS\nBEGIN\n    UPDATE employees SET salary = salary + p_amount WHERE id = p_id;\n    COMMIT;\nEND;",
+                "SELECT 1"
+            ]
+        );
     }
 
     #[test]
@@ -3270,6 +3344,13 @@ SELECT 1;";
 
         assert_eq!(
             split_sql_statements_for_database(sql, DatabaseType::Oracle),
+            vec![
+                "CREATE TRIGGER trg_audit\nBEFORE INSERT ON employees\nFOR EACH ROW\nBEGIN\n    INSERT INTO audit_log VALUES (:NEW.id, 'INSERT');\nEND;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
             vec![
                 "CREATE TRIGGER trg_audit\nBEFORE INSERT ON employees\nFOR EACH ROW\nBEGIN\n    INSERT INTO audit_log VALUES (:NEW.id, 'INSERT');\nEND;",
                 "SELECT 1"
@@ -3317,6 +3398,206 @@ SELECT 1;";
                 "SELECT 1"
             ]
         );
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_keeps_create_package_body_together() {
+        let sql = "\
+CREATE OR REPLACE PACKAGE BODY dbx_pkg AS
+    PROCEDURE ping AS
+    BEGIN
+        NULL;
+    END ping;
+END dbx_pkg;
+/
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE PACKAGE BODY dbx_pkg AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_keeps_routines_without_or_replace_together() {
+        let cases = [
+            "CREATE PROCEDURE dbx_proc_without_replace AS BEGIN NULL; END;",
+            "CREATE FUNCTION dbx_func_without_replace RETURN INTEGER AS BEGIN RETURN 1; END;",
+            "CREATE TRIGGER dbx_trigger_without_replace BEFORE INSERT ON dbx_events FOR EACH ROW BEGIN NULL; END;",
+        ];
+
+        for statement in cases {
+            assert_eq!(
+                split_sql_statements_for_database(&format!("{statement}\nSELECT 1;"), DatabaseType::Xugu),
+                vec![statement.to_owned(), "SELECT 1".to_owned()],
+                "failed for {statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn xugu_split_keeps_force_package_body_together() {
+        let sql = "\
+CREATE OR REPLACE FORCE PACKAGE BODY dbx_pkg AS
+    PROCEDURE ping AS
+    BEGIN
+        NULL;
+    END ping;
+END dbx_pkg;
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE FORCE PACKAGE BODY dbx_pkg AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE OR REPLACE NOFORCE PACKAGE BODY dbx_pkg AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE OR REPLACE NOFORCE PACKAGE BODY dbx_pkg AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE PACKAGE BODY dbx_pkg_without_replace AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg_without_replace;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE PACKAGE BODY dbx_pkg_without_replace AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg_without_replace;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_package_spec_without_slash_does_not_consume_following_sql() {
+        let sql = "\
+CREATE OR REPLACE PACKAGE pkg_utils AS
+    FUNCTION get_version RETURN VARCHAR2;
+    PROCEDURE log_message(msg VARCHAR2);
+END pkg_utils;
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;\n/\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE OR REPLACE FORCE PACKAGE pkg_utils AS\n    PROCEDURE ping;\nEND pkg_utils;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec!["CREATE OR REPLACE FORCE PACKAGE pkg_utils AS\n    PROCEDURE ping;\nEND pkg_utils;", "SELECT 1"]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE PACKAGE pkg_utils_without_replace AS\n    PROCEDURE ping;\nEND pkg_utils_without_replace;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE PACKAGE pkg_utils_without_replace AS\n    PROCEDURE ping;\nEND pkg_utils_without_replace;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_keeps_create_type_body_together() {
+        let sql = "\
+CREATE OR REPLACE TYPE BODY obj_t AS
+    MEMBER PROCEDURE ping IS
+    BEGIN
+        NULL;
+    END;
+END;
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE TYPE BODY obj_t AS\n    MEMBER PROCEDURE ping IS\n    BEGIN\n        NULL;\n    END;\nEND;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE TYPE BODY obj_t_without_replace AS\n    MEMBER PROCEDURE ping IS\n    BEGIN\n        NULL;\n    END;\nEND;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE TYPE BODY obj_t_without_replace AS\n    MEMBER PROCEDURE ping IS\n    BEGIN\n        NULL;\n    END;\nEND;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_plain_create_type_object_on_semicolon() {
+        // Plain CREATE TYPE ends with ");" and must not wait for a nonexistent outer END.
+        let sql = "CREATE OR REPLACE TYPE address_t AS OBJECT (id INT);\nSELECT 1;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec!["CREATE OR REPLACE TYPE address_t AS OBJECT (id INT)", "SELECT 1"]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE TYPE address_t_without_replace AS OBJECT (id INT);\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec!["CREATE TYPE address_t_without_replace AS OBJECT (id INT)", "SELECT 1"]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_case_expressions_inside_routines() {
+        let function = "CREATE OR REPLACE FUNCTION dbx_case_expr RETURN NUMBER AS\nBEGIN\n  RETURN CASE WHEN 1 = 1 THEN CASE WHEN 2 = 2 THEN 1 ELSE 2 END ELSE 0 END;\nEND;\nSELECT 1;";
+        let procedure = "CREATE OR REPLACE PROCEDURE dbx_case_statement AS\nBEGIN\n  CASE WHEN 1 = 1 THEN NULL; ELSE NULL; END CASE;\nEND;\nSELECT 1;";
+
+        for database in [DatabaseType::Xugu, DatabaseType::Oracle] {
+            assert_eq!(
+                split_sql_statements_for_database(function, database),
+                vec![
+                    "CREATE OR REPLACE FUNCTION dbx_case_expr RETURN NUMBER AS\nBEGIN\n  RETURN CASE WHEN 1 = 1 THEN CASE WHEN 2 = 2 THEN 1 ELSE 2 END ELSE 0 END;\nEND;",
+                    "SELECT 1"
+                ]
+            );
+            assert_eq!(
+                split_sql_statements_for_database(procedure, database),
+                vec![
+                    "CREATE OR REPLACE PROCEDURE dbx_case_statement AS\nBEGIN\n  CASE WHEN 1 = 1 THEN NULL; ELSE NULL; END CASE;\nEND;",
+                    "SELECT 1"
+                ]
+            );
+        }
     }
 
     #[test]

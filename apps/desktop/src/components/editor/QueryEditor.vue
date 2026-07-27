@@ -61,6 +61,7 @@ import {
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, loadEditorTheme, editorFontTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
+import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
 import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
@@ -2284,7 +2285,7 @@ function buildCompletionResult(items: QueryCompletionItem[], from: number, valid
   if (items.length === 0) return null;
   return {
     from,
-    filter: false,
+    // Keep CodeMirror's live filtering enabled so an already-open menu follows the typed prefix.
     options: items.map((item) => completionOptionForItem(item)),
     validFor,
   };
@@ -2305,6 +2306,10 @@ function mergeCompletionQualifierNames(primary: string[], secondary: string[]): 
 function localCompletionDatabaseNames(completionContext: ReturnType<typeof getSqlCompletionContext>): string[] {
   if (!supportsDatabaseQualifierCompletion() || !completionContext.suggestTables || completionContext.insertTable || !props.connectionId) return [];
   return connectionStore.lookupLocalCompletionDatabases(props.connectionId, completionContext.qualifier || completionContext.prefix, MAX_COMPLETION_TABLES);
+}
+
+function shouldInsertSqlCompletionSpace(): boolean {
+  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch";
 }
 
 function completionOptionForItem(item: QueryCompletionItem) {
@@ -2346,7 +2351,11 @@ function completionOptionForItem(item: QueryCompletionItem) {
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
       markCompletionAccepted(item);
-      const insert = item.apply ?? item.label;
+      const insert = appendSqlCompletionSpace(item.apply ?? item.label, {
+        enabled: shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion,
+        itemType: item.type,
+        nextCharacter: view.state.sliceDoc(to, to + 1),
+      });
       if (codeMirrorInsertCompletionText) {
         view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, to));
       } else {

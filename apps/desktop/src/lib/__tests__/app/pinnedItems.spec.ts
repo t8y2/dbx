@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { reactive } from "vue";
-import { inheritNaturalTreeNodeOrder, migrateLegacyPinnedTreeNodeIds, syncPinnedTreeNodeStateInPlace, treeNodePinKey, updatePinnedTreeNodeInPlace } from "@/lib/app/pinnedItems";
+import {
+  inheritNaturalTreeNodeOrder,
+  migrateLegacyPinnedTreeNodeIds,
+  migrateLegacyPinnedTreeNodeOrder,
+  removePinnedTreeNodesFromOrder,
+  reorderPinnedTreeNodeOrder,
+  replacePinnedTreeNodeInOrder,
+  syncPinnedTreeNodeStateInPlace,
+  treeNodePinKey,
+  updatePinnedTreeNodeInPlace,
+} from "@/lib/app/pinnedItems";
 import { buildTreeNodesFromLayout } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfig, SidebarLayout, TreeNode } from "@/types/database";
 
@@ -146,6 +156,31 @@ describe("sidebar pinned tree nodes", () => {
     expect(tableB.pinned).toBe(false);
   });
 
+  it("removes a deleted table pin so a recreated or renamed table does not inherit it", () => {
+    const deletedTable: TreeNode = { id: "conn:db:public:users", label: "users", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "users" };
+    const anotherTable: TreeNode = { id: "conn:db:public:orders", label: "orders", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "orders" };
+    const pinOrder = [treeNodePinKey(deletedTable), treeNodePinKey(anotherTable)];
+
+    const remainingOrder = removePinnedTreeNodesFromOrder(pinOrder, [{ ...deletedTable, id: "object-browser-row-id" }]);
+    const recreatedTable: TreeNode = { ...deletedTable };
+    const renamedTable: TreeNode = { ...anotherTable, id: deletedTable.id, label: deletedTable.label, tableName: deletedTable.tableName };
+
+    expect(remainingOrder).toEqual([treeNodePinKey(anotherTable)]);
+    expect(remainingOrder).not.toContain(treeNodePinKey(recreatedTable));
+    expect(remainingOrder).not.toContain(treeNodePinKey(renamedTable));
+  });
+
+  it("moves a renamed pin to the new identity without retaining the old name", () => {
+    const users: TreeNode = { id: "conn:db:public:users", label: "users", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "users" };
+    const orders: TreeNode = { id: "conn:db:public:orders", label: "orders", type: "table", connectionId: "conn", database: "db", schema: "public", tableName: "orders" };
+    const accounts: TreeNode = { ...users, id: "conn:db:public:accounts", label: "accounts", tableName: "accounts" };
+
+    const renamedOrder = replacePinnedTreeNodeInOrder([treeNodePinKey(users), treeNodePinKey(orders)], users, accounts);
+
+    expect(renamedOrder).toEqual([treeNodePinKey(accounts), treeNodePinKey(orders)]);
+    expect(renamedOrder).not.toContain(treeNodePinKey(users));
+  });
+
   it("migrates a legacy id once instead of pinning every colliding node", () => {
     const tableA: TreeNode = { id: "duplicate-table-id", label: "users", type: "table", connectionId: "conn", database: "a" };
     const tableB: TreeNode = { id: "duplicate-table-id", label: "users", type: "table", connectionId: "conn", database: "b" };
@@ -154,6 +189,91 @@ describe("sidebar pinned tree nodes", () => {
 
     expect(migrated.changed).toBe(true);
     expect(migrated.ids).toEqual(new Set([treeNodePinKey(tableA)]));
+  });
+
+  it("uses the persisted order for pinned siblings", () => {
+    const nodeA: TreeNode = { id: "db-a", label: "A", type: "database", connectionId: "conn", database: "a" };
+    const nodeB: TreeNode = { id: "db-b", label: "B", type: "database", connectionId: "conn", database: "b" };
+    const nodeC: TreeNode = { id: "db-c", label: "C", type: "database", connectionId: "conn", database: "c" };
+    const nodes = [nodeA, nodeB, nodeC];
+    const order = [treeNodePinKey(nodeC), treeNodePinKey(nodeA)];
+
+    syncPinnedTreeNodeStateInPlace(nodes, new Set(order), order);
+
+    expect(nodes.map((node) => node.id)).toEqual(["db-c", "db-a", "db-b"]);
+  });
+
+  it("keeps the fixed default database before manually pinned siblings", () => {
+    const nodeA: TreeNode = { id: "db-a", label: "A", type: "database", connectionId: "conn", database: "a" };
+    const defaultNode: TreeNode = { id: "db-default", label: "Default", type: "database", connectionId: "conn", database: "default" };
+    const nodeC: TreeNode = { id: "db-c", label: "C", type: "database", connectionId: "conn", database: "c" };
+    const nodes = [nodeA, defaultNode, nodeC];
+    const order = [treeNodePinKey(nodeC), treeNodePinKey(nodeA)];
+
+    syncPinnedTreeNodeStateInPlace(nodes, new Set(order), order, (node) => node.id === defaultNode.id);
+
+    expect(nodes.map((node) => node.id)).toEqual(["db-default", "db-c", "db-a"]);
+    expect(defaultNode.pinned).toBe(false);
+  });
+
+  it("keeps the fixed default database first even when it is also manually pinned", () => {
+    const nodeA: TreeNode = { id: "db-a", label: "A", type: "database", connectionId: "conn", database: "a" };
+    const defaultNode: TreeNode = { id: "db-default", label: "Default", type: "database", connectionId: "conn", database: "default" };
+    const nodeC: TreeNode = { id: "db-c", label: "C", type: "database", connectionId: "conn", database: "c" };
+    const nodes = [nodeA, defaultNode, nodeC];
+    const order = [treeNodePinKey(nodeC), treeNodePinKey(nodeA), treeNodePinKey(defaultNode)];
+
+    syncPinnedTreeNodeStateInPlace(nodes, new Set(order), order, (node) => node.id === defaultNode.id);
+
+    expect(nodes.map((node) => node.id)).toEqual(["db-default", "db-c", "db-a"]);
+    expect(defaultNode.pinned).toBe(true);
+  });
+
+  it("reorders pinned keys before and after a sibling without dropping unrelated keys", () => {
+    const initial = ["scope:a", "other:x", "scope:b", "other:y", "scope:c"];
+
+    const before = reorderPinnedTreeNodeOrder(initial, "scope:c", "scope:a", "before");
+    expect(before).toEqual(["scope:c", "scope:a", "other:x", "scope:b", "other:y"]);
+
+    const after = reorderPinnedTreeNodeOrder(before, "scope:c", "scope:b", "after");
+    expect(after).toEqual(["scope:a", "other:x", "scope:b", "scope:c", "other:y"]);
+    expect(after.filter((key) => key.startsWith("other:"))).toEqual(["other:x", "other:y"]);
+  });
+
+  it("places a newly appended pin last within its sibling pin section", () => {
+    const nodeA: TreeNode = { id: "db-a", label: "A", type: "database", connectionId: "conn", database: "a" };
+    const nodeB: TreeNode = { id: "db-b", label: "B", type: "database", connectionId: "conn", database: "b" };
+    const nodeC: TreeNode = { id: "db-c", label: "C", type: "database", connectionId: "conn", database: "c" };
+    const nodes = [nodeA, nodeB, nodeC];
+    const order = [treeNodePinKey(nodeC), treeNodePinKey(nodeA), treeNodePinKey(nodeB)];
+
+    syncPinnedTreeNodeStateInPlace(nodes, new Set(order), order);
+
+    expect(nodes.map((node) => node.id)).toEqual(["db-c", "db-a", "db-b"]);
+  });
+
+  it("migrates a legacy pin key in place without changing persisted order", () => {
+    const node: TreeNode = { id: "legacy-table", label: "users", type: "table", connectionId: "conn", database: "db" };
+
+    const migrated = migrateLegacyPinnedTreeNodeOrder([node], ["before", node.id, "after"]);
+
+    expect(migrated.changed).toBe(true);
+    expect(migrated.order).toEqual(["before", treeNodePinKey(node), "after"]);
+  });
+
+  it("removes explicitly supplied legacy keys for an unloaded node", () => {
+    const node: TreeNode = { id: "object-browser:app:events", label: "events", type: "table", connectionId: "conn", database: "app", schema: "public" };
+    const legacyKey = "conn:app:public:__tables:public:events";
+
+    expect(removePinnedTreeNodesFromOrder([legacyKey, "unrelated"], [node], undefined, [legacyKey])).toEqual(["unrelated"]);
+  });
+
+  it("replaces an explicitly supplied legacy key without losing its position", () => {
+    const oldNode: TreeNode = { id: "object-browser:app:events", label: "events", type: "table", connectionId: "conn", database: "app", schema: "public" };
+    const newNode: TreeNode = { id: "conn:app:public:__tables:public:renamed", label: "renamed", type: "table", connectionId: "conn", database: "app", schema: "public" };
+    const legacyKey = "conn:app:public:__tables:public:events";
+
+    expect(replacePinnedTreeNodeInOrder(["before", legacyKey, "after"], oldNode, newNode, undefined, [legacyKey])).toEqual(["before", treeNodePinKey(newNode), "after"]);
   });
 
   it("applies pinned state to connection groups when rebuilding from layout", () => {

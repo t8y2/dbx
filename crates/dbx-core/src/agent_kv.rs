@@ -24,6 +24,7 @@ pub struct KvKeyMetadata {
     pub mod_revision: Option<i64>,
     pub version: Option<i64>,
     pub lease: Option<i64>,
+    pub ttl: Option<i64>,
     pub value_size: Option<u64>,
     pub czxid: Option<i64>,
     pub mzxid: Option<i64>,
@@ -68,6 +69,8 @@ pub struct KvListPrefixResponse {
 #[serde(rename_all = "camelCase")]
 pub struct KvGetRequest {
     pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,6 +90,10 @@ pub struct KvPutRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserve_lease: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub write_mode: Option<KvWriteMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create_mode: Option<KvCreateMode>,
@@ -97,6 +104,10 @@ pub struct KvPutRequest {
 pub struct KvPutOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserve_lease: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_mode: Option<KvWriteMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,7 +172,12 @@ pub fn kv_list_prefix_params_with_options(
 }
 
 pub fn kv_get_params(key: &str) -> serde_json::Value {
-    serde_json::to_value(KvGetRequest { key: key.to_string() }).expect("KV get request should serialize")
+    kv_get_params_with_options(key, false)
+}
+
+pub fn kv_get_params_with_options(key: &str, metadata_only: bool) -> serde_json::Value {
+    serde_json::to_value(KvGetRequest { key: key.to_string(), metadata_only: metadata_only.then_some(true) })
+        .expect("KV get request should serialize")
 }
 
 pub fn kv_put_params(key: &str, value: KvValue, lease: Option<i64>) -> serde_json::Value {
@@ -173,6 +189,8 @@ pub fn kv_put_params_with_options(key: &str, value: KvValue, options: KvPutOptio
         key: key.to_string(),
         value,
         lease: options.lease,
+        ttl: options.ttl,
+        preserve_lease: options.preserve_lease,
         write_mode: options.write_mode,
         create_mode: options.create_mode,
     })
@@ -206,12 +224,22 @@ pub async fn kv_list_prefix_core_with_options(
         connection_id,
         AgentKvMethod::ListPrefix,
         kv_list_prefix_params_with_options(prefix, limit, continuation, recursive),
+        None,
     )
     .await
 }
 
 pub async fn kv_get_core(state: &AppState, connection_id: &str, key: &str) -> Result<KvGetResponse, String> {
-    call_agent_kv(state, connection_id, AgentKvMethod::Get, kv_get_params(key)).await
+    kv_get_core_with_options(state, connection_id, key, false).await
+}
+
+pub async fn kv_get_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    key: &str,
+    metadata_only: bool,
+) -> Result<KvGetResponse, String> {
+    call_agent_kv(state, connection_id, AgentKvMethod::Get, kv_get_params_with_options(key, metadata_only), None).await
 }
 
 pub async fn kv_put_core(
@@ -231,11 +259,37 @@ pub async fn kv_put_core_with_options(
     value: KvValue,
     options: KvPutOptions,
 ) -> Result<KvPutResponse, String> {
-    call_agent_kv(state, connection_id, AgentKvMethod::Put, kv_put_params_with_options(key, value, options)).await
+    let required_capability = kv_put_required_capability(&options);
+    call_agent_kv(
+        state,
+        connection_id,
+        AgentKvMethod::Put,
+        kv_put_params_with_options(key, value, options),
+        required_capability,
+    )
+    .await
+}
+
+fn kv_put_required_capability(options: &KvPutOptions) -> Option<AgentCapability> {
+    (options.ttl.is_some() || options.preserve_lease == Some(true)).then_some(AgentCapability::KvTtl)
 }
 
 pub async fn kv_delete_core(state: &AppState, connection_id: &str, key: &str) -> Result<KvDeleteResponse, String> {
-    call_agent_kv(state, connection_id, AgentKvMethod::Delete, kv_delete_params(key)).await
+    call_agent_kv(state, connection_id, AgentKvMethod::Delete, kv_delete_params(key), None).await
+}
+
+pub async fn kv_supports_ttl_core(state: &AppState, connection_id: &str) -> Result<bool, String> {
+    ensure_agent_kv_pool(state, connection_id).await?;
+
+    let connections = state.connections.read().await;
+    let pool = connections.get(connection_id).ok_or("Connection not found")?;
+    match pool {
+        PoolKind::Agent(client) => {
+            let client = client.lock().await;
+            Ok(client.supports_capability(AgentCapability::KvTtl))
+        }
+        _ => Err("Not an agent key-value connection".to_string()),
+    }
 }
 
 async fn ensure_agent_kv_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -247,6 +301,7 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
     connection_id: &str,
     method: AgentKvMethod,
     params: serde_json::Value,
+    required_capability: Option<AgentCapability>,
 ) -> Result<T, String> {
     ensure_agent_kv_pool(state, connection_id).await?;
 
@@ -257,6 +312,11 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
             let mut client = client.lock().await;
             if !client.supports_capability(AgentCapability::Kv) {
                 return Err("Agent does not support key-value operations".to_string());
+            }
+            if required_capability.is_some_and(|capability| !client.supports_capability(capability)) {
+                return Err(
+                    "Installed etcd Agent does not support TTL. Update the etcd driver and reconnect.".to_string()
+                );
             }
             client.call_kv_method(method, params).await
         }
@@ -302,6 +362,13 @@ mod tests {
     #[test]
     fn serializes_kv_get_put_delete_params() {
         assert_eq!(kv_get_params("/app/name"), serde_json::json!({ "key": "/app/name" }));
+        assert_eq!(
+            kv_get_params_with_options("/app/name", true),
+            serde_json::json!({
+                "key": "/app/name",
+                "metadataOnly": true
+            })
+        );
         assert_eq!(
             kv_put_params("/app/name", KvValue { encoding: KvValueEncoding::Utf8, data: "dbx".to_string() }, Some(42),),
             serde_json::json!({
@@ -349,6 +416,50 @@ mod tests {
                 "createMode": "ephemeral_sequential"
             })
         );
+        assert_eq!(
+            kv_put_params_with_options(
+                "/jobs/expiring",
+                KvValue { encoding: KvValueEncoding::Utf8, data: "value".to_string() },
+                KvPutOptions { ttl: Some(60), ..KvPutOptions::default() },
+            ),
+            serde_json::json!({
+                "key": "/jobs/expiring",
+                "value": {
+                    "encoding": "utf8",
+                    "data": "value"
+                },
+                "ttl": 60
+            })
+        );
+        assert_eq!(
+            kv_put_params_with_options(
+                "/jobs/expiring",
+                KvValue { encoding: KvValueEncoding::Utf8, data: "updated".to_string() },
+                KvPutOptions { preserve_lease: Some(true), ..KvPutOptions::default() },
+            ),
+            serde_json::json!({
+                "key": "/jobs/expiring",
+                "value": {
+                    "encoding": "utf8",
+                    "data": "updated"
+                },
+                "preserveLease": true
+            })
+        );
+    }
+
+    #[test]
+    fn requires_ttl_capability_only_for_ttl_aware_puts() {
+        assert_eq!(kv_put_required_capability(&KvPutOptions::default()), None);
+        assert_eq!(kv_put_required_capability(&KvPutOptions { lease: Some(42), ..KvPutOptions::default() }), None);
+        assert_eq!(
+            kv_put_required_capability(&KvPutOptions { ttl: Some(60), ..KvPutOptions::default() }),
+            Some(AgentCapability::KvTtl)
+        );
+        assert_eq!(
+            kv_put_required_capability(&KvPutOptions { preserve_lease: Some(true), ..KvPutOptions::default() }),
+            Some(AgentCapability::KvTtl)
+        );
     }
 
     #[test]
@@ -360,6 +471,7 @@ mod tests {
                 "modRevision": 2,
                 "version": 3,
                 "lease": 0,
+                "ttl": 30,
                 "valueSize": 5
             }],
             "continuation": "next-token",
@@ -369,6 +481,7 @@ mod tests {
 
         assert_eq!(decoded.keys[0].key, "/app/name");
         assert_eq!(decoded.keys[0].metadata.mod_revision, Some(2));
+        assert_eq!(decoded.keys[0].metadata.ttl, Some(30));
         assert_eq!(decoded.continuation.as_deref(), Some("next-token"));
         assert_eq!(decoded.revision, Some(9));
     }

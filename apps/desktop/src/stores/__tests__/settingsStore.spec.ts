@@ -34,6 +34,11 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ autoAliasTables: false }).autoAliasTables).toBe(false);
   });
 
+  it("enables a trailing space after completion by default and preserves the opt-out", () => {
+    expect(normalizeEditorSettings({}).insertSpaceAfterCompletion).toBe(true);
+    expect(normalizeEditorSettings({ insertSpaceAfterCompletion: false }).insertSpaceAfterCompletion).toBe(false);
+  });
+
   it("defaults sidebar connection sorting to manual order and preserves valid alphabetical modes", () => {
     expect(normalizeEditorSettings({}).sidebarConnectionSortMode).toBe("manual");
     expect(normalizeEditorSettings({ sidebarConnectionSortMode: "asc" }).sidebarConnectionSortMode).toBe("asc");

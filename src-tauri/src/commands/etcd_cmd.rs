@@ -2,7 +2,12 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
-use dbx_core::agent_kv::{KvDeleteResponse, KvGetResponse, KvListPrefixResponse, KvPutResponse, KvValue};
+use dbx_core::agent_kv::{KvDeleteResponse, KvGetResponse, KvListPrefixResponse, KvPutOptions, KvPutResponse, KvValue};
+
+#[tauri::command]
+pub async fn etcd_supports_ttl(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<bool, String> {
+    dbx_core::agent_kv::kv_supports_ttl_core(&state, &connection_id).await
+}
 
 #[tauri::command]
 pub async fn etcd_list_prefix(
@@ -20,8 +25,9 @@ pub async fn etcd_get(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     key: String,
+    metadata_only: Option<bool>,
 ) -> Result<KvGetResponse, String> {
-    dbx_core::agent_kv::kv_get_core(&state, &connection_id, &key).await
+    dbx_core::agent_kv::kv_get_core_with_options(&state, &connection_id, &key, metadata_only.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -31,9 +37,18 @@ pub async fn etcd_put(
     key: String,
     value: KvValue,
     lease: Option<i64>,
+    ttl: Option<i64>,
+    preserve_lease: Option<bool>,
 ) -> Result<KvPutResponse, String> {
     ensure_connection_writable(&state, &connection_id, "Put").await?;
-    dbx_core::agent_kv::kv_put_core(&state, &connection_id, &key, value, lease).await
+    dbx_core::agent_kv::kv_put_core_with_options(
+        &state,
+        &connection_id,
+        &key,
+        value,
+        KvPutOptions { lease, ttl, preserve_lease, ..KvPutOptions::default() },
+    )
+    .await
 }
 
 #[tauri::command]

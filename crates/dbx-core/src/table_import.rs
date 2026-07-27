@@ -19,7 +19,7 @@ use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::models::connection::DatabaseType;
 use crate::transfer::{
     execute_on_pool, generate_insert_typed, generate_insert_typed_sql_batches, get_columns_for_transfer,
-    qualified_table, quote_identifier,
+    normalize_postgres_integer_literal, qualified_table, quote_identifier,
 };
 
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
@@ -3113,7 +3113,18 @@ fn normalize_import_value(
     kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
 ) -> serde_json::Value {
-    normalize_import_temporal_value(value, data_type, db_type, kingbase_oracle_mode, date_time_format)
+    let normalized = normalize_import_temporal_value(value, data_type, db_type, kingbase_oracle_mode, date_time_format);
+    let integer_text =
+        normalized.as_str().map(str::to_owned).or_else(|| normalized.as_number().map(ToString::to_string));
+    if let Some(integer_text) = integer_text
+        .as_deref()
+        .and_then(|value| normalize_postgres_integer_literal(value, db_type, data_type))
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        // Normalize before both INSERT and COPY paths; COPY does not pass through SQL literal escaping.
+        return serde_json::Value::Number(integer_text.into());
+    }
+    normalized
 }
 
 pub fn build_import_insert_batches(
@@ -7142,6 +7153,29 @@ mod tests {
 
         assert_eq!(sql, "COPY \"public\".\"items\" (\"id\", \"payload\") FROM STDIN WITH (FORMAT text)");
         assert_eq!(String::from_utf8(data).unwrap(), "1\ta\\\\b\\tline\\nnext\\v\n\\N\t\\\\N\n");
+    }
+
+    #[test]
+    fn postgres_copy_normalizes_zero_fraction_integer_values_for_integer_targets() {
+        let plan = CompiledImportPlan {
+            mapped_source_indexes: vec![0, 1, 2],
+            target_columns: vec!["small_value".to_string(), "big_value".to_string(), "label".to_string()],
+            column_types: vec![Some("smallint".to_string()), Some("bigint".to_string()), Some("text".to_string())],
+        };
+        let (sql, data) = build_postgres_copy_text_batch(
+            &[vec![serde_json::json!("1.0"), serde_json::json!(2.0), serde_json::json!("3.0")]],
+            &plan,
+            "numbers",
+            "public",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sql,
+            "COPY \"public\".\"numbers\" (\"small_value\", \"big_value\", \"label\") FROM STDIN WITH (FORMAT text)"
+        );
+        assert_eq!(String::from_utf8(data).unwrap(), "1\t2\t3.0\n");
     }
 
     #[test]

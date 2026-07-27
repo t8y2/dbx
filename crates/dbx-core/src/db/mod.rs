@@ -30,6 +30,8 @@ pub mod redis_driver;
 pub mod rqlite_driver;
 pub mod sqlite;
 pub mod sqlserver;
+pub mod ssh_host_key;
+pub mod ssh_prompt;
 pub mod ssh_tunnel;
 pub mod starrocks;
 pub mod transport_layer_tunnel;

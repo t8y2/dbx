@@ -15,6 +15,7 @@ const TableImportDialog = defineAsyncComponent(() => import("@/components/import
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
+const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/ssh/SshHostKeyPromptDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -262,4 +263,5 @@ watch(
       </DialogFooter>
     </DialogContent>
   </Dialog>
+  <SshHostKeyPromptDialog />
 </template>

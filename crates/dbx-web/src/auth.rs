@@ -201,8 +201,8 @@ pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body:
     (StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
-    let cookie_header = req.headers().get("cookie")?.to_str().ok()?;
+pub fn session_token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    let cookie_header = headers.get("cookie")?.to_str().ok()?;
     for pair in cookie_header.split(';') {
         let pair = pair.trim();
         if let Some(value) = pair.strip_prefix("dbx_session=") {
@@ -212,6 +212,10 @@ fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
+    session_token_from_headers(req.headers())
 }
 
 pub async fn auth_middleware(

@@ -353,11 +353,12 @@ pub enum AgentCapability {
     Transaction,
     Ddl,
     Kv,
+    KvTtl,
     MultiSession,
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -366,6 +367,7 @@ impl AgentCapability {
         Self::Transaction,
         Self::Ddl,
         Self::Kv,
+        Self::KvTtl,
         Self::MultiSession,
     ];
 
@@ -379,6 +381,7 @@ impl AgentCapability {
             Self::Transaction => "transaction",
             Self::Ddl => "ddl",
             Self::Kv => "kv",
+            Self::KvTtl => "kv_ttl",
             Self::MultiSession => "multi_session",
         }
     }
@@ -1635,7 +1638,7 @@ pub fn is_unsupported_handshake_error(error: &str) -> bool {
 }
 
 pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability: AgentCapability) -> bool {
-    if capability == AgentCapability::Kv {
+    if matches!(capability, AgentCapability::Kv | AgentCapability::KvTtl) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
     handshake.map(|value| value.supports(capability)).unwrap_or(true)
@@ -2306,8 +2309,9 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::Transaction.as_str(), "transaction");
         assert_eq!(AgentCapability::Ddl.as_str(), "ddl");
         assert_eq!(AgentCapability::Kv.as_str(), "kv");
+        assert_eq!(AgentCapability::KvTtl.as_str(), "kv_ttl");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
-        assert_eq!(AgentCapability::ALL.len(), 9);
+        assert_eq!(AgentCapability::ALL.len(), 10);
     }
 
     #[test]
@@ -2625,6 +2629,8 @@ for line in sys.stdin:
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::Query));
         assert!(!agent_supports_capability(None, AgentCapability::Kv));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::Kv));
+        assert!(!agent_supports_capability(None, AgentCapability::KvTtl));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvTtl));
     }
 
     #[test]

@@ -6,9 +6,12 @@
 //! still supports an older Rust toolchain. A future SDK adapter can implement
 //! the same port without changing commands, routes, or frontend contracts.
 
+pub mod archive;
+pub mod batch;
 pub mod config;
 pub mod http;
 pub mod port;
+pub mod search;
 pub mod service;
 pub mod types;
 

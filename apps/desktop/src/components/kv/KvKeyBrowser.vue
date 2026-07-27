@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { ChevronDown, ChevronRight, FolderClosed, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Search, Trash2 } from "@lucide/vue";
@@ -14,7 +14,10 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import type { KvCreateMode, KvGetResponse, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/backend/api";
 import { buildKvKeyTree, flattenVisibleKvKeyTree, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
 import { refreshedKvSelectionKey } from "@/lib/kv/kvRefreshSelection";
+import { decideKvMetadataRefresh, knownKvLeaseKeys, KvListRequestGuard, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
+import { parseOptionalTtl } from "@/lib/kv/kvTtl";
 import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
+import { formatTtl } from "@/lib/common/ttlFormat";
 import {
   createLazyKvKeyTreeState,
   createZooKeeperChildPathDraft,
@@ -50,6 +53,10 @@ interface KvKeyBrowserLabels {
   deleted: string;
   base64Readonly: string;
   createMode?: string;
+  ttl?: string;
+  ttlPlaceholder?: string;
+  ttlInvalid?: string;
+  ttlUnavailable?: string;
   add?: string;
   value?: string;
   metadata?: string;
@@ -69,6 +76,7 @@ interface KvCreateModeOption {
 interface KvKeyBrowserApi {
   listPrefix: (connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null) => Promise<{ keys: KvKeySummary[]; continuation?: string | null }>;
   get: (connectionId: string, key: string) => Promise<KvGetResponse>;
+  getMetadata?: (connectionId: string, key: string) => Promise<KvGetResponse>;
   put: (connectionId: string, key: string, value: KvValue, options?: KvPutOptions | null) => Promise<KvPutResponse>;
   deleteKey: (connectionId: string, key: string) => Promise<{ deleted: number }>;
 }
@@ -82,6 +90,8 @@ const props = withDefaults(
     labels: KvKeyBrowserLabels;
     api: KvKeyBrowserApi;
     supportsCreateModes?: boolean;
+    supportsTtl?: boolean;
+    ttlCapabilityKnown?: boolean;
     createModeOptions?: KvCreateModeOption[];
     enableNodeActions?: boolean;
     metadataStyle?: "default" | "zookeeper";
@@ -89,12 +99,17 @@ const props = withDefaults(
   }>(),
   {
     supportsCreateModes: false,
+    supportsTtl: false,
+    ttlCapabilityKnown: true,
     createModeOptions: () => [],
     enableNodeActions: false,
     metadataStyle: "default",
     lazyHierarchy: false,
   },
 );
+const emit = defineEmits<{
+  refreshRequested: [];
+}>();
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -114,6 +129,7 @@ const showEditDialog = ref(false);
 const isCreating = ref(false);
 const editKey = ref("");
 const editValue = ref("");
+const editTtl = ref<string | number>("");
 const editError = ref("");
 const saving = ref(false);
 const showDeleteConfirm = ref(false);
@@ -122,6 +138,18 @@ const selectedCreateMode = ref<KvCreateMode>("persistent");
 const selectedPrettyValue = ref<string | null>(null);
 const lazyTreeState = reactive(createLazyKvKeyTreeState());
 const pageSize = 200;
+const metadataRefreshIntervalMs = 1000;
+const keyListRefreshBaseIntervalMs = 2000;
+const keyListRefreshMaxIntervalMs = 30000;
+let detailRequestId = 0;
+let metadataRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let metadataRefreshGeneration = 0;
+let metadataRefreshInFlight = false;
+let keyListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let keyListRefreshGeneration = 0;
+let keyListRefreshDelayMs = keyListRefreshBaseIntervalMs;
+let loadedPrefix = "";
+const keyListRequestGuard = new KvListRequestGuard();
 type LoadKeysOptions = {
   preserveSelection?: boolean;
 };
@@ -140,6 +168,8 @@ const selectedTextValue = computed(() => {
 const displayedSelectedTextValue = computed(() => selectedPrettyValue.value ?? selectedTextValue.value);
 const selectedValueIsBase64 = computed(() => selectedValue.value?.value?.encoding === "base64");
 const showCreateModeSelect = computed(() => props.supportsCreateModes && isCreating.value && props.createModeOptions.length > 0);
+const showTtlInput = computed(() => props.supportsTtl && isCreating.value);
+const showTtlUnavailable = computed(() => props.ttlCapabilityKnown && !props.supportsTtl && isCreating.value && !!props.labels.ttlUnavailable);
 const zookeeperSummaryBadges = computed(() =>
   formatZooKeeperSummaryBadges(selectedMetadata.value, {
     revision: props.labels.summaryRevision,
@@ -149,6 +179,10 @@ const zookeeperSummaryBadges = computed(() =>
   }),
 );
 const zookeeperMetadataRows = computed(() => formatZooKeeperMetadataRows(selectedMetadata.value));
+const selectedTtlLabel = computed(() => {
+  const ttl = selectedMetadata.value?.ttl;
+  return typeof ttl === "number" && ttl > 0 ? formatTtl(ttl, t) : null;
+});
 const selectedValueCanPrettyJson = computed(() => selectedValue.value?.value?.encoding === "utf8" && prettyPrintJsonText(selectedTextValue.value).ok);
 const editValueCanPrettyJson = computed(() => prettyPrintJsonText(editValue.value).ok);
 
@@ -162,37 +196,51 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
     return;
   }
 
+  const loadGeneration = keyListRequestGuard.beginForegroundRequest();
+  stopKeyListRefresh();
+  const connectionId = props.connectionId;
   const keyToRestore = options.preserveSelection ? selectedKey.value : null;
+  const requestedPrefix = reset ? prefix.value.trim() : loadedPrefix;
+  const continuationToUse = reset ? null : continuation.value;
   if (reset) {
     loading.value = true;
     continuation.value = null;
     keys.value = [];
     if (!options.preserveSelection) {
-      selectedKey.value = null;
-      selectedValue.value = null;
+      clearSelectedKey();
     }
   } else {
     loadingMore.value = true;
   }
   try {
-    const result = await props.api.listPrefix(props.connectionId, prefix.value.trim(), pageSize, reset ? null : continuation.value);
+    const result = await props.api.listPrefix(connectionId, requestedPrefix, pageSize, continuationToUse);
+    if (!keyListRequestGuard.isForegroundRequestCurrent(loadGeneration) || props.connectionId !== connectionId) return;
+
     const existing = new Set(keys.value.map((key) => key.key));
     const merged = reset ? result.keys : [...keys.value, ...result.keys.filter((key) => !existing.has(key.key))];
     keys.value = merged;
     continuation.value = result.continuation || null;
-    preserveExpandedGroups(!!prefix.value.trim());
+    if (reset) {
+      loadedPrefix = requestedPrefix;
+    }
+    preserveExpandedGroups(!!requestedPrefix);
     if (reset && options.preserveSelection) {
       const restoredKey = refreshedKvSelectionKey(keyToRestore, merged);
       if (restoredKey) {
         await loadSelectedKey(restoredKey);
       } else {
-        selectedKey.value = null;
-        selectedValue.value = null;
+        clearSelectedKey();
       }
     }
+  } catch (error) {
+    if (!keyListRequestGuard.isForegroundRequestCurrent(loadGeneration) || props.connectionId !== connectionId) return;
+    throw error;
   } finally {
-    loading.value = false;
-    loadingMore.value = false;
+    if (keyListRequestGuard.isForegroundRequestCurrent(loadGeneration) && props.connectionId === connectionId) {
+      loading.value = false;
+      loadingMore.value = false;
+      startKeyListRefresh();
+    }
   }
 }
 
@@ -207,8 +255,7 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
   loading.value = true;
   loadingMore.value = false;
   if (!options.preserveSelection) {
-    selectedKey.value = null;
-    selectedValue.value = null;
+    clearSelectedKey();
   }
 
   try {
@@ -232,8 +279,7 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
       if (keyToRestore && lazyTreeState.nodeByKey.has(keyToRestore)) {
         await loadSelectedKey(keyToRestore);
       } else {
-        selectedKey.value = null;
-        selectedValue.value = null;
+        clearSelectedKey();
       }
     } else {
       expandedGroupIds.value = focusedRootExpansion(rootPath);
@@ -341,16 +387,173 @@ async function refreshLazyParent(parentPath: string) {
 }
 
 async function loadSelectedKey(key: string) {
+  stopMetadataRefresh();
+  const requestId = ++detailRequestId;
   selectedKey.value = key;
+  selectedValue.value = null;
   selectedPrettyValue.value = null;
   detailLoading.value = true;
   detailError.value = "";
   try {
-    selectedValue.value = await props.api.get(props.connectionId, key);
+    const result = await props.api.get(props.connectionId, key);
+    if (requestId !== detailRequestId || selectedKey.value !== key) return;
+    if (!result.found) {
+      removeExpiredSelectedKey(key);
+      return;
+    }
+    selectedValue.value = result;
+    startMetadataRefresh(key);
   } catch (error) {
+    if (requestId !== detailRequestId || selectedKey.value !== key) return;
     detailError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    detailLoading.value = false;
+    if (requestId === detailRequestId) detailLoading.value = false;
+  }
+}
+
+function clearSelectedKey() {
+  stopMetadataRefresh();
+  detailRequestId++;
+  selectedKey.value = null;
+  selectedValue.value = null;
+  selectedPrettyValue.value = null;
+  detailLoading.value = false;
+}
+
+function startMetadataRefresh(key: string) {
+  stopMetadataRefresh();
+  const metadata = selectedValue.value?.metadata;
+  if (!props.api.getMetadata || typeof metadata?.lease !== "number" || metadata.lease <= 0 || typeof metadata.ttl !== "number") return;
+
+  const generation = metadataRefreshGeneration;
+  metadataRefreshTimer = setInterval(() => {
+    void refreshSelectedMetadata(key, generation);
+  }, metadataRefreshIntervalMs);
+}
+
+function stopMetadataRefresh() {
+  metadataRefreshGeneration++;
+  metadataRefreshInFlight = false;
+  if (metadataRefreshTimer !== null) {
+    clearInterval(metadataRefreshTimer);
+    metadataRefreshTimer = null;
+  }
+}
+
+function startKeyListRefresh() {
+  stopKeyListRefresh();
+  keyListRefreshDelayMs = keyListRefreshBaseIntervalMs;
+  scheduleKeyListRefresh(keyListRefreshGeneration);
+}
+
+function activeMetadataRefreshKey(): string | null {
+  return metadataRefreshTimer !== null ? selectedKey.value : null;
+}
+
+function scheduleKeyListRefresh(generation: number) {
+  if (generation !== keyListRefreshGeneration || !props.supportsTtl || props.lazyHierarchy || !props.api.getMetadata || knownKvLeaseKeys(keys.value, activeMetadataRefreshKey()).length === 0) {
+    return;
+  }
+
+  keyListRefreshTimer = setTimeout(() => {
+    keyListRefreshTimer = null;
+    void refreshKnownLeaseKeys(generation);
+  }, keyListRefreshDelayMs);
+}
+
+function stopKeyListRefresh() {
+  keyListRefreshGeneration++;
+  if (keyListRefreshTimer !== null) {
+    clearTimeout(keyListRefreshTimer);
+    keyListRefreshTimer = null;
+  }
+}
+
+async function refreshKnownLeaseKeys(generation: number) {
+  const getMetadata = props.api.getMetadata;
+  if (!props.supportsTtl || props.lazyHierarchy || !getMetadata || loading.value || loadingMore.value || generation !== keyListRefreshGeneration) {
+    return;
+  }
+
+  const connectionId = props.connectionId;
+  const leaseKeys = knownKvLeaseKeys(keys.value, activeMetadataRefreshKey());
+  let failed = false;
+  for (const key of leaseKeys) {
+    try {
+      const result = await getMetadata(connectionId, key);
+      if (generation !== keyListRefreshGeneration || props.connectionId !== connectionId) return;
+      if (result.found && !result.metadata) {
+        failed = true;
+        continue;
+      }
+      if (!result.found && selectedKey.value === key) {
+        removeExpiredSelectedKey(key);
+        continue;
+      }
+
+      const previousLength = keys.value.length;
+      keys.value = mergeKvKeyMetadata(keys.value, key, result);
+      if (keys.value.length !== previousLength) {
+        preserveExpandedGroups();
+      }
+    } catch {
+      if (generation !== keyListRefreshGeneration || props.connectionId !== connectionId) return;
+      failed = true;
+    }
+  }
+
+  if (generation !== keyListRefreshGeneration || props.connectionId !== connectionId) return;
+  keyListRefreshDelayMs = nextKvLeaseRefreshDelay(keyListRefreshDelayMs, failed, keyListRefreshBaseIntervalMs, keyListRefreshMaxIntervalMs);
+  scheduleKeyListRefresh(generation);
+}
+
+function removeExpiredSelectedKey(key: string) {
+  keys.value = removeMissingKvKey(keys.value, key);
+  preserveExpandedGroups();
+  clearSelectedKey();
+}
+
+async function refreshSelectedValueSilently(key: string, generation: number) {
+  const result = await props.api.get(props.connectionId, key);
+  if (generation !== metadataRefreshGeneration || selectedKey.value !== key) return;
+  if (!result.found) {
+    removeExpiredSelectedKey(key);
+    return;
+  }
+
+  selectedValue.value = mergeKvValueRefresh(selectedValue.value, result);
+  const metadata = selectedValue.value.metadata;
+  if (typeof metadata?.lease !== "number" || metadata.lease <= 0 || typeof metadata.ttl !== "number") {
+    stopMetadataRefresh();
+  }
+}
+
+async function refreshSelectedMetadata(key: string, generation: number) {
+  const getMetadata = props.api.getMetadata;
+  if (!getMetadata || metadataRefreshInFlight || generation !== metadataRefreshGeneration || selectedKey.value !== key) return;
+
+  metadataRefreshInFlight = true;
+  try {
+    const result = await getMetadata(props.connectionId, key);
+    if (generation !== metadataRefreshGeneration || selectedKey.value !== key) return;
+
+    const current = selectedValue.value;
+    const decision = decideKvMetadataRefresh(current, result);
+    if (decision.type === "notFound") {
+      removeExpiredSelectedKey(key);
+    } else if (decision.type === "stop") {
+      stopMetadataRefresh();
+    } else if (decision.type === "reload") {
+      await refreshSelectedValueSilently(key, generation);
+    } else {
+      if (!current || !updateKvResponseTtl(current, decision.ttl)) {
+        stopMetadataRefresh();
+      }
+    }
+  } catch {
+    // Keep the timer alive so transient failures do not freeze the countdown.
+  } finally {
+    if (generation === metadataRefreshGeneration) metadataRefreshInFlight = false;
   }
 }
 
@@ -401,6 +604,7 @@ function openCreateDialog(parentPath?: string) {
   isCreating.value = true;
   editKey.value = createKeyPrefix(parentPath);
   editValue.value = "";
+  editTtl.value = "";
   editError.value = "";
   selectedCreateMode.value = props.createModeOptions[0]?.value || "persistent";
   showEditDialog.value = true;
@@ -416,11 +620,23 @@ function openEditDialog() {
 }
 
 function putOptions(): KvPutOptions | undefined {
-  if (!props.supportsCreateModes) return undefined;
-  if (isCreating.value) {
-    return { writeMode: "create", createMode: selectedCreateMode.value };
+  const options: KvPutOptions = {};
+  if (props.supportsCreateModes) {
+    if (isCreating.value) {
+      options.writeMode = "create";
+      options.createMode = selectedCreateMode.value;
+    } else {
+      options.writeMode = "update";
+    }
   }
-  return { writeMode: "update" };
+  if (props.supportsTtl && isCreating.value) {
+    const parsed = parseOptionalTtl(editTtl.value);
+    if (parsed.ok && parsed.ttl != null) options.ttl = parsed.ttl;
+  }
+  if (!isCreating.value && typeof selectedMetadata.value?.lease === "number" && selectedMetadata.value.lease > 0) {
+    options.preserveLease = true;
+  }
+  return Object.keys(options).length > 0 ? options : undefined;
 }
 
 async function saveKey() {
@@ -431,6 +647,10 @@ async function saveKey() {
   }
   if (props.lazyHierarchy && normalizeZooKeeperPath(rawKey) === "/") {
     editError.value = props.labels.rootReadonly || props.labels.keyRequired;
+    return;
+  }
+  if (showTtlInput.value && !parseOptionalTtl(editTtl.value).ok) {
+    editError.value = props.labels.ttlInvalid || "TTL must be a positive integer";
     return;
   }
   const key = props.lazyHierarchy ? normalizeZooKeeperPath(rawKey) : rawKey;
@@ -462,8 +682,7 @@ async function deleteSelectedKey() {
   try {
     await props.api.deleteKey(props.connectionId, selectedKey.value);
     showDeleteConfirm.value = false;
-    selectedKey.value = null;
-    selectedValue.value = null;
+    clearSelectedKey();
     if (props.lazyHierarchy) {
       await refreshLazyParent(parentPath);
     } else {
@@ -553,20 +772,44 @@ function focusSearch(): boolean {
   return true;
 }
 
+async function refreshKeys() {
+  emit("refreshRequested");
+  await loadKeys(true, { preserveSelection: true });
+}
+
 function refresh(): boolean {
-  void loadKeys(true, { preserveSelection: true });
+  void refreshKeys().catch((error) => {
+    console.warn("[DBX] KV key refresh failed", error);
+  });
   return true;
 }
 
 watch(
   () => props.connectionId,
   async () => {
+    stopKeyListRefresh();
+    clearSelectedKey();
     try {
       await connectionStore.ensureConnected(props.connectionId);
     } catch {
       // Connection failed — loadKeys will show the error state
     }
-    void loadKeys(true);
+    await loadKeys(true);
+  },
+);
+
+watch(
+  () => props.supportsTtl,
+  (supported) => {
+    if (supported) startKeyListRefresh();
+    else stopKeyListRefresh();
+  },
+);
+
+watch(
+  () => selectedKey.value,
+  () => {
+    startKeyListRefresh();
   },
 );
 
@@ -586,7 +829,12 @@ onMounted(async () => {
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
-  void loadKeys(true);
+  await loadKeys(true);
+});
+
+onBeforeUnmount(() => {
+  clearSelectedKey();
+  stopKeyListRefresh();
 });
 defineExpose({ focusSearch, refresh });
 </script>
@@ -598,7 +846,7 @@ defineExpose({ focusSearch, refresh });
         <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input ref="searchInputRef" v-model="prefix" class="h-8 pl-8" :placeholder="labels.prefixPlaceholder" @keyup.enter="loadKeys(true)" />
       </div>
-      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="loadKeys(true, { preserveSelection: true })">
+      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="refreshKeys">
         <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
         <RefreshCw v-else class="h-3.5 w-3.5" />
         {{ t("grid.refresh") }}
@@ -678,6 +926,7 @@ defineExpose({ focusSearch, refresh });
                   <Badge variant="secondary">rev {{ metadataLabel(selectedMetadata?.modRevision) }}</Badge>
                   <Badge variant="outline">ver {{ metadataLabel(selectedMetadata?.version) }}</Badge>
                   <Badge variant="outline">lease {{ metadataLabel(selectedMetadata?.lease) }}</Badge>
+                  <Badge v-if="selectedTtlLabel" variant="outline">TTL {{ selectedTtlLabel }}</Badge>
                   <Badge variant="outline">{{ metadataLabel(selectedMetadata?.valueSize) }} B</Badge>
                 </template>
               </div>
@@ -743,6 +992,13 @@ defineExpose({ focusSearch, refresh });
                 </SelectItem>
               </SelectContent>
             </Select>
+          </div>
+          <div v-if="showTtlInput" class="grid grid-cols-4 items-center gap-3">
+            <Label class="text-right text-xs">{{ labels.ttl || "TTL (seconds)" }}</Label>
+            <Input v-model="editTtl" class="col-span-3" type="number" min="1" step="1" :placeholder="labels.ttlPlaceholder || 'Optional; leave blank for no expiry'" />
+          </div>
+          <div v-else-if="showTtlUnavailable" class="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+            {{ labels.ttlUnavailable }}
           </div>
           <textarea v-model="editValue" class="min-h-52 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" spellcheck="false" />
           <div v-if="editValueCanPrettyJson" class="flex justify-end">

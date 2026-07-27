@@ -76,6 +76,7 @@ public final class AgentProtocol {
     public static final String CAPABILITY_TRANSACTION = "transaction";
     public static final String CAPABILITY_DDL = "ddl";
     public static final String CAPABILITY_KV = "kv";
+    public static final String CAPABILITY_KV_TTL = "kv_ttl";
     public static final String CAPABILITY_MULTI_SESSION = "multi_session";
 
     public static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
@@ -96,7 +97,8 @@ public final class AgentProtocol {
         CAPABILITY_PAGED_QUERY,
         CAPABILITY_TRANSACTION,
         CAPABILITY_DDL,
-        CAPABILITY_KV
+        CAPABILITY_KV,
+        CAPABILITY_KV_TTL
     ));
 
     public static final List<String> COMMON_METHODS = Collections.unmodifiableList(Arrays.asList(

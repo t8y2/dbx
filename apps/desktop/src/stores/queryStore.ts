@@ -6,6 +6,7 @@ import type { ConnectionConfig, DatabaseType, IndexInfo, ObjectBrowserViewport, 
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult } from "@/lib/diagram/explainPlan";
+import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, resolveMetadataColumnName, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
@@ -1425,12 +1426,18 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
-  function openNacosAdmin(connectionId: string, target?: { namespace?: string; namespaceName?: string }) {
+  function openNacosAdmin(connectionId: string, target?: { namespace?: string; namespaceName?: string; dataId?: string; group?: string; keyword?: string }) {
     const namespace = target?.namespace ?? "";
     const namespaceName = target?.namespaceName || (namespace ? namespace : "public");
     const existing = tabs.value.find((tab) => tab.mode === "nacos" && tab.connectionId === connectionId && (tab.nacosNamespace || "") === namespace);
     if (existing) {
       existing.nacosNamespaceName = namespaceName;
+      if (target?.dataId) {
+        existing.nacosTargetDataId = target.dataId;
+        existing.nacosTargetGroup = target.group || "DEFAULT_GROUP";
+        existing.nacosTargetKeyword = target.keyword;
+        existing.nacosTargetRequestId = (existing.nacosTargetRequestId ?? 0) + 1;
+      }
       if (!existing.customTitle) existing.title = `${useConnectionStore().getConfig(connectionId)?.name || "Nacos"}:${namespaceName}`;
       switchTab(existing.id);
       return existing.id;
@@ -1450,10 +1457,22 @@ export const useQueryStore = defineStore("query", () => {
       mode: "nacos",
       nacosNamespace: namespace,
       nacosNamespaceName: namespaceName,
+      nacosTargetDataId: target?.dataId,
+      nacosTargetGroup: target?.group,
+      nacosTargetKeyword: target?.keyword,
+      nacosTargetRequestId: target?.dataId ? 1 : undefined,
     };
     tabs.value.push(tab);
     activeTabId.value = id;
     return id;
+  }
+
+  function clearNacosNavigationTarget(connectionId: string, namespace: string, requestId?: number) {
+    const tab = tabs.value.find((candidate) => candidate.mode === "nacos" && candidate.connectionId === connectionId && (candidate.nacosNamespace || "") === namespace);
+    if (!tab || (requestId !== undefined && tab.nacosTargetRequestId !== requestId)) return;
+    tab.nacosTargetDataId = undefined;
+    tab.nacosTargetGroup = undefined;
+    tab.nacosTargetKeyword = undefined;
   }
 
   function applyTableStructureInitialTab(tab: QueryTab, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget) {
@@ -2068,6 +2087,16 @@ export const useQueryStore = defineStore("query", () => {
     if (tab) {
       tab.sql = sql;
       queueSavedSqlEditorPositionPersist(tab);
+    }
+  }
+
+  function updateDataGridLocalColumnFilters(id: string, filters: Record<string, string[]>) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab?.result) return;
+    if (Object.keys(filters).length === 0) {
+      delete tab.result.local_column_filters;
+    } else {
+      tab.result.local_column_filters = Object.fromEntries(Object.entries(filters).map(([columnIndex, values]) => [columnIndex, [...values]]));
     }
   }
 
@@ -3835,36 +3864,68 @@ export const useQueryStore = defineStore("query", () => {
         return failed;
       }
 
-      tab.explainTableSql = tableBuilt.sql;
-      tab.explainSql = jsonBuilt.sql;
+      let tableSql = tableBuilt.sql;
+      let jsonSupportedByServer: boolean | undefined;
+      tab.explainTableSql = tableSql;
+      tab.explainSql = undefined;
       // Keep the two EXPLAIN statements on the same one-connection MySQL session.
       const clientSessionId = `${tabClientSessionId(tab, "explain")}:${executionId}`;
       tab.explainClientSessionId = clientSessionId;
       try {
+        let tableResult: QueryResult | undefined;
+        let tableError: unknown;
         try {
-          const tableResult = await api.executeQuery(tab.connectionId, tab.database, tableBuilt.sql, tab.schema, executionId, {
+          tableResult = await api.executeQuery(tab.connectionId, tab.database, tableSql, tab.schema, executionId, {
             clientSessionId,
             timeoutSecs: queryTimeoutSecs,
           });
-          const current = tabs.value.find((t) => t.id === id);
-          if (current?.explainExecutionId === executionId) {
+        } catch (error: unknown) {
+          const compatibility = mysqlExplainCompatibilityHint(error, tableSql);
+          jsonSupportedByServer = compatibility?.supportsJson;
+          if (compatibility?.fallbackSql && tabs.value.find((t) => t.id === id)?.explainExecutionId === executionId) {
+            tableSql = compatibility.fallbackSql;
+            tab.explainTableSql = tableSql;
+            try {
+              tableResult = await api.executeQuery(tab.connectionId, tab.database, tableSql, tab.schema, executionId, {
+                clientSessionId,
+                timeoutSecs: queryTimeoutSecs,
+              });
+            } catch (fallbackError: unknown) {
+              tableError = fallbackError;
+            }
+          } else {
+            tableError = error;
+          }
+        }
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          if (tableResult) {
             current.explainTableResult = markQueryResultRowsRaw(tableResult);
             current.explainTableError = undefined;
-          }
-        } catch (e: any) {
-          const current = tabs.value.find((t) => t.id === id);
-          if (current?.explainExecutionId === executionId) {
+          } else if (tableError !== undefined) {
             current.explainTableResult = undefined;
-            current.explainTableError = String(e?.message || e);
+            current.explainTableError = formatError(tableError);
           }
         }
 
-        // A canceled or superseded standard request must not start the JSON request.
+        // A canceled or superseded standard request must not start a fallback or JSON request.
         if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
-          return { ok: true as const, sql: jsonBuilt.sql };
+          return { ok: true as const, sql: tableSql };
+        }
+
+        // ADB MySQL advertises its accepted formats in the first error; avoid a second known-invalid request.
+        if (jsonSupportedByServer === false) {
+          const latest = tabs.value.find((t) => t.id === id);
+          if (latest?.explainExecutionId === executionId) {
+            latest.explainPlan = undefined;
+            latest.explainError = latest.explainTableResult ? undefined : latest.explainTableError;
+          }
+          return { ok: true as const, sql: tableSql };
         }
 
         try {
+          const latest = tabs.value.find((t) => t.id === id);
+          if (latest?.explainExecutionId === executionId) latest.explainSql = jsonBuilt.sql;
           const jsonResult = await api.executeQuery(tab.connectionId, tab.database, jsonBuilt.sql, tab.schema, executionId, {
             clientSessionId,
             timeoutSecs: queryTimeoutSecs,
@@ -3875,10 +3936,12 @@ export const useQueryStore = defineStore("query", () => {
             current.explainError = undefined;
           }
         } catch (e: any) {
-          const current = tabs.value.find((t) => t.id === id);
-          if (current?.explainExecutionId === executionId) {
-            current.explainPlan = undefined;
-            current.explainError = String(e?.message || e);
+          const latest = tabs.value.find((t) => t.id === id);
+          if (latest?.explainExecutionId === executionId) {
+            latest.explainPlan = undefined;
+            // Keep a usable tabular plan visible when the server explicitly rejects JSON.
+            const compatibility = mysqlExplainCompatibilityHint(e, jsonBuilt.sql);
+            latest.explainError = compatibility?.supportsJson === false && latest.explainTableResult ? undefined : formatError(e);
           }
         }
       } finally {
@@ -3890,7 +3953,7 @@ export const useQueryStore = defineStore("query", () => {
         if (current?.explainClientSessionId === clientSessionId) current.explainClientSessionId = undefined;
         void closeClientSessionId(tab.connectionId, tab.database, clientSessionId, { tabId: tab.id, explainExecutionId: executionId });
       }
-      return { ok: true as const, sql: jsonBuilt.sql };
+      return { ok: true as const, sql: tab.explainSql ?? tableSql };
     }
 
     if (databaseType === "sqlserver") {
@@ -4566,6 +4629,7 @@ export const useQueryStore = defineStore("query", () => {
     rollbackConnectionTransactions,
     rollbackDatabaseTransactions,
     updateSql,
+    updateDataGridLocalColumnFilters,
     updateEditorViewport,
     updateEditorSelection,
     updateObjectBrowserViewport,
@@ -4583,6 +4647,7 @@ export const useQueryStore = defineStore("query", () => {
     openDamengJobAdmin,
     openMqAdmin,
     openNacosAdmin,
+    clearNacosNavigationTarget,
     openTableStructure,
     linkSavedSql,
     linkExternalSqlPath,

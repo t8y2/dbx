@@ -19,6 +19,7 @@ export interface SqlParameterDescriptor {
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
+  replacement?: "string-fragment";
 }
 
 type ComplexTypeDeclarationKind = "struct" | "variant";
@@ -63,7 +64,10 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
   let cursor = 0;
   for (const occurrence of occurrences) {
     result += sql.slice(cursor, occurrence.start);
-    result += sqlParameterLiteral(values[occurrence.key] ?? { kind: "string", value: "" });
+    const input = values[occurrence.key] ?? { kind: "string", value: "" };
+    // Embedded placeholders stay inside the surrounding SQL string, so their value
+    // must be escaped as text instead of being wrapped in a second SQL literal.
+    result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : sqlParameterLiteral(input);
     cursor = occurrence.end;
   }
   result += sql.slice(cursor);
@@ -104,16 +108,21 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     const next = sql[i + 1];
 
     if (ch === "'" || ch === '"') {
-      // Exact quoted braced placeholders only (`'${name}'` / `"#{name}"`).
-      // Do not scan inside arbitrary quoted text — that path needs dialect-specific
-      // escaping contracts (see PR #3666) and must not change skipQuoted semantics.
+      // Exact quoted placeholders use SQL-literal replacement; embedded placeholders
+      // in ordinary single-quoted values use escaped text replacement below.
       const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch as "'" | '"', isSyntaxEnabled);
       if (quoted) {
         occurrences.push(quoted);
         i = quoted.end;
         continue;
       }
-      i = skipQuoted(sql, i, ch);
+      const quotedEnd = skipQuoted(sql, i, ch);
+      // Double quotes can delimit identifiers, so only ordinary single-quoted
+      // values opt into embedded interpolation.
+      if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
+        occurrences.push(...collectEmbeddedQuotedBracedPlaceholders(sql, i + 1, quotedEnd, isSyntaxEnabled));
+      }
+      i = quotedEnd;
       continue;
     }
     if (ch === "`") {
@@ -932,6 +941,48 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
   };
 }
 
+function collectEmbeddedQuotedBracedPlaceholders(sql: string, contentStart: number, quotedEnd: number, isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence[] {
+  const occurrences: ParameterOccurrence[] = [];
+  const contentEnd = sql[quotedEnd - 1] === "'" ? quotedEnd - 1 : quotedEnd;
+  let i = contentStart;
+
+  while (i < contentEnd) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    let syntax: SqlParameterSyntax | null = null;
+    if (ch === "$" && next === "{") syntax = "shell";
+    else if (ch === "#" && next === "{") syntax = "mybatis";
+    if (!syntax || !isSyntaxEnabled(syntax)) {
+      i += 1;
+      continue;
+    }
+
+    const closeBrace = sql.indexOf("}", i + 2);
+    if (closeBrace === -1 || closeBrace >= contentEnd) {
+      i += 1;
+      continue;
+    }
+    const name = sql.slice(i + 2, closeBrace).trim();
+    if (!PARAMETER_NAME_RE.test(name)) {
+      i += 1;
+      continue;
+    }
+
+    occurrences.push({
+      key: name,
+      name,
+      syntax,
+      token: sql.slice(i, closeBrace + 1),
+      start: i,
+      end: closeBrace + 1,
+      replacement: "string-fragment",
+    });
+    i = closeBrace + 1;
+  }
+
+  return occurrences;
+}
+
 /** True when `quoteStart` opens a prefixed literal such as E'...', U&'...', or MySQL _charset'...'. */
 function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
   if (quoteStart <= 0) return false;
@@ -1022,6 +1073,10 @@ function readDollarQuoteMarker(sql: string, start: number): string {
 
 function quoteSqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sqlParameterStringFragment(input: SqlParameterInput): string {
+  return input.value.replace(/'/g, "''");
 }
 
 function normalizeBooleanLiteral(value: string): string {

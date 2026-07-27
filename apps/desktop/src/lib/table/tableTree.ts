@@ -90,7 +90,7 @@ function makeTableTreeEntry({
   if (normalizedParentName) node.partitionParentName = normalizedParentName;
 
   return {
-    key: partitionObjectLookupKey(objectType, schema, name),
+    key: exactObjectIdentityKey(objectType, schema, name),
     objectType,
     schema,
     parentSchema: normalizedParentSchema,
@@ -103,7 +103,7 @@ function exactObjectIdentityKey(objectType: string, schema: string | undefined, 
   return `${objectType}\0${schema || ""}\0${name}\0${signature}`;
 }
 
-function partitionObjectLookupKey(objectType: string, schema: string | undefined, name: string) {
+function foldedPartitionObjectLookupKey(objectType: string, schema: string | undefined, name: string) {
   return `${objectType}\0${(schema || "").toLowerCase()}\0${name.toLowerCase()}`;
 }
 
@@ -278,8 +278,15 @@ export function filterSimpleSidebarSupplementalObjects(objects: readonly ObjectI
 function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, database: string): TreeNode[] {
   const orderedEntries = sortDatabaseObjectsByName(entries, (entry) => entry.node.label);
   const byKey = new Map<string, TableTreeEntry>();
+  const uniqueByFoldedKey = new Map<string, TableTreeEntry | null>();
   for (const entry of orderedEntries) {
     byKey.set(entry.key, entry);
+    const foldedKey = foldedPartitionObjectLookupKey(entry.objectType, entry.schema, entry.node.label);
+    if (!uniqueByFoldedKey.has(foldedKey)) {
+      uniqueByFoldedKey.set(foldedKey, entry);
+    } else if (uniqueByFoldedKey.get(foldedKey)?.key !== entry.key) {
+      uniqueByFoldedKey.set(foldedKey, null);
+    }
   }
 
   const childrenByParent = new Map<string, TableTreeEntry[]>();
@@ -287,8 +294,8 @@ function buildPartitionTree(entries: TableTreeEntry[], connectionId: string, dat
   for (const entry of orderedEntries) {
     if (entry.objectType !== "TABLE" || !entry.parentName) continue;
     const parentSchema = entry.parentSchema || entry.schema;
-    const parentKey = partitionObjectLookupKey("TABLE", parentSchema, entry.parentName);
-    const parent = byKey.get(parentKey);
+    const parentKey = exactObjectIdentityKey("TABLE", parentSchema, entry.parentName);
+    const parent = byKey.get(parentKey) ?? uniqueByFoldedKey.get(foldedPartitionObjectLookupKey("TABLE", parentSchema, entry.parentName));
     if (!parent || parent.key === entry.key) continue;
     const children = childrenByParent.get(parent.key) ?? [];
     children.push(entry);
@@ -349,16 +356,32 @@ export type TableTreeLoadMoreParent = {
 };
 
 function findTableTreeNode(nodes: readonly TreeNode[], parent: TableTreeLoadMoreParent): TreeNode | undefined {
+  const candidates: TreeNode[] = [];
   for (const node of nodes) {
-    const sameSchema = !parent.schema || (node.schema || "").toLowerCase() === parent.schema.toLowerCase();
-    if (node.type === "table" && sameSchema && node.label.toLowerCase() === parent.name.toLowerCase()) return node;
-
-    const child = findTableTreeNode(node.children ?? [], parent);
-    if (child) return child;
-    const hiddenChild = findTableTreeNode(node.hiddenChildren?.filter((item) => !(node.children ?? []).includes(item)) ?? [], parent);
-    if (hiddenChild) return hiddenChild;
+    if (node.type === "table") candidates.push(node);
+    candidates.push(...collectTableTreeNodes(node.children ?? []));
+    candidates.push(...collectTableTreeNodes(node.hiddenChildren?.filter((item) => !(node.children ?? []).includes(item)) ?? []));
   }
-  return undefined;
+
+  const exactMatches = candidates.filter((node) => (!parent.schema || (node.schema || "") === parent.schema) && node.label === parent.name);
+  if (exactMatches.length === 1) return exactMatches[0];
+  if (exactMatches.length > 1) return undefined;
+
+  const foldedMatches = candidates.filter((node) => {
+    const sameSchema = !parent.schema || (node.schema || "").toLowerCase() === parent.schema.toLowerCase();
+    return sameSchema && node.label.toLowerCase() === parent.name.toLowerCase();
+  });
+  return foldedMatches.length === 1 ? foldedMatches[0] : undefined;
+}
+
+function collectTableTreeNodes(nodes: readonly TreeNode[]): TreeNode[] {
+  const tables: TreeNode[] = [];
+  for (const node of nodes) {
+    if (node.type === "table") tables.push(node);
+    tables.push(...collectTableTreeNodes(node.children ?? []));
+    tables.push(...collectTableTreeNodes(node.hiddenChildren?.filter((item) => !(node.children ?? []).includes(item)) ?? []));
+  }
+  return tables;
 }
 
 export function appendTableTreeLoadMoreNode(children: TreeNode[], loadMoreNode: TreeNode, parent?: TableTreeLoadMoreParent): TreeNode[] {
@@ -388,7 +411,7 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
   const nodesByKey = new Map<string, TreeNode>();
   const rootKeys = new Set<string>();
 
-  const nodeKey = (node: TreeNode) => partitionObjectLookupKey("TABLE", node.schema, node.label);
+  const nodeKey = (node: TreeNode) => exactObjectIdentityKey("TABLE", node.schema, node.label);
   const collect = (nodes: readonly TreeNode[]) => {
     for (const node of nodes) {
       if (node.type === "table") {
@@ -402,6 +425,32 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
   collect(roots);
   for (const node of roots) {
     if (node.type === "table") rootKeys.add(nodeKey(node));
+  }
+
+  const flattenIncomingTables = (node: TreeNode): TreeNode[] => {
+    if (node.type !== "table") return [node];
+    const descendants = partitionGroupChildren(node)
+      .flatMap((group) => group.children ?? [])
+      .flatMap(flattenIncomingTables);
+    node.children = (node.children ?? []).filter((child) => child.type !== "group-partitions");
+    node.hiddenChildren = (node.hiddenChildren ?? []).filter((child) => child.type !== "group-partitions");
+    return [node, ...descendants];
+  };
+  const incomingNodes = pageChildren.flatMap(flattenIncomingTables);
+  const allNodesByKey = new Map(nodesByKey);
+  for (const node of incomingNodes) {
+    if (node.type === "table" && !allNodesByKey.has(nodeKey(node))) {
+      allNodesByKey.set(nodeKey(node), node);
+    }
+  }
+  const uniqueByFoldedKey = new Map<string, TreeNode | null>();
+  for (const node of allNodesByKey.values()) {
+    const foldedKey = foldedPartitionObjectLookupKey("TABLE", node.schema, node.label);
+    if (!uniqueByFoldedKey.has(foldedKey)) {
+      uniqueByFoldedKey.set(foldedKey, node);
+    } else if (uniqueByFoldedKey.get(foldedKey) !== node) {
+      uniqueByFoldedKey.set(foldedKey, null);
+    }
   }
 
   const ensurePartitionGroup = (parent: TreeNode): TreeNode => {
@@ -444,8 +493,11 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
 
     const parentName = node.partitionParentName;
     const parentSchema = node.partitionParentSchema || node.schema;
-    const parentKey = parentName ? partitionObjectLookupKey("TABLE", parentSchema, parentName) : "";
-    const parent = parentKey ? nodesByKey.get(parentKey) : undefined;
+    let parent: TreeNode | null | undefined;
+    if (parentName) {
+      const parentKey = exactObjectIdentityKey("TABLE", parentSchema, parentName);
+      parent = allNodesByKey.get(parentKey) ?? uniqueByFoldedKey.get(foldedPartitionObjectLookupKey("TABLE", parentSchema, parentName));
+    }
     nodesByKey.set(key, node);
     if (parent && parent !== node) {
       addToParent(parent, node);
@@ -458,17 +510,7 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
     }
   };
 
-  const flattenIncomingTables = (node: TreeNode): TreeNode[] => {
-    if (node.type !== "table") return [node];
-    const descendants = partitionGroupChildren(node)
-      .flatMap((group) => group.children ?? [])
-      .flatMap(flattenIncomingTables);
-    node.children = (node.children ?? []).filter((child) => child.type !== "group-partitions");
-    node.hiddenChildren = (node.hiddenChildren ?? []).filter((child) => child.type !== "group-partitions");
-    return [node, ...descendants];
-  };
-
-  for (const node of pageChildren.flatMap(flattenIncomingTables)) {
+  for (const node of incomingNodes) {
     addNode(node);
   }
 

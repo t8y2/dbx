@@ -37,6 +37,23 @@ describe("case-sensitive database objects", () => {
     expect(viewGroup?.children?.map((node) => node.label)).toEqual(["dbx_issue4529_case_V1", "dbx_issue4529_case_v1"]);
     expect(new Set(viewGroup?.children?.map((node) => node.id) ?? []).size).toBe(2);
   });
+
+  it("keeps table nodes whose names differ only by case across pages", () => {
+    const firstPage = buildTableTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      tables: [{ name: "dbx_issue4529_case_T1", table_type: "BASE TABLE", comment: null }],
+    });
+    const secondPage = buildTableTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      tables: [{ name: "dbx_issue4529_case_t1", table_type: "BASE TABLE", comment: null }],
+    });
+
+    const merged = mergeTableTreePageChildren(firstPage, secondPage, context.connectionId, context.database);
+
+    expect(merged.map((node) => node.label)).toEqual(["dbx_issue4529_case_T1", "dbx_issue4529_case_t1"]);
+  });
 });
 
 describe("PostgreSQL overloaded routines", () => {
@@ -107,6 +124,47 @@ describe("PostgreSQL table hierarchy", () => {
 
     expect(nodes.map((node) => node.label)).toEqual(["Orders"]);
     expect(tablePartitionGroups(nodes[0])[0].children?.map((node) => node.label)).toEqual(["orders_2026"]);
+  });
+
+  it("prefers the exact partition parent when folded names are ambiguous", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "public",
+      tables: [
+        { name: "Orders", table_type: "PARTITIONED TABLE", comment: null },
+        { name: "orders", table_type: "PARTITIONED TABLE", comment: null },
+        { name: "Orders_2026", table_type: "TABLE", comment: null, parent_schema: "public", parent_name: "Orders" },
+      ],
+    });
+
+    const upperParent = nodes.find((node) => node.label === "Orders");
+    const lowerParent = nodes.find((node) => node.label === "orders");
+
+    expect(tablePartitionGroups(upperParent!)[0].children?.map((node) => node.label)).toEqual(["Orders_2026"]);
+    expect(tablePartitionGroups(lowerParent!)).toHaveLength(0);
+  });
+
+  it("prefers the exact partition parent when merging later pages", () => {
+    const firstPage = buildTableTreeNodes({
+      ...context,
+      schema: "public",
+      tables: [
+        { name: "Orders", table_type: "PARTITIONED TABLE", comment: null },
+        { name: "orders", table_type: "PARTITIONED TABLE", comment: null },
+      ],
+    });
+    const secondPage = buildTableTreeNodes({
+      ...context,
+      schema: "public",
+      tables: [{ name: "Orders_2026", table_type: "TABLE", comment: null, parent_schema: "public", parent_name: "Orders" }],
+    });
+
+    const merged = mergeTableTreePageChildren(firstPage, secondPage, context.connectionId, context.database);
+    const upperParent = merged.find((node) => node.label === "Orders");
+    const lowerParent = merged.find((node) => node.label === "orders");
+
+    expect(tablePartitionGroups(upperParent!)[0].children?.map((node) => node.label)).toEqual(["Orders_2026"]);
+    expect(tablePartitionGroups(lowerParent!)).toHaveLength(0);
   });
 
   it("keeps schema pagination visible at the table-group root when a page ends inside nested partitions", () => {

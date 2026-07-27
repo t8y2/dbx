@@ -2423,7 +2423,7 @@ fn starrocks_materialized_views_sql(database: &str) -> String {
 ///
 /// Made `pub(super)` so the dispatch site in `schema::mysql_object_source` can
 /// rely on it without rewriting the escape convention.
-pub(super) fn mysql_materialized_view_definition_sql(database: &str, name: &str) -> String {
+pub(crate) fn mysql_materialized_view_definition_sql(database: &str, name: &str) -> String {
     format!(
         "SELECT MATERIALIZED_VIEW_DEFINITION \
          FROM information_schema.materialized_views \
@@ -2465,7 +2465,7 @@ fn merge_starrocks_materialized_views(
 
     // Snapshot the names already returned by SHOW FULL TABLES so the second pass can
     // append MVs that are absent from SHOW FULL TABLES without duplicating rows.
-    let known_names: HashSet<&str> = tables.iter().map(|table| table.name.as_str()).collect();
+    let known_names: HashSet<String> = tables.iter().map(|table| table.name.clone()).collect();
 
     // Step 1 — reclassify: rows whose name appears in `information_schema.materialized_views`
     // are MVs even when SHOW FULL TABLES labeled them as VIEW (sync MVs) or BASE TABLE
@@ -2480,8 +2480,11 @@ fn merge_starrocks_materialized_views(
     // Step 2 — union: on StarRocks versions predating starrocks/starrocks#73396 (merged
     // 2026-05-19), sync MVs "are not registered as separate Tables" so SHOW FULL TABLES
     // omits them entirely. Append those rows from the system view so they appear in the
-    // sidebar and the DDL source path has something to resolve.
-    for name in &materialized_view_names {
+    // sidebar and the DDL source path has something to resolve. Sort names so that
+    // the resulting table order is deterministic across runs.
+    let mut materialized_view_names_sorted: Vec<&String> = materialized_view_names.iter().collect();
+    materialized_view_names_sorted.sort();
+    for name in materialized_view_names_sorted {
         if !known_names.contains(name.as_str()) {
             tables.push(TableInfo {
                 name: name.clone(),
@@ -4527,8 +4530,8 @@ mod tests {
             tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
             vec![
                 ("orders", "BASE TABLE"),
-                ("orders_mv", "MATERIALIZED_VIEW"),
                 ("daily_orders_mv", "MATERIALIZED_VIEW"),
+                ("orders_mv", "MATERIALIZED_VIEW"),
             ]
         );
     }

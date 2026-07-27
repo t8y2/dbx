@@ -2848,9 +2848,9 @@ mod tests {
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error,
-        kingbase_object_statistics_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
-        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_metadata_catalog,
+        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
@@ -6224,8 +6224,6 @@ async fn mysql_object_source(
     name: &str,
     kind: &db::ObjectSourceKind,
 ) -> Result<String, String> {
-    use mysql_async::prelude::*;
-
     let primary_sql = mysql_object_source_sql(database, name, kind);
     let primary_column_index = mysql_object_source_ddl_column_index(kind);
     let mut conn = db::mysql::get_conn_with_timeout(pool, db::connection_timeout()).await?;

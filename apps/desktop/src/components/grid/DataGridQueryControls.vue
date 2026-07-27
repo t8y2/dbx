@@ -24,6 +24,7 @@ const props = defineProps<{
   orderByInput: string;
   columns: readonly string[];
   conditionColumns: readonly DataGridConditionColumnOption[];
+  identifierQuote?: string;
   historyScope: DataGridConditionHistoryScope;
   canUseWhereSearch: boolean;
   compact: boolean;
@@ -179,6 +180,7 @@ onUnmounted(onResizeEnd);
         :model-value="whereInput"
         kind="where"
         :columns="conditionColumns"
+        :identifier-quote="identifierQuote"
         :history-scope="historyScope"
         placeholder="WHERE"
         :history-empty-text="t('grid.conditionHistoryEmpty')"
@@ -204,6 +206,7 @@ onUnmounted(onResizeEnd);
         :model-value="orderByInput"
         kind="orderBy"
         :columns="conditionColumns"
+        :identifier-quote="identifierQuote"
         :history-scope="historyScope"
         placeholder="ORDER BY"
         :history-empty-text="t('grid.conditionHistoryEmpty')"

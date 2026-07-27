@@ -77,6 +77,17 @@ ${StrLoc}
   ${EndIf}
 !macroend
 
+!macro ShouldAbortWebView2OfflineInstall INSTALL_RESULT RUNTIME_VERSION MINIMUM_COMPARISON RESULT
+  StrCpy ${RESULT} 0
+  ${If} ${INSTALL_RESULT} <> 0
+    ${If} ${RUNTIME_VERSION} == ""
+      StrCpy ${RESULT} 1
+    ${ElseIf} ${MINIMUM_COMPARISON} = 1
+      StrCpy ${RESULT} 1
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 Var PassiveMode
 Var UpdateMode
 Var NoShortcutMode
@@ -562,6 +573,8 @@ Section WebView2
     DetailPrint "$(installingWebview2)"
     ExecWait '"$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" ${WEBVIEW2INSTALLERARGS} /install' $1
     Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
+    StrCpy $4 ""
+    StrCpy $R0 0
     ${If} $1 = 0
       DetailPrint "$(webview2InstallSuccess)"
     ${Else}
@@ -572,14 +585,12 @@ Section WebView2
       ${If} $4 != ""
         !if "${MINIMUMWEBVIEW2VERSION}" != ""
           ${VersionCompare} "${MINIMUMWEBVIEW2VERSION}" "$4" $R0
-          ${If} $R0 = 1
-            StrCpy $4 ""
-          ${EndIf}
         !endif
       ${EndIf}
-      ${If} $4 == ""
-        Abort "$(webview2AbortError)"
-      ${EndIf}
+    ${EndIf}
+    !insertmacro ShouldAbortWebView2OfflineInstall $1 $4 $R0 $R1
+    ${If} $R1 = 1
+      Abort "$(webview2AbortError)"
     ${EndIf}
   !else
   ; Check if Webview2 is already installed and skip this section

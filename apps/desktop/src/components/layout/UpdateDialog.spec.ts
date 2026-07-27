@@ -147,6 +147,15 @@ describe("UpdateDialog active task guard", () => {
     expect(buttonWithText("Open Release")).toBeDefined();
   });
 
+  it("prevents Windows 7 portable builds from installing the regular x64 portable update", async () => {
+    await mountDialog(0, { portableMode: true, manualUpdateOnly: true });
+
+    expect(document.body.textContent).toContain("WebView2 109 offline installer");
+    expect(document.body.textContent).not.toContain("signed portable ZIP");
+    expect(downloadButton()).toBeUndefined();
+    expect(buttonWithText("Open Release")).toBeDefined();
+  });
+
   it("retains the downloaded update and enables installation only after tasks finish", async () => {
     await mountDialog(1, { updateDownloaded: true, downloadProgress: 100 });
 

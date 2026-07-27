@@ -209,12 +209,12 @@ pub async fn check_for_updates(
     let current_version = env!("CARGO_PKG_VERSION");
     let mut info = dbx_core::update::build_update_info(release, current_version);
     info.portable_mode = crate::data_dir::is_portable_mode();
-    info.manual_update_only = requires_manual_installer_update(IS_WINDOWS_7_TARGET, info.portable_mode);
+    info.manual_update_only = requires_manual_update(IS_WINDOWS_7_TARGET);
     Ok(info)
 }
 
-fn requires_manual_installer_update(is_windows_7_target: bool, portable_mode: bool) -> bool {
-    is_windows_7_target && !portable_mode
+fn requires_manual_update(is_windows_7_target: bool) -> bool {
+    is_windows_7_target
 }
 
 #[tauri::command]
@@ -236,7 +236,7 @@ pub async fn download_update(
     latest_version: Option<String>,
 ) -> Result<(), String> {
     let portable_mode = crate::data_dir::is_portable_mode();
-    if requires_manual_installer_update(IS_WINDOWS_7_TARGET, portable_mode) {
+    if requires_manual_update(IS_WINDOWS_7_TARGET) {
         return Err("Windows 7 builds must be updated with the dedicated Windows 7 offline installer.".to_string());
     }
     let portable_version = if portable_mode {
@@ -456,15 +456,14 @@ async fn update_url_is_available(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        requires_manual_installer_update, tag_version, UpdateDownloadSource, CNB_RELEASE_DOWNLOAD_PREFIX,
+        requires_manual_update, tag_version, UpdateDownloadSource, CNB_RELEASE_DOWNLOAD_PREFIX,
         GITHUB_RELEASE_DOWNLOAD_PREFIX, OFFICIAL_UPDATE_ENDPOINTS, R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
     };
 
     #[test]
-    fn windows_7_installer_builds_require_manual_updates() {
-        assert!(requires_manual_installer_update(true, false));
-        assert!(!requires_manual_installer_update(false, false));
-        assert!(!requires_manual_installer_update(true, true));
+    fn all_windows_7_builds_require_manual_updates() {
+        assert!(requires_manual_update(true));
+        assert!(!requires_manual_update(false));
     }
 
     #[test]

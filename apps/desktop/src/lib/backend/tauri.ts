@@ -2757,4 +2757,5 @@ export async function exportQueryResultMarkdown(filePath: string, columns: strin
 }
 
 export * from "@/lib/backend/mq-tauri";
+export * from "@/lib/backend/mqtt-tauri";
 export * from "@/lib/backend/nacos-tauri";

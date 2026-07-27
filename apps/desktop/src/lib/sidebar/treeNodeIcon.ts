@@ -29,6 +29,7 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: FolderOpen, colorClass: "text-emerald-500" };
     case "nacos-namespace":
     case "etcd-root":
+    case "mqtt-topic":
       return { icon: FolderOpen, colorClass: "text-sky-500" };
     case "zookeeper-root":
       return { icon: Database, colorClass: "text-blue-500" };

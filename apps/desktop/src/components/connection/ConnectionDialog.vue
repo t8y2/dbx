@@ -17,6 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, IdentifierCase, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
+import type { MqttConnectionConfig } from "@/types/mqtt";
 import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
@@ -605,6 +606,22 @@ const nacosUsername = ref("nacos");
 const nacosPassword = ref("");
 const nacosTlsSkipVerify = ref(false);
 const nacosPageSize = ref(20);
+
+// --- MQTT-specific form fields ---
+const mqttHost = ref("127.0.0.1");
+const mqttPort = ref(1883);
+const mqttClientId = ref("");
+const mqttProtocolVersion = ref<"v3" | "v4" | "v5">("v5");
+const mqttTransportMode = ref<"tcp" | "websocket">("tcp");
+const mqttWsPath = ref("/mqtt");
+const mqttAuthKind = ref<"none" | "password">("none");
+const mqttUsername = ref("");
+const mqttPassword = ref("");
+const mqttTls = ref(false);
+const mqttTlsSkipVerify = ref(false);
+const mqttKeepAliveSecs = ref(60);
+const mqttConnectTimeoutSecs = ref(30);
+
 const nacosPrimaryAddressLabel = computed(() => {
   if (nacosImplementation.value === "rnacos") return t("connection.nacosPrimaryAddressRNacos");
   if (nacosVersionMode.value === "v2") return t("connection.nacosPrimaryAddressV2");
@@ -892,6 +909,7 @@ const driverProfiles: Record<
   rocketmq: { type: "mq", port: 9876, user: "", label: "Apache RocketMQ", icon: "rocketmq", host: "127.0.0.1" },
   rabbitmq: { type: "mq", port: 5672, user: "", label: "RabbitMQ", icon: "rabbitmq", host: "127.0.0.1" },
   nacos: { type: "nacos", port: 8848, user: "nacos", label: "Nacos", icon: "nacos", host: "127.0.0.1" },
+  mqtt: { type: "mqtt", port: 1883, user: "", label: "MQTT", icon: "mqtt", host: "127.0.0.1" },
   iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
   influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
   custom_mysql: {
@@ -1103,6 +1121,55 @@ function hydrateNacosFields(value: unknown) {
     return;
   }
   resetNacosFields(value as Partial<NacosAdminConfig>);
+}
+
+function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
+  mqttHost.value = config?.host?.trim() || "127.0.0.1";
+  mqttPort.value = config?.port || 1883;
+  mqttClientId.value = config?.clientId || "";
+  mqttProtocolVersion.value = config?.protocolVersion || "v5";
+  mqttTransportMode.value = config?.transport || "tcp";
+  mqttWsPath.value = config?.wsPath || "/mqtt";
+  mqttTls.value = config?.tls || false;
+  mqttTlsSkipVerify.value = config?.tlsSkipVerify || false;
+  mqttKeepAliveSecs.value = Math.max(1, config?.keepAliveSecs || 60);
+  mqttConnectTimeoutSecs.value = Math.max(1, config?.connectTimeoutSecs || 30);
+  const auth = config?.auth;
+  if (auth && auth.kind === "password") {
+    mqttAuthKind.value = "password";
+    mqttUsername.value = auth.username || "";
+    mqttPassword.value = auth.password || "";
+  } else {
+    mqttAuthKind.value = "none";
+    mqttUsername.value = "";
+    mqttPassword.value = "";
+  }
+}
+
+function hydrateMqttFields(value: unknown) {
+  if (!value || typeof value !== "object") {
+    resetMqttFields();
+    return;
+  }
+  resetMqttFields(value as Partial<MqttConnectionConfig>);
+}
+
+function buildMqttExternalConfig(): MqttConnectionConfig {
+  const auth: MqttConnectionConfig["auth"] = mqttAuthKind.value === "password" ? { kind: "password", username: mqttUsername.value, password: mqttPassword.value } : { kind: "none" };
+
+  return {
+    host: mqttHost.value.trim(),
+    port: mqttPort.value,
+    clientId: mqttClientId.value.trim() || `dbx-${Math.random().toString(36).slice(2, 10)}`,
+    protocolVersion: mqttProtocolVersion.value,
+    transport: mqttTransportMode.value,
+    tls: mqttTls.value,
+    tlsSkipVerify: mqttTlsSkipVerify.value,
+    auth,
+    keepAliveSecs: Math.max(1, mqttKeepAliveSecs.value),
+    connectTimeoutSecs: Math.max(1, mqttConnectTimeoutSecs.value),
+    wsPath: mqttTransportMode.value === "websocket" ? mqttWsPath.value || "/mqtt" : undefined,
+  };
 }
 
 const influxDbVersion = ref<InfluxDbVersion>("1");
@@ -1845,6 +1912,12 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
+    if (profile.type === "mqtt") {
+      resetMqttFields();
+      form.value.database = undefined;
+      form.value.connection_string = undefined;
+      form.value.url_params = "";
+    }
     if (profile.type === "influxdb") {
       resetInfluxDbFields();
       form.value.database = undefined;
@@ -1945,6 +2018,11 @@ watch(
         hydrateNacosFields(config.external_config);
       } else {
         resetNacosFields();
+      }
+      if (config.db_type === "mqtt") {
+        hydrateMqttFields(config.external_config);
+      } else {
+        resetMqttFields();
       }
       if (config.db_type === "influxdb") {
         hydrateInfluxDbFields(config.external_config);
@@ -2186,6 +2264,7 @@ const iconTypeMap: Record<string, string> = {
   rocketmq: "rocketmq",
   rabbitmq: "rabbitmq",
   nacos: "nacos",
+  mqtt: "mqtt",
   dm: "dm",
   h2: "h2",
   snowflake: "snowflake",
@@ -2282,6 +2361,7 @@ const dbOptions: DbOption[] = [
   { value: "kafka", label: "Apache Kafka" },
   { value: "rocketmq", label: "Apache RocketMQ" },
   { value: "rabbitmq", label: "RabbitMQ" },
+  { value: "mqtt", label: "MQTT" },
   { value: "nacos", label: "Nacos" },
   { value: "influxdb", label: "InfluxDB" },
   { value: "iris", label: "IRIS" },
@@ -2335,7 +2415,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "mq",
     titleKey: "connection.databaseCategoryMq",
-    optionValues: ["mq", "kafka", "rocketmq", "rabbitmq"],
+    optionValues: ["mq", "kafka", "rocketmq", "rabbitmq", "mqtt"],
   },
   {
     key: "registry_config",
@@ -2736,6 +2816,7 @@ const hasRequiredConnectionTarget = computed(() => {
     return !!mqAdminUrl.value.trim();
   }
   if (form.value.db_type === "zookeeper") return !!(form.value.host || form.value.connection_string || connectionUrlInput.value.trim());
+  if (form.value.db_type === "mqtt") return !!mqttHost.value.trim() && mqttPort.value > 0;
   if (form.value.db_type === "nacos") return !!nacosServerAddr.value.trim();
   if (isCloudflareD1Connection(form.value)) return hasCloudflareD1Credentials(form.value);
   if (isH2FileMode.value) return !!(form.value.host.trim() || h2FilePathFromJdbcUrl(form.value.connection_string));
@@ -3122,6 +3203,19 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.username = nacosAuthKind.value === "usernamePassword" ? nacosUsername.value.trim() : "";
     config.password = nacosAuthKind.value === "usernamePassword" ? nacosPassword.value : "";
     config.database = nacosConfig.namespace || undefined;
+    config.connection_string = undefined;
+    config.url_params = "";
+  } else if (config.db_type === "mqtt") {
+    const mqttConfig = buildMqttExternalConfig();
+    config.external_config = mqttConfig;
+    config.driver_profile = "mqtt";
+    config.driver_label = "MQTT";
+    config.host = mqttConfig.host;
+    config.port = mqttConfig.port;
+    config.ssl = mqttConfig.tls;
+    config.username = "";
+    config.password = "";
+    config.database = undefined;
     config.connection_string = undefined;
     config.url_params = "";
   } else if (config.db_type === "influxdb") {
@@ -5645,6 +5739,77 @@ function openExternalUrl(url: string) {
                       <Input v-model="form.url_params" class="col-span-3" placeholder="replicaSet=rs0&authSource=admin" />
                     </div>
                   </template>
+                </template>
+
+                <!-- MQTT: broker address, client ID, protocol version, auth, TLS -->
+                <template v-else-if="form.db_type === 'mqtt'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttBrokerAddress") }}</Label>
+                    <Input v-model="mqttHost" class="col-span-3" :placeholder="t('connection.mqttBrokerAddressPlaceholder')" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttBrokerPort") }}</Label>
+                    <Input v-model.number="mqttPort" type="number" class="col-span-3 w-24" min="1" max="65535" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttClientId") }}</Label>
+                    <Input v-model="mqttClientId" class="col-span-3" :placeholder="t('connection.mqttClientIdPlaceholder')" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttProtocolVersion") }}</Label>
+                    <select v-model="mqttProtocolVersion" class="col-span-3 flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+                      <option value="v5">MQTT 5.0</option>
+                      <option value="v4">MQTT 3.1.1</option>
+                      <option value="v3">MQTT 3.1</option>
+                    </select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttTransport") }}</Label>
+                    <div class="col-span-3 flex gap-2">
+                      <Button size="sm" :variant="mqttTransportMode === 'tcp' ? 'default' : 'outline'" @click="mqttTransportMode = 'tcp'">{{ t("connection.mqttTransportTcp") }}</Button>
+                      <Button size="sm" :variant="mqttTransportMode === 'websocket' ? 'default' : 'outline'" @click="mqttTransportMode = 'websocket'">{{ t("connection.mqttTransportWebSocket") }}</Button>
+                    </div>
+                  </div>
+                  <div v-if="mqttTransportMode === 'websocket'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttWsPath") }}</Label>
+                    <Input v-model="mqttWsPath" class="col-span-3" :placeholder="t('connection.mqttWsPathPlaceholder')" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqAuth") }}</Label>
+                    <div class="col-span-3 flex gap-2">
+                      <Button size="sm" :variant="mqttAuthKind === 'none' ? 'default' : 'outline'" @click="mqttAuthKind = 'none'">{{ t("connection.mqAuthNone") }}</Button>
+                      <Button size="sm" :variant="mqttAuthKind === 'password' ? 'default' : 'outline'" @click="mqttAuthKind = 'password'">{{ t("connection.mqAuthBasic") }}</Button>
+                    </div>
+                  </div>
+                  <template v-if="mqttAuthKind === 'password'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttUsername") }}</Label>
+                      <Input v-model="mqttUsername" class="col-span-3" :placeholder="t('connection.mqttUsernamePlaceholder')" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.mqttPassword") }}</Label>
+                      <Input v-model="mqttPassword" type="password" class="col-span-3" :placeholder="t('connection.mqttPasswordPlaceholder')" />
+                    </div>
+                  </template>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttTls") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Switch :checked="mqttTls" @update:checked="mqttTls = $event" />
+                      <Label class="text-sm" :class="mqttTls ? '' : 'text-muted-foreground'">TLS</Label>
+                      <template v-if="mqttTls">
+                        <Switch :checked="mqttTlsSkipVerify" @update:checked="mqttTlsSkipVerify = $event" class="ml-4" />
+                        <Label class="text-sm" :class="mqttTlsSkipVerify ? '' : 'text-muted-foreground'">{{ t("connection.mqttTlsSkipVerify") }}</Label>
+                      </template>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttKeepAlive") }}</Label>
+                    <Input v-model.number="mqttKeepAliveSecs" type="number" class="col-span-3 w-32" min="1" max="65535" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.mqttConnectTimeout") }}</Label>
+                    <Input v-model.number="mqttConnectTimeoutSecs" type="number" class="col-span-3 w-32" min="1" max="300" />
+                  </div>
                 </template>
 
                 <!-- InfluxDB: v1 username/password or v2 token/org/bucket -->

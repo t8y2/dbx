@@ -1772,6 +1772,13 @@ pub fn run() {
             commands::mq_cmd::mq_raw_request,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_send_message,
+            commands::mqtt_cmd::mqtt_get_broker_info,
+            commands::mqtt_cmd::mqtt_subscribe,
+            commands::mqtt_cmd::mqtt_unsubscribe,
+            commands::mqtt_cmd::mqtt_publish,
+            commands::mqtt_cmd::mqtt_list_topics,
+            commands::mqtt_cmd::mqtt_get_topic_tree,
+            commands::mqtt_cmd::mqtt_get_messages,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,

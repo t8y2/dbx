@@ -64,6 +64,7 @@ export type DatabaseType =
   | "influxdb"
   | "jdbc"
   | "mq"
+  | "mqtt"
   | "nacos";
 
 export interface SqlSnippet {
@@ -729,7 +730,8 @@ export type TreeNodeType =
   | "mongo-collection"
   | "vector-database"
   | "vector-collection"
-  | "elasticsearch-index";
+  | "elasticsearch-index"
+  | "mqtt-topic";
 
 export interface ConnectionGroup {
   id: string;
@@ -898,9 +900,10 @@ export interface QueryTab {
   explainClientSessionId?: string;
   /** Invalidates tab-scoped completion metadata after session context changes. */
   completionContextVersion?: number;
-  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "mqtt" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
   mqTenant?: string;
   mqInitialTab?: "topics";
+  mqttInitialTopic?: string;
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   nacosTargetDataId?: string;

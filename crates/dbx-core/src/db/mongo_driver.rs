@@ -637,10 +637,11 @@ pub async fn find_documents(
         _ => doc! {},
     };
 
-    let total = if filter_doc.is_empty() {
-        col.estimated_document_count().await.map_err(|e| e.to_string())?
-    } else {
+    let total_is_exact = !filter_doc.is_empty();
+    let total = if total_is_exact {
         col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    } else {
+        col.estimated_document_count().await.map_err(|e| e.to_string())?
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -675,7 +676,7 @@ pub async fn find_documents(
         raw_documents: None,
         extended_documents: Some(extended_documents),
         total,
-        total_is_exact: true,
+        total_is_exact,
     })
 }
 
@@ -781,10 +782,11 @@ pub async fn find_documents_extended_json(
         _ => doc! {},
     };
 
-    let total = if filter_doc.is_empty() {
-        col.estimated_document_count().await.map_err(|e| e.to_string())?
-    } else {
+    let total_is_exact = !filter_doc.is_empty();
+    let total = if total_is_exact {
         col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    } else {
+        col.estimated_document_count().await.map_err(|e| e.to_string())?
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -820,7 +822,7 @@ pub async fn find_documents_extended_json(
         documents,
         raw_documents: None,
         total,
-        total_is_exact: true,
+        total_is_exact,
     })
 }
 

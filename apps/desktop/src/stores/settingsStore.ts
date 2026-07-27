@@ -5,6 +5,7 @@ import { generateId, getConfigKey, aiConfigToItem } from "@/lib/ai/aiConfigList"
 import { normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyExtractorId, normalizeDataGridExtractorOptions, type DataGridCopyExtractorId, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
@@ -311,6 +312,8 @@ const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
+const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
+export type ResultRunDisplayMode = (typeof RESULT_RUN_DISPLAY_MODES)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
 export const TABLE_FONT_SIZE_MAX = 16;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
@@ -394,6 +397,7 @@ export interface EditorSettings {
   showCurrentStatementFrame: boolean;
   showInsertValueHints: boolean;
   autoAliasTables: boolean;
+  insertSpaceAfterCompletion: boolean;
   wordWrap: boolean;
   vimModeEnabled: boolean;
   autoCloseBrackets: boolean;
@@ -417,6 +421,9 @@ export interface EditorSettings {
   dataGridQuickEntry: boolean;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
+  dataGridCopyExtractor: DataGridCopyExtractorId;
+  dataGridExtractorOptions: DataGridExtractorOptions;
+  resultRunDisplayMode: ResultRunDisplayMode;
   dataGridAutoTransposeSingleRow: boolean;
   dataGridMultiRowTranspose: boolean;
   dataGridHideNullColumns: boolean;
@@ -557,6 +564,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showCurrentStatementFrame: true,
   showInsertValueHints: true,
   autoAliasTables: true,
+  insertSpaceAfterCompletion: true,
   wordWrap: false,
   vimModeEnabled: false,
   autoCloseBrackets: true,
@@ -580,6 +588,9 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridQuickEntry: false,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
+  dataGridCopyExtractor: "tsv",
+  dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
+  resultRunDisplayMode: "tabs",
   dataGridAutoTransposeSingleRow: false,
   dataGridMultiRowTranspose: false,
   dataGridHideNullColumns: false,
@@ -670,6 +681,10 @@ function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
 
 function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
   return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
+}
+
+function normalizeResultRunDisplayMode(value: unknown): ResultRunDisplayMode {
+  return RESULT_RUN_DISPLAY_MODES.includes(value as ResultRunDisplayMode) ? (value as ResultRunDisplayMode) : DEFAULT_EDITOR_SETTINGS.resultRunDisplayMode;
 }
 
 function normalizeTableFontSize(value: unknown): number {
@@ -835,6 +850,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
+    insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
@@ -858,6 +874,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
+    dataGridCopyExtractor: normalizeDataGridCopyExtractorId(settings.dataGridCopyExtractor),
+    dataGridExtractorOptions: normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions),
+    resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
     dataGridMultiRowTranspose: settings.dataGridMultiRowTranspose === true,
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
@@ -1202,6 +1221,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showCurrentStatementFrame !== undefined) editorSettings.value.showCurrentStatementFrame = partial.showCurrentStatementFrame === true;
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
+    if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
@@ -1229,6 +1249,9 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
+    if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyExtractorId(partial.dataGridCopyExtractor);
+    if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
+    if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
     if (partial.dataGridMultiRowTranspose !== undefined) editorSettings.value.dataGridMultiRowTranspose = partial.dataGridMultiRowTranspose === true;
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;

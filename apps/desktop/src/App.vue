@@ -57,6 +57,7 @@ import {
   isBrowserReloadShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
   isModRShortcut,
@@ -300,6 +301,7 @@ const {
   showDangerDialog,
   suppressDangerConfirm,
   tryExecute,
+  tryExecuteInNewResultTab,
   doExecute,
   cancelActiveExecution,
   tryExplain,
@@ -324,6 +326,11 @@ const {
 function requestActiveEditorExecute() {
   if (contentAreaRef.value?.requestQueryEditorExecute?.()) return;
   void tryExecute();
+}
+
+function requestActiveEditorExecuteInNewResultTab() {
+  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
+  void tryExecuteInNewResultTab();
 }
 
 const dialogs = useDialogSources();
@@ -1904,6 +1911,12 @@ function handleKeydown(e: KeyboardEvent) {
     void openSaveSqlDialog();
     return;
   }
+  if (activeTab.value?.mode === "query" && isExecuteSqlInNewResultTabShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
+    e.preventDefault();
+    e.stopPropagation();
+    requestActiveEditorExecuteInNewResultTab();
+    return;
+  }
   if (activeTab.value?.mode === "query" && isExecuteSqlShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
@@ -2265,6 +2278,7 @@ onUnmounted(() => {
                     @fix-with-ai="fixWithAi"
                     @send-selection-to-ai="sendSelectionToAi"
                     @execute="tryExecute($event)"
+                    @execute-in-new-result-tab="tryExecuteInNewResultTab($event)"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"
                     @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"
@@ -2339,7 +2353,7 @@ onUnmounted(() => {
 
           <div v-if="showAiPanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: aiPanelWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startAiPanelResize" />
-            <div class="h-full min-h-0 overflow-hidden">
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <AiAssistant
                 v-if="aiPanelReady"
                 ref="aiAssistantRef"
@@ -2359,19 +2373,21 @@ onUnmounted(() => {
 
           <div v-if="showHistory" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: historyWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
-            <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
+              <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
+            </div>
           </div>
 
           <div v-if="showSqlLibraryPanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlLibraryWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlLibraryResize" />
-            <div class="h-full min-h-0 overflow-hidden">
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlLibraryPanel @close="closeRightSidebarPanel('sqlLibrary')" />
             </div>
           </div>
 
           <div v-if="showSqlFilePanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlFilePanelWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlFilePanelResize" />
-            <div class="h-full min-h-0 overflow-hidden">
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlFilePanel @close="closeRightSidebarPanel('sqlFile')" />
             </div>
           </div>
@@ -2384,6 +2400,7 @@ onUnmounted(() => {
           :show-danger-dialog="showDangerDialog"
           :danger-sql="dangerSql"
           :suppress-danger-confirm="suppressDangerConfirm"
+          :active-database-type="activeConnection?.db_type"
           :show-sql-parameter-dialog="showSqlParameterDialog"
           :sql-parameter-source-sql="sqlParameterSourceSql"
           :sql-parameter-names="sqlParameterNames"

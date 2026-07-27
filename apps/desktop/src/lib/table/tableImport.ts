@@ -238,7 +238,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       if (databaseType === "clickhouse") return "Int64";
       return "BIGINT";
     case "decimal":
-      if (["postgres", "gaussdb", "opengauss", "redshift", "kingbase", "highgo", "kwdb", "vastbase"].includes(databaseType || "")) return "DOUBLE PRECISION";
+      if (["postgres", "gaussdb", "opengauss", "redshift", "kingbase", "highgo", "uxdb", "kwdb", "vastbase"].includes(databaseType || "")) return "DOUBLE PRECISION";
       if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "REAL";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "BINARY_DOUBLE";
       if (databaseType === "clickhouse") return "Float64";
@@ -254,7 +254,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       if (databaseType === "clickhouse") return "DateTime64";
       return "TIMESTAMP";
     case "json":
-      if (["postgres", "gaussdb", "opengauss", "kingbase", "highgo", "kwdb", "vastbase"].includes(databaseType || "")) return "JSONB";
+      if (["postgres", "gaussdb", "opengauss", "kingbase", "highgo", "uxdb", "kwdb", "vastbase"].includes(databaseType || "")) return "JSONB";
       if (databaseType === "mysql" || databaseType === "databend") return "JSON";
       return importDataTypeForDatabase("text", databaseType);
     case "text":

@@ -1,5 +1,6 @@
-import type { ObjectInfo } from "@/types/database";
-import { compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
+import type { ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
+import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
+import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
 export type ObjectBrowserRow = {
@@ -25,6 +26,114 @@ export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalByt
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
+
+export type ObjectBrowserPinnedTreeNodeContext = {
+  connectionId: string;
+  database: string;
+  schema?: string;
+  catalog?: string;
+  sidebarParentId?: string;
+};
+
+export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): TreeNodeType {
+  if (type === "TABLE") return "table";
+  if (type === "VIEW") return "view";
+  if (type === "MATERIALIZED_VIEW") return "materialized_view";
+  if (type === "PROCEDURE") return "procedure";
+  if (type === "FUNCTION") return "function";
+  if (type === "TRIGGER") return "trigger";
+  if (type === "SEQUENCE") return "sequence";
+  if (type === "PACKAGE_BODY") return "package-body";
+  if (type === "PACKAGE") return "package";
+  if (type === "TYPE_BODY") return "type-body";
+  return "type";
+}
+
+export function canonicalObjectBrowserPinnedTreeNodeIdentity(identity: PinnedTreeNodeIdentity, database: string): PinnedTreeNodeIdentity {
+  // Some drivers expose database-level objects with the selected database as
+  // their schema, while the sidebar represents the same objects without one.
+  // Canonicalize only this alias; real schemas remain distinct.
+  return identity.schema === database ? { ...identity, schema: "" } : identity;
+}
+
+export function canonicalizeObjectBrowserPinnedTreeNodeIdentity(context: ObjectBrowserPinnedTreeNodeContext): (identity: PinnedTreeNodeIdentity) => PinnedTreeNodeIdentity {
+  return (identity) => canonicalObjectBrowserPinnedTreeNodeIdentity(identity, context.database);
+}
+
+export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): PinnedTreeNodeIdentity {
+  return {
+    connectionId: context.connectionId,
+    database: context.database,
+    schema: row.schema ?? context.schema ?? "",
+    catalog: context.catalog || "",
+    type: objectBrowserRowTreeNodeType(row.type),
+    name: row.name,
+    signature: row.type === "FUNCTION" || row.type === "PROCEDURE" ? row.signature?.trim() || "" : "",
+    id: row.id,
+  };
+}
+
+export function objectBrowserRowMatchesPinnedTreeNode(row: ObjectBrowserRow, identity: PinnedTreeNodeIdentity, context: ObjectBrowserPinnedTreeNodeContext): boolean {
+  return pinnedTreeNodeIdentityMatches(identity, objectBrowserRowPinnedTreeNodeIdentity(row, context), canonicalizeObjectBrowserPinnedTreeNodeIdentity(context));
+}
+
+function flattenTreeNodeIds(nodes: readonly TreeNode[]): string[] {
+  return nodes.flatMap((node) => [node.id, ...(node.children ? flattenTreeNodeIds(node.children) : [])]);
+}
+
+function objectBrowserRowObjectInfo(row: ObjectBrowserRow, schema?: string): ObjectInfo {
+  return {
+    name: row.name,
+    object_type: row.type,
+    schema,
+    signature: row.signature || undefined,
+    parent_schema: row.partitionParentSchema,
+    parent_name: row.partitionParentName,
+  };
+}
+
+function legacySchemaCandidates(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): Array<string | undefined> {
+  const identity = objectBrowserRowPinnedTreeNodeIdentity(row, context);
+  const canonicalIdentity = canonicalizeObjectBrowserPinnedTreeNodeIdentity(context)(identity);
+  return [...new Set([row.schema, context.schema, canonicalIdentity.schema, undefined].map((schema) => schema?.trim() || undefined))];
+}
+
+/**
+ * Builds the historical bare IDs emitted by each sidebar layout. The current
+ * v2 key is identity-based, but old persisted pins contain only these IDs.
+ */
+export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, context: ObjectBrowserPinnedTreeNodeContext): string[] {
+  const parentId = context.sidebarParentId || `${context.connectionId}:${context.database}`;
+  const legacyIds = new Set<string>();
+  for (const schema of legacySchemaCandidates(row, context)) {
+    const object = objectBrowserRowObjectInfo(row, schema);
+    const simpleNodes =
+      row.type === "TABLE" || row.type === "VIEW" || row.type === "MATERIALIZED_VIEW"
+        ? buildTableTreeNodes({
+            nodeId: parentId,
+            connectionId: context.connectionId,
+            database: context.database,
+            schema,
+            tables: [
+              {
+                name: row.name,
+                table_type: row.type,
+                comment: row.comment,
+                parent_schema: row.partitionParentSchema,
+                parent_name: row.partitionParentName,
+              },
+            ],
+          })
+        : buildSimpleObjectTreeNodes({ nodeId: parentId, connectionId: context.connectionId, database: context.database, schema, objects: [object] });
+    for (const id of flattenTreeNodeIds(simpleNodes)) legacyIds.add(id);
+
+    const groupedNodes = buildGroupedObjectTreeNodes({ nodeId: parentId, connectionId: context.connectionId, database: context.database, schema, objects: [object] });
+    for (const group of groupedNodes) {
+      for (const id of flattenTreeNodeIds(group.children || [])) legacyIds.add(id);
+    }
+  }
+  return [...legacyIds];
+}
 
 export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {
   const value = type.toUpperCase();

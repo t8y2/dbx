@@ -38,6 +38,7 @@ pub mod schema_diff;
 pub mod sql_file;
 pub mod sqlite_backup;
 pub mod ssh_config;
+pub mod ssh_prompt;
 pub mod support_info;
 pub mod system_fonts;
 pub mod tab_runtime_cache;

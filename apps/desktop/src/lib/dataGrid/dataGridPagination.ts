@@ -21,6 +21,11 @@ export interface CompleteLocalDataGridResultOptions {
   hasMore?: boolean;
 }
 
+export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean }): number | undefined {
+  if (options.paginationTotalRowCount !== undefined) return options.paginationTotalRowCount;
+  return options.totalRowCountIsExact ? options.serverKnownTotalRowCount : undefined;
+}
+
 export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridResultOptions): boolean {
   if (!options.isResultsContext || options.truncated === true || options.hasMore === true) return false;
   if (options.pageLimit === undefined) return true;

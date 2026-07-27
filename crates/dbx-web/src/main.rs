@@ -21,8 +21,40 @@ use state::WebState;
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
+use utoipa::OpenApi;
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "DBX Data Grid Extractor API", description = "HTTP contract for data-grid clipboard extraction."),
+    paths(routes::query::extract_data_grid_selection),
+    tags((name = "data-grid", description = "Data grid extraction and clipboard formats"))
+)]
+struct ApiDoc;
+
+async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
+    axum::Json(ApiDoc::openapi())
+}
+
+#[cfg(test)]
+mod data_grid_extractor_openapi_tests {
+    use super::*;
+
+    #[test]
+    fn extractor_openapi_contains_the_versioned_request_and_error_responses() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize extractor OpenAPI document");
+        let operation = &document["paths"]["/api/query/extract-data-grid-selection"]["post"];
+
+        assert_eq!(operation["requestBody"]["required"], true);
+        assert!(operation["responses"].get("200").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("413").is_some());
+        assert!(operation["responses"].get("422").is_some());
+        assert!(operation["responses"].get("500").is_some());
+    }
+}
 
 fn web_compression_predicate() -> impl Predicate {
     // XLSX exports are already compressed ZIP archives, so gzip would only add CPU overhead.
@@ -203,6 +235,7 @@ async fn main() {
         sse_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
+        nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
     });
@@ -298,6 +331,9 @@ async fn main() {
         .route("/schema/indexes", get(routes::schema::list_indexes))
         .route("/schema/foreign-keys", get(routes::schema::list_foreign_keys))
         .route("/schema/triggers", get(routes::schema::list_triggers))
+        .route("/schema/constraints", get(routes::schema::list_constraints))
+        .route("/schema/partitions", get(routes::schema::list_partitions))
+        .route("/schema/subpartitions", get(routes::schema::list_subpartitions))
         .route("/schema/functions", get(routes::schema::list_functions))
         .route("/schema/sequences", get(routes::schema::list_sequences))
         .route("/schema/rules", get(routes::schema::list_rules))
@@ -373,6 +409,12 @@ async fn main() {
         .route("/query/build-single-column-alter-sql", post(routes::query::build_single_column_alter_sql))
         .route("/query/analyze-editability", post(routes::query::analyze_editable_query_editability))
         .route("/query/prepare-data-grid-save", post(routes::query::prepare_data_grid_save))
+        .route("/query/data-grid-extractor-openapi.json", get(openapi_json))
+        .route(
+            "/query/extract-data-grid-selection",
+            post(routes::query::extract_data_grid_selection)
+                .layer(DefaultBodyLimit::max(DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES)),
+        )
         .route(
             "/query/build-data-grid-copy-update-statements",
             post(routes::query::build_data_grid_copy_update_statements),
@@ -431,6 +473,8 @@ async fn main() {
         .route("/redis/stream-add", post(routes::redis::stream_add))
         .route("/redis/json-set", post(routes::redis::json_set))
         .route("/redis/check-json-module", post(routes::redis::check_json_module))
+        .route("/redis/set-ttl", post(routes::redis::set_ttl))
+        .route("/redis/set-expire-at", post(routes::redis::set_expire_at))
         .route("/redis/delete-keys", post(routes::redis::delete_keys))
         .route("/redis/flush-db", post(routes::redis::flush_db))
         .route("/redis/execute-command", post(routes::redis::execute_command))
@@ -440,10 +484,14 @@ async fn main() {
         .route("/redis/slowlog-get", post(routes::redis::slowlog_get))
         .route("/redis/cluster-master-nodes", post(routes::redis::cluster_master_nodes))
         // etcd
+        .route("/etcd/supports-ttl", post(routes::etcd::supports_ttl))
         .route("/etcd/list-prefix", post(routes::etcd::list_prefix))
         .route("/etcd/get", post(routes::etcd::get))
         .route("/etcd/put", post(routes::etcd::put))
         .route("/etcd/delete", post(routes::etcd::delete))
+        .route("/etcd/rename", post(routes::etcd::rename))
+        .route("/etcd/history", post(routes::etcd::history))
+        .route("/etcd/status", post(routes::etcd::status))
         // ZooKeeper
         .route("/zookeeper/list-prefix", post(routes::zookeeper::list_prefix))
         .route("/zookeeper/get", post(routes::zookeeper::get))
@@ -466,7 +514,15 @@ async fn main() {
         .route("/nacos/services/list", post(routes::nacos::list_services))
         .route("/nacos/instances/list", post(routes::nacos::list_instances))
         .route("/nacos/instances/update", post(routes::nacos::update_instance))
+        .route("/nacos/dashboard", post(routes::nacos::get_dashboard))
         .route("/nacos/raw", post(routes::nacos::raw_request))
+        .route("/nacos/configs/search", post(routes::nacos::search_config_content))
+        .route("/nacos/configs/search/cancel", post(routes::nacos::cancel_operation))
+        .route("/nacos/configs/export", post(routes::nacos::export_configs))
+        .route("/nacos/configs/import/preview", post(routes::nacos::preview_config_import))
+        .route("/nacos/configs/import/apply", post(routes::nacos::apply_config_import))
+        .route("/nacos/configs/copy/preview", post(routes::nacos::preview_config_transfer))
+        .route("/nacos/configs/copy/apply", post(routes::nacos::apply_config_transfer))
         // MongoDB
         .route("/mongo/list-databases", post(routes::mongo::list_databases))
         .route("/mongo/list-collections", post(routes::mongo::list_collections))
@@ -583,7 +639,11 @@ async fn main() {
         )
         .route("/export/query-result/cancel", post(routes::query_result_export::cancel_query_result_export))
         // SQL file
-        .route("/sql-file/preview", post(routes::sql_file::preview_sql_file))
+        .route(
+            "/sql-file/preview",
+            post(routes::sql_file::preview_sql_file)
+                .layer(DefaultBodyLimit::max(routes::sql_file::SQL_FILE_UPLOAD_MAX_BYTES.saturating_add(1024 * 1024))),
+        )
         .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))

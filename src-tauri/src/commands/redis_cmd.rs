@@ -235,6 +235,7 @@ pub async fn redis_stream_add(
     fields: Vec<(String, String)>,
     ttl: Option<i64>,
 ) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "XADD").await?;
     dbx_core::redis_ops::redis_stream_add_in_db_core(&state, &connection_id, db, &key_raw, &entry_id, fields, ttl).await
 }
 
@@ -247,6 +248,7 @@ pub async fn redis_json_set(
     value: String,
     ttl: Option<i64>,
 ) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "JSON.SET").await?;
     dbx_core::redis_ops::redis_json_set_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
 }
 
@@ -269,6 +271,18 @@ pub async fn redis_set_ttl(
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "EXPIRE").await?;
     dbx_core::redis_ops::redis_set_ttl_in_db_core(&state, &connection_id, db, &key_raw, ttl).await
+}
+
+#[tauri::command]
+pub async fn redis_set_expire_at(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    expire_at: i64,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "EXPIREAT").await?;
+    dbx_core::redis_ops::redis_set_expire_at_in_db_core(&state, &connection_id, db, &key_raw, expire_at).await
 }
 
 #[tauri::command]

@@ -90,7 +90,7 @@
 
 ### 70+ 种数据库，一个工具搞定
 
-MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、IRIS 等。全部装进约 20 MB 的应用里，不内嵌 Chromium。
+MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等数据库都能直接连接。Agent/JDBC 方向的配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、IRIS 等。全部装进约 20 MB 的应用里，不内嵌 Chromium。
 
 ### 查询编辑器
 
@@ -397,10 +397,26 @@ make package
 
 DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础设施建设和版本发布都需要长期投入时间与资源。
 
+### 基础设施赞助
+
+<table>
+  <tr>
+    <td align="center" width="180">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
+        <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="雨云" height="48" />
+      </a>
+    </td>
+    <td>
+      雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。
+    </td>
+    <td align="center" width="140">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
+    </td>
+  </tr>
+</table>
+
 - [支持 DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) —— 通过微信或支付宝自愿捐助
 - [赞助商与合作伙伴](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) —— 支持基础设施、开发工具、服务或社区合作
-
-捐助和赞助不会影响任何人使用 DBX，也不代表购买功能排期。经双方确认后，赞助商和合作伙伴可在赞助页面展示。
 
 ## 常见问题
 
@@ -416,6 +432,7 @@ DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础�
 
 <details>
 <summary><strong>可以离线使用吗？</strong></summary>
+
 可以。桌面端完全支持离线使用。内网环境安装驱动时，可在有网机器打开[离线驱动下载页](https://dbxio.com/cn/drivers)下载离线驱动包，传输到内网机器后，在 DBX 的「设置 > 驱动管理」中导入。AI 功能需要网络访问模型端点（或通过 Ollama 使用本地模型）。
 </details>
 
@@ -426,7 +443,7 @@ DBX 仅 20 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 
 
 <details>
 <summary><strong>支持哪些数据库？</strong></summary>
-MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Pulsar、Kafka、RocketMQ）。
+MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Qdrant、Milvus、Weaviate、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingBase、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB 等。JDBC 方向配置可扩展到 H2、Snowflake、Trino、PrestoSQL、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX、Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase 8a/8s、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、IRIS 及自定义 JDBC 连接，并支持消息队列管理（Pulsar、Kafka、RocketMQ）。
 </details>
 
 <details>

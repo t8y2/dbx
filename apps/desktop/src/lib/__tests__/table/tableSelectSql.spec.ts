@@ -39,6 +39,11 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifier("mysql", "orders")).toBe("`orders`");
   });
 
+  it("uses BigQuery quoted identifiers and escape sequences", () => {
+    expect(quoteTableIdentifier("bigquery", "order")).toBe("`order`");
+    expect(quoteTableIdentifier("bigquery", "a`b")).toBe("`a\\`b`");
+  });
+
   it("bracket-quotes sqlserver identifiers", () => {
     expect(quoteTableIdentifier("sqlserver", "orders")).toBe("[orders]");
   });

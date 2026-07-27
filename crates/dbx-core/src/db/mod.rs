@@ -1,5 +1,6 @@
 pub mod agent_driver;
 pub mod clickhouse_driver;
+pub mod cloudberry;
 pub mod cloudflare_d1;
 pub use cloudflare_d1 as cloudflare_d1_driver;
 pub mod document_result;
@@ -29,6 +30,8 @@ pub mod redis_driver;
 pub mod rqlite_driver;
 pub mod sqlite;
 pub mod sqlserver;
+pub mod ssh_host_key;
+pub mod ssh_prompt;
 pub mod ssh_tunnel;
 pub mod starrocks;
 pub mod transport_layer_tunnel;

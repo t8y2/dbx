@@ -1117,6 +1117,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "Postgres".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,
@@ -1171,6 +1172,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -1262,6 +1264,7 @@ mod tests {
         let mut config = ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { fitCanvasText } from "../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts";
+import { fitCanvasText, resolveCanvasDataGridRowFill } from "../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, resolveDataGridPaintTheme } from "../../apps/desktop/src/lib/dataGrid/dataGridPaintTheme.ts";
 
 function measureContext(charWidth = 1): CanvasRenderingContext2D {
@@ -21,6 +21,14 @@ test("fitCanvasText truncates only when text exceeds the available cell width", 
   const ctx = measureContext();
 
   assert.equal(fitCanvasText(ctx, "1234567890", 8), "12345...");
+});
+
+test("canvas row fill keeps frozen and scrolling regions on the same selection surface", () => {
+  const theme = { cellActive: "active-blue", cellSelected: "selected-blue" };
+
+  assert.equal(resolveCanvasDataGridRowFill(theme, "base", { isActive: true, isDeleted: false, isSelected: false }), "active-blue");
+  assert.equal(resolveCanvasDataGridRowFill(theme, "base", { isActive: true, isDeleted: false, isSelected: true }), "selected-blue");
+  assert.equal(resolveCanvasDataGridRowFill(theme, "deleted", { isActive: true, isDeleted: true, isSelected: false }), "deleted");
 });
 
 test("data grid paint themes use the increased striped row contrast", () => {

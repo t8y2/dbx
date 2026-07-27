@@ -64,6 +64,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "kwdb",
   "kingbase",
   "highgo",
+  "uxdb",
   "vastbase",
   "goldendb",
   "yashandb",

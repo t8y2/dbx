@@ -1683,7 +1683,7 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
         | "SPOP" | "SREM" | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN"
         | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT"
         | "SDIFFSTORE" | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE"
-        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" => RedisCommandSafety::Confirm,
+        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
         "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
         | "GETEX" | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX"
         | "SETRANGE" | "MSET" | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX"
@@ -2689,9 +2689,31 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     if ttl > 0 {
-        redis::cmd("EXPIRE").arg(key).arg(ttl).query_async::<()>(con).await.map_err(|e| e.to_string())
+        let applied =
+            redis::cmd("EXPIRE").arg(key).arg(ttl).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+        if applied == 1 {
+            Ok(())
+        } else {
+            Err("Redis key no longer exists; EXPIRE was not applied".to_string())
+        }
     } else {
+        // Redis treats PERSIST as idempotent: a zero reply also means the key
+        // was already persistent. Follow-up reads in the UI handle a key that
+        // disappeared concurrently without requiring an extra ACL permission.
         redis::cmd("PERSIST").arg(key).query_async::<()>(con).await.map_err(|e| e.to_string())
+    }
+}
+
+pub async fn set_expire_at<C>(con: &mut C, key: &[u8], expire_at: i64) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let applied =
+        redis::cmd("EXPIREAT").arg(key).arg(expire_at).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+    if applied == 1 {
+        Ok(())
+    } else {
+        Err("Redis key no longer exists; EXPIREAT was not applied".to_string())
     }
 }
 
@@ -3198,6 +3220,48 @@ mod tests {
         assert!(con.commands[0].contains("\r\nSET\r\n"));
         assert!(!con.commands[0].contains("\r\nKEEPTTL\r\n"));
         assert!(!con.commands[0].contains("\r\nEXPIRE\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_expire_at_uses_expireat_with_the_unix_timestamp() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+
+        super::set_expire_at(&mut con, b"session", 1_735_689_600).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nEXPIREAT\r\n"));
+        assert!(con.commands[0].contains("\r\n1735689600\r\n"));
+        assert_eq!(con.command_count("EVAL"), 0);
+    }
+
+    #[tokio::test]
+    async fn set_expire_at_reports_when_the_key_disappears_before_expiration_is_applied() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::set_expire_at(&mut con, b"session", 1_735_689_600).await.unwrap_err();
+
+        assert!(error.contains("EXPIREAT was not applied"));
+    }
+
+    #[tokio::test]
+    async fn set_ttl_reports_when_positive_expiration_is_not_applied() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::set_ttl(&mut con, b"session", 60).await.unwrap_err();
+
+        assert!(error.contains("EXPIRE was not applied"));
+    }
+
+    #[tokio::test]
+    async fn persist_is_idempotent_for_an_already_persistent_key() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        super::set_ttl(&mut con, b"session", 0).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(con.command_count("PERSIST"), 1);
+        assert_eq!(con.command_count("EXISTS"), 0);
+        assert_eq!(con.command_count("EVAL"), 0);
     }
 
     #[tokio::test]
@@ -3924,13 +3988,47 @@ mod tests {
         assert_eq!(classify_command("GETEX"), RedisCommandSafety::Write);
         assert_eq!(classify_command("XREADGROUP"), RedisCommandSafety::Write);
         assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
-        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.DEL"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.FORGET"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.CLEAR"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("KEYS"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("flushall"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("eval"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("FCALL"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("XGROUP"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("VENDOR.WRITE"), RedisCommandSafety::Blocked);
+    }
+
+    // Regression for review feedback: an unknown command (e.g. FCALL) inside a
+    // multi-statement batch must still raise the batch to Blocked regardless
+    // of its position, so "DEL victim\nFCALL wipe 0" cannot execute the
+    // destructive command after the frontend scan would otherwise have
+    // stopped the run.
+    #[test]
+    fn classify_command_batch_blocks_on_any_unknown_member() {
+        for batch in [
+            // destructive first, unknown second
+            ["DEL victim", "FCALL wipe 0"],
+            // unknown first, destructive second
+            ["FCALL wipe 0", "DEL victim"],
+        ] {
+            let mut highest = RedisCommandSafety::Allowed;
+            for cmd in batch.iter() {
+                let safety = classify_command(cmd);
+                if matches!(safety, RedisCommandSafety::Blocked) {
+                    highest = safety;
+                    break;
+                }
+                if matches!(safety, RedisCommandSafety::Confirm) && !matches!(highest, RedisCommandSafety::Blocked) {
+                    highest = safety;
+                }
+            }
+            assert!(
+                matches!(highest, RedisCommandSafety::Blocked),
+                "batch {batch:?} must be Blocked because it contains FCALL, got {highest:?}"
+            );
+        }
     }
 
     #[test]
@@ -4077,6 +4175,7 @@ mod tests {
         ConnectionConfig {
             id: "redis".to_string(),
             name: "Redis".to_string(),
+            note: String::new(),
             db_type: crate::models::connection::DatabaseType::Redis,
             driver_profile: None,
             driver_label: None,

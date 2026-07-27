@@ -417,6 +417,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "SQLite".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Sqlite,
             driver_profile: None,
             driver_label: None,
@@ -495,6 +496,7 @@ mod tests {
             sse_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
+            nacos_imports: RwLock::new(HashMap::new()),
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
             export_files: RwLock::new(HashMap::new()),
         });

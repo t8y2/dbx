@@ -2,6 +2,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -435,6 +436,18 @@ pub struct AgentManager {
     pub(crate) connection_runtimes: Mutex<
         std::collections::HashMap<String, std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<AgentRuntimeClient>>>>,
     >,
+    /// Serializes `load_state` → modify → `save_state` to prevent lost updates
+    /// when multiple driver installs run concurrently.
+    pub(crate) state_lock: StdMutex<()>,
+    /// Per-JRE-key install locks so that concurrent driver installs sharing the
+    /// same JRE download it only once (DCL pattern: lock → re-check installed → download).
+    pub(crate) jre_install_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-driver locks serialize install, import, and uninstall operations
+    /// targeting the same on-disk agent files.
+    pub(crate) driver_operation_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    /// Driver operations may run concurrently, but JRE replacement/removal
+    /// must exclude them until their dependent driver state is persisted.
+    pub(crate) installation_operation_lock: tokio::sync::RwLock<()>,
 }
 
 impl Default for AgentManager {
@@ -460,11 +473,28 @@ impl AgentManager {
             app_version: app_version.into(),
             daemons: Mutex::new(std::collections::HashMap::new()),
             connection_runtimes: Mutex::new(std::collections::HashMap::new()),
+            state_lock: StdMutex::new(()),
+            jre_install_locks: Mutex::new(std::collections::HashMap::new()),
+            driver_operation_locks: Mutex::new(std::collections::HashMap::new()),
+            installation_operation_lock: tokio::sync::RwLock::new(()),
         };
         mgr.migrate_legacy_jre();
         mgr.cleanup_pending_jre_dirs();
         mgr.cleanup_orphan_jre_dirs();
         mgr
+    }
+
+    /// Atomically load, modify, and persist the installation state.
+    ///
+    /// Keep the closure free of async work: this lock exists specifically to
+    /// prevent one installation operation from saving an older snapshot over
+    /// another operation's successful update.
+    pub fn mutate_state<T>(&self, mutate: impl FnOnce(&mut AgentState) -> T) -> Result<T, String> {
+        let _guard = self.state_lock.lock().map_err(|_| "Agent installation state lock was poisoned".to_string())?;
+        let mut state = self.load_state();
+        let result = mutate(&mut state);
+        self.save_state(&state)?;
+        Ok(result)
     }
 
     fn migrate_legacy_jre(&self) {
@@ -480,25 +510,26 @@ impl AgentManager {
     /// removals are pruned from the persisted state. Failures are kept for the
     /// next launch and never block startup. (Issue #1100, D6.)
     fn cleanup_pending_jre_dirs(&self) {
-        let mut state = self.load_state();
-        if state.pending_jre_cleanup.is_empty() {
+        if self.load_state().pending_jre_cleanup.is_empty() {
             return;
         }
-        let mut remaining = Vec::new();
-        for path in std::mem::take(&mut state.pending_jre_cleanup) {
-            if !path.exists() {
-                continue;
-            }
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => log::info!("Cleaned up pending JRE stash: {}", path.display()),
-                Err(err) => {
-                    log::warn!("Pending JRE cleanup failed for {}: {err}", path.display());
-                    remaining.push(path);
+
+        if let Err(err) = self.mutate_state(|state| {
+            let mut remaining = Vec::new();
+            for path in std::mem::take(&mut state.pending_jre_cleanup) {
+                if !path.exists() {
+                    continue;
+                }
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => log::info!("Cleaned up pending JRE stash: {}", path.display()),
+                    Err(err) => {
+                        log::warn!("Pending JRE cleanup failed for {}: {err}", path.display());
+                        remaining.push(path);
+                    }
                 }
             }
-        }
-        state.pending_jre_cleanup = remaining;
-        if let Err(err) = self.save_state(&state) {
+            state.pending_jre_cleanup = remaining;
+        }) {
             log::warn!("Failed to persist post-cleanup AgentState: {err}");
         }
     }

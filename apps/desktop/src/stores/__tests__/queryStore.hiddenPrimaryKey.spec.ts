@@ -146,6 +146,32 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("keeps insert disabled when a MySQL table has a physical primary key named like DBX ROWID", async () => {
+    getColumns.mockResolvedValue([
+      { name: "__DBX_ROWID", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "name", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "users",
+        selectStar: false,
+        columns: [{ sourceName: "name", resultName: "name", expression: "name" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "__DBX_ROWID", resultName: "__DBX_PK_0", expression: "`__DBX_ROWID`" }] : [])],
+      },
+    }));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "__DBX_ROWID"]));
+    expect(tab.queryAnalysis?.allowInsert).toBe(false);
+  });
+
   it("uses the connection default database for SQL library tabs without a saved database", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -266,7 +292,7 @@ describe("queryStore hidden primary key editing", () => {
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["ID", "PLATFORM", "__DBX_ROWID"]));
     expect(tab.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]);
     expect(tab.queryAnalysis).toBeDefined();
-    expect(tab.queryAnalysis?.allowInsert).toBe(false);
+    expect(tab.queryAnalysis?.allowInsert).not.toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 

@@ -4,7 +4,23 @@ import { supportsDriverManagement } from "@/lib/database/databaseCapabilities";
 export interface AgentDriverInstallState {
   db_type: string;
   installed: boolean;
+  installed_version?: string | null;
   update_available?: boolean;
+}
+
+/** Returns whether a locally installed native Agent meets a required release. */
+export function hasInstalledAgentVersion(drivers: readonly AgentDriverInstallState[], driverKey: string, minimumVersion: string): boolean {
+  const installedVersion = drivers.find((driver) => driver.db_type === driverKey && driver.installed)?.installed_version;
+  if (!installedVersion) return false;
+
+  const parse = (version: string): number[] | null => {
+    const match = version.trim().match(/^(\d+)\.(\d+)\.(\d+)$/);
+    return match ? match.slice(1).map(Number) : null;
+  };
+  const installed = parse(installedVersion);
+  const minimum = parse(minimumVersion);
+  if (!installed || !minimum) return false;
+  return installed[0] > minimum[0] || (installed[0] === minimum[0] && (installed[1] > minimum[1] || (installed[1] === minimum[1] && installed[2] >= minimum[2])));
 }
 
 export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverProfile?: string): string | undefined {

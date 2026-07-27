@@ -429,6 +429,60 @@ test("cloning a row clears auto-generated key columns", async () => {
   assert.deepEqual(editor.newRows.value, [[null, "Ada"]]);
 });
 
+test("cloning an Oracle keyless row clears the hidden ROWID source column", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["ID", "PLATFORM", "__DBX_PK_0"],
+    rows: [[72, "轻卡", "AAAPr9AAEAAAACXAAA"] as CellValue[]],
+  }));
+  const rowStatusFilter = ref<"all" | "changed" | "edited" | "new" | "deleted">("all");
+  let editor: ReturnType<typeof useDataGridEditor>;
+
+  editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "oracle"),
+    connectionId: computed(() => undefined),
+    database: computed(() => undefined),
+    tableMeta: computed(() => ({
+      tableName: "TT_PLATFORM_CARS",
+      columns: [column("ID"), column("PLATFORM")],
+      primaryKeys: ["__DBX_ROWID"],
+    })),
+    sourceColumns: computed(() => ["ID", "PLATFORM", "__DBX_ROWID"]),
+    onExecuteSql: computed(() => undefined),
+    customSaveHandler: computed(() => undefined),
+    sql: computed(() => undefined),
+    searchText: ref(""),
+    whereFilterInput: ref(""),
+    orderByInput: ref(""),
+    currentWhereInput: computed(() => undefined),
+    rowStatusFilter,
+    pageSize: ref(100),
+    currentPage: ref(1),
+    getRowItem: (rowId) => {
+      if (rowId !== 0) return undefined;
+      return {
+        id: 0,
+        sourceIndex: 0,
+        data: result.value.rows[0],
+        isNew: false,
+        isDeleted: false,
+        isDirtyCol: [false, false, false],
+        status: "clean",
+      };
+    },
+    emit: () => {},
+  });
+
+  editor.cloneRow(0);
+  await nextTick();
+
+  assert.deepEqual(editor.newRows.value, [[72, "轻卡", null]]);
+});
+
 test("saving deleted rows reloads current table data", async () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();
@@ -717,6 +771,24 @@ test("a failed NULL save keeps the pending cell edit", async () => {
   assert.equal(editor.saveError.value, "NULL write rejected");
   assert.equal(editor.dirtyRows.value.get(0)?.get(1), null);
   assert.equal(editor.hasPendingChanges.value, true);
+});
+
+test("committing a no-op edit batch keeps the existing save error", () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+  const editor = createPeopleGridEditor();
+
+  editor.applyCellValue(0, 1, "Ada Lovelace");
+  editor.saveError.value = "Previous save failed";
+  const version = editor.pendingChangesVersion.value;
+
+  editor.beginBatch();
+  editor.applyCellValue(0, 1, "Ada Lovelace");
+  editor.commitBatch();
+
+  assert.equal(editor.saveError.value, "Previous save failed");
+  assert.equal(editor.pendingChangesVersion.value, version);
+  assert.equal(editor.dirtyRows.value.get(0)?.get(1), "Ada Lovelace");
 });
 
 test("a NOT NULL validation failure keeps the pending NULL cell edit recoverable", async () => {

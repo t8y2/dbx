@@ -241,6 +241,39 @@ function mongoLineCommentEnd(source: string, start: number): number {
   return source.length;
 }
 
+function removeTrailingCommas(source: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index] ?? "";
+    if (inString) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === ",") {
+      let next = index + 1;
+      while (/\s/.test(source[next] ?? "")) next += 1;
+      if (source[next] === "}" || source[next] === "]") continue;
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
 export function quoteUnquotedObjectKeys(source: string): string {
   let result = "";
   let quote: string | null = null;
@@ -407,5 +440,6 @@ function convertSingleQuotedStrings(source: string): string {
     }
   }
 
-  return quote === "'" ? source : result + source.slice(copiedUntil);
+  const converted = quote === "'" ? source : result + source.slice(copiedUntil);
+  return removeTrailingCommas(converted);
 }

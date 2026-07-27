@@ -952,15 +952,20 @@ func buildDSN(params connectParams) string {
 		return buildGoOraURL(host, port, jdbc.Database, username, params.Password, options)
 	}
 
-	service := strings.TrimSpace(params.Database)
-	if strings.HasPrefix(strings.ToUpper(service), "SYSDBA:") {
-		service = strings.TrimSpace(service[len("SYSDBA:"):])
-	}
+	service := oracleConnectionDatabaseName(params.Database)
 	port := params.Port
 	if port == 0 {
 		port = 1521
 	}
 	return buildGoOraURL(params.Host, port, service, username, params.Password, options)
+}
+
+func oracleConnectionDatabaseName(database string) string {
+	database = strings.TrimSpace(database)
+	if strings.HasPrefix(strings.ToUpper(database), "SYSDBA:") {
+		return strings.TrimSpace(database[len("SYSDBA:"):])
+	}
+	return database
 }
 
 func buildGoOraJDBC(user, password, connStr string, options map[string]string) string {
@@ -2337,10 +2342,7 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 	}
 	defer conn.Close()
 
-	targetSchema := strings.TrimSpace(schema)
-	if targetSchema == "" && !strings.EqualFold(strings.TrimSpace(database), strings.TrimSpace(s.params.Database)) {
-		targetSchema = strings.TrimSpace(database)
-	}
+	targetSchema := oracleExplainTargetSchema(database, schema, s.params.Database)
 	if targetSchema != "" {
 		var originalSchema string
 		if err := conn.QueryRowContext(ctx, "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL").Scan(&originalSchema); err != nil {
@@ -2380,6 +2382,17 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 		builder.WriteByte('\n')
 	}
 	return strings.TrimSpace(builder.String()), planRows.Err()
+}
+
+func oracleExplainTargetSchema(database, schema, configuredDatabase string) string {
+	if schema = strings.TrimSpace(schema); schema != "" {
+		return schema
+	}
+	database = oracleConnectionDatabaseName(database)
+	if database == "" || strings.EqualFold(database, oracleConnectionDatabaseName(configuredDatabase)) {
+		return ""
+	}
+	return database
 }
 
 func cleanupOracleExplainPlan(conn *sql.Conn, statementID string) {

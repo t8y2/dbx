@@ -47,6 +47,9 @@ pub(in crate::schema) async fn list_tables(
             db::mysql::list_tables(p, db).await
         }
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => db::questdb::list_tables(p, schema).await,
+        PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
+            db::cloudberry::list_tables_filtered(p, schema, None, None, None).await
+        }
         PoolKind::Postgres(p) => db::postgres::list_tables(p, schema).await,
         PoolKind::Sqlite(p) => db::sqlite::list_tables(p, schema).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_tables(client, schema).await,
@@ -86,6 +89,9 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
             db::questdb::list_objects(p, schema).await.map(Some)
         }
+        PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
+            db::cloudberry::list_objects(p, schema).await.map(Some)
+        }
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(Some),
         _ => Ok(None),
     }
@@ -106,6 +112,9 @@ pub(in crate::schema) async fn list_completion_objects(
         }
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
             db::questdb::list_objects(p, schema).await.map(Some)
+        }
+        PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
+            db::cloudberry::list_objects(p, schema).await.map(Some)
         }
         PoolKind::Postgres(p) => db::postgres::list_objects(p, schema).await.map(Some),
         _ => Ok(None),
@@ -237,6 +246,9 @@ pub(in crate::schema) async fn table_ddl(
                 Err(_) => super::super::pg_ddl(p, schema, table).await,
             }
         }
+        PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
+            super::super::cloudberry_ddl(p, schema, table).await
+        }
         PoolKind::Postgres(p) => super::super::pg_ddl(p, schema, table).await,
         PoolKind::Sqlite(p) => super::super::sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
@@ -314,6 +326,10 @@ fn clickhouse_metadata_database<'a>(database: &'a str, schema: &'a str) -> &'a s
 fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
         || matches!(config.driver_profile.as_deref(), Some("opengauss" | "gaussdb"))
+}
+
+fn is_cloudberry_config(config: &ConnectionConfig) -> bool {
+    matches!(config.driver_profile.as_deref(), Some("cloudberry"))
 }
 
 fn is_doris_family_config(config: &ConnectionConfig) -> bool {

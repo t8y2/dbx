@@ -11,7 +11,7 @@ use crate::object_source_sql::build_export_object_source_sql;
 use crate::sql_dialect::{qualified_table_name, quote_table_identifier, uses_single_row_insert_statements};
 use crate::transfer::{
     format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra, quote_identifier,
-    selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
+    quote_postgres_string_literal, selected_columns_include_identity_extras, wrap_dameng_identity_insert_sql,
     wrap_dameng_identity_insert_sql_for_table,
 };
 use crate::types::ObjectSourceKind;
@@ -38,6 +38,11 @@ pub struct DatabaseExportRequest {
     pub include_structure: bool,
     pub include_data: bool,
     pub include_objects: bool,
+    /// Include a MySQL `CREATE DATABASE IF NOT EXISTS` and `USE` preamble.
+    /// The option is intentionally opt-in because it needs CREATE privileges
+    /// when importing into a new server.
+    #[serde(default)]
+    pub include_create_database: bool,
     #[serde(default)]
     pub drop_table_if_exists: bool,
     /// Drop the table-level `AUTO_INCREMENT=N` clause from exported MySQL DDL,
@@ -87,6 +92,59 @@ fn database_export_total_objects(request: &DatabaseExportRequest, counts: &Datab
         total += counts.procedures + counts.functions;
     }
     total
+}
+
+fn mysql_sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn mysql_database_export_preamble(database: &str, charset: Option<&str>, collation: Option<&str>) -> String {
+    let database = quote_identifier(database, &DatabaseType::Mysql);
+    let charset = charset.map(str::trim).filter(|value| !value.is_empty());
+    let collation = collation.map(str::trim).filter(|value| !value.is_empty());
+    let options = match charset {
+        Some(charset) => match collation {
+            Some(collation) => format!(" CHARACTER SET {charset} COLLATE {collation}"),
+            None => format!(" CHARACTER SET {charset}"),
+        },
+        None => String::new(),
+    };
+    format!("CREATE DATABASE IF NOT EXISTS {database}{options};\nUSE {database};\n")
+}
+
+async fn mysql_database_export_preamble_for_request(
+    state: &crate::connection::AppState,
+    request: &DatabaseExportRequest,
+) -> String {
+    let metadata_sql = format!(
+        "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = {}",
+        mysql_sql_string_literal(&request.database)
+    );
+    let metadata = crate::query::execute_sql_statement(
+        state,
+        &request.connection_id,
+        &request.database,
+        &metadata_sql,
+        None,
+        None,
+    )
+    .await
+    .ok()
+    .and_then(|result| {
+        result.rows.first().map(|row| {
+            (
+                row.first().and_then(Value::as_str).map(str::to_string),
+                row.get(1).and_then(Value::as_str).map(str::to_string),
+            )
+        })
+    });
+
+    match metadata {
+        Some((charset, collation)) => {
+            mysql_database_export_preamble(&request.database, charset.as_deref(), collation.as_deref())
+        }
+        None => mysql_database_export_preamble(&request.database, None, None),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,7 +361,7 @@ fn format_postgres_json_export_literal(value: &Value) -> String {
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
     // PostgreSQL standard strings keep backslashes literal; JSON text needs its
     // own escape sequences, so only SQL-escape the surrounding string delimiter.
-    postgres_string_literal(&text)
+    quote_postgres_string_literal(&text)
 }
 
 fn format_postgres_vector_export_literal(value: &Value) -> String {
@@ -317,7 +375,7 @@ fn format_postgres_vector_export_literal(value: &Value) -> String {
         Value::String(text) => text.to_string(),
         _ => value.to_string(),
     };
-    postgres_string_literal(&text)
+    quote_postgres_string_literal(&text)
 }
 
 fn format_postgres_vector_export_text(arr: &[Value]) -> String {
@@ -342,6 +400,7 @@ fn quote_export_sql_string(text: &str) -> String {
 fn quote_export_sql_string_for_database(text: &str, database_type: Option<DatabaseType>) -> String {
     match database_type {
         Some(DatabaseType::Dameng) => quote_dameng_export_sql_string(text),
+        Some(DatabaseType::Postgres) => quote_postgres_string_literal(text),
         database_type if is_mysql_compatible_export_literal_target(database_type) => {
             quote_mysql_compatible_export_sql_string(text)
         }
@@ -930,10 +989,6 @@ fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String
     }
 }
 
-fn postgres_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 fn generate_postgres_sequence_create_ddl(sequence: &PostgresExportSequence, schema: &str) -> String {
     let qualified_name = postgres_sequence_qualified_name(schema, &sequence.name);
     let cycle = if sequence.cycle { "CYCLE" } else { "NO CYCLE" };
@@ -965,7 +1020,7 @@ fn generate_postgres_sequence_setval_sql(sequence: &PostgresExportSequence, sche
         return None;
     }
 
-    let sequence_literal = postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name));
+    let sequence_literal = quote_postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name));
     match (sequence.owner_table.as_deref(), sequence.owner_column.as_deref()) {
         (Some(owner_table), Some(owner_column)) => {
             let owner_table = crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres);
@@ -1269,10 +1324,17 @@ pub async fn export_database_sql_core(
         None,
         None,
         None,
+        None,
     )
     .await?;
     // 4. Create file
     let mut file = std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to write file: {e}"))?;
+
+    let create_database_preamble = if request.include_create_database && matches!(db_type, DatabaseType::Mysql) {
+        Some(mysql_database_export_preamble_for_request(state, request).await)
+    } else {
+        None
+    };
 
     // 5. Write header
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -1280,6 +1342,11 @@ pub async fn export_database_sql_core(
     writeln!(file, "-- Date: {timestamp}").map_err(|e| format!("Failed to write file: {e}"))?;
     writeln!(file, "-- Generated by DBX").map_err(|e| format!("Failed to write file: {e}"))?;
     writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+
+    if let Some(preamble) = create_database_preamble {
+        writeln!(file, "-- Database setup").map_err(|e| format!("Failed to write file: {e}"))?;
+        writeln!(file, "{preamble}").map_err(|e| format!("Failed to write file: {e}"))?;
+    }
 
     // 6. For MySQL: disable foreign key checks
     if matches!(db_type, DatabaseType::Mysql) {
@@ -1425,6 +1492,7 @@ pub async fn export_database_sql_core(
     );
 
     let mut object_index: usize = 0;
+    let mut total_rows_exported = 0_u64;
 
     // Export tables
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
@@ -1438,7 +1506,7 @@ pub async fn export_database_sql_core(
             current_object: extension.name.clone(),
             object_index,
             total_objects,
-            rows_exported: 0,
+            rows_exported: total_rows_exported,
             total_rows: None,
             status: ExportStatus::Running,
             error: None,
@@ -1458,7 +1526,7 @@ pub async fn export_database_sql_core(
             current_object: sequence.name.clone(),
             object_index,
             total_objects,
-            rows_exported: 0,
+            rows_exported: total_rows_exported,
             total_rows: None,
             status: ExportStatus::Running,
             error: None,
@@ -1559,7 +1627,7 @@ pub async fn export_database_sql_core(
                 current_object: table_info.name.clone(),
                 object_index,
                 total_objects,
-                rows_exported: 0,
+                rows_exported: total_rows_exported,
                 total_rows: None,
                 status: ExportStatus::Cancelled,
                 error: None,
@@ -1575,7 +1643,7 @@ pub async fn export_database_sql_core(
             current_object: table_name.clone(),
             object_index,
             total_objects,
-            rows_exported: 0,
+            rows_exported: total_rows_exported,
             total_rows: None,
             status: ExportStatus::Running,
             error: None,
@@ -1596,7 +1664,7 @@ pub async fn export_database_sql_core(
                     current_object: sequence.name.clone(),
                     object_index,
                     total_objects,
-                    rows_exported: 0,
+                    rows_exported: total_rows_exported,
                     total_rows: None,
                     status: ExportStatus::Running,
                     error: None,
@@ -1682,7 +1750,6 @@ pub async fn export_database_sql_core(
             if !col_names.is_empty() {
                 if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
                     let sql = database_export_select_sql(&col_names, table_name, &request.schema, &db_type);
-                    let mut rows_exported = 0_u64;
                     crate::query::stream_rows_in_manual_transaction(
                         state,
                         snapshot_session_id,
@@ -1702,13 +1769,13 @@ pub async fn export_database_sql_core(
                                 &request.schema,
                                 &db_type,
                             )?;
-                            rows_exported += rows.len() as u64;
+                            total_rows_exported += rows.len() as u64;
                             on_progress(ExportProgress {
                                 export_id: request.export_id.clone(),
                                 current_object: table_name.clone(),
                                 object_index,
                                 total_objects,
-                                rows_exported,
+                                rows_exported: total_rows_exported,
                                 total_rows: None,
                                 status: ExportStatus::Running,
                                 error: None,
@@ -1737,7 +1804,6 @@ pub async fn export_database_sql_core(
                         Err(_) => None,
                     };
                     let mut offset = 0_u64;
-                    let mut rows_exported = 0_u64;
 
                     loop {
                         if is_export_cancelled(&request.export_id).await {
@@ -1746,7 +1812,7 @@ pub async fn export_database_sql_core(
                                 current_object: table_name.clone(),
                                 object_index,
                                 total_objects,
-                                rows_exported,
+                                rows_exported: total_rows_exported,
                                 total_rows,
                                 status: ExportStatus::Cancelled,
                                 error: None,
@@ -1787,14 +1853,14 @@ pub async fn export_database_sql_core(
                             &request.schema,
                             &db_type,
                         )?;
-                        rows_exported += row_count as u64;
+                        total_rows_exported += row_count as u64;
                         offset += row_count as u64;
                         on_progress(ExportProgress {
                             export_id: request.export_id.clone(),
                             current_object: table_name.clone(),
                             object_index,
                             total_objects,
-                            rows_exported,
+                            rows_exported: total_rows_exported,
                             total_rows,
                             status: ExportStatus::Running,
                             error: None,
@@ -1837,7 +1903,7 @@ pub async fn export_database_sql_core(
                 current_object: view_name.clone(),
                 object_index,
                 total_objects,
-                rows_exported: 0,
+                rows_exported: total_rows_exported,
                 total_rows: None,
                 status: ExportStatus::Running,
                 error: None,
@@ -1888,7 +1954,7 @@ pub async fn export_database_sql_core(
                 current_object: proc_name.clone(),
                 object_index,
                 total_objects,
-                rows_exported: 0,
+                rows_exported: total_rows_exported,
                 total_rows: None,
                 status: ExportStatus::Running,
                 error: None,
@@ -1943,7 +2009,7 @@ pub async fn export_database_sql_core(
                 current_object: func_name.clone(),
                 object_index,
                 total_objects,
-                rows_exported: 0,
+                rows_exported: total_rows_exported,
                 total_rows: None,
                 status: ExportStatus::Running,
                 error: None,
@@ -1997,7 +2063,7 @@ pub async fn export_database_sql_core(
         current_object: String::new(),
         object_index,
         total_objects,
-        rows_exported: 0,
+        rows_exported: total_rows_exported,
         total_rows: None,
         status: ExportStatus::Done,
         error: None,
@@ -2054,10 +2120,11 @@ mod tests {
         database_export_total_objects, drop_table_if_exists_sql, filter_export_table_infos, format_export_sql_literal,
         format_export_table_ddl, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
         generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
-        is_postgres_extension_member_routine, normalize_export_table_ddl, record_export_error,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
-        PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        is_postgres_extension_member_routine, mysql_database_export_preamble, normalize_export_table_ddl,
+        record_export_error, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions, ExportedTableSql,
+        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE,
+        DATABASE_EXPORT_ROW_LIMIT,
     };
     use crate::models::connection::DatabaseType;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
@@ -2105,6 +2172,7 @@ mod tests {
             include_structure,
             include_data,
             include_objects,
+            include_create_database: false,
             drop_table_if_exists: false,
             omit_auto_increment: false,
             fail_on_error: false,
@@ -2135,6 +2203,18 @@ mod tests {
         for (name, request, expected) in cases {
             assert_eq!(database_export_total_objects(&request, &counts), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn mysql_database_export_preamble_preserves_database_settings() {
+        assert_eq!(
+            mysql_database_export_preamble("app`db", Some("utf8mb4"), Some("utf8mb4_unicode_ci")),
+            "CREATE DATABASE IF NOT EXISTS `app``db` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;\nUSE `app``db`;\n"
+        );
+        assert_eq!(
+            mysql_database_export_preamble("app", None, None),
+            "CREATE DATABASE IF NOT EXISTS `app`;\nUSE `app`;\n"
+        );
     }
 
     #[test]
@@ -2356,7 +2436,7 @@ mod tests {
     }
 
     #[test]
-    fn postgres_export_inserts_keep_literal_control_characters() {
+    fn postgres_export_inserts_escape_control_characters() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
             schema: Some("public".to_string()),
@@ -2370,7 +2450,35 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(statements, vec!["INSERT INTO \"public\".\"notes\" (\"body\") VALUES ('line1\nline2\tend');"]);
+        assert_eq!(statements, vec!["INSERT INTO \"public\".\"notes\" (\"body\") VALUES (E'line1\\nline2\\tend');"]);
+    }
+
+    #[test]
+    fn postgres_export_inserts_escape_quotes_and_backslashes_without_changing_plain_strings() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: Some("notes".to_string()),
+            qualified_table_name: None,
+            columns: vec!["carriage_return".to_string(), "quote".to_string(), "path".to_string(), "plain".to_string()],
+            column_types: vec![
+                Some("text".to_string()),
+                Some("text".to_string()),
+                Some("text".to_string()),
+                Some("text".to_string()),
+            ],
+            column_extras: Vec::new(),
+            rows: vec![vec![json!("line1\rline2"), json!("O'Hara"), json!(r"C:\tmp"), json!("plain")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO "public"."notes" ("carriage_return", "quote", "path", "plain") VALUES (E'line1\rline2', 'O''Hara', E'C:\\tmp', 'plain');"#
+            ]
+        );
     }
 
     #[test]
@@ -2391,7 +2499,7 @@ mod tests {
         assert_eq!(
             statements,
             vec![
-                r#"INSERT INTO "public"."events" ("payload") VALUES ('{"text":"say \"hi\"","path":"C:\\tmp","quote":"O''Hara"}');"#
+                r#"INSERT INTO "public"."events" ("payload") VALUES (E'{"text":"say \\"hi\\"","path":"C:\\\\tmp","quote":"O''Hara"}');"#
             ]
         );
     }

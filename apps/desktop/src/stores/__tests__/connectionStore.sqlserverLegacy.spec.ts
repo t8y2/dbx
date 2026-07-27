@@ -41,11 +41,11 @@ describe("connectionStore SQL Server legacy compatibility", () => {
     setActivePinia(createPinia());
   });
 
-  it("does not preinstall the legacy component for historical disabled-encryption configs", async () => {
+  it("migrates historical disabled-encryption configs and installs the legacy component", async () => {
     const connectDb = vi.fn().mockResolvedValue("sqlserver-1");
     const installAgent = vi.fn().mockResolvedValue(undefined);
 
-    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
     vi.doMock("@/lib/backend/api", () => ({
       connectDb,
       installAgent,
@@ -56,8 +56,16 @@ describe("connectionStore SQL Server legacy compatibility", () => {
     const store = useConnectionStore();
     await store.connect(sqlServerNativeConnectionWithDisabledEncryption());
 
-    expect(installAgent).not.toHaveBeenCalled();
+    expect(installAgent).toHaveBeenCalledWith("sqlserver-legacy");
     expect(connectDb).toHaveBeenCalledTimes(1);
+    expect(connectDb).toHaveBeenCalledWith(
+      expect.objectContaining({
+        driver_profile: "sqlserver-legacy",
+        driver_label: "SQL Server legacy compatibility component",
+        url_params: "",
+      }),
+      expect.any(Number),
+    );
   });
 
   it("reconnects persisted legacy profiles without reinstalling an installed component", async () => {
@@ -66,6 +74,7 @@ describe("connectionStore SQL Server legacy compatibility", () => {
     const config = sqlServerNativeConnectionWithDisabledEncryption();
     config.driver_profile = "sqlserver-legacy";
     config.driver_label = "SQL Server legacy compatibility component";
+    config.url_params = "";
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
     vi.doMock("@/lib/backend/api", () => ({
@@ -87,6 +96,7 @@ describe("connectionStore SQL Server legacy compatibility", () => {
     const connectDb = vi.fn().mockRejectedValue(new Error("TLS negotiation failed\nSQL Server error 18456: Login failed"));
     const installAgent = vi.fn().mockResolvedValue(undefined);
     const config = sqlServerNativeConnectionWithDisabledEncryption();
+    config.url_params = "";
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
     vi.doMock("@/lib/backend/api", () => ({

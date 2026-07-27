@@ -28,6 +28,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.BeforeAll;
@@ -146,6 +147,53 @@ class MongoAgentTest {
         assertEquals(15, json.get("id").getAsInt());
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void collectionTotalUsesEstimatedCountForEmptyFilter() {
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(collection, new Document());
+
+        assertEquals(10_000_000L, total.value());
+        assertFalse(total.exact());
+        assertEquals(List.of("estimatedDocumentCount"), calls);
+    }
+
+    @Test
+    void collectionTotalUsesExactCountForNonEmptyFilter() {
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+        Document filter = new Document("status", "active");
+
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(collection, filter);
+
+        assertEquals(42L, total.value());
+        assertTrue(total.exact());
+        assertEquals(List.of("countDocuments:{\"status\": \"active\"}"), calls);
+    }
+
+    @Test
+    void estimatedDocumentQueryResultMarksTotalAsInexact() {
+        Map<String, Object> result = MongoAgent.documentQueryResult(
+            List.of(new Document("_id", 1)),
+            new MongoAgent.CollectionTotal(10_000_000L, false)
+        );
+
+        assertEquals(10_000_000L, result.get("total"));
+        assertEquals(false, result.get("total_is_exact"));
+    }
+
+    @Test
+    void exactDocumentQueryResultKeepsExistingWireShape() {
+        Map<String, Object> result = MongoAgent.documentQueryResult(
+            List.of(new Document("_id", 1)),
+            new MongoAgent.CollectionTotal(42L, true)
+        );
+
+        assertEquals(42L, result.get("total"));
+        assertFalse(result.containsKey("total_is_exact"));
     }
 
     @Test
@@ -669,6 +717,26 @@ class MongoAgentTest {
     }
 
     // ─── helpers ───
+
+    @SuppressWarnings("unchecked")
+    private static MongoCollection<Document> recordingCountCollection(List<String> calls) {
+        return (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("estimatedDocumentCount".equals(method.getName())) {
+                    calls.add("estimatedDocumentCount");
+                    return 10_000_000L;
+                }
+                if ("countDocuments".equals(method.getName())) {
+                    Document filter = (Document) args[0];
+                    calls.add("countDocuments:" + filter.toJson());
+                    return 42L;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
 
     private static void assertRpcModifiedCount(MongoClient client, int id, String updateJson, boolean many) {
         JsonObject params = new JsonObject();

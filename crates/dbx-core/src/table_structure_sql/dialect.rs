@@ -111,6 +111,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             | DatabaseType::Kwdb
             | DatabaseType::OpenGauss
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
             | DatabaseType::Kingbase
             | DatabaseType::Firebird,

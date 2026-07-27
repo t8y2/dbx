@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { driverInstallProgressChannel, updateDriverInstallProgress, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { driverInstallProgressChannel, isDriverInstallProgressForOperation, isDriverInstallProgressTarget, updateDriverInstallProgress, updatePerDriverProgress, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 
 describe("driver install progress channels", () => {
   it("classifies agent and JDBC plugin progress independently", () => {
@@ -15,6 +15,16 @@ describe("driver install progress channels", () => {
 
     expect(updateDriverInstallProgress(agentProgress, jdbcProgress, "agent")).toBe(agentProgress);
     expect(updateDriverInstallProgress(jdbcProgress, agentProgress, "jdbc-plugin")).toBe(jdbcProgress);
+  });
+
+  it("rejects progress and terminal events from another operation", () => {
+    expect(isDriverInstallProgressForOperation({ operation_id: "upgrade-b", step: "driver", db_type: "mysql" }, "upgrade-a")).toBe(false);
+    expect(isDriverInstallProgressForOperation({ operation_id: "upgrade-b", step: "all-done" }, "upgrade-a")).toBe(false);
+    expect(isDriverInstallProgressForOperation({ operation_id: "upgrade-a", step: "all-done" }, "upgrade-a")).toBe(true);
+  });
+
+  it("keeps legacy progress compatible when no operation id is emitted", () => {
+    expect(isDriverInstallProgressForOperation({ step: "driver", db_type: "mysql" }, "upgrade-a")).toBe(true);
   });
 
   it("allows a built-in driver backed by JDBC to consume JDBC progress explicitly", () => {
@@ -40,5 +50,28 @@ describe("driver install progress channels", () => {
 
     expect(updateDriverInstallProgress(agentProgress, ambiguousDone, "agent")).toBe(agentProgress);
     expect(updateDriverInstallProgress(jdbcProgress, ambiguousDone, "jdbc-plugin")).toBe(jdbcProgress);
+  });
+
+  it("keeps other drivers visible when one concurrent update completes", () => {
+    const progressByDbType: Record<string, DriverInstallProgress | null | undefined> = {};
+    updatePerDriverProgress(progressByDbType, { step: "driver", db_type: "mysql", downloaded: 50, total: 100 });
+    updatePerDriverProgress(progressByDbType, { step: "driver", db_type: "oracle", downloaded: 25, total: 100 });
+    updatePerDriverProgress(progressByDbType, { step: "done", db_type: "mysql" });
+
+    expect(progressByDbType.mysql).toBeNull();
+    expect(progressByDbType.oracle).toMatchObject({ step: "driver", downloaded: 25 });
+    expect(isDriverInstallProgressTarget("oracle", { installing: null, upgradingAll: true, progressMap: progressByDbType })).toBe(true);
+  });
+
+  it("clears all tracked progress on a batch completion event", () => {
+    const progressByDbType: Record<string, DriverInstallProgress | null | undefined> = {
+      mysql: { step: "driver", db_type: "mysql", downloaded: 50, total: 100 },
+      oracle: { step: "driver", db_type: "oracle", downloaded: 25, total: 100 },
+    };
+
+    updatePerDriverProgress(progressByDbType, { step: "all-done" });
+
+    expect(progressByDbType.mysql).toBeNull();
+    expect(progressByDbType.oracle).toBeNull();
   });
 });

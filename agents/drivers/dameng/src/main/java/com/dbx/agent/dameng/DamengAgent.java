@@ -1089,7 +1089,17 @@ public final class DamengAgent extends BaseDatabaseAgent {
     private static String buildUrl(ConnectParams params) {
         String database = params.getDatabase() == null ? "" : params.getDatabase().trim();
         String suffix = database.isEmpty() ? "" : "/" + database;
-        return "jdbc:dm://" + params.getHost() + ":" + params.getPort() + suffix;
+        String url = "jdbc:dm://" + params.getHost() + ":" + params.getPort() + suffix;
+        String urlParams = params.getUrl_params() == null ? "" : params.getUrl_params().trim();
+        while (urlParams.startsWith("?") || urlParams.startsWith("&") || urlParams.startsWith(";")) {
+            urlParams = urlParams.substring(1);
+        }
+        if (urlParams.isEmpty()) {
+            return url;
+        }
+
+        // DM8 SSL options are JDBC URL query parameters; dropping them makes the driver initialize SSL with defaults.
+        return url + "?" + urlParams;
     }
 
     private static String formatDataType(

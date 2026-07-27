@@ -44,7 +44,7 @@ export type DocumentStoreProvider = {
   kind: DocumentStoreKind;
   filterInputLabel: string;
   sortInputLabel: string;
-  documentsLabel(options: { total: number; t: ComposerTranslation }): string;
+  documentsLabel(options: { total: number; totalIsExact: boolean; t: ComposerTranslation }): string;
   queryPreview(options: DocumentStoreQueryPreviewOptions): string;
   sortInputForColumn(column: string, direction: "asc" | "desc" | null): string;
 };
@@ -80,7 +80,7 @@ const mongoDocumentProvider: DocumentStoreProvider = {
   kind: "mongodb",
   filterInputLabel: "find",
   sortInputLabel: "sort",
-  documentsLabel: ({ total, t }) => t("mongo.documents", { count: total }),
+  documentsLabel: ({ total, totalIsExact, t }) => `${totalIsExact ? "" : "≈"}${t("mongo.documents", { count: total })}`,
   queryPreview: ({ collection, filterJson, sortJson, skip, limit }) => {
     const collectionRef = `db.getCollection(${JSON.stringify(collection)})`;
     const parts = [`${collectionRef}.find(${mongoShellPreviewLiteral(filterJson || "{}")})`];

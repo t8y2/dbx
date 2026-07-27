@@ -40,7 +40,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore, AI_PROVIDER_PRESETS, normalizeAiConfig } from "@/stores/settingsStore";
@@ -147,12 +146,13 @@ const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
 const activeAction = ref<AiAction>("general");
-const assistantMode = ref<"ask" | "agent">("ask");
+const assistantMode = ref<AiAssistantMode>("ask");
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
 const showConversationList = ref(false);
 const showTemplateSelector = ref(false);
+const modeActionOpen = ref(false);
 
 // Prompt template selection (panel-session scope)
 const activeTemplateIds = ref<string[]>([]);
@@ -212,6 +212,12 @@ const templateSelectorLabel = computed(() => {
   const name = activeTemplates.value[0].name;
   if (count === 1) return name;
   return `${name} +${count - 1}`;
+});
+const templateSelectorTriggerLabel = computed(() => {
+  if (activeTemplates.value.length === 0) {
+    return t("ai.templateSelectorLabel", { label: templateSelectorLabel.value });
+  }
+  return templateSelectorLabel.value;
 });
 const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const shouldAutoScroll = ref(true);
@@ -588,34 +594,36 @@ function sendProposalReply(positive: boolean) {
 }
 
 const activePlaceholder = computed(() => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
-const activeModeHint = computed(() => t(`ai.modeHints.${assistantMode.value}`));
-const assistantModeItems = computed(() => [
-  {
-    value: "ask",
-    label: t("ai.modes.ask"),
-    title: t("ai.modeHints.ask"),
-    icon: MessageSquarePlus,
-  },
-  {
-    value: "agent",
-    label: t("ai.modes.agent"),
-    title: t("ai.modeHints.agent"),
-    icon: Bot,
-  },
-]);
-const actionMenuItems = computed(() =>
-  actionButtons.value.map((button) => ({
-    value: button.action,
-    label: t(button.key),
-    icon: button.icon,
-  })),
-);
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
 
 const showActionButtons = computed(() => {
   if (!props.connection) return true;
   return !isVectorDbType(props.connection.db_type);
 });
+
+const modeIcon = computed<Component>(() => (assistantMode.value === "agent" ? Bot : MessageSquarePlus));
+const modeLabel = computed(() => t(`ai.modes.${assistantMode.value}`));
+const selectedActionButton = computed<AiActionButton | undefined>(() => actionButtons.value.find((b) => b.action === activeAction.value));
+const modeActionTriggerLabel = computed(() => {
+  const modePart = `${modeLabel.value}`;
+  if (!showActionButtons.value || !selectedActionButton.value) return modePart;
+  return `${modePart} · ${t(selectedActionButton.value.key)}`;
+});
+
+function switchModeActionTab(mode: "ask" | "agent") {
+  activeAction.value = resolveDefaultAction(mode);
+  if (assistantMode.value !== mode) {
+    // Set the mode after the action so the tab label and picker stay aligned.
+    assistantMode.value = mode;
+  }
+}
+
+function selectModeActionItem(action: AiAction) {
+  // Vector databases only support generation; keep this constraint at the selection boundary.
+  if (!showActionButtons.value) return;
+  selectAction(action);
+  modeActionOpen.value = false;
+}
 
 const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
 
@@ -1713,6 +1721,9 @@ async function deleteConversation(id: string) {
 function startNewChat() {
   clearMessages();
   showConversationList.value = false;
+  // A fresh conversation always starts from the safe, non-executing default.
+  assistantMode.value = "ask";
+  activeAction.value = resolveDefaultAction("ask");
 }
 
 onMounted(async () => {
@@ -2088,54 +2099,95 @@ async function openExternalUrl(url: string) {
       <div ref="promptPanelRef" class="relative rounded-[6px] border bg-background">
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
-          <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
-            <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
-            <Server v-else class="h-3 w-3 shrink-0" />
-            <Select
-              :model-value="connection?.id || ''"
-              @update:model-value="
-                (v) => {
-                  if (typeof v === 'string') changeConnection(v);
-                }
-              "
-            >
-              <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
-                <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t("editor.selectConnection") }}</SelectValue>
-              </SelectTrigger>
-              <SelectContent class="min-w-48">
-                <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
-                  <div class="flex min-w-0 items-center gap-2">
-                    <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
-                    <ConnectionGroupBadge :connection-id="conn.id" />
-                    <span class="truncate">{{ conn.name }}</span>
-                  </div>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <template v-if="connection">
-              <Database class="h-3 w-3 shrink-0 text-foreground/40" />
+          <div class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
+            <template v-if="connectionStore.connections.length">
+              <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
+              <Server v-else class="h-3 w-3 shrink-0" />
               <Select
-                :model-value="selectedDatabaseSelectValue"
+                :model-value="connection?.id || ''"
                 @update:model-value="
                   (v) => {
-                    if (typeof v === 'string') changeDatabase(v);
-                  }
-                "
-                @update:open="
-                  (open: boolean) => {
-                    if (open) loadDatabases();
+                    if (typeof v === 'string') changeConnection(v);
                   }
                 "
               >
                 <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
-                  <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
+                  <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t("editor.selectConnection") }}</SelectValue>
                 </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="option in dbSelectOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                  <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{ selectedDatabaseLabel }}</SelectItem>
+                <SelectContent class="min-w-48">
+                  <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
+                    <div class="flex min-w-0 items-center gap-2">
+                      <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
+                      <ConnectionGroupBadge :connection-id="conn.id" />
+                      <span class="truncate">{{ conn.name }}</span>
+                    </div>
+                  </SelectItem>
                 </SelectContent>
               </Select>
+              <template v-if="connection">
+                <Database class="h-3 w-3 shrink-0 text-foreground/40" />
+                <Select
+                  :model-value="selectedDatabaseSelectValue"
+                  @update:model-value="
+                    (v) => {
+                      if (typeof v === 'string') changeDatabase(v);
+                    }
+                  "
+                  @update:open="
+                    (open: boolean) => {
+                      if (open) loadDatabases();
+                    }
+                  "
+                >
+                  <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
+                    <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="option in dbSelectOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                    <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{ selectedDatabaseLabel }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </template>
             </template>
+            <span class="min-w-0 flex-1" />
+            <!-- Template selector -->
+            <Popover v-model:open="showTemplateSelector">
+              <PopoverTrigger as-child>
+                <button type="button" class="flex min-w-0 max-w-[40%] items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="templateSelectorTriggerLabel" :title="templateSelectorTriggerLabel">
+                  <FileCode class="h-3 w-3" />
+                  <span class="truncate">{{ templateSelectorTriggerLabel }}</span>
+                  <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="end" class="w-64 gap-0 p-1.5">
+                <div class="max-h-64 overflow-auto">
+                  <div v-if="!promptTemplateStore.isLoaded" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {{ t("ai.templateSelectorLoading") }}
+                  </div>
+                  <div v-else-if="promptTemplateStore.templates.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {{ t("ai.templateSelectorEmpty") }}
+                  </div>
+                  <template v-else>
+                    <template v-for="tpl in promptTemplateStore.templates" :key="tpl.id">
+                      <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleTemplateId(tpl.id)">
+                        <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="activeTemplateIds.includes(tpl.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                          <Check v-if="activeTemplateIds.includes(tpl.id)" class="h-3 w-3" />
+                        </div>
+                        <div class="flex-1 truncate text-left">
+                          <div class="font-medium">{{ tpl.name }}</div>
+                          <div class="text-[10px] text-muted-foreground truncate">{{ tpl.content.slice(0, 60) }}</div>
+                        </div>
+                      </button>
+                    </template>
+                  </template>
+                </div>
+                <div v-if="promptTemplateStore.isLoaded && promptTemplateStore.templates.length > 0" class="border-t mt-1 pt-1 px-1">
+                  <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" @click="deselectAllTemplates">
+                    {{ t("ai.templateSelectorDeselectAll") }}
+                  </button>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
           <div v-if="mentionOpen" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
             <div v-if="mentionLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
@@ -2214,60 +2266,50 @@ async function openExternalUrl(url: string) {
             @keydown="onPromptKeydown"
           />
           <div class="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden">
-            <!-- Template selector -->
-            <Popover v-model:open="showTemplateSelector">
+            <!-- Combined mode + action selector -->
+            <Popover v-model:open="modeActionOpen">
               <PopoverTrigger as-child>
-                <button type="button" class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground">
-                  <FileCode class="h-3 w-3" />
-                  {{ t("ai.templateSelectorLabel", { label: templateSelectorLabel }) }}
+                <button type="button" class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="modeActionTriggerLabel">
+                  <component :is="modeIcon" class="h-3 w-3" />
+                  <span>{{ modeActionTriggerLabel }}</span>
                   <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="start" class="w-64 gap-0 p-1.5">
-                <div class="max-h-64 overflow-auto">
-                  <div v-if="!promptTemplateStore.isLoaded" class="px-3 py-4 text-center text-xs text-muted-foreground">
-                    {{ t("ai.templateSelectorLoading") }}
-                  </div>
-                  <div v-else-if="promptTemplateStore.templates.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
-                    {{ t("ai.templateSelectorEmpty") }}
-                  </div>
-                  <template v-else>
-                    <template v-for="tpl in promptTemplateStore.templates" :key="tpl.id">
-                      <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleTemplateId(tpl.id)">
-                        <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="activeTemplateIds.includes(tpl.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
-                          <Check v-if="activeTemplateIds.includes(tpl.id)" class="h-3 w-3" />
-                        </div>
-                        <div class="flex-1 truncate text-left">
-                          <div class="font-medium">{{ tpl.name }}</div>
-                          <div class="text-[10px] text-muted-foreground truncate">{{ tpl.content.slice(0, 60) }}</div>
-                        </div>
-                      </button>
-                    </template>
-                  </template>
-                </div>
-                <div v-if="promptTemplateStore.isLoaded && promptTemplateStore.templates.length > 0" class="border-t mt-1 pt-1 px-1">
-                  <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" @click="deselectAllTemplates">
-                    {{ t("ai.templateSelectorDeselectAll") }}
+              <PopoverContent align="start" class="w-56 gap-0 p-1.5" @click.stop>
+                <!-- Mode tabs -->
+                <div class="flex items-center gap-1 mb-1.5 px-0.5">
+                  <button
+                    type="button"
+                    class="flex-1 flex items-center justify-center gap-1.5 rounded-sm px-2 py-1 text-xs"
+                    :class="assistantMode === 'ask' ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted'"
+                    @click="switchModeActionTab('ask')"
+                  >
+                    <MessageSquarePlus class="h-3 w-3" />
+                    {{ t("ai.modes.ask") }}
+                  </button>
+                  <button
+                    type="button"
+                    class="flex-1 flex items-center justify-center gap-1.5 rounded-sm px-2 py-1 text-xs"
+                    :class="assistantMode === 'agent' ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted'"
+                    @click="switchModeActionTab('agent')"
+                  >
+                    <Bot class="h-3 w-3" />
+                    {{ t("ai.modes.agent") }}
                   </button>
                 </div>
+                <template v-if="showActionButtons">
+                  <div class="border-t my-1" />
+                  <!-- Action list -->
+                  <div class="max-h-56 overflow-auto">
+                    <button v-for="button in actionButtons" :key="button.action" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs" :class="activeAction === button.action ? 'bg-accent' : 'hover:bg-muted'" @click="selectModeActionItem(button.action)">
+                      <component :is="button.icon" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span class="flex-1 text-left">{{ t(button.key) }}</span>
+                      <Check v-if="activeAction === button.action" class="h-3.5 w-3.5 shrink-0" />
+                    </button>
+                  </div>
+                </template>
               </PopoverContent>
             </Popover>
-            <LightDropdown
-              v-model="assistantMode"
-              :items="assistantModeItems"
-              :aria-label="activeModeHint"
-              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-              item-class="text-xs px-2"
-            />
-            <LightDropdown
-              v-if="showActionButtons"
-              :model-value="activeAction"
-              :items="actionMenuItems"
-              content-class="w-max min-w-0"
-              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-              item-class="text-xs px-2"
-              @update:model-value="(value) => selectAction(value as AiAction)"
-            />
             <span class="min-w-0 flex-1" />
             <template v-if="settings.aiConfigs.length > 0">
               <!-- Combined provider + model selector -->

@@ -283,6 +283,7 @@ const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStateme
 const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurrentStatementFrame);
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
+const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
 const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
@@ -438,6 +439,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showCurrentStatementFrame: editShowCurrentStatementFrame.value,
     showInsertValueHints: editShowInsertValueHints.value,
     autoAliasTables: editAutoAliasTables.value,
+    insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
     wordWrap: editWordWrap.value,
     vimModeEnabled: editVimModeEnabled.value,
     autoCloseBrackets: editAutoCloseBrackets.value,
@@ -689,6 +691,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowCurrentStatementFrame.value = settingsStore.editorSettings.showCurrentStatementFrame;
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
   editWordWrap.value = settingsStore.editorSettings.wordWrap;
   editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
   editAutoCloseBrackets.value = settingsStore.editorSettings.autoCloseBrackets;
@@ -884,6 +887,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
     editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
@@ -969,6 +973,7 @@ function resetAllDefaults() {
   editShowCurrentStatementFrame.value = DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame;
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+  editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
   editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
@@ -3306,6 +3311,14 @@ onUnmounted(cleanupPreviewEditor);
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="editor-insert-space-after-completion">{{ t("settings.insertSpaceAfterCompletion") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.insertSpaceAfterCompletionDescription") }}</p>
+                  </div>
+                  <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="editor-auto-alias-tables">{{ t("settings.autoAliasTables") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.autoAliasTablesDescription") }}</p>
                   </div>
@@ -5395,15 +5408,15 @@ onUnmounted(cleanupPreviewEditor);
               <div class="space-y-2">
                 <Label>{{ t("settings.mcpConfig") }}</Label>
                 <Tabs v-model="mcpConfigTab" class="space-y-3">
-                  <TabsList class="grid h-auto w-full grid-cols-2 gap-1 overflow-visible group-data-horizontal/tabs:h-auto sm:grid-cols-4 xl:grid-cols-8">
-                    <TabsTrigger value="claude" class="h-8 min-w-0 px-2">Claude Code</TabsTrigger>
-                    <TabsTrigger value="cursor" class="h-8 min-w-0 px-2">Cursor</TabsTrigger>
-                    <TabsTrigger value="trae" class="h-8 min-w-0 px-2">TRAE</TabsTrigger>
-                    <TabsTrigger value="vscode" class="h-8 min-w-0 px-2">VS Code</TabsTrigger>
-                    <TabsTrigger value="windsurf" class="h-8 min-w-0 px-2">Windsurf</TabsTrigger>
-                    <TabsTrigger value="codex" class="h-8 min-w-0 px-2">Codex</TabsTrigger>
-                    <TabsTrigger value="opencode" class="h-8 min-w-0 px-2">OpenCode</TabsTrigger>
-                    <TabsTrigger value="cherry-studio" class="h-8 min-w-0 px-2">Cherry Studio</TabsTrigger>
+                  <TabsList class="h-auto min-h-8 w-full min-w-0 max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain group-data-horizontal/tabs:h-auto">
+                    <TabsTrigger value="claude" class="h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
+                    <TabsTrigger value="cursor" class="h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
+                    <TabsTrigger value="trae" class="h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
+                    <TabsTrigger value="vscode" class="h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>
+                    <TabsTrigger value="windsurf" class="h-7 flex-none shrink-0 px-2.5">Windsurf</TabsTrigger>
+                    <TabsTrigger value="codex" class="h-7 flex-none shrink-0 px-2.5">Codex</TabsTrigger>
+                    <TabsTrigger value="opencode" class="h-7 flex-none shrink-0 px-2.5">OpenCode</TabsTrigger>
+                    <TabsTrigger value="cherry-studio" class="h-7 flex-none shrink-0 px-2.5">Cherry Studio</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="claude" class="m-0">

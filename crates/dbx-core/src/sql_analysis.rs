@@ -199,7 +199,7 @@ fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {
 
 fn normalize_dialect(dialect: Option<&str>) -> String {
     match dialect.unwrap_or("generic").to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "questdb" => {
+        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "uxdb" | "questdb" => {
             "postgres".to_string()
         }
         "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql".to_string(),

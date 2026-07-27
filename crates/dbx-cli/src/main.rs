@@ -33,6 +33,7 @@ const BRIDGE_REQUIRED_TYPES: &[&str] = &[
     "dameng",
     "kingbase",
     "highgo",
+    "uxdb",
     "vastbase",
     "goldendb",
     "databend",

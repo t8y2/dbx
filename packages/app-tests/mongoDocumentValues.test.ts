@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import {
   applyMongoGridChangesToDocument,
+  applyMongoGridChangesToDocumentBaseline,
   buildMongoCopyDocumentFromOriginal,
   buildMongoCopyInsertDocument,
   buildMongoInsertDocument,
@@ -175,6 +176,20 @@ test("applies Mongo grid edits without converting existing JSON strings", () => 
   });
 });
 
+test("applies sorted Mongo grid edits to a cloned BSON baseline by document id", () => {
+  const currentDocuments = [
+    { _id: { $oid: "507f1f77bcf86cd799439012" }, name: "Linus", counter: { $numberLong: "2" } },
+    { _id: { $oid: "507f1f77bcf86cd799439011" }, name: "Ada", counter: { $numberLong: "1" } },
+  ];
+  const baselineDocuments = [structuredClone(currentDocuments[1]), structuredClone(currentDocuments[0])];
+  const dirtyRows = new Map([[0, new Map<number, string | number | boolean | null>([[1, "Grace"]])]]);
+
+  assert.deepEqual(applyMongoGridChangesToDocumentBaseline(baselineDocuments, currentDocuments, dirtyRows, ["_id", "name", "counter"]), [
+    { _id: { $oid: "507f1f77bcf86cd799439011" }, name: "Ada", counter: { $numberLong: "1" } },
+    { _id: { $oid: "507f1f77bcf86cd799439012" }, name: "Grace", counter: { $numberLong: "2" } },
+  ]);
+});
+
 test("builds Mongo inserts with parsed date values", () => {
   assert.deepEqual(buildMongoInsertDocument(["ignored", 'new Date("2026-06-10T13:59:31.287Z")'], ["_id", "createdAt"]), {
     createdAt: { $date: "2026-06-10T13:59:31.287Z" },
@@ -259,6 +274,19 @@ test("serializes typed Mongo document ids while keeping their grid display compa
 
 test("formats extended JSON int64 values as Mongo shell NumberLong literals", () => {
   assert.equal(formatMongoShellLiteral({ snowflake: { $numberLong: "9007199254740993" } }), '{"snowflake":NumberLong("9007199254740993")}');
+});
+
+test("formats other extended JSON values through EJSON.deserialize", () => {
+  assert.equal(
+    formatMongoShellLiteral({
+      decimal: { $numberDecimal: "12.34" },
+      payload: { $binary: { base64: "AQI=", subType: "00" } },
+      timestamp: { $timestamp: { t: 42, i: 7 } },
+      pattern: { $regularExpression: { pattern: "^dbx", options: "i" } },
+      canonicalDate: { $date: { $numberLong: "1721779200000" } },
+    }),
+    '{"decimal":EJSON.deserialize({"$numberDecimal":"12.34"}),"payload":EJSON.deserialize({"$binary":{"base64":"AQI=","subType":"00"}}),"timestamp":EJSON.deserialize({"$timestamp":{"t":42,"i":7}}),"pattern":EJSON.deserialize({"$regularExpression":{"pattern":"^dbx","options":"i"}}),"canonicalDate":EJSON.deserialize({"$date":{"$numberLong":"1721779200000"}})}',
+  );
 });
 
 test("keeps normal Mongo values readable and unsafe Int64 editable", () => {

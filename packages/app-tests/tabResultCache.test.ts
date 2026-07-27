@@ -22,6 +22,7 @@ test("result snapshots strip live session handles and clone result rows", () => 
       columns: ["id"],
       rows: [[1]],
       mongo_documents: [{ _id: "1", profile: { role: "admin" } }],
+      mongo_copy_documents: [{ _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } }],
       affected_rows: 0,
       execution_time_ms: 1,
       session_id: "live-session",
@@ -40,6 +41,7 @@ test("result snapshots strip live session handles and clone result rows", () => 
     activeResultIndex: 0,
     resultLocalSortOriginalRows: [[2]],
     resultLocalSortOriginalMongoDocuments: [{ _id: "2", profile: { role: "maintainer" } }],
+    resultLocalSortOriginalMongoCopyDocuments: [{ _id: { $oid: "507f1f77bcf86cd799439012" }, counter: { $numberLong: "9007199254740993" } }],
   });
 
   const snapshot = buildTabResultSnapshot(tab);
@@ -50,11 +52,15 @@ test("result snapshots strip live session handles and clone result rows", () => 
   assert.equal(snapshot?.results?.[0]?.session_id, undefined);
   assert.deepEqual(snapshot?.result?.rows, [[1]]);
   assert.deepEqual(snapshot?.result?.mongo_documents, [{ _id: "1", profile: { role: "admin" } }]);
+  assert.deepEqual(snapshot?.result?.mongo_copy_documents, [{ _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } }]);
   assert.deepEqual(snapshot?.resultLocalSortOriginalRows, [[2]]);
   assert.deepEqual(snapshot?.resultLocalSortOriginalMongoDocuments, [{ _id: "2", profile: { role: "maintainer" } }]);
+  assert.deepEqual(snapshot?.resultLocalSortOriginalMongoCopyDocuments, [{ _id: { $oid: "507f1f77bcf86cd799439012" }, counter: { $numberLong: "9007199254740993" } }]);
   tab.result!.rows[0]![0] = 2;
+  (tab.result!.mongo_copy_documents![0] as { createdAt: { $date: string } }).createdAt.$date = "changed";
   tab.resultLocalSortOriginalRows![0]![0] = 3;
   assert.deepEqual(snapshot?.result?.rows, [[1]]);
+  assert.deepEqual(snapshot?.result?.mongo_copy_documents, [{ _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } }]);
   assert.deepEqual(snapshot?.resultLocalSortOriginalRows, [[2]]);
 });
 
@@ -70,6 +76,7 @@ test("result snapshots strip session handles from result runs", () => {
         result: {
           columns: ["id"],
           rows: [[1]],
+          mongo_copy_documents: [{ _id: { $oid: "507f1f77bcf86cd799439011" } }],
           affected_rows: 0,
           execution_time_ms: 1,
           session_id: "live-run-session",
@@ -78,6 +85,7 @@ test("result snapshots strip session handles from result runs", () => {
         },
         resultLocalSortOriginalRows: [[2]],
         resultLocalSortOriginalMongoDocuments: [{ _id: "2", role: "maintainer" }],
+        resultLocalSortOriginalMongoCopyDocuments: [{ _id: { $oid: "507f1f77bcf86cd799439012" } }],
       },
     ],
   });
@@ -88,8 +96,10 @@ test("result snapshots strip session handles from result runs", () => {
   assert.equal(snapshot?.resultRuns?.[0]?.result?.sourceLabel, "users");
   assert.equal(snapshot?.resultRuns?.[0]?.result?.sourceStatement, "select * from users");
   assert.deepEqual(snapshot?.resultRuns?.[0]?.result?.rows, [[1]]);
+  assert.deepEqual(snapshot?.resultRuns?.[0]?.result?.mongo_copy_documents, [{ _id: { $oid: "507f1f77bcf86cd799439011" } }]);
   assert.deepEqual(snapshot?.resultRuns?.[0]?.resultLocalSortOriginalRows, [[2]]);
   assert.deepEqual(snapshot?.resultRuns?.[0]?.resultLocalSortOriginalMongoDocuments, [{ _id: "2", role: "maintainer" }]);
+  assert.deepEqual(snapshot?.resultRuns?.[0]?.resultLocalSortOriginalMongoCopyDocuments, [{ _id: { $oid: "507f1f77bcf86cd799439012" } }]);
 });
 
 test("result snapshots encode as binary columnar payloads and decode back to rows", () => {
@@ -105,6 +115,10 @@ test("result snapshots encode as binary columnar payloads and decode back to row
           { _id: "1", name: "Ada", tags: ["admin"] },
           { _id: "2", name: "Linus", tags: ["maintainer"] },
         ],
+        mongo_copy_documents: [
+          { _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } },
+          { _id: { $oid: "507f1f77bcf86cd799439012" }, counter: { $numberLong: "9007199254740993" } },
+        ],
         affected_rows: 0,
         execution_time_ms: 3,
         session_id: "live-session",
@@ -119,6 +133,10 @@ test("result snapshots encode as binary columnar payloads and decode back to row
       resultLocalSortOriginalMongoDocuments: [
         { _id: "2", name: "Linus", tags: ["maintainer"] },
         { _id: "1", name: "Ada", tags: ["admin"] },
+      ],
+      resultLocalSortOriginalMongoCopyDocuments: [
+        { _id: { $oid: "507f1f77bcf86cd799439012" }, counter: { $numberLong: "9007199254740993" } },
+        { _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } },
       ],
     }),
   );
@@ -137,6 +155,10 @@ test("result snapshots encode as binary columnar payloads and decode back to row
     { _id: "1", name: "Ada", tags: ["admin"] },
     { _id: "2", name: "Linus", tags: ["maintainer"] },
   ]);
+  assert.deepEqual(decoded?.result?.mongo_copy_documents, [
+    { _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } },
+    { _id: { $oid: "507f1f77bcf86cd799439012" }, counter: { $numberLong: "9007199254740993" } },
+  ]);
   assert.deepEqual(decoded?.resultLocalSortOriginalRows, [
     [2, "Linus", false],
     [1, "Ada", true],
@@ -144,6 +166,10 @@ test("result snapshots encode as binary columnar payloads and decode back to row
   assert.deepEqual(decoded?.resultLocalSortOriginalMongoDocuments, [
     { _id: "2", name: "Linus", tags: ["maintainer"] },
     { _id: "1", name: "Ada", tags: ["admin"] },
+  ]);
+  assert.deepEqual(decoded?.resultLocalSortOriginalMongoCopyDocuments, [
+    { _id: { $oid: "507f1f77bcf86cd799439012" }, counter: { $numberLong: "9007199254740993" } },
+    { _id: { $oid: "507f1f77bcf86cd799439011" }, createdAt: { $date: "2026-07-24T00:00:00Z" } },
   ]);
   assert.equal(decoded?.result?.session_id, undefined);
   assert.equal(decoded?.result?.has_more, true);

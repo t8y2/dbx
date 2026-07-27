@@ -678,6 +678,36 @@
       }
     },
     {
+      "dbType": "uxdb",
+      "label": "优炫 UXDB",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "uxdb",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 52025,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": true,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": true,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "vastbase",
       "label": "Vastbase",
       "runtimeMode": "agent",

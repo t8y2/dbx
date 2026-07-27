@@ -796,6 +796,7 @@ async fn live_sqlserver_cross_database_metadata_and_query() {
         Some(20),
         None,
         None,
+        None,
     )
     .await
     .expect("list database A tables");
@@ -806,6 +807,7 @@ async fn live_sqlserver_cross_database_metadata_and_query() {
         "OUT",
         Some("orders"),
         Some(20),
+        None,
         None,
         None,
     )

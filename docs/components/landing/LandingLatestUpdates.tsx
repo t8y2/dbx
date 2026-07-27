@@ -2,11 +2,10 @@
 
 import Link from "next/link";
 import { ArrowRight, CheckCircle2 } from "lucide-react";
-import { useEffect, useState } from "react";
 import { RevealSection } from "@/components/landing/RevealSection";
-import { fetchChangelog, type ChangelogRelease } from "@/lib/changelog";
+import type { ChangelogRelease } from "@/lib/changelog";
 import { buildLandingLatestUpdates } from "@/lib/landingLatest";
-import { fetchLatestReleaseInfo, type LatestReleaseInfo } from "@/lib/latestRelease";
+import type { LatestReleaseInfo } from "@/lib/latestRelease";
 
 type LandingLatestUpdatesProps = {
   lang: "en" | "cn";
@@ -16,22 +15,7 @@ type LandingLatestUpdatesProps = {
 };
 
 export function LandingLatestUpdates({ lang, fallbackVersion, initialRelease, initialLatestRelease }: LandingLatestUpdatesProps) {
-  const [latest, setLatest] = useState(() => buildLandingLatestUpdates(lang, initialRelease, fallbackVersion, initialLatestRelease));
-
-  useEffect(() => {
-    let active = true;
-
-    setLatest(buildLandingLatestUpdates(lang, initialRelease, fallbackVersion, initialLatestRelease));
-    Promise.all([fetchLatestReleaseInfo(), fetchChangelog(lang)]).then(([releaseInfo, data]) => {
-      if (!active) return;
-
-      setLatest(buildLandingLatestUpdates(lang, data.releases[0] ?? initialRelease, fallbackVersion, releaseInfo ?? initialLatestRelease));
-    });
-
-    return () => {
-      active = false;
-    };
-  }, [lang, fallbackVersion, initialRelease, initialLatestRelease]);
+  const latest = buildLandingLatestUpdates(lang, initialRelease, fallbackVersion, initialLatestRelease);
 
   return (
     <RevealSection className="grid grid-cols-[minmax(86px,0.16fr)_minmax(210px,0.32fr)_minmax(0,0.38fr)_max-content] gap-[22px] items-center max-w-[1180px] mx-auto px-7 border-t border-b border-landing-line mt-[62px] py-6 max-[1040px]:grid-cols-[minmax(0,1fr)_max-content] max-[760px]:block max-[760px]:px-[18px]">

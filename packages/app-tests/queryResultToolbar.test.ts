@@ -42,11 +42,26 @@ test("query result toolbar reuses the production icon contract", () => {
   assert.doesNotMatch(viewSwitcher + toolbarActions, /<svg\b|<symbol\b|<use\b/);
 });
 
-test("ContentArea keeps result history conditional and removes duplicate refresh state", () => {
+test("ContentArea exposes retained result runs as switchable tabs or a compact list", () => {
   const contentArea = source(contentAreaPath);
+  const runScrollerStart = contentArea.indexOf('ref="resultTabsScrollerRef"');
+  const listSelectorStart = contentArea.indexOf('<div v-else-if="showResultRunSelector"', runScrollerStart);
+  const fixedResultSetStart = contentArea.indexOf("data-result-set-tabs-region", listSelectorStart);
 
-  assert.match(contentArea, /showResultRunSelector = computed\(\(\) => resultAutoSave\.value && resultRuns\.value\.length > 0\)/);
-  assert.match(contentArea, /<template v-if="showResultRunSelector">/);
+  assert.match(contentArea, /showResultRunTabs = computed\(\(\) => resultRuns\.value\.length > 0 && resultRunDisplayMode\.value === "tabs"\)/);
+  assert.match(contentArea, /showResultRunSelector = computed\(\(\) => resultRuns\.value\.length > 0 && resultRunDisplayMode\.value === "list"\)/);
+  assert.match(contentArea, /ref="resultTabsScrollerRef"[\s\S]*v-for="\(run, runIndex\) in resultRuns"/);
+  assert.match(contentArea, /role="tablist" :aria-label="t\('tabs\.resultRuns'\)"/);
+  assert.match(contentArea, /data-result-run-tab/);
+  assert.match(contentArea, /@keydown="onResultRunTabKeydown\(\$event, runIndex\)"/);
+  assert.match(contentArea, /@click\.stop\.prevent="removeResultRun\(run\.id\)"/);
+  assert.match(contentArea, /<DropdownMenuContent align="start" class="w-48">[\s\S]*v-for="run in resultRuns"/);
+  assert.match(contentArea, /setResultRunDisplayMode\('list'\)/);
+  assert.match(contentArea, /setResultRunDisplayMode\('tabs'\)/);
+  assert.ok(runScrollerStart >= 0);
+  assert.ok(listSelectorStart > runScrollerStart);
+  assert.ok(fixedResultSetStart > listSelectorStart);
+  assert.doesNotMatch(contentArea.slice(runScrollerStart, listSelectorStart), /visibleResultItems/);
   assert.match(contentArea, /resultAutoSave \? 'bg-primary\/10 text-primary[\s\S]*: 'text-muted-foreground hover:bg-accent hover:text-foreground'/);
   assert.doesNotMatch(contentArea, /queryResultAutoRefresh|QUERY_RESULT_AUTO_REFRESH|nextResultToolbarLayout/);
   assert.equal((contentArea.match(/<QueryResultViewSwitcher\b/g) ?? []).length, 2);

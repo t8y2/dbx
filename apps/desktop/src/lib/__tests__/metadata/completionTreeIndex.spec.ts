@@ -77,4 +77,27 @@ describe("completionTreeIndex", () => {
     expect(completionTablesFromTree(tree, "conn", "hive", "sales_analytics")).toEqual(expected);
     expect(completionTablesFromTree(tree, "conn", "hive")).toEqual(expected);
   });
+
+  it("isolates Doris internal and external catalog tables with the same database name", () => {
+    const tree: TreeNode[] = [
+      {
+        id: "internal-orders",
+        label: "orders",
+        type: "table",
+        connectionId: "doris",
+        database: "sales",
+      },
+      {
+        id: "hive-orders",
+        label: "orders",
+        type: "table",
+        connectionId: "doris",
+        catalog: "hive_catalog",
+        database: "sales",
+      },
+    ];
+
+    expect(completionTablesFromTree(tree, "doris", "sales")).toEqual([{ name: "orders", schema: undefined, type: "table" }]);
+    expect(completionTablesFromTree(tree, "doris", "sales", undefined, "hive_catalog")).toEqual([{ name: "orders", catalog: "hive_catalog", schema: undefined, type: "table" }]);
+  });
 });

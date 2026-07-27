@@ -6,9 +6,13 @@
 //! still supports an older Rust toolchain. A future SDK adapter can implement
 //! the same port without changing commands, routes, or frontend contracts.
 
+pub mod archive;
+pub mod batch;
 pub mod config;
 pub mod http;
 pub mod port;
+mod prometheus;
+pub mod search;
 pub mod service;
 pub mod types;
 
@@ -180,6 +184,8 @@ mod tests {
             },
             auth: NacosAuthConfig::None,
             tls_skip_verify: false,
+            metrics_mode: Default::default(),
+            metrics_url: String::new(),
             page_size: 20,
             connect_override: None,
         }

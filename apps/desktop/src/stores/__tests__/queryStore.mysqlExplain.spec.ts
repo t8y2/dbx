@@ -61,7 +61,8 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const standardSql = "EXPLAIN SELECT * FROM users WHERE status = 'active'";
+const standardSql = "EXPLAIN FORMAT=TRADITIONAL SELECT * FROM users WHERE status = 'active'";
+const textSql = "EXPLAIN FORMAT=TEXT SELECT * FROM users WHERE status = 'active'";
 const jsonSql = "EXPLAIN FORMAT=JSON SELECT * FROM users WHERE status = 'active'";
 const sourceSql = "SELECT * FROM users WHERE status = 'active'";
 
@@ -176,6 +177,48 @@ describe("queryStore MySQL dual explain", () => {
     expect(tab.explainPlan).toEqual(visualPlan);
     expect(tab.explainError).toBeUndefined();
     expect(tab.isExplaining).toBe(false);
+  });
+
+  it("retries ADB MySQL with TEXT and skips its advertised unsupported JSON format", async () => {
+    mocks.executeQuery.mockRejectedValueOnce(new Error("TRADITIONAL is an INVALID EXPLAIN option, valid options are: [TEXT, GRAPHVIZ, DETAIL, SIMPLE]")).mockResolvedValueOnce(tableResult);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query", "query", "analytics");
+
+    await expect(store.explainTabSql(tabId, sourceSql, "mysql")).resolves.toEqual({ ok: true, sql: textSql });
+
+    const firstOptions = mocks.executeQuery.mock.calls[0]?.[5] as { clientSessionId: string };
+    const secondOptions = mocks.executeQuery.mock.calls[1]?.[5] as { clientSessionId: string };
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(mocks.executeQuery).toHaveBeenCalledTimes(2);
+    expect(mocks.executeQuery).toHaveBeenNthCalledWith(1, "mysql-1", "app", standardSql, "analytics", expect.any(String), expect.any(Object));
+    expect(mocks.executeQuery).toHaveBeenNthCalledWith(2, "mysql-1", "app", textSql, "analytics", expect.any(String), expect.any(Object));
+    expect(secondOptions.clientSessionId).toBe(firstOptions.clientSessionId);
+    expect(mocks.parseExplainResult).not.toHaveBeenCalled();
+    expect(tab.explainTableResult).toEqual(tableResult);
+    expect(tab.explainTableSql).toBe(textSql);
+    expect(tab.explainTableError).toBeUndefined();
+    expect(tab.explainPlan).toBeUndefined();
+    expect(tab.explainSql).toBeUndefined();
+    expect(tab.explainError).toBeUndefined();
+  });
+
+  it("keeps the standard table usable when JSON is the rejected ADB format", async () => {
+    mocks.executeQuery.mockResolvedValueOnce(tableResult).mockRejectedValueOnce(new Error("JSON is an INVALID EXPLAIN option, valid options are: [TEXT, GRAPHVIZ, DETAIL, SIMPLE]"));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.explainTabSql(tabId, sourceSql, "mysql");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(mocks.executeQuery).toHaveBeenCalledTimes(2);
+    expect(tab.explainTableResult).toEqual(tableResult);
+    expect(tab.explainPlan).toBeUndefined();
+    expect(tab.explainSql).toBe(jsonSql);
+    expect(tab.explainError).toBeUndefined();
   });
 
   it.each([

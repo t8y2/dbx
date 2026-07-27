@@ -25,12 +25,20 @@ use crate::state::WebState;
 #[serde(rename_all = "camelCase")]
 pub struct AgentTypeRequest {
     pub db_type: String,
+    pub operation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JreRequest {
     pub jre_key: Option<String>,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOperationRequest {
+    pub operation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -101,23 +109,32 @@ pub async fn install_agent(
     Json(req): Json<AgentTypeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&req.db_type)).await.map_err(AppError::from)?;
+    let operation_id = req.operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let tx = progress_sender(&state, "global").await;
-    install_agent_driver(&state.app.agent_manager, &req.db_type, |event| send_progress_event(&tx, event))
-        .await
-        .map_err(AppError::from)?;
+    install_agent_driver(&state.app.agent_manager, &req.db_type, |event| {
+        send_progress_event(&tx, event.with_operation_id(&operation_id))
+    })
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-pub async fn upgrade_all_agents(State(state): State<Arc<WebState>>) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn upgrade_all_agents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AgentOperationRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
     let registry = fetch_registry().await.map_err(AppError::from)?;
     let agents = build_agent_list(&state.app.agent_manager, Some(&registry));
     let updatable: Vec<String> =
         agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
     ensure_no_agent_update_blockers(&state.app, &updatable).await.map_err(AppError::from)?;
+    let operation_id = req.operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let tx = progress_sender(&state, "global").await;
-    let result = upgrade_all_agent_drivers(&state.app.agent_manager, |event| send_progress_event(&tx, event))
-        .await
-        .map_err(AppError::from)?;
+    let result = upgrade_all_agent_drivers(&state.app.agent_manager, |event| {
+        send_progress_event(&tx, event.with_operation_id(&operation_id))
+    })
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|err| AppError::from(err.to_string()))?))
 }
 
@@ -152,9 +169,7 @@ pub async fn set_agent_java_runtime_config(
         config.custom_java_path = None;
     }
 
-    let mut local_state = am.load_state();
-    local_state.java_runtime = config.clone();
-    am.save_state(&local_state).map_err(AppError::from)?;
+    am.mutate_state(|local_state| local_state.java_runtime = config.clone()).map_err(AppError::from)?;
     am.stop_daemons().await;
     Ok(Json(config))
 }
@@ -171,7 +186,19 @@ pub async fn import_agents_from_zip(
     let tmp_dir = state.data_dir.join("tmp");
     std::fs::create_dir_all(&tmp_dir).map_err(|err| AppError::from(err.to_string()))?;
 
-    if let Some(field) = multipart.next_field().await.map_err(|err| AppError::from(err.to_string()))? {
+    let mut operation_id = uuid::Uuid::new_v4().to_string();
+    while let Some(field) = multipart.next_field().await.map_err(|err| AppError::from(err.to_string()))? {
+        if field.name() == Some("operationId") {
+            let candidate = field.text().await.map_err(|err| AppError::from(err.to_string()))?;
+            if !candidate.is_empty() {
+                operation_id = candidate;
+            }
+            continue;
+        }
+        if field.name() != Some("file") {
+            continue;
+        }
+
         let file_name = field.file_name().unwrap_or("offline-drivers.zip").to_string();
         if !file_name.to_ascii_lowercase().ends_with(".zip") {
             return Err(AppError::from("Offline driver package must be a .zip file".to_string()));
@@ -190,14 +217,17 @@ pub async fn import_agents_from_zip(
 
             let plan = inspect_offline_zip(&zip_path).map_err(AppError::from)?;
             ensure_no_offline_import_blockers(&state.app, &plan).await.map_err(AppError::from)?;
-            import_agents_from_zip_core(&state.app.agent_manager, &zip_path, |event| send_progress_event(&tx, event))
-                .map_err(AppError::from)
+            import_agents_from_zip_core(&state.app.agent_manager, &zip_path, |event| {
+                send_progress_event(&tx, event.with_operation_id(&operation_id))
+            })
+            .await
+            .map_err(AppError::from)
         }
         .await;
         let _ = std::fs::remove_file(&zip_path);
 
         let result = result?;
-        send_progress_event(&tx, AgentProgressEvent::step("done"));
+        send_progress_event(&tx, AgentProgressEvent::step("done").with_operation_id(&operation_id));
         return Ok(Json(serde_json::json!({ "count": result.drivers_installed.len() as u32 })));
     }
 
@@ -237,7 +267,7 @@ pub async fn import_agent_driver_file(
 
     let result = async {
         ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&db_type)).await.map_err(AppError::from)?;
-        import_agent_driver(&state.app.agent_manager, &db_type, &tmp_path).map_err(AppError::from)
+        import_agent_driver(&state.app.agent_manager, &db_type, &tmp_path).await.map_err(AppError::from)
     }
     .await;
     let _ = std::fs::remove_file(&tmp_path);
@@ -249,9 +279,10 @@ pub async fn reinstall_jre(
     State(state): State<Arc<WebState>>,
     Json(req): Json<JreRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let operation_id = req.operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let tx = progress_sender(&state, "global").await;
     reinstall_agent_jre(&state.app.agent_manager, req.jre_key.as_deref().unwrap_or(DEFAULT_JRE_KEY), |event| {
-        send_progress_event(&tx, event);
+        send_progress_event(&tx, event.with_operation_id(&operation_id));
     })
     .await
     .map_err(AppError::from)?;

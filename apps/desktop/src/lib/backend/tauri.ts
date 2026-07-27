@@ -22,6 +22,9 @@ import type {
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
+  ConstraintInfo,
+  PartitionInfo,
+  SubpartitionInfo,
   FunctionInfo,
   SequenceInfo,
   RuleInfo,
@@ -315,6 +318,7 @@ export interface DroppedFilePreviewSqlOptions {
 export type XlsxCellValue = string | number | boolean | null;
 
 export interface DriverInstallProgress {
+  operation_id?: string;
   step: string;
   downloaded?: number;
   total?: number;
@@ -816,8 +820,8 @@ export async function deleteSchemaCachePrefix(prefix: string): Promise<void> {
   return invoke("delete_schema_cache_prefix", { prefix });
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string): Promise<TableInfo[]> {
-  return invoke("list_tables", { connectionId, database, schema, filter, limit, offset, objectTypes, catalog });
+export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string, tableNameFilter?: import("@/types/database").TableNameFilter): Promise<TableInfo[]> {
+  return invoke("list_tables", { connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter });
 }
 
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<string | null> {
@@ -1185,6 +1189,18 @@ export async function listTriggers(connectionId: string, database: string, schem
   return invoke("list_triggers", { connectionId, database, schema, table, catalog });
 }
 
+export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ConstraintInfo[]> {
+  return invoke("list_constraints", { connectionId, database, schema, table, catalog });
+}
+
+export async function listPartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<PartitionInfo[]> {
+  return invoke("list_partitions", { connectionId, database, schema, table, catalog });
+}
+
+export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
+  return invoke("list_subpartitions", { connectionId, database, schema, table, catalog });
+}
+
 export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
   return invoke("get_table_ddl", { connectionId, database, schema, table, objectType, catalog });
 }
@@ -1357,12 +1373,12 @@ export async function restartDriverRuntime(runtimeId: string): Promise<void> {
   return invoke("restart_driver_runtime", { runtimeId });
 }
 
-export async function installAgent(dbType: string, source?: UpdateDownloadSource): Promise<void> {
-  return invoke("install_agent", { dbType, source });
+export async function installAgent(dbType: string, source?: UpdateDownloadSource, operationId?: string): Promise<void> {
+  return invoke("install_agent", { dbType, source, operationId });
 }
 
-export async function upgradeAllAgents(source?: UpdateDownloadSource): Promise<UpgradeAllAgentDriversResult> {
-  return invoke("upgrade_all_agents", { source });
+export async function upgradeAllAgents(source?: UpdateDownloadSource, operationId?: string): Promise<UpgradeAllAgentDriversResult> {
+  return invoke("upgrade_all_agents", { source, operationId });
 }
 
 export async function checkAgentUpdateBlockers(dbTypes: string[]): Promise<AgentUpdateBlocker[]> {
@@ -1385,11 +1401,11 @@ export async function invalidateAgentRegistryCache(): Promise<void> {
   return invoke("invalidate_agent_registry_cache");
 }
 
-export async function importAgentsFromZip(path: string | File): Promise<number> {
+export async function importAgentsFromZip(path: string | File, operationId?: string): Promise<number> {
   if (typeof path !== "string") {
     throw new Error("Desktop offline ZIP import requires a local file path");
   }
-  return invoke("import_agents_from_zip", { path });
+  return invoke("import_agents_from_zip", { path, operationId });
 }
 
 export async function importAgentDriver(dbType: string, path: string | File): Promise<void> {
@@ -1401,8 +1417,8 @@ export async function importAgentDriver(dbType: string, path: string | File): Pr
 
 export const importAgentJar = importAgentDriver;
 
-export async function reinstallJre(jreKey?: string, source?: UpdateDownloadSource): Promise<void> {
-  return invoke("reinstall_jre", { jreKey, source });
+export async function reinstallJre(jreKey?: string, source?: UpdateDownloadSource, operationId?: string): Promise<void> {
+  return invoke("reinstall_jre", { jreKey, source, operationId });
 }
 
 export async function uninstallJre(jreKey: string): Promise<void> {
@@ -1723,6 +1739,10 @@ export async function redisSetTtl(connectionId: string, db: number, keyRaw: stri
   return invoke("redis_set_ttl", { connectionId, db, keyRaw, ttl });
 }
 
+export async function redisSetExpireAt(connectionId: string, db: number, keyRaw: string, expireAt: number): Promise<void> {
+  return invoke("redis_set_expire_at", { connectionId, db, keyRaw, expireAt });
+}
+
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
   return invoke("redis_delete_keys", { connectionId, db, keyRaws });
 }
@@ -1758,6 +1778,7 @@ export async function redisClusterMasterNodes(connectionId: string): Promise<Red
 
 // --- etcd ---
 export type KvValueEncoding = "utf8" | "base64";
+export type KvInt64 = string;
 
 export interface KvValue {
   encoding: KvValueEncoding;
@@ -1765,10 +1786,11 @@ export interface KvValue {
 }
 
 export interface KvKeyMetadata {
-  createRevision?: number | null;
-  modRevision?: number | null;
-  version?: number | null;
-  lease?: number | null;
+  createRevision?: KvInt64 | number | null;
+  modRevision?: KvInt64 | number | null;
+  version?: KvInt64 | number | null;
+  lease?: KvInt64 | number | null;
+  ttl?: number | null;
   valueSize?: number | null;
   czxid?: number | null;
   mzxid?: number | null;
@@ -1784,23 +1806,36 @@ export interface KvKeyMetadata {
 
 export interface KvKeySummary extends KvKeyMetadata {
   key: string;
+  keyIdentity?: string | null;
+  keyBytes?: KvValue | null;
+  value?: KvValue | null;
 }
 
 export interface KvListPrefixResponse {
   keys: KvKeySummary[];
   continuation?: string | null;
-  revision?: number | null;
+  revision?: KvInt64 | number | null;
 }
 
 export interface KvListPrefixOptions {
   recursive?: boolean | null;
+  revision?: KvInt64 | null;
+  includeValues?: boolean | null;
 }
 
 export interface KvGetResponse {
   found: boolean;
   key?: string | null;
+  keyIdentity?: string | null;
+  keyBytes?: KvValue | null;
   value?: KvValue | null;
   metadata?: KvKeyMetadata | null;
+}
+
+export interface KvGetOptions {
+  metadataOnly?: boolean | null;
+  keyBytes?: KvValue | null;
+  revision?: KvInt64 | null;
 }
 
 export interface KvPutResponse {
@@ -1815,29 +1850,197 @@ export type KvWriteMode = "upsert" | "create" | "update";
 export type KvCreateMode = "persistent" | "ephemeral" | "persistent_sequential" | "ephemeral_sequential";
 
 export interface KvPutOptions {
+  lease?: KvInt64 | number | null;
+  ttl?: number | null;
+  preserveLease?: boolean | null;
   writeMode?: KvWriteMode | null;
   createMode?: KvCreateMode | null;
+  keyBytes?: KvValue | null;
+  expectedModRevision?: KvInt64 | null;
+  expectedCreateRevision?: KvInt64 | null;
+}
+
+export interface KvDeleteOptions {
+  keyBytes?: KvValue | null;
+  expectedModRevision?: KvInt64 | null;
 }
 
 export interface KvDeleteResponse {
   deleted: number;
-  revision?: number | null;
+  revision?: KvInt64 | number | null;
 }
 
-export async function etcdListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
-  return invoke("etcd_list_prefix", { connectionId, prefix, limit, continuation });
+export type KvHistoryEventType = "put" | "delete";
+export interface KvHistoryEvent {
+  eventType: KvHistoryEventType;
+  revision: KvInt64;
+  value?: KvValue | null;
+  previousValue?: KvValue | null;
+  metadata?: KvKeyMetadata | null;
+}
+export interface KvHistoryResponse {
+  events: KvHistoryEvent[];
+  observedRevision: KvInt64;
+  truncated: boolean;
+}
+export interface KvStatusMember {
+  endpoint: string;
+  memberId?: KvInt64 | null;
+  name?: string | null;
+  version?: string | null;
+  leaderId?: KvInt64 | null;
+  revision?: KvInt64 | null;
+  raftTerm?: KvInt64 | null;
+  raftIndex?: KvInt64 | null;
+  raftAppliedIndex?: KvInt64 | null;
+  dbSize?: KvInt64 | null;
+  dbSizeInUse?: KvInt64 | null;
+  learner: boolean;
+  reachable: boolean;
+  latencyMs?: number | null;
+  errors: string[];
+}
+export interface KvPrometheusMetrics {
+  available: boolean;
+  sourceUrl?: string | null;
+  error?: string | null;
+  collectedAtMs?: number | null;
+  sampleCount?: number | null;
+  serverVersion?: string | null;
+  clusterVersion?: string | null;
+  goVersion?: string | null;
+  authRevision?: number | null;
+  hasLeader?: number | null;
+  isLeader?: number | null;
+  leaderChangesTotal?: number | null;
+  proposalsCommittedTotal?: number | null;
+  proposalsAppliedTotal?: number | null;
+  proposalsPending?: number | null;
+  proposalsFailedTotal?: number | null;
+  grpcRequestsTotal?: number | null;
+  grpcFailuresTotal?: number | null;
+  grpcMethodRequestsTotal: Record<string, number>;
+  grpcMethodFailuresTotal: Record<string, number>;
+  requestDurationSecondsSumByType: Record<string, number>;
+  requestDurationSecondsCountByType: Record<string, number>;
+  mvccPutTotal?: number | null;
+  mvccDeleteTotal?: number | null;
+  mvccRangeTotal?: number | null;
+  mvccTxnTotal?: number | null;
+  mvccCurrentRevision?: number | null;
+  mvccCompactRevision?: number | null;
+  mvccKeysTotal?: number | null;
+  mvccEventsTotal?: number | null;
+  mvccPendingEventsTotal?: number | null;
+  mvccSlowWatcherTotal?: number | null;
+  mvccWatchStreamTotal?: number | null;
+  mvccWatcherTotal?: number | null;
+  mvccTotalPutSizeBytes?: number | null;
+  openReadTransactions?: number | null;
+  leaseGrantedTotal?: number | null;
+  leaseRenewedTotal?: number | null;
+  leaseRevokedTotal?: number | null;
+  leaseExpiredTotal?: number | null;
+  leaseTtlSecondsSum?: number | null;
+  leaseTtlSecondsCount?: number | null;
+  clientReceivedBytesTotal?: number | null;
+  clientSentBytesTotal?: number | null;
+  peerReceivedBytesTotal?: number | null;
+  peerSentBytesTotal?: number | null;
+  peerReceivedFailuresTotal?: number | null;
+  peerSentFailuresTotal?: number | null;
+  walFsyncDurationSecondsSum?: number | null;
+  walFsyncDurationSecondsCount?: number | null;
+  walWriteBytesTotal?: number | null;
+  walWriteDurationSecondsSum?: number | null;
+  walWriteDurationSecondsCount?: number | null;
+  backendCommitDurationSecondsSum?: number | null;
+  backendCommitDurationSecondsCount?: number | null;
+  backendSnapshotDurationSecondsSum?: number | null;
+  backendSnapshotDurationSecondsCount?: number | null;
+  backendDefragDurationSecondsSum?: number | null;
+  backendDefragDurationSecondsCount?: number | null;
+  diskDefragInflight?: number | null;
+  snapshotApplyInProgress?: number | null;
+  quotaBackendBytes?: number | null;
+  knownPeers?: number | null;
+  heartbeatSendFailuresTotal?: number | null;
+  readIndexesFailedTotal?: number | null;
+  slowApplyTotal?: number | null;
+  slowReadIndexesTotal?: number | null;
+  healthSuccessTotal?: number | null;
+  healthFailuresTotal?: number | null;
+  residentMemoryBytes?: number | null;
+  virtualMemoryBytes?: number | null;
+  cpuSecondsTotal?: number | null;
+  processStartTimeSeconds?: number | null;
+  processReceivedBytesTotal?: number | null;
+  processTransmittedBytesTotal?: number | null;
+  openFds?: number | null;
+  maxFds?: number | null;
+  goroutines?: number | null;
+  goThreads?: number | null;
+  goMaxProcs?: number | null;
+  goHeapAllocBytes?: number | null;
+  goHeapInuseBytes?: number | null;
+  goHeapSysBytes?: number | null;
+  goHeapObjects?: number | null;
+  goNextGcBytes?: number | null;
+  goGcDurationSecondsSum?: number | null;
+  goGcDurationSecondsCount?: number | null;
+  dbSizeMetricBytes?: number | null;
+  dbSizeInUseMetricBytes?: number | null;
+}
+export interface KvStatusResponse {
+  clusterId?: KvInt64 | null;
+  revision?: KvInt64 | null;
+  leaderId?: KvInt64 | null;
+  keyCount?: KvInt64 | null;
+  alarms: string[];
+  members: KvStatusMember[];
+  metrics?: KvPrometheusMetrics | null;
 }
 
-export async function etcdGet(connectionId: string, key: string): Promise<KvGetResponse> {
-  return invoke("etcd_get", { connectionId, key });
+export async function etcdListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null): Promise<KvListPrefixResponse> {
+  return invoke("etcd_list_prefix", { connectionId, prefix, limit, continuation, revision: options?.revision ?? null, includeValues: options?.includeValues ?? null });
 }
 
-export async function etcdPut(connectionId: string, key: string, value: KvValue, lease?: number | null): Promise<KvPutResponse> {
-  return invoke("etcd_put", { connectionId, key, value, lease });
+export async function etcdSupportsTtl(connectionId: string): Promise<boolean> {
+  return invoke("etcd_supports_ttl", { connectionId });
 }
 
-export async function etcdDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
-  return invoke("etcd_delete", { connectionId, key });
+export async function etcdGet(connectionId: string, key: string, options?: KvGetOptions | null): Promise<KvGetResponse> {
+  return invoke("etcd_get", { connectionId, key, keyBytes: options?.keyBytes ?? null, revision: options?.revision ?? null, metadataOnly: options?.metadataOnly ?? null });
+}
+
+export async function etcdPut(connectionId: string, key: string, value: KvValue, options?: KvPutOptions | number | null): Promise<KvPutResponse> {
+  const legacyLease = typeof options === "number" ? options : null;
+  const putOptions = typeof options === "object" ? options : null;
+  return invoke("etcd_put", {
+    connectionId,
+    key,
+    value,
+    lease: legacyLease ?? putOptions?.lease ?? null,
+    ttl: putOptions?.ttl ?? null,
+    preserveLease: putOptions?.preserveLease ?? null,
+    keyBytes: putOptions?.keyBytes ?? null,
+    expectedModRevision: putOptions?.expectedModRevision ?? null,
+    expectedCreateRevision: putOptions?.expectedCreateRevision ?? null,
+  });
+}
+
+export async function etcdDelete(connectionId: string, key: string, options?: KvDeleteOptions | null): Promise<KvDeleteResponse> {
+  return invoke("etcd_delete", { connectionId, key, keyBytes: options?.keyBytes ?? null, expectedModRevision: options?.expectedModRevision ?? null });
+}
+
+export async function etcdRename(connectionId: string, request: { key: string; keyBytes?: KvValue | null; newKey: string; expectedModRevision?: KvInt64 | null }): Promise<{ renamed: boolean; revision?: KvInt64 | null }> {
+  return invoke("etcd_rename", { connectionId, request });
+}
+export async function etcdHistory(connectionId: string, request: { key: string; keyBytes?: KvValue | null; startRevision?: KvInt64 | null; endRevision?: KvInt64 | null; limit: number }): Promise<KvHistoryResponse> {
+  return invoke("etcd_history", { connectionId, request });
+}
+export async function etcdStatus(connectionId: string): Promise<KvStatusResponse> {
+  return invoke("etcd_status", { connectionId });
 }
 
 // --- ZooKeeper ---
@@ -2196,6 +2399,7 @@ export interface SqlFilePreview {
   sizeBytes: number;
   preview: string;
   canExecuteWithoutSelectedDatabase: boolean;
+  establishesDatabaseContext?: boolean;
 }
 
 export interface SqlFileProgress {
@@ -2216,6 +2420,10 @@ export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> 
 
 export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
   return invoke("execute_sql_file", { request });
+}
+
+export async function executeSqlFiles(request: SqlFileRequest, filePaths: string[]): Promise<void> {
+  return invoke("execute_sql_files", { request, filePaths });
 }
 
 export async function cancelSqlFileExecution(executionId: string): Promise<boolean> {
@@ -2459,6 +2667,7 @@ export interface DatabaseExportRequest {
   includeStructure: boolean;
   includeData: boolean;
   includeObjects: boolean;
+  includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
   failOnError?: boolean;

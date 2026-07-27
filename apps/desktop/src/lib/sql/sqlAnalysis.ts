@@ -48,7 +48,7 @@ export interface EditableQuerySource {
   alias?: string;
 }
 
-const POSTGRES_FOLDED_IDENTIFIER_TYPES = new Set(["postgres", "redshift", "gaussdb", "highgo", "vastbase", "kwdb", "opengauss", "questdb"]);
+const POSTGRES_FOLDED_IDENTIFIER_TYPES = new Set(["postgres", "redshift", "gaussdb", "highgo", "uxdb", "vastbase", "kwdb", "opengauss", "questdb"]);
 const ORACLE_FOLDED_IDENTIFIER_TYPES = new Set(["oracle", "dameng", "oceanbase-oracle"]);
 
 /**

@@ -313,6 +313,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   redshift: redshiftCapabilities,
   vertica: redshiftCapabilities,
   highgo: postgresCapabilities,
+  uxdb: postgresCapabilities,
   vastbase: postgresCapabilities,
   kingbase: postgresCapabilities,
   firebird: firebirdCapabilities,

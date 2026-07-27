@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { ref } from "vue";
 import { afterEach, beforeEach, test } from "vitest";
 import {
   NACOS_CONFIG_LIST_COLUMN_WIDTHS_STORAGE_KEY,
   DEFAULT_NACOS_CONFIG_LIST_COLUMN_WIDTHS,
+  NACOS_CONFIG_LIST_HORIZONTAL_PADDING,
   useNacosConfigListColumnResize,
 } from "../../apps/desktop/src/composables/useNacosConfigListColumnResize.ts";
 
@@ -73,13 +75,13 @@ afterEach(() => {
   restoreLocalStorage = undefined;
 });
 
-test("Nacos config list keeps overflow tied to the computed width and updates it after drag resizing", () => {
+test("Nacos config list adjusts adjacent columns without changing the table width", () => {
   const layout = useNacosConfigListColumnResize();
 
   assert.deepEqual(layout.columnWidths.value, [...DEFAULT_NACOS_CONFIG_LIST_COLUMN_WIDTHS]);
   assert.equal(layout.gridTemplateColumns.value, "280px 180px 180px 96px");
   assert.equal(layout.totalWidth.value, 736);
-  assert.equal(layout.minWidth.value, "736px");
+  assert.equal(layout.minWidth.value, `${736 + NACOS_CONFIG_LIST_HORIZONTAL_PADDING}px`);
   assert.equal(layout.totalWidth.value > 700, true);
   assert.equal(layout.totalWidth.value > 820, false);
 
@@ -96,17 +98,31 @@ test("Nacos config list keeps overflow tied to the computed width and updates it
 
   documentHarness!.dispatchMouseEvent("mousemove", 400);
 
-  assert.deepEqual(layout.columnWidths.value, [400, 180, 180, 96]);
-  assert.equal(layout.gridTemplateColumns.value, "400px 180px 180px 96px");
-  assert.equal(layout.totalWidth.value, 856);
-  assert.equal(layout.minWidth.value, "856px");
-  assert.equal(layout.totalWidth.value > 820, true);
+  assert.deepEqual(layout.columnWidths.value, [364, 96, 180, 96]);
+  assert.equal(layout.gridTemplateColumns.value, "364px 96px 180px 96px");
+  assert.equal(layout.totalWidth.value, 736);
+  assert.equal(layout.minWidth.value, `${736 + NACOS_CONFIG_LIST_HORIZONTAL_PADDING}px`);
 
   documentHarness!.dispatchMouseEvent("mouseup", 400);
 
   assert.equal(layout.resizingColumnIndex.value, null);
-  assert.equal(localStorage.getItem(NACOS_CONFIG_LIST_COLUMN_WIDTHS_STORAGE_KEY), JSON.stringify([400, 180, 180, 96]));
+  assert.equal(localStorage.getItem(NACOS_CONFIG_LIST_COLUMN_WIDTHS_STORAGE_KEY), JSON.stringify([364, 96, 180, 96]));
 
   const restoredLayout = useNacosConfigListColumnResize();
-  assert.deepEqual(restoredLayout.columnWidths.value, [400, 180, 180, 96]);
+  assert.deepEqual(restoredLayout.columnWidths.value, [364, 96, 180, 96]);
+});
+
+test("Nacos config list fits every default column into the actual list viewport", () => {
+  const viewportWidth = ref(600);
+  const layout = useNacosConfigListColumnResize(viewportWidth);
+
+  assert.deepEqual(layout.columnWidths.value, [212, 139, 139, 86]);
+  assert.equal(layout.totalWidth.value, 600 - NACOS_CONFIG_LIST_HORIZONTAL_PADDING);
+  assert.equal(layout.minWidth.value, "600px");
+
+  viewportWidth.value = 800;
+
+  assert.equal(layout.totalWidth.value, 800 - NACOS_CONFIG_LIST_HORIZONTAL_PADDING);
+  assert.equal(layout.minWidth.value, "800px");
+  assert.equal(layout.columnWidths.value.every((width) => width > 0), true);
 });

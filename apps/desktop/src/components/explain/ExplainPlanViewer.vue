@@ -22,9 +22,15 @@ const { t } = useI18n();
 const activeView = ref<"tree" | "summary" | "raw" | "table">("tree");
 const hasTableView = computed(() => !!props.tableResult || !!props.tableError);
 
-watch(hasTableView, (available) => {
-  if (!available && activeView.value === "table") activeView.value = "tree";
-});
+watch(
+  [hasTableView, () => !!props.tableResult, () => !!props.plan, () => props.loading],
+  ([available, hasTableResult, hasPlan, loading]) => {
+    if (!available && activeView.value === "table") activeView.value = "tree";
+    // Wait for JSON EXPLAIN to finish so regular MySQL still defaults to its visual tree.
+    if (!loading && hasTableResult && !hasPlan) activeView.value = "table";
+  },
+  { immediate: true },
+);
 
 const flatRows = computed(() => {
   const rows: Array<{ node: ExplainPlanNode; depth: number }> = [];

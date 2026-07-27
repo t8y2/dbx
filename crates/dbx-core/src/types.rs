@@ -283,6 +283,59 @@ pub struct TriggerInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub constraint_type: String,
+    pub definition: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_table: Option<String>,
+    #[serde(default)]
+    pub ref_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
+    #[serde(default)]
+    pub deferrable: bool,
+    #[serde(default)]
+    pub initially_deferred: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionInfo {
+    pub name: String,
+    pub position: i32,
+    pub value: String,
+    pub partition_type: String,
+    pub partition_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_partition_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_partition_span: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubpartitionInfo {
+    pub name: String,
+    pub position: i32,
+    pub value: String,
+    pub partition_type: String,
+    pub partition_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionInfo {
     pub name: String,

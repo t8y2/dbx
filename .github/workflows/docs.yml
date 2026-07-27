@@ -5,7 +5,8 @@ on:
     branches: [main]
     paths: ["docs/**"]
   workflow_run:
-    workflows: ["Publish Packages"]
+    # Release and agent metadata are embedded during the static build, so wait for their R2 producers.
+    workflows: ["Sync Changelog to R2", "Agents Release"]
     types: [completed]
   workflow_dispatch:
 
@@ -26,7 +27,7 @@ jobs:
         with:
           node-version: 22
       - uses: pnpm/action-setup@v6
-      - run: cd docs && pnpm install --frozen-lockfile --ignore-workspace && pnpm build
+      - run: cd docs && pnpm install --frozen-lockfile && pnpm build
       - name: Deploy to Cloudflare Workers
         working-directory: docs
         run: pnpm dlx wrangler@4 deploy

@@ -353,11 +353,16 @@ pub enum AgentCapability {
     Transaction,
     Ddl,
     Kv,
+    KvTtl,
+    KvCas,
+    KvListValues,
+    KvStatus,
+    KvHistory,
     MultiSession,
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 14] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -366,6 +371,11 @@ impl AgentCapability {
         Self::Transaction,
         Self::Ddl,
         Self::Kv,
+        Self::KvTtl,
+        Self::KvCas,
+        Self::KvListValues,
+        Self::KvStatus,
+        Self::KvHistory,
         Self::MultiSession,
     ];
 
@@ -379,6 +389,11 @@ impl AgentCapability {
             Self::Transaction => "transaction",
             Self::Ddl => "ddl",
             Self::Kv => "kv",
+            Self::KvTtl => "kv_ttl",
+            Self::KvCas => "kv_cas",
+            Self::KvListValues => "kv_list_values",
+            Self::KvStatus => "kv_status",
+            Self::KvHistory => "kv_history",
             Self::MultiSession => "multi_session",
         }
     }
@@ -406,6 +421,9 @@ pub enum AgentMethod {
     ListIndexes,
     ListForeignKeys,
     ListTriggers,
+    ListConstraints,
+    ListPartitions,
+    ListSubpartitions,
     GetTableDdl,
     ExecuteQuery,
     ExecuteQueryPage,
@@ -422,7 +440,7 @@ pub enum AgentMethod {
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 36] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -444,6 +462,9 @@ impl AgentMethod {
         Self::ListIndexes,
         Self::ListForeignKeys,
         Self::ListTriggers,
+        Self::ListConstraints,
+        Self::ListPartitions,
+        Self::ListSubpartitions,
         Self::ExecuteQuery,
         Self::ExecuteQueryPage,
         Self::FetchQueryPage,
@@ -481,6 +502,9 @@ impl AgentMethod {
             Self::ListIndexes => "list_indexes",
             Self::ListForeignKeys => "list_foreign_keys",
             Self::ListTriggers => "list_triggers",
+            Self::ListConstraints => "list_constraints",
+            Self::ListPartitions => "list_partitions",
+            Self::ListSubpartitions => "list_subpartitions",
             Self::ExecuteQuery => "execute_query",
             Self::ExecuteQueryPage => "execute_query_page",
             Self::FetchQueryPage => "fetch_query_page",
@@ -502,6 +526,8 @@ impl AgentMethod {
 pub struct AgentConnectionInfo {
     #[serde(default)]
     pub identifier_quote: String,
+    #[serde(default)]
+    pub compatibility_mode: Option<String>,
     #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
 }
@@ -597,10 +623,14 @@ pub enum AgentKvMethod {
     Get,
     Put,
     Delete,
+    Rename,
+    History,
+    Status,
 }
 
 impl AgentKvMethod {
-    pub const ALL: [Self; 4] = [Self::ListPrefix, Self::Get, Self::Put, Self::Delete];
+    pub const ALL: [Self; 7] =
+        [Self::ListPrefix, Self::Get, Self::Put, Self::Delete, Self::Rename, Self::History, Self::Status];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -608,6 +638,9 @@ impl AgentKvMethod {
             Self::Get => "kv_get",
             Self::Put => "kv_put",
             Self::Delete => "kv_delete",
+            Self::Rename => "kv_rename",
+            Self::History => "kv_history",
+            Self::Status => "kv_status",
         }
     }
 }
@@ -878,7 +911,13 @@ impl AgentDriverClient {
         .map_err(|e| format!("Agent RPC task failed: {e}"))?;
 
         let _ = self.stdout.insert(returned_reader);
-        result.map_err(|e| self.format_agent_process_error(&e))
+        result.map_err(|error| {
+            if is_agent_rpc_response_error(&error) {
+                error
+            } else {
+                self.format_agent_process_error(&error)
+            }
+        })
     }
 
     pub async fn call_method<T: DeserializeOwned + Send + 'static>(
@@ -1186,6 +1225,51 @@ impl AgentDriverClient {
     ) -> Result<T, String> {
         self.call_method_with_timeout(
             AgentMethod::ListTriggers,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn list_constraints<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::ListConstraints,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn list_partitions<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::ListPartitions,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn list_subpartitions<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::ListSubpartitions,
             agent_schema_table_params(database, schema, table),
             timeout_duration,
         )
@@ -1579,7 +1663,15 @@ pub fn is_unsupported_handshake_error(error: &str) -> bool {
 }
 
 pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability: AgentCapability) -> bool {
-    if capability == AgentCapability::Kv {
+    if matches!(
+        capability,
+        AgentCapability::Kv
+            | AgentCapability::KvTtl
+            | AgentCapability::KvCas
+            | AgentCapability::KvListValues
+            | AgentCapability::KvStatus
+            | AgentCapability::KvHistory
+    ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
     handshake.map(|value| value.supports(capability)).unwrap_or(true)
@@ -1656,7 +1748,7 @@ fn agent_java_args_with_extra_opts(
     .map(str::to_string)
     .collect::<Vec<_>>();
 
-    if agent_jar_path_matches_key(jar_path, "kingbase") || agent_jar_path_matches_key(jar_path, "informix") {
+    if agent_jar_path_matches_key(jar_path, "informix") {
         args.push("-Djava.net.preferIPv4Stack=true".to_string());
     }
 
@@ -1828,6 +1920,10 @@ fn format_agent_process_error(base: &str, exit_status: Option<String>, stderr_ta
     parts.join(". ")
 }
 
+fn is_agent_rpc_response_error(message: &str) -> bool {
+    message.trim_start().starts_with("Agent RPC error (")
+}
+
 fn agent_process_error_hint(stderr: &str) -> Option<&'static str> {
     let lower = stderr.to_ascii_lowercase();
     if lower.contains("unsupportedclassversionerror")
@@ -1885,11 +1981,11 @@ mod tests {
         agent_close_query_session_params, agent_handshake_params, agent_java_args, agent_java_args_with_extra,
         agent_java_args_with_extra_opts, agent_object_source_params, agent_proxy_env_vars, agent_schema_params,
         agent_schema_table_params, agent_supports_capability, agent_transaction_params, format_agent_process_error,
-        format_agent_startup_error, is_unsupported_handshake_error, mongo_collection_params, mongo_database_params,
-        mongo_document_id_params, parse_agent_java_opts, read_agent_line, start_stderr_collector, AgentCapability,
-        AgentDriverClient, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentRuntimeClient,
-        AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail,
-        AGENT_PROTOCOL_VERSION,
+        format_agent_startup_error, is_agent_rpc_response_error, is_unsupported_handshake_error,
+        mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
+        read_agent_line, start_stderr_collector, AgentCapability, AgentDriverClient, AgentHandshake, AgentKvMethod,
+        AgentLaunchSpec, AgentMethod, AgentRuntimeClient, AgentTableReadCloseParams, AgentTableReadPageParams,
+        AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
     };
     use std::io::Cursor;
     use std::io::Write;
@@ -1921,13 +2017,6 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "-Dhttp.proxyHost="));
         assert!(args.iter().any(|arg| arg == "-Dhttps.proxyHost="));
         assert!(args.iter().any(|arg| arg == "-DsocksProxyHost="));
-    }
-
-    #[test]
-    fn agent_java_args_prefer_ipv4_for_kingbase() {
-        let args = agent_java_args("/tmp/dbx/drivers/kingbase/agent.jar");
-
-        assert!(args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
     }
 
     #[test]
@@ -2089,6 +2178,14 @@ mod tests {
         assert!(started_at.elapsed() < std::time::Duration::from_millis(500));
         assert!(message.contains("Agent RPC error (-1): syntax error"));
         assert!(!message.contains("agent process exited"));
+    }
+
+    #[test]
+    fn rpc_response_errors_do_not_require_process_stderr_diagnostics() {
+        assert!(is_agent_rpc_response_error(
+            "Agent RPC error (-1): ETCD_CAS_CONFLICT: key changed after it was loaded"
+        ));
+        assert!(!is_agent_rpc_response_error("Failed to read response from agent: end of stream"));
     }
 
     #[tokio::test]
@@ -2257,8 +2354,13 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::Transaction.as_str(), "transaction");
         assert_eq!(AgentCapability::Ddl.as_str(), "ddl");
         assert_eq!(AgentCapability::Kv.as_str(), "kv");
+        assert_eq!(AgentCapability::KvTtl.as_str(), "kv_ttl");
+        assert_eq!(AgentCapability::KvCas.as_str(), "kv_cas");
+        assert_eq!(AgentCapability::KvListValues.as_str(), "kv_list_values");
+        assert_eq!(AgentCapability::KvStatus.as_str(), "kv_status");
+        assert_eq!(AgentCapability::KvHistory.as_str(), "kv_history");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
-        assert_eq!(AgentCapability::ALL.len(), 9);
+        assert_eq!(AgentCapability::ALL.len(), 14);
     }
 
     #[test]
@@ -2278,6 +2380,9 @@ for line in sys.stdin:
         assert_eq!(AgentMethod::ListIndexes.as_str(), "list_indexes");
         assert_eq!(AgentMethod::ListForeignKeys.as_str(), "list_foreign_keys");
         assert_eq!(AgentMethod::ListTriggers.as_str(), "list_triggers");
+        assert_eq!(AgentMethod::ListConstraints.as_str(), "list_constraints");
+        assert_eq!(AgentMethod::ListPartitions.as_str(), "list_partitions");
+        assert_eq!(AgentMethod::ListSubpartitions.as_str(), "list_subpartitions");
         assert_eq!(AgentMethod::GetTableDdl.as_str(), "get_table_ddl");
         assert_eq!(AgentMethod::ExecuteQuery.as_str(), "execute_query");
         assert_eq!(AgentMethod::ExecuteQueryPage.as_str(), "execute_query_page");
@@ -2316,7 +2421,10 @@ for line in sys.stdin:
         assert_eq!(AgentKvMethod::Get.as_str(), "kv_get");
         assert_eq!(AgentKvMethod::Put.as_str(), "kv_put");
         assert_eq!(AgentKvMethod::Delete.as_str(), "kv_delete");
-        assert_eq!(AgentKvMethod::ALL.len(), 4);
+        assert_eq!(AgentKvMethod::Rename.as_str(), "kv_rename");
+        assert_eq!(AgentKvMethod::History.as_str(), "kv_history");
+        assert_eq!(AgentKvMethod::Status.as_str(), "kv_status");
+        assert_eq!(AgentKvMethod::ALL.len(), 7);
     }
 
     #[test]
@@ -2330,6 +2438,9 @@ for line in sys.stdin:
         let _list_indexes = AgentDriverClient::list_indexes::<serde_json::Value>;
         let _list_foreign_keys = AgentDriverClient::list_foreign_keys::<serde_json::Value>;
         let _list_triggers = AgentDriverClient::list_triggers::<serde_json::Value>;
+        let _list_constraints = AgentDriverClient::list_constraints::<serde_json::Value>;
+        let _list_partitions = AgentDriverClient::list_partitions::<serde_json::Value>;
+        let _list_subpartitions = AgentDriverClient::list_subpartitions::<serde_json::Value>;
         let _get_table_ddl = AgentDriverClient::get_table_ddl::<serde_json::Value>;
         let _execute_query = AgentDriverClient::execute_query::<serde_json::Value>;
         let _execute_query_page = AgentDriverClient::execute_query_page::<serde_json::Value>;
@@ -2570,6 +2681,16 @@ for line in sys.stdin:
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::Query));
         assert!(!agent_supports_capability(None, AgentCapability::Kv));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::Kv));
+        assert!(!agent_supports_capability(None, AgentCapability::KvTtl));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvTtl));
+        assert!(!agent_supports_capability(None, AgentCapability::KvCas));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvCas));
+        assert!(!agent_supports_capability(None, AgentCapability::KvListValues));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvListValues));
+        assert!(!agent_supports_capability(None, AgentCapability::KvStatus));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvStatus));
+        assert!(!agent_supports_capability(None, AgentCapability::KvHistory));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvHistory));
     }
 
     #[test]

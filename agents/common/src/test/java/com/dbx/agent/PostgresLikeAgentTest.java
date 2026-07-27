@@ -55,6 +55,40 @@ class PostgresLikeAgentTest {
     }
 
     @Test
+    void metadataQueriesSupportRenamedPostgresCatalogs() {
+        TestPostgresLikeAgent agent = new TestPostgresLikeAgent(new PostgresLikeAgentProfile(
+            PostgresLikeAgentTest.class.getName(),
+            "jdbc:uxdb://{host}:{port}/{database}",
+            52025,
+            "ux_catalog",
+            "ux_"
+        ));
+        agent.connect(new ConnectParams());
+
+        agent.listDatabases();
+        agent.listSchemas();
+        agent.listTables("app");
+        agent.listObjects("app");
+        agent.getObjectSource("app", "refresh_orders", "FUNCTION");
+        agent.getColumns("app", "orders");
+        agent.listCheckConstraintsForTest("app", "orders");
+        agent.listIndexes("app", "orders");
+        agent.listForeignKeys("app", "orders");
+        agent.listTriggers("app", "orders");
+
+        String sql = String.join("\n", MetadataSqlFake.statements);
+
+        assertTrue(sql.contains("ux_catalog.ux_database"), sql);
+        assertTrue(sql.contains("ux_catalog.ux_namespace"), sql);
+        assertTrue(sql.contains("ux_catalog.ux_class"), sql);
+        assertTrue(sql.contains("ux_catalog.ux_proc"), sql);
+        assertTrue(sql.contains("ux_catalog.ux_get_constraintdef"), sql);
+        assertTrue(sql.contains("ux_catalog.ux_get_functiondef"), sql);
+        assertTrue(sql.contains("ux_catalog.ux_get_expr"), sql);
+        assertFalse(sql.contains("pg_catalog"), sql);
+    }
+
+    @Test
     void mapsPgCatalogBooleanNullableValues() {
         TestPostgresLikeAgent agent = new TestPostgresLikeAgent(preparedConnection(
             resultSet(
@@ -156,14 +190,22 @@ class PostgresLikeAgentTest {
         private final Connection connection;
 
         private TestPostgresLikeAgent() {
-            this(null);
+            this((Connection) null);
         }
 
         private TestPostgresLikeAgent(Connection connection) {
-            super(new PostgresLikeAgentProfile(
+            this(new PostgresLikeAgentProfile(
                 PostgresLikeAgentTest.class.getName(),
                 "jdbc:test://{host}:{port}/{database}"
-            ));
+            ), connection);
+        }
+
+        private TestPostgresLikeAgent(PostgresLikeAgentProfile profile) {
+            this(profile, null);
+        }
+
+        private TestPostgresLikeAgent(PostgresLikeAgentProfile profile, Connection connection) {
+            super(profile);
             this.connection = connection;
         }
 

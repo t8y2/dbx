@@ -683,7 +683,7 @@ const defaultValuePresets = computed((): DefaultValuePreset[] => {
 });
 
 function isPostgresIdentityType(dbType: string | undefined): boolean {
-  return dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "highgo" || dbType === "vastbase" || dbType === "kingbase";
+  return dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "highgo" || dbType === "uxdb" || dbType === "vastbase" || dbType === "kingbase";
 }
 
 const showExtendedProperties = computed(() => {

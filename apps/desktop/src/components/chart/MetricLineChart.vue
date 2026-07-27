@@ -13,7 +13,7 @@ use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendComponent
 
 interface Series {
   name: string;
-  data: number[];
+  data: Array<number | null>;
   color?: string;
 }
 
@@ -56,6 +56,7 @@ const chartOption = computed(() => {
       name: s.name,
       type: "line",
       data: s.data,
+      connectNulls: false,
       smooth: true,
       showSymbol: false,
       lineStyle: s.color ? { color: s.color, width: 2 } : { width: 2 },

@@ -116,6 +116,16 @@ pub(super) fn mysql_index_parts(index_type: &str) -> (String, String) {
     }
 }
 
+fn mysql_index_column_sql(column: &str) -> String {
+    let trimmed = column.trim();
+    // Keep the wrapped expression from MySQL metadata instead of quoting it as a column identifier.
+    if trimmed.starts_with("((") && trimmed.ends_with("))") {
+        trimmed.to_string()
+    } else {
+        quote_ident(StructureDialect::Mysql, column)
+    }
+}
+
 pub(super) fn build_drop_index_sql(
     database_type: Option<DatabaseType>,
     dialect: StructureDialect,
@@ -160,7 +170,17 @@ pub(super) fn build_create_index_statements(
     }
 
     let unique = if index.is_unique { "UNIQUE " } else { "" };
-    let cols = columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", ");
+    let cols = columns
+        .iter()
+        .map(|column| {
+            if dialect == StructureDialect::Mysql {
+                mysql_index_column_sql(column)
+            } else {
+                quote_ident(dialect, column)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let idx_type = normalized_index_type(index);
     let mut type_prefix = String::new();
     let mut using_clause = String::new();

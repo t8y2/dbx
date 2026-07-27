@@ -5,6 +5,11 @@ describe("queryStore switchTab", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
     setActivePinia(createPinia());
   });
 
@@ -67,5 +72,36 @@ describe("queryStore switchTab", () => {
     expect(reopenedTabId).toBe(tabId);
     expect(queryStore.activeTabId).toBe(tabId);
     expect(settingsStore.settingsPageActive).toBe(false);
+  });
+
+  it("stores local data-grid column filters on the tab result", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", "users", "data", "public");
+    const tab = queryStore.tabs.find((item) => item.id === tabId)!;
+    tab.result = {
+      columns: ["id", "status"],
+      rows: [[1, "active"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+
+    queryStore.updateDataGridLocalColumnFilters(tabId, { "1": ["str:active"] });
+    expect(tab.result.local_column_filters).toEqual({ "1": ["str:active"] });
+
+    queryStore.updateDataGridLocalColumnFilters(tabId, {});
+    expect(tab.result.local_column_filters).toBeUndefined();
+  });
+
+  it("opens one reusable Nacos dashboard tab per connection", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+
+    const tabId = queryStore.openNacosDashboard("nacos-1");
+    const reopenedTabId = queryStore.openNacosDashboard("nacos-1");
+
+    expect(reopenedTabId).toBe(tabId);
+    expect(queryStore.tabs.filter((tab) => tab.mode === "nacos-dashboard")).toHaveLength(1);
+    expect(queryStore.activeTabId).toBe(tabId);
   });
 });

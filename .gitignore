@@ -2,6 +2,7 @@
 node_modules/
 .claude/
 .codex/
+.workbuddy/
 .superpowers/
 .trellis/
 .worktrees/

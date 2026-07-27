@@ -3,7 +3,8 @@ import { computed, ref } from "vue";
 import { beforeEach, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
-import type { QueryResult } from "../../apps/desktop/src/types/database.ts";
+import type { DataGridTableMeta } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
+import type { DatabaseType, QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 const apiMock = vi.hoisted(() => ({
   startQueryResultExport: vi.fn(),
@@ -17,6 +18,7 @@ const apiMock = vi.hoisted(() => ({
   exportQueryResultMarkdown: vi.fn(),
   exportQueryResultsXlsx: vi.fn(),
   buildDataGridCopyInsertStatement: vi.fn(),
+  buildExportSqlInsert: vi.fn(),
 }));
 const clipboardMock = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
@@ -80,6 +82,10 @@ function buildExportHarness(
     rows?: QueryResult["rows"];
     allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
     completeLocalResult?: QueryResult;
+    tableMeta?: DataGridTableMeta;
+    sourceColumns?: Array<string | undefined>;
+    databaseType?: DatabaseType;
+    context?: "results" | "table-data";
   } = {},
 ) {
   const exportColumns = options.columns ?? ["id", "name"];
@@ -129,12 +135,12 @@ function buildExportHarness(
     displayItems: computed(() => rowItems),
     sql: computed(() => "SELECT * FROM users"),
     exportSql: computed(() => "SELECT * FROM users ORDER BY id DESC"),
-    tableMeta: computed(() => undefined),
-    databaseType: computed(() => "postgres"),
+    tableMeta: computed(() => options.tableMeta),
+    databaseType: computed(() => options.databaseType ?? "postgres"),
     connectionId: computed(() => "conn-1"),
     database: computed(() => "db"),
-    context: computed(() => "results"),
-    sourceColumns: computed(() => undefined),
+    context: computed(() => options.context ?? "results"),
+    sourceColumns: computed(() => options.sourceColumns),
     columnTypes: computed(() => options.columnTypes),
     whereInput: computed(() => undefined),
     orderBy: computed(() => undefined),
@@ -715,6 +721,68 @@ test("complete local query result XLSX export does not re-execute the query", as
   assert.equal(queryResultExportRequest.mock.calls.length, 0);
   assert.equal(apiMock.startQueryResultExport.mock.calls.length, 0);
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1), ["Export", ["id", "name"], ["int4", "text"], completeLocalResult.rows]);
+});
+
+test("MySQL joined query SQL export keeps result aliases instead of source column names", async () => {
+  const download = installTextDownloadCapture();
+  const completeLocalResult: QueryResult = {
+    columns: ["order_no", "customer_name", "total_amount"],
+    column_types: ["int", "varchar", "decimal"],
+    rows: [[101, "Ada", "25.50"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    truncated: false,
+    has_more: false,
+  };
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO `orders` (`order_no`, `customer_name`, `total_amount`) VALUES (101, 'Ada', 25.50);");
+
+  try {
+    const { composable } = buildExportHarness({
+      columns: completeLocalResult.columns,
+      rows: completeLocalResult.rows,
+      completeLocalResult,
+      databaseType: "mysql",
+      tableMeta: {
+        tableName: "orders",
+        primaryKeys: ["id"],
+      },
+      sourceColumns: ["id", undefined, "amount"],
+    });
+
+    await composable.exportSql();
+
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["order_no", "customer_name", "total_amount"]);
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].rows, [[101, "Ada", "25.50"]]);
+    assert.match((await download.content()) ?? "", /`order_no`, `customer_name`, `total_amount`/);
+  } finally {
+    download.restore();
+  }
+});
+
+test("table data SQL export keeps source column names", async () => {
+  const download = installTextDownloadCapture();
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');");
+
+  try {
+    const { composable } = buildExportHarness({
+      columns: ["display_id", "display_name"],
+      rows: [[1, "Ada"]],
+      databaseType: "mysql",
+      context: "table-data",
+      tableMeta: {
+        tableName: "users",
+        primaryKeys: ["id"],
+      },
+      sourceColumns: ["id", "name"],
+    });
+
+    await composable.exportSql([1]);
+
+    assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["id", "name"]);
+    assert.match((await download.content()) ?? "", /`id`, `name`/);
+  } finally {
+    download.restore();
+  }
 });
 
 test("complete local query result export removes only internal hidden columns", async () => {

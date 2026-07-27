@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventToModifierOnlyShortcut, eventToShortcut, matchesModifierOnlyShortcut, matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { eventToModifierOnlyShortcut, eventToShortcut, isExecuteSqlInNewResultTabShortcut, matchesModifierOnlyShortcut, matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 
 describe("keyboard shortcut matching", () => {
   it("records modifier-only mouse shortcut settings", () => {
@@ -30,6 +30,12 @@ describe("keyboard shortcut matching", () => {
   it("matches canonical plus-key shortcuts", () => {
     expect(matchesShortcut({ key: "+", ctrlKey: true }, "Mod+Plus")).toBe(true);
     expect(matchesShortcut({ key: "+", ctrlKey: true, shiftKey: true }, "Shift+Mod+Plus")).toBe(true);
+  });
+
+  it("matches the configurable execute-in-new-result-tab shortcut", () => {
+    expect(isExecuteSqlInNewResultTabShortcut({ key: "\\", ctrlKey: true }, { executeSqlInNewResultTab: "Mod+\\" })).toBe(true);
+    expect(isExecuteSqlInNewResultTabShortcut({ key: "\\", metaKey: true }, { executeSqlInNewResultTab: "Mod+\\" })).toBe(true);
+    expect(isExecuteSqlInNewResultTabShortcut({ key: "\\", ctrlKey: true, shiftKey: true }, { executeSqlInNewResultTab: "Mod+\\" })).toBe(false);
   });
 
   it("matches legacy plus-key shortcuts saved with plus as a separator", () => {

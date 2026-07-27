@@ -597,7 +597,7 @@ impl NacosOpenApiAdmin {
     fn api_path_allowed(&self, path: &str) -> bool {
         match self.cfg.version_mode.as_ref() {
             Some(NacosVersionMode::V2) => !path.starts_with("/v3/"),
-            Some(NacosVersionMode::V3) => !path.starts_with("/v1/"),
+            Some(NacosVersionMode::V3) => !path.starts_with("/v1/") && !path.starts_with("/v2/"),
             Some(NacosVersionMode::Auto) | None => true,
         }
     }
@@ -833,6 +833,39 @@ impl NacosOpenApiAdmin {
         let mut seen = HashSet::new();
         instances.retain(|instance| seen.insert((instance.ip.clone(), instance.port, instance.cluster_name.clone())));
         Ok(instances)
+    }
+
+    async fn get_dashboard_nodes(&self) -> Result<Vec<NacosClusterNode>, String> {
+        // r-nacos does not implement the official Nacos cluster-node Admin
+        // APIs. An empty list represents this unsupported optional capability
+        // without turning every dashboard refresh into a false warning.
+        if self.is_explicit_rnacos() {
+            return Ok(Vec::new());
+        }
+
+        self.get_json_from_candidates(
+            "load Nacos cluster nodes",
+            vec![
+                ("/v3/admin/core/cluster/node/list", Vec::new()),
+                ("/v2/core/cluster/node/list", Vec::new()),
+                ("/v1/core/cluster/nodes", Vec::new()),
+                ("/v1/ns/operator/servers", Vec::new()),
+            ],
+        )
+        .await
+        .map(parse_cluster_nodes)
+    }
+
+    fn dashboard_warning(&self, error: String) -> String {
+        if matches!(self.cfg.version_mode, Some(NacosVersionMode::V3))
+            && (error.contains("[contextPathMismatch]") || error.contains("[apiVersionMismatch]"))
+        {
+            return format!(
+                "{error} Check the connection address: Nacos 3 dashboard APIs use the Server / Admin API endpoint \
+                 (normally http://host:8848/nacos), not the port 8080 Console."
+            );
+        }
+        error
     }
 }
 
@@ -1570,6 +1603,102 @@ impl NacosAdmin for NacosOpenApiAdmin {
         .await
     }
 
+    async fn get_dashboard(&self, query: NacosDashboardQuery) -> Result<NacosDashboardSnapshot, String> {
+        let namespace = self.namespace(query.namespace.as_deref());
+        let metrics_future = self.get_json_from_candidates(
+            "load Nacos dashboard metrics",
+            vec![
+                ("/v3/admin/ns/ops/metrics", vec![("onlyStatus".to_string(), "false".to_string())]),
+                ("/v2/ns/operator/metrics", vec![("onlyStatus".to_string(), "false".to_string())]),
+                ("/v1/ns/operator/metrics", Vec::new()),
+            ],
+        );
+        let nodes_future = self.get_dashboard_nodes();
+        let namespaces_future = self.list_namespaces();
+        let configs_future = self.list_configs(NacosConfigQuery {
+            namespace: Some(namespace.clone()),
+            group: None,
+            data_id: None,
+            app_name: None,
+            search: None,
+            page_no: Some(1),
+            page_size: Some(1),
+        });
+        let services_future = self.list_services(NacosServiceQuery {
+            namespace: Some(namespace.clone()),
+            group_name: None,
+            service_name: None,
+            page_no: Some(1),
+            page_size: Some(1),
+        });
+        let prometheus_future = crate::nacos::prometheus::scrape(&self.http, &self.cfg);
+
+        let (metrics_result, nodes_result, namespaces_result, configs_result, services_result, prometheus_result) = tokio::join!(
+            metrics_future,
+            nodes_future,
+            namespaces_future,
+            configs_future,
+            services_future,
+            prometheus_future
+        );
+        let mut warnings = Vec::new();
+
+        let mut metrics = match metrics_result {
+            Ok(value) => Some(parse_dashboard_metrics(value)),
+            Err(error) => {
+                warnings.push(self.dashboard_warning(error));
+                None
+            }
+        };
+        let nodes = match nodes_result {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(self.dashboard_warning(error));
+                Vec::new()
+            }
+        };
+        let namespace_count = match namespaces_result {
+            Ok(items) => Some(items.len() as u64),
+            Err(error) => {
+                warnings.push(error);
+                None
+            }
+        };
+        let config_count = match configs_result {
+            Ok(result) => Some(result.total_count),
+            Err(error) => {
+                warnings.push(error);
+                None
+            }
+        };
+        let service_count = match services_result {
+            Ok(result) => Some(result.total_count),
+            Err(error) => {
+                warnings.push(error);
+                None
+            }
+        };
+        let prometheus = match prometheus_result {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(error);
+                None
+            }
+        };
+        merge_prometheus_dashboard(&mut metrics, prometheus.as_ref());
+
+        Ok(NacosDashboardSnapshot {
+            namespace,
+            namespace_count,
+            config_count,
+            service_count,
+            metrics,
+            prometheus,
+            nodes,
+            warnings,
+        })
+    }
+
     async fn raw_request(&self, req: NacosRawRequest) -> Result<NacosRawResponse, String> {
         validate_raw_api_path(&req.path)?;
         let method = reqwest::Method::from_bytes(req.method.to_ascii_uppercase().as_bytes())
@@ -1658,6 +1787,107 @@ fn parse_namespaces(value: Value) -> Vec<NacosNamespaceInfo> {
         );
     }
     namespaces
+}
+
+fn parse_dashboard_metrics(value: Value) -> NacosDashboardMetrics {
+    let data = value.get("data").unwrap_or(&value);
+    NacosDashboardMetrics {
+        status: optional_string_field(data, &["status"])
+            .or_else(|| data.as_str().map(str::to_string))
+            .filter(|value| !value.trim().is_empty()),
+        service_count: optional_u64_field(data, &["serviceCount"]),
+        instance_count: optional_u64_field(data, &["instanceCount"]),
+        subscribe_count: optional_u64_field(data, &["subscribeCount"]),
+        raft_notify_task_count: optional_u64_field(data, &["raftNotifyTaskCount"]),
+        responsible_service_count: optional_u64_field(data, &["responsibleServiceCount"]),
+        responsible_instance_count: optional_u64_field(data, &["responsibleInstanceCount"]),
+        client_count: optional_u64_field(data, &["clientCount"]),
+        connection_based_client_count: optional_u64_field(data, &["connectionBasedClientCount"]),
+        ephemeral_ip_port_client_count: optional_u64_field(data, &["ephemeralIpPortClientCount"]),
+        persistent_ip_port_client_count: optional_u64_field(data, &["persistentIpPortClientCount"]),
+        responsible_client_count: optional_u64_field(data, &["responsibleClientCount"]),
+        cpu: optional_f64_field(data, &["cpu"]),
+        load: optional_f64_field(data, &["load"]),
+        mem: optional_f64_field(data, &["mem"]),
+    }
+}
+
+fn merge_prometheus_dashboard(
+    metrics: &mut Option<NacosDashboardMetrics>,
+    prometheus: Option<&NacosPrometheusSnapshot>,
+) {
+    let Some(prometheus) = prometheus else {
+        return;
+    };
+    let metrics = metrics.get_or_insert_with(NacosDashboardMetrics::default);
+    if let Some(value) = finite_u64(prometheus.naming.instance_count) {
+        metrics.instance_count = Some(value);
+    }
+    if let Some(value) = finite_u64(prometheus.naming.subscriber_count) {
+        metrics.subscribe_count = Some(value);
+    }
+    if let Some(value) = finite_u64(prometheus.naming.connection_count) {
+        metrics.client_count = Some(value);
+        metrics.connection_based_client_count = Some(value);
+    }
+    if let Some(value) = prometheus.resource.cpu_ratio {
+        metrics.cpu = Some(value);
+    }
+    if let Some(value) = prometheus.resource.memory_ratio {
+        metrics.mem = Some(value);
+    }
+    if let Some(value) = prometheus.resource.load_1m {
+        metrics.load = Some(value);
+    }
+}
+
+fn finite_u64(value: Option<f64>) -> Option<u64> {
+    value.filter(|value| value.is_finite() && *value >= 0.0 && *value <= u64::MAX as f64).map(|value| value as u64)
+}
+
+fn parse_cluster_nodes(value: Value) -> Vec<NacosClusterNode> {
+    let data = value.get("data").unwrap_or(&value);
+    let items = data
+        .as_array()
+        .cloned()
+        .or_else(|| data.get("servers").and_then(Value::as_array).cloned())
+        .or_else(|| data.get("members").and_then(Value::as_array).cloned())
+        .or_else(|| data.get("nodes").and_then(Value::as_array).cloned())
+        .or_else(|| data.get("pageItems").and_then(Value::as_array).cloned())
+        .or_else(|| value.get("servers").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    items
+        .into_iter()
+        .map(|item| {
+            let ip = optional_string_field(&item, &["ip"]);
+            let port = optional_u64_field(&item, &["port", "servePort"]).and_then(|port| u16::try_from(port).ok());
+            let address = optional_string_field(&item, &["address", "key"])
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| match (&ip, port) {
+                    (Some(ip), Some(port)) => format!("{ip}:{port}"),
+                    (Some(ip), None) => ip.clone(),
+                    _ => "-".to_string(),
+                });
+            let state = optional_string_field(&item, &["state", "status"]);
+            let alive = optional_bool_field(&item, &["alive", "healthy"]).or_else(|| {
+                state.as_ref().map(|state| matches!(state.to_ascii_uppercase().as_str(), "UP" | "ONLINE" | "HEALTHY"))
+            });
+            NacosClusterNode {
+                address,
+                ip,
+                port,
+                state,
+                alive,
+                site: optional_string_field(&item, &["site"]),
+                weight: optional_f64_field(&item, &["weight", "adWeight"]),
+                last_refresh_time: optional_string_field(&item, &["lastRefreshTime", "lastRefTimeStr", "lastRefTime"])
+                    .or_else(|| {
+                        item.get("extendInfo")
+                            .and_then(|extend_info| optional_string_field(extend_info, &["lastRefreshTime"]))
+                    }),
+            }
+        })
+        .collect()
 }
 
 fn normalize_api_path(path: &str) -> String {
@@ -1759,8 +1989,32 @@ async fn error_for_status(resp: reqwest::Response, path: &str) -> Result<reqwest
         return Ok(resp);
     }
     let detail = resp.text().await.unwrap_or_default();
-    let message = format!("Nacos admin {path} returned {status}: {}", detail.trim());
+    let detail = compact_response_detail(&detail);
+    let message = if detail.is_empty() {
+        format!("Nacos admin {path} returned {status}")
+    } else {
+        format!("Nacos admin {path} returned {status}: {detail}")
+    };
     Err(classified_error(classify_nacos_error(&message), &message))
+}
+
+fn compact_response_detail(detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return String::new();
+    }
+    if detail.to_ascii_lowercase().contains("<!doctype html") || detail.to_ascii_lowercase().contains("<html") {
+        return "HTML error page".to_string();
+    }
+
+    const MAX_CHARS: usize = 512;
+    let mut chars = detail.chars();
+    let compact: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{compact}…")
+    } else {
+        compact
+    }
 }
 
 fn classified_error(kind: &str, message: &str) -> String {
@@ -2188,7 +2442,29 @@ fn normalize_config_format(value: String) -> String {
 }
 
 fn optional_u64_field(value: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter().find_map(|key| value.get(*key)).and_then(Value::as_u64)
+    keys.iter().find_map(|key| value.get(*key)).and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+            .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+    })
+}
+
+fn optional_f64_field(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(|value| value.as_f64().or_else(|| value.as_str().and_then(|value| value.trim().parse().ok())))
+        .filter(|value| value.is_finite())
+}
+
+fn optional_bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| value.get(*key)).and_then(|value| {
+        value.as_bool().or_else(|| match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+            "true" | "up" | "online" | "healthy" => Some(true),
+            "false" | "down" | "offline" | "unhealthy" => Some(false),
+            _ => None,
+        })
+    })
 }
 
 fn optional_i64_field(value: &Value, keys: &[&str]) -> Option<i64> {
@@ -2311,6 +2587,8 @@ mod tests {
             rnacos_console_auth: Default::default(),
             auth: NacosAuthConfig::None,
             tls_skip_verify: false,
+            metrics_mode: Default::default(),
+            metrics_url: String::new(),
             page_size: 100,
             connect_override: None,
         }
@@ -2332,6 +2610,124 @@ mod tests {
 
         admin.get_config_list_value("", "", "", "", 1, 20).await.unwrap();
         server.await.unwrap();
+    }
+
+    #[test]
+    fn explicit_v3_rejects_legacy_admin_api_paths() {
+        let mut config = test_admin_config("http://127.0.0.1:8848".to_string());
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        assert!(admin.api_path_allowed("/v3/admin/ns/ops/metrics"));
+        assert!(admin.api_path_allowed("/health"));
+        assert!(!admin.api_path_allowed("/v2/ns/operator/metrics"));
+        assert!(!admin.api_path_allowed("/v1/ns/operator/metrics"));
+    }
+
+    #[test]
+    fn compacts_html_error_pages_in_admin_warnings() {
+        assert_eq!(
+            compact_response_detail("<!doctype html><html><body><h1>HTTP Status 404</h1></body></html>"),
+            "HTML error page"
+        );
+        assert!(compact_response_detail(&"x".repeat(600)).ends_with('…'));
+    }
+
+    #[test]
+    fn gives_nacos_v3_dashboard_endpoint_guidance() {
+        let mut config = test_admin_config("http://127.0.0.1:8080".to_string());
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let warning =
+            admin.dashboard_warning("NACOS_ERROR[contextPathMismatch]: No static resource v3/admin".to_string());
+        assert!(warning.contains("http://host:8848/nacos"));
+        assert!(warning.contains("not the port 8080 Console"));
+    }
+
+    #[test]
+    fn prometheus_metrics_preserve_namespace_dashboard_values() {
+        let mut metrics = Some(NacosDashboardMetrics {
+            service_count: Some(1),
+            instance_count: Some(2),
+            cpu: Some(0.1),
+            ..Default::default()
+        });
+        let config_count = Some(3);
+        let service_count = Some(1);
+        let prometheus = NacosPrometheusSnapshot {
+            resource: NacosPrometheusResourceMetrics { cpu_ratio: Some(0.5), ..Default::default() },
+            config: NacosPrometheusConfigMetrics { config_count: Some(7.0), ..Default::default() },
+            naming: NacosPrometheusNamingMetrics {
+                service_count: Some(8.0),
+                instance_count: Some(9.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        merge_prometheus_dashboard(&mut metrics, Some(&prometheus));
+
+        let metrics = metrics.unwrap();
+        assert_eq!(config_count, Some(3));
+        assert_eq!(service_count, Some(1));
+        assert_eq!(metrics.service_count, Some(1));
+        assert_eq!(metrics.instance_count, Some(9));
+        assert_eq!(metrics.cpu, Some(0.5));
+    }
+
+    #[tokio::test]
+    async fn nacos_v2_dashboard_uses_core_cluster_node_api() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v2/core/cluster/node/list");
+            write_json_response(&mut socket, r#"{"code":0,"data":[{"address":"127.0.0.1:8848","state":"UP"}]}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let nodes = admin.get_dashboard_nodes().await.unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].address, "127.0.0.1:8848");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn nacos_v2_dashboard_falls_back_to_legacy_core_cluster_nodes_api() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v2/core/cluster/node/list");
+            write_not_found_response(&mut socket).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/core/cluster/nodes");
+            write_json_response(&mut socket, r#"{"code":200,"data":[{"address":"127.0.0.1:8848","state":"UP"}]}"#)
+                .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let nodes = admin.get_dashboard_nodes().await.unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].address, "127.0.0.1:8848");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_dashboard_skips_unsupported_cluster_node_api() {
+        let mut config = test_admin_config("http://127.0.0.1:1".to_string());
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        assert!(admin.get_dashboard_nodes().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3638,6 +4034,53 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn dashboard_combines_metrics_nodes_and_namespace_totals() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut paths = HashSet::new();
+            for _ in 0..6 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let target = read_request_target(&mut socket).await;
+                let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+                paths.insert(url.path().to_string());
+                let body = match url.path() {
+                    "/v3/admin/ns/ops/metrics" => {
+                        r#"{"code":0,"data":{"status":"UP","serviceCount":8,"instanceCount":13,"clientCount":5}}"#
+                    }
+                    "/v3/admin/core/cluster/node/list" => {
+                        r#"{"code":0,"data":[{"address":"127.0.0.1:8848","ip":"127.0.0.1","port":8848,"state":"UP"}]}"#
+                    }
+                    "/v3/console/core/namespace/list" => {
+                        r#"{"code":0,"data":{"pageItems":[{"namespaceId":"dev","namespaceName":"Development"}]}}"#
+                    }
+                    "/v3/console/cs/config/list" => r#"{"code":0,"data":{"totalCount":21,"pageItems":[]}}"#,
+                    "/v3/console/ns/service/list" => r#"{"code":0,"data":{"count":3,"serviceList":[]}}"#,
+                    "/actuator/prometheus" => {
+                        "# TYPE system_cpu_usage gauge\nsystem_cpu_usage 0.25\n# TYPE nacos_monitor gauge\nnacos_monitor{module=\"config\",name=\"configCount\"} 12\nnacos_monitor{module=\"naming\",name=\"serviceCount\"} 4\nnacos_monitor{module=\"naming\",name=\"ipCount\"} 14\n"
+                    }
+                    path => panic!("unexpected dashboard request path: {path}"),
+                };
+                write_json_response(&mut socket, body).await;
+            }
+            paths
+        });
+
+        let admin = NacosOpenApiAdmin::new(test_admin_config(format!("http://{address}"))).unwrap();
+        let snapshot = admin.get_dashboard(NacosDashboardQuery { namespace: Some("dev".to_string()) }).await.unwrap();
+
+        assert_eq!(snapshot.namespace, "dev");
+        assert_eq!(snapshot.namespace_count, Some(2));
+        assert_eq!(snapshot.config_count, Some(21));
+        assert_eq!(snapshot.service_count, Some(3));
+        assert_eq!(snapshot.metrics.as_ref().and_then(|metrics| metrics.instance_count), Some(14));
+        assert_eq!(snapshot.prometheus.as_ref().and_then(|metrics| metrics.resource.cpu_ratio), Some(0.25));
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert!(snapshot.warnings.is_empty());
+        assert_eq!(server.await.unwrap().len(), 6);
+    }
+
     #[test]
     fn parses_namespace_list_shape() {
         let parsed = parse_namespaces(serde_json::json!({
@@ -3665,6 +4108,61 @@ mod tests {
         assert_eq!(parsed[0].namespace, "");
         assert_eq!(parsed[1].namespace, "dev");
         assert_eq!(parsed[1].namespace_show_name, "Development");
+    }
+
+    #[test]
+    fn parses_v3_dashboard_metrics_shape() {
+        let parsed = parse_dashboard_metrics(serde_json::json!({
+            "code": 0,
+            "data": {
+                "status": "UP",
+                "serviceCount": 12,
+                "instanceCount": 34,
+                "clientCount": "5",
+                "cpu": 0.25,
+                "mem": "0.5"
+            }
+        }));
+
+        assert_eq!(parsed.status.as_deref(), Some("UP"));
+        assert_eq!(parsed.service_count, Some(12));
+        assert_eq!(parsed.instance_count, Some(34));
+        assert_eq!(parsed.client_count, Some(5));
+        assert_eq!(parsed.cpu, Some(0.25));
+        assert_eq!(parsed.mem, Some(0.5));
+
+        let status_only = parse_dashboard_metrics(serde_json::json!({ "code": 0, "data": "UP" }));
+        assert_eq!(status_only.status.as_deref(), Some("UP"));
+    }
+
+    #[test]
+    fn parses_v1_and_v3_cluster_node_shapes() {
+        let v1 = parse_cluster_nodes(serde_json::json!({
+            "servers": [{
+                "ip": "192.0.2.1",
+                "servePort": 8848,
+                "alive": true,
+                "site": "unknown",
+                "lastRefTimeStr": "2026-07-26 10:00:00"
+            }]
+        }));
+        assert_eq!(v1[0].address, "192.0.2.1:8848");
+        assert_eq!(v1[0].alive, Some(true));
+        assert_eq!(v1[0].last_refresh_time.as_deref(), Some("2026-07-26 10:00:00"));
+
+        let v3 = parse_cluster_nodes(serde_json::json!({
+            "code": 0,
+            "data": [{
+                "address": "192.0.2.2:8848",
+                "ip": "192.0.2.2",
+                "port": 8848,
+                "state": "UP",
+                "extendInfo": { "lastRefreshTime": 1785031200000_u64 }
+            }]
+        }));
+        assert_eq!(v3[0].address, "192.0.2.2:8848");
+        assert_eq!(v3[0].alive, Some(true));
+        assert_eq!(v3[0].last_refresh_time.as_deref(), Some("1785031200000"));
     }
 
     #[test]

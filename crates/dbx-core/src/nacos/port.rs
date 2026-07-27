@@ -31,5 +31,6 @@ pub trait NacosAdmin: Send + Sync {
     async fn list_services(&self, query: NacosServiceQuery) -> Result<NacosServiceList, String>;
     async fn list_instances(&self, query: NacosInstanceQuery) -> Result<Vec<NacosInstanceInfo>, String>;
     async fn update_instance(&self, req: NacosInstanceUpdate) -> Result<(), String>;
+    async fn get_dashboard(&self, query: NacosDashboardQuery) -> Result<NacosDashboardSnapshot, String>;
     async fn raw_request(&self, req: NacosRawRequest) -> Result<NacosRawResponse, String>;
 }

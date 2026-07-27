@@ -170,6 +170,8 @@ import type {
   NacosInstanceInfo,
   NacosInstanceQuery,
   NacosInstanceUpdate,
+  NacosDashboardQuery,
+  NacosDashboardSnapshot,
   NacosNamespaceCreate,
   NacosNamespaceInfo,
   NacosNamespaceUpdate,
@@ -2273,6 +2275,10 @@ export async function nacosListInstances(connectionId: string, query: NacosInsta
 
 export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdate): Promise<void> {
   return post("/api/nacos/instances/update", { connectionId, req });
+}
+
+export async function nacosGetDashboard(connectionId: string, query: NacosDashboardQuery): Promise<NacosDashboardSnapshot> {
+  return post("/api/nacos/dashboard", { connectionId, query });
 }
 
 export async function nacosRawRequest(connectionId: string, req: NacosRawRequest): Promise<NacosRawResponse> {

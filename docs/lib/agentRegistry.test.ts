@@ -32,6 +32,7 @@ test("non-release assets retain their official download link", () => {
 test("catalog falls back from R2 to CNB without using GitHub API", async () => {
   const accessVersion = driverVersions.access;
   const requestedUrls: string[] = [];
+  const accessVersion = driverVersions.access;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request) => {

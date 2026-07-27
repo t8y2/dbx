@@ -51,6 +51,7 @@ export interface NacosAuthConfig {
 
 export type NacosImplementation = "nacos" | "rnacos";
 export type NacosVersionMode = "auto" | "v2" | "v3";
+export type NacosMetricsMode = "auto" | "disabled" | "custom";
 export type NacosRNacosConsoleAuth = { kind: "inherit" } | { kind: "usernamePassword"; username: string; password: string };
 
 export interface NacosAdminConfig {
@@ -65,6 +66,8 @@ export interface NacosAdminConfig {
   rnacosConsoleAuth?: NacosRNacosConsoleAuth;
   auth?: NacosAuthConfig;
   tlsSkipVerify?: boolean;
+  metricsMode?: NacosMetricsMode;
+  metricsUrl?: string;
   pageSize?: number;
 }
 
@@ -342,6 +345,124 @@ export interface NacosInstanceUpdate {
   ephemeral?: boolean;
   weight?: number;
   metadata?: unknown;
+}
+
+export interface NacosDashboardQuery {
+  namespace?: string;
+}
+
+export interface NacosDashboardMetrics {
+  status?: string;
+  serviceCount?: number;
+  instanceCount?: number;
+  subscribeCount?: number;
+  raftNotifyTaskCount?: number;
+  responsibleServiceCount?: number;
+  responsibleInstanceCount?: number;
+  clientCount?: number;
+  connectionBasedClientCount?: number;
+  ephemeralIpPortClientCount?: number;
+  persistentIpPortClientCount?: number;
+  responsibleClientCount?: number;
+  cpu?: number;
+  load?: number;
+  mem?: number;
+}
+
+export interface NacosPrometheusSource {
+  kind: NacosImplementation;
+  endpoint: string;
+  fingerprint?: string;
+}
+
+export interface NacosPrometheusResourceMetrics {
+  cpuRatio?: number;
+  memoryRatio?: number;
+  memoryUsedBytes?: number;
+  memoryMaxBytes?: number;
+  rssBytes?: number;
+  vmsBytes?: number;
+  systemTotalMemoryBytes?: number;
+  load1m?: number;
+  jvmDaemonThreads?: number;
+  gcPauseCount?: number;
+}
+
+export interface NacosPrometheusTrafficMetrics {
+  httpRequestsTotal?: number;
+  grpcRequestsTotal?: number;
+  httpErrorsTotal?: number;
+  grpcErrorsTotal?: number;
+  httpDurationSecondsTotal?: number;
+  httpDurationCount?: number;
+  grpcDurationSecondsTotal?: number;
+  grpcDurationCount?: number;
+  httpP50Ms?: number;
+  httpP95Ms?: number;
+  httpP99Ms?: number;
+  grpcP50Ms?: number;
+  grpcP95Ms?: number;
+  grpcP99Ms?: number;
+  executorPoolSize?: number;
+  executorActiveCount?: number;
+  executorQueuedTasks?: number;
+}
+
+export interface NacosPrometheusConfigMetrics {
+  configCount?: number;
+  getConfigTotal?: number;
+  publishTotal?: number;
+  longPolling?: number;
+  listenerClients?: number;
+  listenerKeys?: number;
+  notifyTasks?: number;
+  notifyClientTasks?: number;
+  dumpTasks?: number;
+  subscriberCount?: number;
+}
+
+export interface NacosPrometheusNamingMetrics {
+  serviceCount?: number;
+  instanceCount?: number;
+  subscriberCount?: number;
+  connectionCount?: number;
+  totalPush?: number;
+  failedPush?: number;
+  emptyPush?: number;
+  pushPendingTasks?: number;
+  avgPushCostMs?: number;
+  maxPushCostMs?: number;
+  leaderStatus?: number;
+}
+
+export interface NacosPrometheusSnapshot {
+  source: NacosPrometheusSource;
+  resource: NacosPrometheusResourceMetrics;
+  traffic: NacosPrometheusTrafficMetrics;
+  config: NacosPrometheusConfigMetrics;
+  naming: NacosPrometheusNamingMetrics;
+}
+
+export interface NacosClusterNode {
+  address: string;
+  ip?: string;
+  port?: number;
+  state?: string;
+  alive?: boolean;
+  site?: string;
+  weight?: number;
+  lastRefreshTime?: string;
+}
+
+export interface NacosDashboardSnapshot {
+  namespace: string;
+  namespaceCount?: number;
+  configCount?: number;
+  serviceCount?: number;
+  metrics?: NacosDashboardMetrics;
+  prometheus?: NacosPrometheusSnapshot;
+  nodes: NacosClusterNode[];
+  warnings: string[];
 }
 
 export interface NacosRawRequest {

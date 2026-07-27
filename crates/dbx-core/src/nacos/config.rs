@@ -33,6 +33,15 @@ pub enum NacosVersionMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosMetricsMode {
+    #[default]
+    Auto,
+    Disabled,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum NacosRNacosConsoleAuth {
     #[default]
@@ -73,6 +82,10 @@ pub struct NacosAdminConfig {
     pub auth: NacosAuthConfig,
     #[serde(default)]
     pub tls_skip_verify: bool,
+    #[serde(default)]
+    pub metrics_mode: NacosMetricsMode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub metrics_url: String,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
     #[serde(skip)]
@@ -113,6 +126,8 @@ impl NacosAdminConfig {
                     NacosAuthConfig::UsernamePassword { username: cfg.username.clone(), password: cfg.password.clone() }
                 },
                 tls_skip_verify: false,
+                metrics_mode: NacosMetricsMode::Auto,
+                metrics_url: String::new(),
                 page_size: default_page_size(),
                 connect_override: None,
             }
@@ -130,7 +145,19 @@ impl NacosAdminConfig {
         } else {
             self.display_server_addr = normalize_endpoint_url(&self.display_server_addr, "Nacos display address")?;
         }
+        let context_path_is_explicit_root = self.context_path.trim() == "/";
         self.context_path = normalize_context_path(&self.context_path);
+        // Nacos 3 separates the console (normally :8080) from the server-side
+        // Admin API (normally :8848/nacos). Older DBX connection records did
+        // not persist the default server context, so repair only explicit
+        // Nacos 3 profiles here while preserving custom contexts.
+        if self.context_path.is_empty()
+            && !context_path_is_explicit_root
+            && matches!(self.implementation, Some(NacosImplementation::Nacos))
+            && matches!(self.version_mode, Some(NacosVersionMode::V3))
+        {
+            self.context_path = "/nacos".to_string();
+        }
         self.rnacos_console_addr = if self.rnacos_console_addr.trim().is_empty() {
             String::new()
         } else {
@@ -144,6 +171,10 @@ impl NacosAdminConfig {
                 return Err("r-nacos console username is empty".to_string());
             }
         }
+        self.metrics_url = match self.metrics_mode {
+            NacosMetricsMode::Custom => normalize_metrics_url(&self.metrics_url)?,
+            NacosMetricsMode::Auto | NacosMetricsMode::Disabled => String::new(),
+        };
         if self.page_size == 0 {
             self.page_size = default_page_size();
         }
@@ -204,6 +235,24 @@ impl NacosAdminConfig {
             NacosRNacosConsoleAuth::UsernamePassword { username, .. } => !username.trim().is_empty(),
         }
     }
+}
+
+fn normalize_metrics_url(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Nacos Prometheus metrics URL is empty".to_string());
+    }
+    let url = reqwest::Url::parse(value).map_err(|e| format!("Nacos Prometheus metrics URL is invalid: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Nacos Prometheus metrics URL must use http or https".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Nacos Prometheus metrics URL must not contain embedded credentials".to_string());
+    }
+    if url.fragment().is_some() {
+        return Err("Nacos Prometheus metrics URL must not contain a fragment".to_string());
+    }
+    Ok(url.to_string())
 }
 
 fn normalize_endpoint_url(value: &str, label: &str) -> Result<String, String> {
@@ -337,9 +386,71 @@ mod tests {
     }
 
     #[test]
+    fn defaults_prometheus_metrics_to_auto_and_validates_custom_urls() {
+        let parsed = NacosAdminConfig::from_connection(&connection_with_external(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8818"
+        })))
+        .unwrap();
+        assert_eq!(parsed.metrics_mode, NacosMetricsMode::Auto);
+        assert!(parsed.metrics_url.is_empty());
+
+        let parsed = NacosAdminConfig::from_connection(&connection_with_external(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8848",
+            "metricsMode": "custom",
+            "metricsUrl": "http://127.0.0.1:8818/nacos/actuator/prometheus?node=a"
+        })))
+        .unwrap();
+        assert_eq!(parsed.metrics_mode, NacosMetricsMode::Custom);
+        assert_eq!(parsed.metrics_url, "http://127.0.0.1:8818/nacos/actuator/prometheus?node=a");
+
+        for metrics_url in [
+            "",
+            "file:///tmp/metrics",
+            "http://user:secret@127.0.0.1:8818/metrics",
+            "http://127.0.0.1:8818/metrics#private",
+            "http://127.0.0.1:8818/metrics#",
+        ] {
+            let error = NacosAdminConfig::from_connection(&connection_with_external(serde_json::json!({
+                "serverAddr": "http://127.0.0.1:8848",
+                "metricsMode": "custom",
+                "metricsUrl": metrics_url
+            })))
+            .unwrap_err();
+            assert!(error.contains("Prometheus metrics URL"));
+        }
+    }
+
+    #[test]
     fn missing_external_context_path_defaults_to_root() {
         let cfg = connection_with_external(serde_json::json!({
             "serverAddr": "http://127.0.0.1:8848",
+            "auth": { "kind": "none" }
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.context_path, "");
+    }
+
+    #[test]
+    fn explicit_nacos_v3_defaults_to_server_admin_context() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "serverAddr": "http://127.0.0.1:8848",
+            "auth": { "kind": "none" }
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.context_path, "/nacos");
+    }
+
+    #[test]
+    fn explicit_nacos_v3_root_context_is_preserved() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "serverAddr": "http://127.0.0.1:8848",
+            "contextPath": "/",
             "auth": { "kind": "none" }
         }));
 

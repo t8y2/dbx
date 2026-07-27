@@ -47,6 +47,16 @@ test("infers GaussDB-compatible JDBC connections as schema-aware", () => {
   assert.equal(connectionUsesDatabaseObjectTreeMode(opengaussConnection), false);
 });
 
+test("infers Dameng JDBC connections", () => {
+  const damengConnection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:dm://127.0.0.1:5236/DAMENG",
+    jdbc_driver_class: "dm.jdbc.driver.DmDriver",
+  };
+
+  assert.equal(inferJdbcDialect(damengConnection), "dameng");
+});
+
 test("discovers schemas only for unknown generic JDBC connections", () => {
   assert.equal(connectionShouldDiscoverJdbcSchemas({ db_type: "jdbc", driver_profile: "jdbc" }), true);
   assert.equal(connectionShouldDiscoverJdbcSchemas({ db_type: "jdbc", connection_string: "jdbc:mysql://127.0.0.1:3306/app" }), false);

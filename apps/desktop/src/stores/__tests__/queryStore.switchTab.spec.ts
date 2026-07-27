@@ -5,6 +5,11 @@ describe("queryStore switchTab", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
     setActivePinia(createPinia());
   });
 
@@ -86,5 +91,17 @@ describe("queryStore switchTab", () => {
 
     queryStore.updateDataGridLocalColumnFilters(tabId, {});
     expect(tab.result.local_column_filters).toBeUndefined();
+  });
+
+  it("opens one reusable Nacos dashboard tab per connection", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+
+    const tabId = queryStore.openNacosDashboard("nacos-1");
+    const reopenedTabId = queryStore.openNacosDashboard("nacos-1");
+
+    expect(reopenedTabId).toBe(tabId);
+    expect(queryStore.tabs.filter((tab) => tab.mode === "nacos-dashboard")).toHaveLength(1);
+    expect(queryStore.activeTabId).toBe(tabId);
   });
 });

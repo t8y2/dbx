@@ -215,6 +215,7 @@ pub struct CompletionAssistantCandidate {
     pub parent_name: Option<String>,
     pub comment: Option<String>,
     pub data_type: Option<String>,
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

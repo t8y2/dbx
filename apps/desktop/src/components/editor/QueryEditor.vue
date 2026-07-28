@@ -3190,9 +3190,9 @@ function isTableNameCompletionContext(completionContext: ReturnType<typeof getSq
 
 function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]) {
   const merged = [...existing];
-  const indexes = new Map(existing.map((object, index) => [`${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}`.toLowerCase(), index]));
+  const indexes = new Map(existing.map((object, index) => [completionObjectIdentityKey(object), index]));
   for (const object of incoming) {
-    const key = `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}`.toLowerCase();
+    const key = completionObjectIdentityKey(object);
     const index = indexes.get(key);
     if (index == null) {
       indexes.set(key, merged.length);
@@ -3202,6 +3202,10 @@ function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCo
     }
   }
   return merged;
+}
+
+function completionObjectIdentityKey(object: SqlCompletionObject): string {
+  return `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}:${object.signature?.trim() ?? ""}`.toLowerCase();
 }
 
 function completionObjectsDiffer(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]): boolean {

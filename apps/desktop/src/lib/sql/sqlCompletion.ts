@@ -3071,23 +3071,70 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
           ? quoteSqlIdentifier(object.name, dialect)
           : (object.applyName ?? (object.schema && !objectInCurrentSchema ? `${quoteSqlIdentifier(object.schema, dialect)}.${quoteSqlIdentifier(object.name, dialect)}` : quoteSqlIdentifier(object.name, dialect)));
       const locationDetail = object.type === "trigger" && object.parentName ? `trigger on ${object.parentName}` : object.parentName ? `${object.type} in ${object.parentName}` : object.schema ? `${object.type} in ${object.schema}` : object.type;
-      const detail = object.dataType ? `${locationDetail}  [${object.dataType}]` : locationDetail;
+      const signature = object.signature?.trim();
+      const detail = [locationDetail, signature ? `(${signature})` : undefined, object.dataType ? `[${object.dataType}]` : undefined].filter(Boolean).join("  ");
       const schemaBoost = onlyFunctions ? Math.min(object.boost ?? 0, 1000) : (object.boost ?? 0);
       const typeBoost = routineTypeBoost(object.type, prioritizeOracleFunctions && !onlyFunctions);
+      const baseDedupeKey = object.applyName || (databaseType === "oracle" && object.schema) ? applyName : undefined;
       return {
         label: object.name,
         type: "function" as const,
         detail,
         info: buildRoutineInfo(object),
-        apply: object.type === "trigger" || object.type === "package" ? applyName : `${applyName}()`,
+        apply: object.type === "trigger" || object.type === "package" ? applyName : buildRoutineApply(applyName, object.signature),
         boost: computeBoost(object.name, context.prefix) + typeBoost + schemaBoost,
-        dedupeKey: object.applyName || (databaseType === "oracle" && object.schema) ? applyName : undefined,
+        dedupeKey: signature ? `${baseDedupeKey ?? object.name}(${signature})` : baseDedupeKey,
         // Preserve exact routine matches before the capped candidate list is truncated.
         exactMatch: !!context.prefix && object.name.toLowerCase() === context.prefix.toLowerCase(),
       };
     })
     .sort(compareCompletionItems)
     .slice(0, MAX_TABLE_COMPLETION_ITEMS);
+}
+
+function buildRoutineApply(applyName: string, signature?: string): string {
+  const parameters = splitRoutineSignatureParameters(signature?.trim() ?? "");
+  if (parameters.length === 0) return `${applyName}()`;
+  return `${applyName}(${parameters.map((parameter) => `\${${escapeSnippetFieldName(parameter)}}`).join(", ")})`;
+}
+
+function splitRoutineSignatureParameters(signature: string): string[] {
+  if (!signature) return [];
+  const parameters: string[] = [];
+  let start = 0;
+  let parenthesisDepth = 0;
+  let bracketDepth = 0;
+  let quoted = false;
+
+  for (let index = 0; index < signature.length; index++) {
+    const char = signature[index];
+    if (char === '"') {
+      if (quoted && signature[index + 1] === '"') {
+        index++;
+      } else {
+        quoted = !quoted;
+      }
+      continue;
+    }
+    if (quoted) continue;
+    if (char === "(") parenthesisDepth++;
+    else if (char === ")" && parenthesisDepth > 0) parenthesisDepth--;
+    else if (char === "[") bracketDepth++;
+    else if (char === "]" && bracketDepth > 0) bracketDepth--;
+    else if (char === "," && parenthesisDepth === 0 && bracketDepth === 0) {
+      const parameter = signature.slice(start, index).trim();
+      if (parameter) parameters.push(parameter);
+      start = index + 1;
+    }
+  }
+
+  const parameter = signature.slice(start).trim();
+  if (parameter) parameters.push(parameter);
+  return parameters;
+}
+
+function escapeSnippetFieldName(value: string): string {
+  return value.replace(/[{}]/g, "\\$&");
 }
 
 function buildRoutineInfo(object: SqlCompletionObject): string | undefined {

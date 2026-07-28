@@ -1919,6 +1919,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1944,6 +1945,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1969,6 +1971,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: get_opt_str(&row, "data_type"),
+                signature: None,
             });
         }
     }
@@ -1990,6 +1993,7 @@ pub async fn completion_assistant_search(
                         .map(|s| fix_potential_double_encoding(&s))
                         .filter(|s| !s.is_empty()),
                     data_type: Some(get_str_by_name(&row, "data_type")),
+                    signature: None,
                 });
             }
         }

@@ -591,6 +591,7 @@ fn duckdb_completion_schemas(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -641,6 +642,7 @@ fn duckdb_completion_tables(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -686,6 +688,7 @@ fn duckdb_completion_columns(
                 parent_name: Some(table.to_string()),
                 comment: None,
                 data_type: Some(row.get(1)?),
+                signature: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -4327,6 +4330,7 @@ async fn completion_assistant_fallback_core(
                     parent_name: None,
                     comment: None,
                     data_type: None,
+                    signature: None,
                 });
             }
             if candidates.len() >= limit {
@@ -4364,6 +4368,7 @@ async fn completion_assistant_fallback_core(
                 parent_name: table.parent_name,
                 comment: table.comment,
                 data_type: None,
+                signature: None,
             });
             if candidates.len() >= limit {
                 return Ok(db::CompletionAssistantResponse { candidates, incomplete: true, fallback_used: true });
@@ -4385,6 +4390,7 @@ async fn completion_assistant_fallback_core(
                         parent_name: Some(table.to_string()),
                         comment: column.comment,
                         data_type: Some(column.data_type),
+                        signature: None,
                     });
                 }
                 if candidates.len() >= limit {

@@ -5127,6 +5127,7 @@ export const useConnectionStore = defineStore("connection", () => {
           parentSchema: candidate.parent_schema ?? undefined,
           parentName: candidate.parent_name ?? undefined,
           dataType,
+          signature: candidate.signature ?? undefined,
           comment: candidate.comment ?? null,
           applyName: completionCandidateApplyName(candidate.name, candidate.schema, preferredSchema),
           boost: oracleMetadata ? completionCandidateSchemaBoost(candidate.schema, preferredSchema) : completionRoutineSchemaBoost(candidate.schema, preferredSchema),
@@ -5733,7 +5734,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const seen = new Set<string>();
     const deduped: SqlCompletionObject[] = [];
     for (const object of objects) {
-      const key = `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}`.toLowerCase();
+      const key = `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}:${object.signature?.trim() ?? ""}`.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
       deduped.push(object);

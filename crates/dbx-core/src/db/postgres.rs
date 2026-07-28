@@ -1869,6 +1869,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1897,6 +1898,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1925,6 +1927,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
                 data_type: row.try_get::<_, Option<String>>(4).ok().flatten(),
+                signature: row.try_get::<_, Option<String>>(5).ok().flatten(),
             });
         }
     }
@@ -1962,6 +1965,7 @@ pub async fn completion_assistant_search(
                     parent_name: Some(table.to_string()),
                     comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
                     data_type: Some(pg_row_try_string(&row, 1)),
+                    signature: None,
                 });
             }
         }
@@ -1990,7 +1994,8 @@ fn postgres_completion_tables_sql() -> &'static str {
 
 fn postgres_completion_routines_sql() -> &'static str {
     "SELECT p.proname, n.nspname, CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
-            obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type \
+            obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type, \
+            pg_get_function_identity_arguments(p.oid) AS signature \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
      WHERE n.nspname = $1 AND p.prokind::text = ANY($3::text[]) \
@@ -5651,6 +5656,7 @@ mod tests {
         assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
         assert!(postgres_completion_routines_sql().contains("p.proname ILIKE $2 ESCAPE '~'"));
         assert!(postgres_completion_routines_sql().contains("p.prokind::text = ANY($3::text[])"));
+        assert!(postgres_completion_routines_sql().contains("pg_get_function_identity_arguments(p.oid) AS signature"));
         assert!(postgres_completion_routines_sql().contains("ORDER BY p.proname LIMIT $4"));
         assert!(postgres_completion_columns_sql().contains("a.attname ILIKE $3 ESCAPE '~'"));
         assert!(postgres_visible_table_schema_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));

@@ -93,6 +93,7 @@ import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
+import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   buildObjectBrowserRows,
@@ -1531,30 +1532,35 @@ async function confirmBatchDropTables() {
     if (targets.length === 0) return;
     batchDropProgress.value = { completed: 0, total: targets.length };
     const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-    const statements = await Promise.all(targets.map((row) => buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade }))));
-    const batchSql = statements.join(";\n");
-    const results = await executeObjectBrowserSqlWithProductionGuard(batchSql, () =>
-      api.executeMultiWithProgress(props.connection.id, props.database, batchSql, (progress) => {
-        batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
+    const plan = await Promise.all(
+      targets.map(async (target) => ({
+        target,
+        sql: await buildDropTableSql(tableAdminSqlOptions(target, { cascade: useCascade })),
+      })),
+    );
+    const batchSql = plan.map(({ sql }) => sql).join(";\n");
+    const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, () =>
+      runBatchTableDrop({
+        databaseType: effectiveDatabaseType.value,
+        plan,
+        executeStatement: (sql) => api.executeQuery(props.connection.id, props.database, sql),
+        executeBatch: (sql, onProgress) => api.executeMultiWithProgress(props.connection.id, props.database, sql, onProgress),
+        onProgress: (progress) => {
+          batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
+        },
       }),
     );
-    if (!results) return;
+    if (!result) return;
 
-    const succeededStatementIndexes = new Set(results.filter((result) => result.execution_error !== true && Number.isInteger(result.statement_index)).map((result) => result.statement_index!));
-    const succeededTargets = targets.filter((_, index) => succeededStatementIndexes.has(index));
-    const failedResult = results.find((result) => result.execution_error === true);
-
-    for (const row of succeededTargets) closeDroppedTableObjectTabsForRow(row);
-    if (succeededTargets.length > 0) {
-      removePinnedObjectBrowserRows(succeededTargets);
+    for (const row of result.succeeded) closeDroppedTableObjectTabsForRow(row);
+    if (result.succeeded.length > 0) {
+      removePinnedObjectBrowserRows(result.succeeded);
       await reload();
       await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
     }
 
-    if (failedResult) {
-      throw new Error(String(failedResult.rows[0]?.[0] ?? "Batch drop failed"));
-    }
-    toast(t("objects.batchDropSuccess", { count: succeededTargets.length }));
+    if (result.failed) throw result.failed;
+    toast(t("objects.batchDropSuccess", { count: result.succeeded.length }));
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   } finally {

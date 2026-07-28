@@ -134,6 +134,7 @@ import { connectionSupportsServerDashboard as connectionSupportsPgServerDashboar
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
+import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
@@ -1986,30 +1987,39 @@ async function confirmBatchDrop() {
       const first = targets[0]!;
       await connectionStore.ensureConnected(first.connectionId!);
       batchDropProgress.value = { completed: 0, total: targets.length };
-      const statements = await Promise.all(targets.map((target) => dropSqlForTreeNode(target, { cascade: useCascade })));
-      const batchSql = statements.filter((sql): sql is string => !!sql).join(";\n");
-      const results = await executeWithProductionSqlGuard({
+      const plan = await Promise.all(
+        targets.map(async (target) => {
+          const sql = await dropSqlForTreeNode(target, { cascade: useCascade });
+          if (!sql) throw new Error("Drop table SQL is unavailable");
+          return { target, sql };
+        }),
+      );
+      const batchSql = plan.map(({ sql }) => sql).join(";\n");
+      const result = await executeWithProductionSqlGuard({
         connection: connectionStore.getConfig(first.connectionId!),
         database: first.database!,
         sql: batchSql,
         source: t("production.sourceSidebar"),
         execute: () =>
-          api.executeMultiWithProgress(first.connectionId!, first.database!, batchSql, (progress) => {
-            batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
+          runBatchTableDrop({
+            databaseType: databaseTypeForNode(first),
+            plan,
+            executeStatement: (sql) => api.executeQuery(first.connectionId!, first.database!, sql),
+            executeBatch: (sql, onProgress) => api.executeMultiWithProgress(first.connectionId!, first.database!, sql, onProgress),
+            onProgress: (progress) => {
+              batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
+            },
           }),
       });
-      if (!results) return;
+      if (!result) return;
 
-      const succeededIndexes = new Set(results.filter((result) => result.execution_error !== true && Number.isInteger(result.statement_index)).map((result) => result.statement_index!));
-      const succeededTargets = targets.filter((_, index) => succeededIndexes.has(index));
-      for (const target of succeededTargets) {
+      for (const target of result.succeeded) {
         closeDroppedTableObjectTabsForNode(target);
         connectionStore.removeTreeNode(target.id);
         releaseActiveNodeReference([target.id]);
       }
-      const failedResult = results.find((result) => result.execution_error === true);
-      if (failedResult) throw new Error(String(failedResult.rows[0]?.[0] ?? "Batch drop failed"));
-      toast(t("contextMenu.batchDropSuccess", { count: succeededTargets.length }), 3000);
+      if (result.failed) throw result.failed;
+      toast(t("contextMenu.batchDropSuccess", { count: result.succeeded.length }), 3000);
       showBatchDropConfirm.value = false;
       return;
     }

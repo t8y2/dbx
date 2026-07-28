@@ -1728,6 +1728,27 @@ fn agent_java_args_with_extra_args(jar_path: &str, extra_java_args: &[String]) -
     agent_java_args_with_extra_opts(jar_path, std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref(), extra_java_args)
 }
 
+pub(crate) fn validate_dameng_java_system_properties(options: &[String]) -> Result<(), String> {
+    for (index, option) in options.iter().enumerate() {
+        let option = option.trim();
+        let Some(property) = option.strip_prefix("-D") else {
+            return Err(java_system_property_error(index));
+        };
+        let key = property.split_once('=').map_or(property, |(key, _)| key);
+        if key.is_empty() || key.chars().any(char::is_whitespace) || option.contains('"') || option.contains('\'') {
+            return Err(java_system_property_error(index));
+        }
+    }
+    Ok(())
+}
+
+fn java_system_property_error(index: usize) -> String {
+    format!(
+        "Dameng JVM option #{} must be a Java system property (-Dkey or -Dkey=value) without shell quotes",
+        index + 1
+    )
+}
+
 fn agent_java_args_with_extra_opts(
     jar_path: &str,
     extra_opts: Option<&str>,
@@ -1983,9 +2004,10 @@ mod tests {
         agent_schema_table_params, agent_supports_capability, agent_transaction_params, format_agent_process_error,
         format_agent_startup_error, is_agent_rpc_response_error, is_unsupported_handshake_error,
         mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
-        read_agent_line, start_stderr_collector, AgentCapability, AgentDriverClient, AgentHandshake, AgentKvMethod,
-        AgentLaunchSpec, AgentMethod, AgentRuntimeClient, AgentTableReadCloseParams, AgentTableReadPageParams,
-        AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
+        read_agent_line, start_stderr_collector, validate_dameng_java_system_properties, AgentCapability,
+        AgentDriverClient, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentRuntimeClient,
+        AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail,
+        AGENT_PROTOCOL_VERSION,
     };
     use std::io::Cursor;
     use std::io::Write;
@@ -2070,6 +2092,30 @@ mod tests {
 
         assert!(global < connection);
         assert!(connection < jar);
+    }
+
+    #[test]
+    fn connection_java_system_properties_allow_flags_and_values_with_spaces() {
+        validate_dameng_java_system_properties(&[
+            "-Djava.net.preferIPv4Stack".to_string(),
+            "-Ddm.config.path=C:\\Program Files\\DM\\dm.ini".to_string(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn connection_java_system_properties_reject_launcher_options_and_empty_keys() {
+        for option in ["-jar", "-javaagent:agent.jar", "-agentpath:agent.dll", "-Xmx1g", "", "-D", "-D=value"] {
+            assert!(validate_dameng_java_system_properties(&[option.to_string()]).is_err(), "{option}");
+        }
+    }
+
+    #[test]
+    fn connection_java_system_properties_reject_shell_quotes() {
+        assert!(validate_dameng_java_system_properties(&[
+            r#"-Ddm.config.path="C:\Program Files\DM\dm.ini""#.to_string(),
+        ])
+        .is_err());
     }
 
     #[test]

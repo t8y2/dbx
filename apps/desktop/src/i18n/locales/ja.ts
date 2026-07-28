@@ -645,8 +645,10 @@ export default withEnglishFallback({
     sshHostKeyNoticeRejected: "ホスト {host}:{port} のホストキー検証を拒否しました。接続は中止され、資格情報は送信されませんでした。",
     sshHostKeyNoticeGeneric: "SSHホスト {host}:{port} のキー検証に失敗しました。",
     sshHostKeyNoticeLearnFailed: "{host}:{port} のホストキーを保存できません — このホストは現在のセッションでのみ信頼され、次回の接続時に再確認が必要です。",
-    damengJvmOptions: "JVM パラメータ",
+    damengJvmOptions: "JVM システムプロパティ",
     damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
+    damengJvmOptionsHint: "1 行に 1 つの -Dkey または -Dkey=value を入力します。空白を含む値にもシェル引用符は不要です。",
+    damengJvmOptionsInvalid: "{line} 行目は、シェル引用符を使わない -Dkey または -Dkey=value 形式で入力してください。",
   },
   editor: {
     pressToExecute: "{mod}+Enter で実行",

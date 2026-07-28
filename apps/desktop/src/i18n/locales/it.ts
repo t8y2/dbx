@@ -645,8 +645,10 @@ export default withEnglishFallback({
     sshHostKeyNoticeRejected: "Hai rifiutato la verifica della chiave host di {host}:{port}, la connessione è stata interrotta e le credenziali non sono state inviate.",
     sshHostKeyNoticeGeneric: "Verifica della chiave host SSH {host}:{port} fallita.",
     sshHostKeyNoticeLearnFailed: "Impossibile salvare la chiave host di {host}:{port} — Questo host è considerato affidabile solo per questa sessione, alla prossima connessione sarà necessaria una nuova conferma.",
-    damengJvmOptions: "parametri JVM",
+    damengJvmOptions: "Proprietà di sistema JVM",
     damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
+    damengJvmOptionsHint: "Una proprietà -Dkey o -Dkey=value per riga. I valori con spazi non richiedono virgolette della shell.",
+    damengJvmOptionsInvalid: "La riga {line} deve essere una proprietà -Dkey o -Dkey=value senza virgolette della shell.",
   },
   editor: {
     pressToExecute: "Premi {mod}+Enter per eseguire",

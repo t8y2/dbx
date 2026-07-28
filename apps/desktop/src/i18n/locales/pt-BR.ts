@@ -646,8 +646,10 @@ export default withEnglishFallback({
     sshHostKeyNoticeRejected: "Você rejeitou a verificação da chave do host {host}:{port}. A conexão foi abortada e as credenciais não foram enviadas.",
     sshHostKeyNoticeGeneric: "Falha na verificação da chave do host SSH {host}:{port}.",
     sshHostKeyNoticeLearnFailed: "Não foi possível salvar a chave do host {host}:{port} — o host é confiável apenas nesta sessão, necessitando reconfirmação na próxima conexão.",
-    damengJvmOptions: "Parâmetros da JVM",
+    damengJvmOptions: "Propriedades do sistema da JVM",
     damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
+    damengJvmOptionsHint: "Uma propriedade -Dkey ou -Dkey=value por linha. Valores com espaços não precisam de aspas do shell.",
+    damengJvmOptionsInvalid: "A linha {line} deve ser uma propriedade -Dkey ou -Dkey=value sem aspas do shell.",
   },
   editor: {
     pressToExecute: "Pressione {mod}+Enter para executar",

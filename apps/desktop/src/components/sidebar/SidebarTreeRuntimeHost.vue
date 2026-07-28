@@ -90,6 +90,7 @@ import {
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
+import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
 import { dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
 import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
 import { appendCreateDatabaseErrorHint } from "@/lib/database/createDatabaseErrorHints";
@@ -779,20 +780,26 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
-  if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && isDeleteTreeNodeShortcut(event)) {
-    if (!requestDeleteSelectedNode()) return;
-    event.preventDefault();
-    event.stopPropagation();
+  if (
+    handleSidebarTreeDeleteShortcut(event, {
+      activeNode: activeNode.value,
+      selectedNodes: selectedTreeNodesInVisibleOrder(),
+      databaseTypeForNode,
+      requestHBaseTableDelete: () => {
+        ensureDangerDialogRouting();
+        routeTreeItemDialogController();
+        requestDeleteHBaseTable();
+        return true;
+      },
+      requestDefaultDelete: requestDeleteSelectedNode,
+    })
+  ) {
     return;
   }
   if (!isCopyTreeSelectionShortcut(event)) return;
   event.preventDefault();
   event.stopPropagation();
   copySelectedNames();
-}
-
-function isDeleteTreeNodeShortcut(event: KeyboardEvent): boolean {
-  return event.key === "Delete" || event.key === "Backspace";
 }
 
 function isPasteTreeClipboardShortcut(event: KeyboardEvent): boolean {

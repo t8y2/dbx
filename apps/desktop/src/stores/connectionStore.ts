@@ -5748,9 +5748,10 @@ export const useConnectionStore = defineStore("connection", () => {
   async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean }, catalog?: string): Promise<SqlCompletionColumn[]> {
     const config = getConfig(connectionId);
     const oracleIdentifier = config?.db_type === "oracle";
-    const completionTable = oracleIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
+    const uppercaseUnquotedIdentifier = oracleIdentifier || config?.db_type === "saphana";
+    const completionTable = uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
     const rawCompletionSchema = schema?.trim() || undefined;
-    const completionSchema = oracleIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
+    const completionSchema = uppercaseUnquotedIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
     const usesOracleCurrentSchema = config?.db_type === "oracle" && !completionSchema;
     if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !completionSchema && !usesOracleCurrentSchema) {
       return [];

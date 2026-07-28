@@ -206,7 +206,7 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
   return results;
 }
 
-function isOracleCurrentSchemaStatement(statement: string | undefined): boolean {
+function sqlStatementWithoutLeadingComments(statement: string | undefined): string {
   let remaining = statement?.trimStart() ?? "";
   while (remaining) {
     if (remaining.startsWith("--")) {
@@ -216,13 +216,24 @@ function isOracleCurrentSchemaStatement(statement: string | undefined): boolean 
     }
     if (remaining.startsWith("/*")) {
       const end = remaining.indexOf("*/", 2);
-      if (end < 0) return false;
+      if (end < 0) return "";
       remaining = remaining.slice(end + 2).trimStart();
       continue;
     }
     break;
   }
-  return /^ALTER\s+SESSION\s+SET\s+CURRENT_SCHEMA\s*=/i.test(remaining);
+  return remaining;
+}
+
+function isOracleCurrentSchemaStatement(statement: string | undefined): boolean {
+  return /^ALTER\s+SESSION\s+SET\s+CURRENT_SCHEMA\s*=/i.test(sqlStatementWithoutLeadingComments(statement));
+}
+
+function sapHanaSchemaFromStatement(statement: string | undefined): string | undefined {
+  const match = /^SET\s+SCHEMA\s+(?:"((?:[^"]|"")*)"|([A-Za-z_][\w$#]*))\s*;?\s*$/i.exec(sqlStatementWithoutLeadingComments(statement));
+  if (!match) return undefined;
+  if (match[1] != null) return match[1].replace(/""/g, '"');
+  return match[2]?.toUpperCase();
 }
 
 function annotateQueryResultSource(result: QueryResult, sourceStatement: string, database?: string, databaseType?: DatabaseType, sourceRange?: { from: number; to: number }): QueryResult {
@@ -3689,6 +3700,13 @@ export const useQueryStore = defineStore("query", () => {
       }
       const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset);
       const successfulOracleSchemaChanges = effectiveDbType === "oracle" ? results.filter((result) => result.execution_error !== true && isOracleCurrentSchemaStatement(result.sourceStatement)).length : 0;
+      const successfulSapHanaSchemas =
+        effectiveDbType === "saphana"
+          ? results
+              .filter((result) => result.execution_error !== true)
+              .map((result) => sapHanaSchemaFromStatement(result.sourceStatement))
+              .filter((schema): schema is string => !!schema)
+          : [];
       if (hiddenPrimaryKeys.length > 0 && results.length === 1) {
         const hiddenIndexes = hiddenResultColumnIndexes(results[0]!.columns, hiddenPrimaryKeys);
         if (hiddenIndexes.length > 0) results[0]!.hidden_column_indexes = hiddenIndexes;
@@ -3708,6 +3726,10 @@ export const useQueryStore = defineStore("query", () => {
         if (openInNewResultTab && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
         if (successfulOracleSchemaChanges > 0) {
           current.completionContextVersion = (current.completionContextVersion ?? 0) + successfulOracleSchemaChanges;
+        }
+        if (successfulSapHanaSchemas.length > 0) {
+          current.schema = successfulSapHanaSchemas[successfulSapHanaSchemas.length - 1];
+          current.completionContextVersion = (current.completionContextVersion ?? 0) + successfulSapHanaSchemas.length;
         }
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;

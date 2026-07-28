@@ -37,6 +37,18 @@ function oracleConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function sapHanaConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "hana-1",
+    name: "SAP HANA",
+    db_type: "saphana",
+    port: 30015,
+    username: "SYSTEM",
+    database: "",
+  } as ConnectionConfig;
+}
+
 function sqlServerConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -294,6 +306,45 @@ describe("connectionStore completion assistant", () => {
 
     expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["ORDERS_ALIAS", "orders_alias", "Orders_Alias"]);
     expect(completionAssistantSearch).not.toHaveBeenCalled();
+  });
+
+  it("normalizes unquoted SAP HANA table and schema names before column lookup", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { parent_name?: string | null; parent_schema?: string | null }) => ({
+      candidates: [
+        {
+          name: request.parent_name === "ACDOCA" ? "BELNR" : "MixedColumn",
+          kind: "column",
+          schema: request.parent_schema,
+          parent_schema: request.parent_schema,
+          parent_name: request.parent_name,
+          data_type: "NVARCHAR",
+        },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns: vi.fn(),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sapHanaConnection()];
+    store.connectedIds.add("hana-1");
+
+    const unquoted = await store.listCompletionColumns("hana-1", "", "acdoca", "saphanadb", { tableQuoted: false, schemaQuoted: false });
+    const quoted = await store.listCompletionColumns("hana-1", "", "MixedTable", "MixedSchema", { tableQuoted: true, schemaQuoted: true });
+
+    expect(completionAssistantSearch.mock.calls.map(([request]) => ({ schema: request.schema, parent_schema: request.parent_schema, parent_name: request.parent_name }))).toEqual([
+      { schema: "SAPHANADB", parent_schema: "SAPHANADB", parent_name: "ACDOCA" },
+      { schema: "MixedSchema", parent_schema: "MixedSchema", parent_name: "MixedTable" },
+    ]);
+    expect(unquoted).toEqual([expect.objectContaining({ name: "BELNR", table: "ACDOCA", schema: "SAPHANADB" })]);
+    expect(quoted).toEqual([expect.objectContaining({ name: "MixedColumn", table: "MixedTable", schema: "MixedSchema" })]);
   });
 
   it("keeps quoted and unquoted Oracle objects separate in the local column index", async () => {

@@ -174,6 +174,35 @@ describe("queryStore multi-statement errors", () => {
     expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.clientSessionId)).toEqual([tabA, tabA, tabA]);
   });
 
+  it("updates only the executing SAP HANA tab after successful SET SCHEMA statements", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "hana-1",
+      name: "SAP HANA",
+      db_type: "saphana",
+      database: "",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti
+      .mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }])
+      .mockResolvedValueOnce([{ columns: ["Error"], rows: [["schema missing"]], affected_rows: 0, execution_time_ms: 1, execution_error: true }])
+      .mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabA = store.createTab("hana-1", "", "Tab A");
+    const tabB = store.createTab("hana-1", "", "Tab B");
+
+    await store.executeTabSql(tabA, "SET SCHEMA saphanadb");
+    expect(store.tabs.find((tab) => tab.id === tabA)).toMatchObject({ schema: "SAPHANADB", completionContextVersion: 1 });
+    expect(store.tabs.find((tab) => tab.id === tabB)?.schema).toBeUndefined();
+
+    await store.executeTabSql(tabA, 'SET SCHEMA "MissingSchema"');
+    expect(store.tabs.find((tab) => tab.id === tabA)).toMatchObject({ schema: "SAPHANADB", completionContextVersion: 1 });
+
+    await store.executeTabSql(tabA, '/* switch */ SET SCHEMA "MixedSchema"');
+    expect(store.tabs.find((tab) => tab.id === tabA)).toMatchObject({ schema: "MixedSchema", completionContextVersion: 2 });
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.clientSessionId)).toEqual([tabA, tabA, tabA]);
+  });
+
   it("invalidates Oracle completion metadata when clearing a tab schema resets its session", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "oracle-1",

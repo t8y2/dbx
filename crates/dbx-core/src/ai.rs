@@ -1116,10 +1116,11 @@ fn parse_dynamic_effort_capability(
     if let Some(levels) = effort.and_then(serde_json::Value::as_object) {
         let mut supported = levels
             .iter()
-            .filter_map(|(level, capability)| {
-                (level != "supported" && capability.get("supported").and_then(serde_json::Value::as_bool) == Some(true))
-                    .then(|| level.as_str())
+            .filter(|(level, capability)| {
+                level.as_str() != "supported"
+                    && capability.get("supported").and_then(serde_json::Value::as_bool) == Some(true)
             })
+            .map(|(level, _)| level.as_str())
             .collect::<Vec<_>>();
         const EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
         supported.sort_by_key(|level| EFFORT_ORDER.iter().position(|known| known == level).unwrap_or(usize::MAX));

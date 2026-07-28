@@ -70,7 +70,7 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
     let model = normalized_model_id(model_id);
     let source = AiCapabilitySource::OfficialRegistry;
 
-    let capability = match config.provider {
+    match config.provider {
         AiProvider::Openai => openai_capability(&model, source),
         AiProvider::Gemini => gemini_capability(&model, source),
         AiProvider::Deepseek => deepseek_capability(&model, source),
@@ -80,9 +80,7 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
             Some(AiEffortCapability::FreeText { placeholder: None, source: AiCapabilitySource::Custom })
         }
         AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli => None,
-    };
-
-    capability
+    }
 }
 
 fn openai_capability(model: &str, source: AiCapabilitySource) -> Option<AiEffortCapability> {

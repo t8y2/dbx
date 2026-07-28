@@ -3095,7 +3095,7 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
 function buildRoutineApply(applyName: string, signature?: string): string {
   const parameters = splitRoutineSignatureParameters(signature?.trim() ?? "");
   if (parameters.length === 0) return `${applyName}()`;
-  return `${applyName}(${parameters.map((parameter) => `\${${escapeSnippetFieldName(parameter)}}`).join(", ")})`;
+  return `${applyName}(${parameters.map((parameter, index) => `\${${index + 1}:${escapeSnippetFieldName(parameter)}}`).join(", ")})`;
 }
 
 function splitRoutineSignatureParameters(signature: string): string[] {

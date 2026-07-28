@@ -2012,6 +2012,10 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.connectionId !== target.connectionId || tab.database !== target.database) return false;
     const targetSchemas = droppedTableObjectSchemaCandidates(target);
 
+    if ((target.objectType ?? "TABLE") === "TABLE" && tab.mode === "hbase") {
+      return tab.sql === target.name;
+    }
+
     if (tab.mode === "data") {
       const tableMeta = tableMetaForDataTab(tab);
       if (!tableMeta || tableMeta.tableName !== target.name) return false;

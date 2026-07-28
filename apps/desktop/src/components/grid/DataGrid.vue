@@ -299,6 +299,7 @@ interface DataGridProps {
   totalRowCount?: number;
   totalRowCountIsExact?: boolean;
   paginationTotalRowCount?: number;
+  paginationEnabled?: boolean;
   totalRowCountLoading?: boolean;
   loading?: boolean;
   cacheKey?: string;
@@ -319,6 +320,7 @@ const props = withDefaults(defineProps<DataGridProps>(), {
   // Vue casts absent Boolean props to false unless a default is explicit.
   // Regular grids have exact totals; document stores opt into lower-bound totals.
   totalRowCountIsExact: true,
+  paginationEnabled: true,
   // Omitted row-action limits must keep normal table-data editing.
   allowInsertRows: undefined,
   allowDeleteRows: undefined,
@@ -461,7 +463,7 @@ const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.c
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const compactDataGridToolbar = computed(() => dataGridTopbarWidth.value > 0 && dataGridTopbarWidth.value < DATA_GRID_COMPACT_TOPBAR_WIDTH);
-const infiniteScrollEnabled = computed(() => settingsStore.editorSettings.infiniteScroll);
+const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
 const infiniteScrollMaxRows = computed(() => settingsStore.editorSettings.infiniteScrollMaxRows);
 const expandedCellEditor = ref<{ rowId: number; col: number } | null>(null);
 
@@ -9178,6 +9180,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
       <DataGridPagination
         v-model:custom-page-size-input="customPageSizeInput"
+        :pagination-enabled="paginationEnabled"
         :selection-summary="selectionSummary"
         :selection-summary-sum-text="selectionSummarySumText"
         :loading="loading"

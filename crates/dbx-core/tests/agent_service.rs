@@ -963,22 +963,14 @@ fn test_jre_archive_bytes() -> Vec<u8> {
     let root = test_path("jre-archive");
     let runtime_root = root.join("dbx-jre");
     let bin_dir = runtime_root.join("bin");
-    let archive = root.join("jre.tar.gz");
     std::fs::create_dir_all(&bin_dir).unwrap();
     std::fs::write(bin_dir.join("java"), b"java").unwrap();
     std::fs::write(bin_dir.join("java.exe"), b"java").unwrap();
 
-    let status = std::process::Command::new("tar")
-        .arg("czf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&root)
-        .arg("dbx-jre")
-        .status()
-        .unwrap();
-    assert!(status.success());
-
-    let bytes = std::fs::read(&archive).unwrap();
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder.append_dir_all("dbx-jre", &runtime_root).unwrap();
+    let bytes = builder.into_inner().unwrap().finish().unwrap();
     std::fs::remove_dir_all(root).ok();
     bytes
 }

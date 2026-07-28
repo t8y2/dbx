@@ -428,13 +428,20 @@ struct SqlServerDescribedColumn {
 struct SqlServerLegacyProbe {
     source_sql: String,
     output_names: Option<Vec<Option<String>>>,
-    output_name_overrides: Vec<(String, Option<String>)>,
+    output_name_overrides: Vec<SqlServerProbeOutputNameOverride>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct SqlServerWildcardProjectionProbe {
     statement: String,
-    output_name_overrides: Vec<(String, Option<String>)>,
+    output_name_overrides: Vec<SqlServerProbeOutputNameOverride>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SqlServerProbeOutputNameOverride {
+    projection_ordinal: usize,
+    probe_name: String,
+    output_name: Option<String>,
 }
 
 async fn sqlserver_driver_result<T, E, F>(future: F) -> Result<T, String>
@@ -507,26 +514,33 @@ async fn describe_sqlserver_result_set_with_mode(
     }
     let mut columns = rows.iter().map(sqlserver_described_column_from_row).collect::<Vec<_>>();
     if uses_describe_dmv == Some(false) {
-        if let Some(output_names) = &legacy_probe.output_names {
-            for (column, output_name) in columns.iter_mut().zip(output_names) {
-                column.name.clone_from(output_name);
-            }
-        } else if !legacy_probe.output_name_overrides.is_empty() {
-            for column in &mut columns {
-                let output_name = column.name.as_deref().and_then(|probe_name| {
-                    legacy_probe
-                        .output_name_overrides
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case(probe_name))
-                        .map(|(_, output_name)| output_name.clone())
-                });
-                if let Some(output_name) = output_name {
-                    column.name = output_name;
-                }
+        restore_sqlserver_legacy_probe_output_names(&mut columns, legacy_probe);
+    }
+    Ok(columns)
+}
+
+fn restore_sqlserver_legacy_probe_output_names(
+    columns: &mut [SqlServerDescribedColumn],
+    legacy_probe: &SqlServerLegacyProbe,
+) {
+    if let Some(output_names) = &legacy_probe.output_names {
+        for (column, output_name) in columns.iter_mut().zip(output_names) {
+            column.name.clone_from(output_name);
+        }
+    } else if !legacy_probe.output_name_overrides.is_empty() {
+        for column in columns {
+            let output_name = column.name.as_deref().and_then(|probe_name| {
+                legacy_probe
+                    .output_name_overrides
+                    .iter()
+                    .find(|output_name_override| output_name_override.probe_name.eq_ignore_ascii_case(probe_name))
+                    .map(|output_name_override| output_name_override.output_name.clone())
+            });
+            if let Some(output_name) = output_name {
+                column.name = output_name;
             }
         }
     }
-    Ok(columns)
 }
 
 fn sqlserver_described_column_from_row(row: &Row) -> SqlServerDescribedColumn {
@@ -554,6 +568,11 @@ async fn sqlserver_unsafe_type_query(client: &mut SqlServerClient, sql: &str) ->
 }
 
 fn sqlserver_legacy_probe(sql: &str) -> Option<SqlServerLegacyProbe> {
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    sqlserver_legacy_probe_with_nonce(sql, &nonce)
+}
+
+fn sqlserver_legacy_probe_with_nonce(sql: &str, nonce: &str) -> Option<SqlServerLegacyProbe> {
     let statement = normalized_sqlserver_select_statement(sql)?;
     let output_names = sqlserver_projection_output_names(&statement);
     let source_alias = quote_sqlserver_identifier("dbx_probe_source");
@@ -564,7 +583,7 @@ fn sqlserver_legacy_probe(sql: &str) -> Option<SqlServerLegacyProbe> {
             .collect::<Vec<_>>()
             .join(", ");
         (format!("({statement}) AS {source_alias}({aliases})"), Vec::new())
-    } else if let Some(wildcard_probe) = sqlserver_wildcard_projection_probe(&statement) {
+    } else if let Some(wildcard_probe) = sqlserver_wildcard_projection_probe(&statement, nonce) {
         (format!("({}) AS {source_alias}", wildcard_probe.statement), wildcard_probe.output_name_overrides)
     } else {
         (format!("({statement}) AS {source_alias}"), Vec::new())
@@ -597,7 +616,11 @@ fn sqlserver_projection_item_output_name(item: &SelectItem) -> Option<Option<Str
     }
 }
 
-fn sqlserver_wildcard_projection_probe(statement: &str) -> Option<SqlServerWildcardProjectionProbe> {
+fn sqlserver_probe_explicit_alias(nonce: &str, projection_ordinal: usize) -> String {
+    format!("__dbx_probe_{nonce}_explicit_{projection_ordinal}__")
+}
+
+fn sqlserver_wildcard_projection_probe(statement: &str, nonce: &str) -> Option<SqlServerWildcardProjectionProbe> {
     let mut statements = Parser::parse_sql(&MsSqlDialect {}, statement).ok()?;
     let [Statement::Query(query)] = statements.as_mut_slice() else {
         return None;
@@ -621,9 +644,10 @@ fn sqlserver_wildcard_projection_probe(statement: &str) -> Option<SqlServerWildc
             SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => continue,
             SelectItem::ExprWithAliases { .. } => return None,
         };
-        let probe_name = format!("__dbx_probe_explicit_{}__", index + 1);
+        let projection_ordinal = index + 1;
+        let probe_name = sqlserver_probe_explicit_alias(nonce, projection_ordinal);
         *item = SelectItem::ExprWithAlias { expr, alias: Ident::with_quote('[', probe_name.clone()) };
-        output_name_overrides.push((probe_name, output_name));
+        output_name_overrides.push(SqlServerProbeOutputNameOverride { projection_ordinal, probe_name, output_name });
     }
 
     Some(SqlServerWildcardProjectionProbe { statement: query.to_string(), output_name_overrides })
@@ -2381,13 +2405,15 @@ mod tests {
     use super::{
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, format_sqlserver_numeric,
         is_blocking_sqlserver_unsafe_probe_error, is_sqlserver_spatial_column, is_sqlserver_variant_column,
-        query_result_with_server_messages, requires_simple_query_batch, sqlserver_batch_can_use_execute,
-        sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
-        sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error, sqlserver_hidden_schema_names,
-        sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_list_objects_sql,
-        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_schema_name_predicate,
+        query_result_with_server_messages, requires_simple_query_batch, restore_sqlserver_legacy_probe_output_names,
+        sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
+        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error,
+        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
+        sqlserver_legacy_probe_with_nonce, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
+        sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_schema_name_predicate,
         sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerResultSet, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerResultSet,
+        SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -3325,34 +3351,119 @@ mod tests {
 
     #[test]
     fn sqlserver_legacy_probe_aliases_explicit_columns_next_to_wildcards() {
-        let probe = sqlserver_legacy_probe("SELECT a.*, b.HJRQ FROM dbo.a a JOIN dbo.b b ON b.id = a.id").unwrap();
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let probe =
+            sqlserver_legacy_probe_with_nonce("SELECT a.*, b.HJRQ FROM dbo.a a JOIN dbo.b b ON b.id = a.id", nonce)
+                .unwrap();
+        let probe_name = sqlserver_probe_explicit_alias(nonce, 2);
 
         assert!(probe.source_sql.starts_with("(SELECT a.*,"));
-        assert!(probe.source_sql.contains("b.HJRQ AS [__dbx_probe_explicit_2__]"));
+        assert!(probe.source_sql.contains(&format!("b.HJRQ AS [{probe_name}]")));
         assert!(probe.source_sql.ends_with(") AS [dbx_probe_source]"));
         assert_eq!(probe.output_names, None);
         assert_eq!(
             probe.output_name_overrides,
-            vec![("__dbx_probe_explicit_2__".to_string(), Some("HJRQ".to_string()))]
+            vec![SqlServerProbeOutputNameOverride {
+                projection_ordinal: 2,
+                probe_name,
+                output_name: Some("HJRQ".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_keeps_quoted_columns_around_qualified_wildcard() {
+        let nonce = "fedcba9876543210fedcba9876543210";
+        let probe =
+            sqlserver_legacy_probe_with_nonce("SELECT t.[Order], t.*, t.[After] FROM dbo.t AS t", nonce).unwrap();
+        let first_probe_name = sqlserver_probe_explicit_alias(nonce, 1);
+        let third_probe_name = sqlserver_probe_explicit_alias(nonce, 3);
+
+        assert!(probe.source_sql.contains(&format!("t.[Order] AS [{first_probe_name}], t.*")));
+        assert!(probe.source_sql.contains(&format!("t.*, t.[After] AS [{third_probe_name}]")));
+        assert!(probe.source_sql.contains("FROM dbo.t AS t"));
+        assert_eq!(
+            probe.output_name_overrides,
+            vec![
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 1,
+                    probe_name: first_probe_name,
+                    output_name: Some("Order".to_string()),
+                },
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 3,
+                    probe_name: third_probe_name,
+                    output_name: Some("After".to_string()),
+                },
+            ]
         );
     }
 
     #[test]
     fn sqlserver_legacy_probe_supports_explicit_columns_followed_by_wildcard() {
-        let probe = sqlserver_legacy_probe("SELECT ybbz, cytzrq, jzrq, * FROM dbo.t").unwrap();
+        let nonce = "11223344556677889900aabbccddeeff";
+        let probe = sqlserver_legacy_probe_with_nonce("SELECT ybbz, cytzrq, jzrq, * FROM dbo.t", nonce).unwrap();
+        let first_probe_name = sqlserver_probe_explicit_alias(nonce, 1);
+        let second_probe_name = sqlserver_probe_explicit_alias(nonce, 2);
+        let third_probe_name = sqlserver_probe_explicit_alias(nonce, 3);
 
-        assert!(probe.source_sql.contains("ybbz AS [__dbx_probe_explicit_1__]"));
-        assert!(probe.source_sql.contains("cytzrq AS [__dbx_probe_explicit_2__]"));
-        assert!(probe.source_sql.contains("jzrq AS [__dbx_probe_explicit_3__]"));
+        assert!(probe.source_sql.contains(&format!("ybbz AS [{first_probe_name}]")));
+        assert!(probe.source_sql.contains(&format!("cytzrq AS [{second_probe_name}]")));
+        assert!(probe.source_sql.contains(&format!("jzrq AS [{third_probe_name}]")));
         assert!(probe.source_sql.contains(", * FROM dbo.t"));
         assert_eq!(
             probe.output_name_overrides,
             vec![
-                ("__dbx_probe_explicit_1__".to_string(), Some("ybbz".to_string())),
-                ("__dbx_probe_explicit_2__".to_string(), Some("cytzrq".to_string())),
-                ("__dbx_probe_explicit_3__".to_string(), Some("jzrq".to_string())),
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 1,
+                    probe_name: first_probe_name,
+                    output_name: Some("ybbz".to_string()),
+                },
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 2,
+                    probe_name: second_probe_name,
+                    output_name: Some("cytzrq".to_string()),
+                },
+                SqlServerProbeOutputNameOverride {
+                    projection_ordinal: 3,
+                    probe_name: third_probe_name,
+                    output_name: Some("jzrq".to_string()),
+                },
             ]
         );
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_does_not_collide_with_old_probe_alias_column() {
+        let nonce = "00112233445566778899aabbccddeeff";
+        let old_probe_name = "__dbx_probe_explicit_1__";
+        let probe =
+            sqlserver_legacy_probe_with_nonce("SELECT t.[__dbx_probe_explicit_1__], t.* FROM dbo.t AS t", nonce)
+                .unwrap();
+        let generated_probe_name = sqlserver_probe_explicit_alias(nonce, 1);
+
+        assert_ne!(generated_probe_name, old_probe_name);
+        assert!(probe.source_sql.contains(&format!("t.[{old_probe_name}] AS [{generated_probe_name}], t.*")));
+        assert_eq!(probe.output_name_overrides[0].projection_ordinal, 1);
+
+        let mut columns = vec![
+            SqlServerDescribedColumn {
+                name: Some(generated_probe_name),
+                system_type_name: Some("int".to_string()),
+                user_type_schema: None,
+                user_type_name: None,
+            },
+            SqlServerDescribedColumn {
+                name: Some(old_probe_name.to_string()),
+                system_type_name: Some("int".to_string()),
+                user_type_schema: None,
+                user_type_name: None,
+            },
+        ];
+        restore_sqlserver_legacy_probe_output_names(&mut columns, &probe);
+
+        assert_eq!(columns[0].name.as_deref(), Some(old_probe_name));
+        assert_eq!(columns[1].name.as_deref(), Some(old_probe_name));
     }
 
     #[test]

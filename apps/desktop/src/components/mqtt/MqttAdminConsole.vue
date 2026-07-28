@@ -4,7 +4,13 @@ import { mqttGetBrokerInfo, mqttListTopics, mqttGetTopicTree, mqttGetMessages, m
 import type { MqttBrokerInfo, MqttTopicNode, MqttMessage } from "@/types/mqtt";
 import { Button } from "@/components/ui/button";
 import TopicTreeNode from "./TopicTreeNode.vue";
-import MqttPublishDialog from "./MqttPublishDialog.vue";
+import MqttPublishPanel from "./MqttPublishDialog.vue";
+import {
+  decodePayload,
+  PAYLOAD_ENCODINGS,
+  PAYLOAD_ENCODING_LABELS,
+  type PayloadEncoding,
+} from "@/lib/mqtt/mqttPayloadCodec";
 
 interface Props {
   connectionId: string;
@@ -12,7 +18,7 @@ interface Props {
 }
 const props = defineProps<Props>();
 
-// --- State ---
+/* ========== State ========== */
 const brokerInfo = ref<MqttBrokerInfo | null>(null);
 const topicTree = ref<MqttTopicNode | null>(null);
 const messages = ref<MqttMessage[]>([]);
@@ -20,13 +26,15 @@ const subscribedTopics = ref<[string, string][]>([]);
 const selectedTopic = ref<string>(props.initialTopic ?? "");
 const loading = ref(true);
 const error = ref<string | null>(null);
-const showPublishDialog = ref(false);
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null);
 
-// --- Computed ---
+/* Payload 显示编码格式 */
+const displayEncoding = ref<PayloadEncoding>("plaintext");
+
+/* ========== Computed ========== */
 const connected = computed(() => brokerInfo.value?.connected ?? false);
 
-// --- Actions ---
+/* ========== 数据刷新 ========== */
 async function refreshData() {
   try {
     const [info, topics, tree, msgs] = await Promise.all([
@@ -74,7 +82,7 @@ function handleMessagePublished() {
   refreshData();
 }
 
-// --- Polling for messages ---
+/* ========== 消息轮询 ========== */
 function startPolling() {
   stopPolling();
   pollingTimer.value = setInterval(async () => {
@@ -82,7 +90,7 @@ function startPolling() {
       const msgs = (await mqttGetMessages(props.connectionId, selectedTopic.value || undefined, 50)) as MqttMessage[];
       messages.value = msgs;
     } catch {
-      /* ignore polling errors */
+      /* 忽略轮询错误 */
     }
   }, 3000);
 }
@@ -94,6 +102,15 @@ function stopPolling() {
   }
 }
 
+/* ========== 格式化消息 Payload ========== */
+function formatMessagePayload(msg: MqttMessage): string {
+  if (displayEncoding.value === "plaintext" && msg.payloadText != null) {
+    return msg.payloadText;
+  }
+  return decodePayload(msg.payloadBase64, displayEncoding.value);
+}
+
+/* ========== 生命周期 ========== */
 onMounted(async () => {
   await refreshData();
   startPolling();
@@ -111,11 +128,16 @@ onUnmounted(() => {
       <div class="flex items-center gap-3">
         <span class="text-lg font-semibold">MQTT 控制台</span>
         <span v-if="brokerInfo" class="text-sm text-muted-foreground">{{ brokerInfo.brokerUrl }}</span>
-        <span v-if="brokerInfo" class="px-1.5 py-0.5 rounded text-xs font-medium" :class="connected ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'">{{ connected ? "已连接" : "已断开" }}</span>
+        <span
+          v-if="brokerInfo"
+          class="px-1.5 py-0.5 rounded text-xs font-medium"
+          :class="connected ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'"
+        >
+          {{ connected ? "已连接" : "已断开" }}
+        </span>
       </div>
       <div class="flex items-center gap-2">
         <Button size="sm" variant="outline" @click="refreshData">刷新</Button>
-        <Button size="sm" @click="showPublishDialog = true" :disabled="!connected">发布消息</Button>
       </div>
     </div>
 
@@ -125,17 +147,27 @@ onUnmounted(() => {
       <button class="ml-2 underline" @click="error = null">关闭</button>
     </div>
 
-    <!-- Body: two-panel layout -->
+    <!-- Body: 双栏布局 -->
     <div class="flex-1 flex min-h-0">
-      <!-- Left: Topic Tree -->
+      <!-- 左侧：主题树 -->
       <div class="w-72 border-r flex flex-col shrink-0">
         <div class="px-3 py-2 text-xs font-semibold text-muted-foreground uppercase border-b">主题列表</div>
         <div class="flex-1 overflow-auto p-2">
           <div v-if="loading" class="text-xs text-muted-foreground p-2">加载中...</div>
           <div v-else-if="!topicTree?.children?.length" class="text-xs text-muted-foreground p-2">暂无订阅。使用下方输入框订阅主题。</div>
-          <TopicTreeNode v-for="child in topicTree?.children ?? []" :key="child.fullPath" :node="child" :depth="0" :selected-topic="selectedTopic" :subscribed-topics="subscribedTopics" @select="handleTopicClick" @subscribe="handleSubscribe" @unsubscribe="handleUnsubscribe" />
+          <TopicTreeNode
+            v-for="child in topicTree?.children ?? []"
+            :key="child.fullPath"
+            :node="child"
+            :depth="0"
+            :selected-topic="selectedTopic"
+            :subscribed-topics="subscribedTopics"
+            @select="handleTopicClick"
+            @subscribe="handleSubscribe"
+            @unsubscribe="handleUnsubscribe"
+          />
         </div>
-        <!-- Quick subscribe -->
+        <!-- 快速订阅 -->
         <div class="border-t p-2">
           <form
             class="flex gap-1"
@@ -155,29 +187,53 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Right: Messages -->
+      <!-- 右侧：消息列表 + 发布面板 -->
       <div class="flex-1 flex flex-col min-w-0">
-        <div class="px-3 py-2 text-xs font-semibold text-muted-foreground uppercase border-b flex items-center justify-between">
-          <span v-if="selectedTopic">消息: {{ selectedTopic }}</span>
-          <span v-else>消息（所有主题）</span>
-          <span class="font-normal">{{ messages.length }}</span>
-        </div>
-        <div class="flex-1 overflow-auto">
-          <div v-if="messages.length === 0" class="text-xs text-muted-foreground p-4 text-center">暂无消息。</div>
-          <div v-for="(msg, i) in messages" :key="i" class="px-3 py-2 border-b last:border-b-0 hover:bg-muted/50 cursor-pointer text-xs" @click="handleTopicClick(msg.topic)">
-            <div class="flex items-center gap-2 mb-0.5">
-              <span class="font-mono text-blue-600 dark:text-blue-400 font-medium truncate">{{ msg.topic }}</span>
-              <span class="text-muted-foreground/60 shrink-0">QoS{{ msg.qos }}</span>
-              <span v-if="msg.retain" class="text-amber-600 dark:text-amber-400 text-[10px] font-medium shrink-0">保留</span>
+        <!-- 消息区域 -->
+        <div class="flex-1 flex flex-col min-h-0">
+          <div class="px-3 py-2 text-xs font-semibold text-muted-foreground uppercase border-b flex items-center justify-between shrink-0">
+            <span v-if="selectedTopic">消息: {{ selectedTopic }}</span>
+            <span v-else>消息（所有主题）</span>
+            <div class="flex items-center gap-2">
+              <span class="font-normal">{{ messages.length }}</span>
+              <!-- Payload 编码格式选择 -->
+              <select
+                v-model="displayEncoding"
+                class="h-6 px-1.5 text-[11px] rounded border bg-transparent text-muted-foreground cursor-pointer outline-none"
+              >
+                <option v-for="enc in PAYLOAD_ENCODINGS" :key="enc" :value="enc">
+                  {{ PAYLOAD_ENCODING_LABELS[enc] }}
+                </option>
+              </select>
             </div>
-            <div class="text-muted-foreground font-mono whitespace-pre-wrap break-all">{{ msg.payloadText ?? "(二进制数据)" }}</div>
-            <div class="text-muted-foreground/50 mt-0.5 text-[10px]">{{ new Date(msg.receivedAtMs).toLocaleTimeString() }}</div>
+          </div>
+          <div class="flex-1 overflow-auto">
+            <div v-if="messages.length === 0" class="text-xs text-muted-foreground p-4 text-center">暂无消息。</div>
+            <div
+              v-for="(msg, i) in messages"
+              :key="i"
+              class="px-3 py-2 border-b last:border-b-0 hover:bg-muted/50 cursor-pointer text-xs"
+              @click="handleTopicClick(msg.topic)"
+            >
+              <div class="flex items-center gap-2 mb-0.5">
+                <span class="font-mono text-blue-600 dark:text-blue-400 font-medium truncate">{{ msg.topic }}</span>
+                <span class="text-muted-foreground/60 shrink-0">QoS{{ msg.qos }}</span>
+                <span v-if="msg.retain" class="text-amber-600 dark:text-amber-400 text-[10px] font-medium shrink-0">保留</span>
+              </div>
+              <div class="text-muted-foreground font-mono whitespace-pre-wrap break-all">{{ formatMessagePayload(msg) }}</div>
+              <div class="text-muted-foreground/50 mt-0.5 text-[10px]">{{ new Date(msg.receivedAtMs).toLocaleTimeString() }}</div>
+            </div>
           </div>
         </div>
+
+        <!-- 底部：内联发布面板 -->
+        <MqttPublishPanel
+          v-if="connected"
+          :connection-id="connectionId"
+          :initial-topic="selectedTopic"
+          @published="handleMessagePublished"
+        />
       </div>
     </div>
-
-    <!-- Publish Dialog -->
-    <MqttPublishDialog v-if="showPublishDialog" :connection-id="connectionId" :initial-topic="selectedTopic" @close="showPublishDialog = false" @published="handleMessagePublished" />
   </div>
 </template>

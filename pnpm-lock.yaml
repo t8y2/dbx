@@ -110,6 +110,9 @@ importers:
       '@vueuse/core':
         specifier: ^14.2.1
         version: 14.2.1(vue@3.5.35(typescript@6.0.3))
+      cbor-x:
+        specifier: ^1.6.4
+        version: 1.6.4
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -239,22 +242,22 @@ importers:
     optionalDependencies:
       '@dbx-app/cli-darwin-arm64':
         specifier: 0.4.43
-        version: link:../cli-darwin-arm64
+        version: 0.4.43
       '@dbx-app/cli-darwin-x64':
         specifier: 0.4.43
-        version: link:../cli-darwin-x64
+        version: 0.4.43
       '@dbx-app/cli-linux-arm64-gnu':
         specifier: 0.4.43
-        version: link:../cli-linux-arm64-gnu
+        version: 0.4.43
       '@dbx-app/cli-linux-x64-gnu':
         specifier: 0.4.43
-        version: link:../cli-linux-x64-gnu
+        version: 0.4.43
       '@dbx-app/cli-win32-arm64':
         specifier: 0.4.43
-        version: link:../cli-win32-arm64
+        version: 0.4.43
       '@dbx-app/cli-win32-x64':
         specifier: 0.4.43
-        version: link:../cli-win32-x64
+        version: 0.4.43
 
   packages/cli-darwin-arm64: {}
 
@@ -287,22 +290,22 @@ importers:
     optionalDependencies:
       '@dbx-app/mcp-darwin-arm64':
         specifier: 0.4.43
-        version: link:../mcp-darwin-arm64
+        version: 0.4.43
       '@dbx-app/mcp-darwin-x64':
         specifier: 0.4.43
-        version: link:../mcp-darwin-x64
+        version: 0.4.43
       '@dbx-app/mcp-linux-arm64-gnu':
         specifier: 0.4.43
-        version: link:../mcp-linux-arm64-gnu
+        version: 0.4.43
       '@dbx-app/mcp-linux-x64-gnu':
         specifier: 0.4.43
-        version: link:../mcp-linux-x64-gnu
+        version: 0.4.43
       '@dbx-app/mcp-win32-arm64':
         specifier: 0.4.43
-        version: link:../mcp-win32-arm64
+        version: 0.4.43
       '@dbx-app/mcp-win32-x64':
         specifier: 0.4.43
-        version: link:../mcp-win32-x64
+        version: 0.4.43
 
   packages/mcp-win32-arm64: {}
 
@@ -454,6 +457,36 @@ packages:
     resolution: {integrity: sha512-4zBIxpPzowiZpusoFkyGVwakdRJUyuH5PxQ/PrqghfdFWWasvnCdPfQXHrenDai+gyLARulZjZowCOj6fjT4pA==}
     engines: {node: '>=6.9.0'}
 
+  '@cbor-extract/cbor-extract-darwin-arm64@2.2.2':
+    resolution: {integrity: sha512-ZKZ/F8US7JR92J4DMct6cLW/Y66o2K576+zjlEN/MevH70bFIsB10wkZEQPLzl2oNh2SMGy55xpJ9JoBRl5DOA==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@cbor-extract/cbor-extract-darwin-x64@2.2.2':
+    resolution: {integrity: sha512-32b1mgc+P61Js+KW9VZv/c+xRw5EfmOcPx990JbCBSkYJFY0l25VinvyyWfl+3KjibQmAcYwmyzKF9J4DyKP/Q==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@cbor-extract/cbor-extract-linux-arm64@2.2.2':
+    resolution: {integrity: sha512-wfqgzqCAy/Vn8i6WVIh7qZd0DdBFaWBjPdB6ma+Wihcjv0gHqD/mw3ouVv7kbbUNrab6dKEx/w3xQZEdeXIlzg==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@cbor-extract/cbor-extract-linux-arm@2.2.2':
+    resolution: {integrity: sha512-tNg0za41TpQfkhWjptD+0gSD2fggMiDCSacuIeELyb2xZhr7PrhPe5h66Jc67B/5dmpIhI2QOUtv4SBsricyYQ==}
+    cpu: [arm]
+    os: [linux]
+
+  '@cbor-extract/cbor-extract-linux-x64@2.2.2':
+    resolution: {integrity: sha512-rpiLnVEsqtPJ+mXTdx1rfz4RtUGYIUg2rUAZgd1KjiC1SehYUSkJN7Yh+aVfSjvCGtVP0/bfkQkXpPXKbmSUaA==}
+    cpu: [x64]
+    os: [linux]
+
+  '@cbor-extract/cbor-extract-win32-x64@2.2.2':
+    resolution: {integrity: sha512-dI+9P7cfWxkTQ+oE+7Aa6onEn92PHgfWXZivjNheCRmTBDBf2fx6RyTi0cmgpYLnD1KLZK9ZYrMxaPZ4oiXhGA==}
+    cpu: [x64]
+    os: [win32]
+
   '@codemirror/autocomplete@6.20.2':
     resolution: {integrity: sha512-G5FPkgIiLjOgZMjqVjvuKQ1rGPtHogLldJr33eFJdVLtmwY+giGrlv/ewljLz6b9BSQLkjxuwBc6g6omDM+YxQ==}
 
@@ -502,74 +535,74 @@ packages:
   '@codemirror/view@6.43.0':
     resolution: {integrity: sha512-V7ZCLQO3Jus9hzh2jVCCPW3mO4IBMr43O37PqSUYautJSnnJF41YlgLw21x0fLJTYvJ+Vkm6Gp+qKGH9pltgXA==}
 
-  '@dbx-app/cli-darwin-arm64@0.4.36':
-    resolution: {integrity: sha512-9IfZgHdA76x6D2znEMmQeZYalnVYgkgsgMDmZHBwpJsYrL/NEi7kMxfRhM9MhUoOxrNULR+K1a1oREQQqnULmA==}
+  '@dbx-app/cli-darwin-arm64@0.4.43':
+    resolution: {integrity: sha512-NsDZT1svcBrLNhzsLtVWQ9WuKCCF7lTfwd5fnz7U/MacBZ2hrpjhUOh/upmolNsPdd8Uw5evKVP1CfciEnC/6w==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/cli-darwin-x64@0.4.36':
-    resolution: {integrity: sha512-SGIEMUPrySA9jh8uBx1AYl8wuA14f14ioynjpc3F75KbhPGHJ4kebGOjh8sVgjf4yWf1Rh9tsmffY9zLWeZQWQ==}
+  '@dbx-app/cli-darwin-x64@0.4.43':
+    resolution: {integrity: sha512-1RkisedL3WJltvzy44khc+al7E+rdftuuaslEaPSkJtUAMRIQ7XvKvUPxnQUrfAqW5+UJjzO6bTloNvIOaHQWA==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/cli-linux-arm64-gnu@0.4.36':
-    resolution: {integrity: sha512-zPHHluDmdqbb37kkNBwnAWhaVaA+mw8IhryeDElahJpYrX6fVU4hAZqzR6j1T3LrCVQcSCojkoChtoJ4MFcvVw==}
+  '@dbx-app/cli-linux-arm64-gnu@0.4.43':
+    resolution: {integrity: sha512-xgq20aY6bcTCjwvzS/2IgsHj4JcIwaZ9V6RBpPQ/rXUZQwifxkEgIof+EhH77nVNFpE3p56ZYQs9ObLRXsvtEQ==}
     cpu: [arm64]
     os: [linux]
     hasBin: true
 
-  '@dbx-app/cli-linux-x64-gnu@0.4.36':
-    resolution: {integrity: sha512-aOn97qTOb67fLOCD1duWLsofncvGsMHFr3bKN1D0D8izfLTtzpUDwmdcbJelPwh0Xc3eu/SXq5Zc55v8AiH/Vg==}
+  '@dbx-app/cli-linux-x64-gnu@0.4.43':
+    resolution: {integrity: sha512-vI7Bfp1C6xaxw9t4ovi2PEepug7E997v3Pn2cmG0dx8fIz03ua6r4jPU8h1GXZ2tWs0569+nYC9t0UBcQFckaA==}
     cpu: [x64]
     os: [linux]
     hasBin: true
 
-  '@dbx-app/cli-win32-arm64@0.4.36':
-    resolution: {integrity: sha512-j3NGer4CcO6lBtC41MjnRIaYcwr+Q+SP7otL9jX1IW05Kj+zX3y5URL6n9VX2dI4yXSCAaf04D01PviYHUK5uw==}
+  '@dbx-app/cli-win32-arm64@0.4.43':
+    resolution: {integrity: sha512-Bpet/rFQsMXuXbj4ubRY82C9QLt5+Q2eS6w+CBQL1U0JksGd0ymUHfsQaqEm8sByVlwxHsyXLM+RbpfviogX1Q==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/cli-win32-x64@0.4.36':
-    resolution: {integrity: sha512-vgq3tWciNPi5yH4c4teQsUDV+r6XzsAOxMDz5dEpQzkQJbvUutqSvXz24hpGNX0F/jCI9EyExXsFab5g3k2qRg==}
+  '@dbx-app/cli-win32-x64@0.4.43':
+    resolution: {integrity: sha512-U46OuNzYLsNpcTiRerPBu2H5RI7Q1T04yA1m8NLJAwPYDQ52DJGY6/NuCpYLhaBglCkMe5VljdWOxTKSbhsRNg==}
     cpu: [x64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/mcp-darwin-arm64@0.4.36':
-    resolution: {integrity: sha512-/B1b6DYv9eSTgMZx5qBF7Zsm8vRhba/s2tM+3jFNJanWgn/y+xJVnIZZIB5Qm3x0yhU7ONqgmeLl7HMu8y8v/w==}
+  '@dbx-app/mcp-darwin-arm64@0.4.43':
+    resolution: {integrity: sha512-5/kiiAoRSi+S9Ct6O7dBuZ4Jkq88IjTrjC6Hs6wuhTvoRINghWpW/eb3SoGkHgkdQxz1Syha/0v9a20WkaP/aA==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/mcp-darwin-x64@0.4.36':
-    resolution: {integrity: sha512-ED11PzL7zMLCKfk/zA1gBDLf3qy/v764jmBHut/Cy9JQvMPlZlwTmnTkuW6sJ8SdvG5WRIFDHFtEP1vzezmx3w==}
+  '@dbx-app/mcp-darwin-x64@0.4.43':
+    resolution: {integrity: sha512-cTagkXHHJiv+2Uwkbky4kBklEd3mIkpEIHkiGVXQGMLODgOU1zsPR3UiliBFseKaC2Xo8K9L75qgNBPJddTEZQ==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/mcp-linux-arm64-gnu@0.4.36':
-    resolution: {integrity: sha512-jjJTH5e5Ru8o+RsUsF9PzgN+SQ4xGemBCnaDtbupPKxgOib1iX4wwgjbVt8ycK0QiNLk0ezv3Pj4RhABbv0wBw==}
+  '@dbx-app/mcp-linux-arm64-gnu@0.4.43':
+    resolution: {integrity: sha512-L6ibCO3/n0ehoCEdCprlh+/DXcCyRufaN8yMf+o08gv3ADo1sLVyuYqB5a3Fq8Oq/dPjJFNBfen5VjXBwE63+w==}
     cpu: [arm64]
     os: [linux]
     hasBin: true
 
-  '@dbx-app/mcp-linux-x64-gnu@0.4.36':
-    resolution: {integrity: sha512-qy9EyXVUSne00U4oAvRFwxn7Ed9wCj54WHZX+g+6m1uEEXAcbMC7F3lwczIdAOvQHU/qvLjeAP0rsjanVBVRmA==}
+  '@dbx-app/mcp-linux-x64-gnu@0.4.43':
+    resolution: {integrity: sha512-W/QM5TJP4yznJONcevyXhQotwReMER+t4PWZDmAPqBmz8dnRCuirJlzAAg2jRDtVqBlfbvEgnPNOKEC4Hyeq4w==}
     cpu: [x64]
     os: [linux]
     hasBin: true
 
-  '@dbx-app/mcp-win32-arm64@0.4.36':
-    resolution: {integrity: sha512-drAtzSUUaU7qF2BpTxw6czFc4bciM8Q3fNLgjM/uy7ehFw1ZsS1J8qBOCOiKnZXKJHzMnUYaPAl9hIqdsxINPQ==}
+  '@dbx-app/mcp-win32-arm64@0.4.43':
+    resolution: {integrity: sha512-kX1YSOyedTcTTRv2bE8NzDUmkKu/ogx0yaMIKVZ39CqTr3irLmlyXjGZ3rOHwVgmpczRDV2vXHn3eyzFehiSYQ==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/mcp-win32-x64@0.4.36':
-    resolution: {integrity: sha512-6sPpFJKCGpVJgujPeQrtF+D679/5RUCMuNxU29FTvyswynoqF4KHY07k14bK+JZGHvh1UGGWvy1CfaiC35HkKA==}
+  '@dbx-app/mcp-win32-x64@0.4.43':
+    resolution: {integrity: sha512-Da36aZTYQj/I+hSiO0wRrAqJadf13KwUqO29YXJIoRa1UbupyrcYY48bl9uEiMDQc8k7bIX6tCFz2/Rz+2AoNQ==}
     cpu: [x64]
     os: [win32]
     hasBin: true
@@ -1861,6 +1894,13 @@ packages:
   caniuse-lite@1.0.30001800:
     resolution: {integrity: sha512-MMHtuAz9Ys840zAY5F4k6fV5GaivZ9sPk+nz0mY+GYVzRBnYkN0mpqkSR92oWRQ19yQWo4HvBV/FnC16AJX8MA==}
 
+  cbor-extract@2.2.2:
+    resolution: {integrity: sha512-hlSxxI9XO2yQfe9g6msd3g4xCfDqK5T5P0fRMLuaLHhxn4ViPrm+a+MUfhrvH2W962RGxcBwEGzLQyjbDG1gng==}
+    hasBin: true
+
+  cbor-x@1.6.4:
+    resolution: {integrity: sha512-UGKHjp6RHC6QuZ2yy5LCKm7MojM4716DwoSaqwQpaH4DvZvbBTGcoDNTiG9Y2lByXZYFEs9WRkS5tLl96IrF1Q==}
+
   ccount@2.0.1:
     resolution: {integrity: sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg==}
 
@@ -2891,6 +2931,10 @@ packages:
 
   node-fetch-native@1.6.7:
     resolution: {integrity: sha512-g9yhqoedzIUm0nTnTqAQvueMPVOuIY16bqgAJJC8XOOubYFNwz6IER9qs0Gq2Xd0+CecCKFjtdDTMA4u4xG06Q==}
+
+  node-gyp-build-optional-packages@5.1.1:
+    resolution: {integrity: sha512-+P72GAjVAbTxjjwUmwjVrqrdZROD4nf8KgpBoDxqXXTiYZZt/ud60dE5yvCSr9lRO8e8yv6kgJIC0K0PfZFVQw==}
+    hasBin: true
 
   node-html-parser@7.1.0:
     resolution: {integrity: sha512-iJo8b2uYGT40Y8BTyy5ufL6IVbN8rbm/1QK2xffXU/1a/v3AAa0d1YAoqBNYqaS4R/HajkWIpIfdE6KcyFh1AQ==}
@@ -4009,6 +4053,24 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
+  '@cbor-extract/cbor-extract-darwin-arm64@2.2.2':
+    optional: true
+
+  '@cbor-extract/cbor-extract-darwin-x64@2.2.2':
+    optional: true
+
+  '@cbor-extract/cbor-extract-linux-arm64@2.2.2':
+    optional: true
+
+  '@cbor-extract/cbor-extract-linux-arm@2.2.2':
+    optional: true
+
+  '@cbor-extract/cbor-extract-linux-x64@2.2.2':
+    optional: true
+
+  '@cbor-extract/cbor-extract-win32-x64@2.2.2':
+    optional: true
+
   '@codemirror/autocomplete@6.20.2':
     dependencies:
       '@codemirror/language': 6.12.3
@@ -4129,40 +4191,40 @@ snapshots:
       style-mod: 4.1.3
       w3c-keyname: 2.2.8
 
-  '@dbx-app/cli-darwin-arm64@0.4.36':
+  '@dbx-app/cli-darwin-arm64@0.4.43':
     optional: true
 
-  '@dbx-app/cli-darwin-x64@0.4.36':
+  '@dbx-app/cli-darwin-x64@0.4.43':
     optional: true
 
-  '@dbx-app/cli-linux-arm64-gnu@0.4.36':
+  '@dbx-app/cli-linux-arm64-gnu@0.4.43':
     optional: true
 
-  '@dbx-app/cli-linux-x64-gnu@0.4.36':
+  '@dbx-app/cli-linux-x64-gnu@0.4.43':
     optional: true
 
-  '@dbx-app/cli-win32-arm64@0.4.36':
+  '@dbx-app/cli-win32-arm64@0.4.43':
     optional: true
 
-  '@dbx-app/cli-win32-x64@0.4.36':
+  '@dbx-app/cli-win32-x64@0.4.43':
     optional: true
 
-  '@dbx-app/mcp-darwin-arm64@0.4.36':
+  '@dbx-app/mcp-darwin-arm64@0.4.43':
     optional: true
 
-  '@dbx-app/mcp-darwin-x64@0.4.36':
+  '@dbx-app/mcp-darwin-x64@0.4.43':
     optional: true
 
-  '@dbx-app/mcp-linux-arm64-gnu@0.4.36':
+  '@dbx-app/mcp-linux-arm64-gnu@0.4.43':
     optional: true
 
-  '@dbx-app/mcp-linux-x64-gnu@0.4.36':
+  '@dbx-app/mcp-linux-x64-gnu@0.4.43':
     optional: true
 
-  '@dbx-app/mcp-win32-arm64@0.4.36':
+  '@dbx-app/mcp-win32-arm64@0.4.43':
     optional: true
 
-  '@dbx-app/mcp-win32-x64@0.4.36':
+  '@dbx-app/mcp-win32-x64@0.4.43':
     optional: true
 
   '@dotenvx/dotenvx@1.75.1':
@@ -5353,6 +5415,22 @@ snapshots:
 
   caniuse-lite@1.0.30001800: {}
 
+  cbor-extract@2.2.2:
+    dependencies:
+      node-gyp-build-optional-packages: 5.1.1
+    optionalDependencies:
+      '@cbor-extract/cbor-extract-darwin-arm64': 2.2.2
+      '@cbor-extract/cbor-extract-darwin-x64': 2.2.2
+      '@cbor-extract/cbor-extract-linux-arm': 2.2.2
+      '@cbor-extract/cbor-extract-linux-arm64': 2.2.2
+      '@cbor-extract/cbor-extract-linux-x64': 2.2.2
+      '@cbor-extract/cbor-extract-win32-x64': 2.2.2
+    optional: true
+
+  cbor-x@1.6.4:
+    optionalDependencies:
+      cbor-extract: 2.2.2
+
   ccount@2.0.1: {}
 
   chai@6.2.2: {}
@@ -6323,6 +6401,11 @@ snapshots:
   negotiator@1.0.0: {}
 
   node-fetch-native@1.6.7: {}
+
+  node-gyp-build-optional-packages@5.1.1:
+    dependencies:
+      detect-libc: 2.1.2
+    optional: true
 
   node-html-parser@7.1.0:
     dependencies:

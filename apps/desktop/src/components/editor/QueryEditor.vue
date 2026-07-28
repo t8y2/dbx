@@ -46,6 +46,7 @@ import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMon
 import { resolveSqlCompletionRoutineLookupTarget, resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
 import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
 import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import { buildHoverTableSql, quoteQualifiedName, reformatHoverDdl } from "@/lib/editor/hoverTableSql";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -415,95 +416,6 @@ const loadedColumnsByTable = new Set<string>();
 // Hover tooltip uses the shared table metadata cache (loadTableMetadata)
 // which provides TTL, invalidation, and in-flight deduplication.
 let hoverSqlHighlighter: SqlHighlighter | null = null;
-
-function formatColumnType(c: ColumnInfo): string {
-  const baseType = c.data_type.replace(/\([^()]*\)$/, "").trim();
-  if (c.character_maximum_length != null && c.numeric_scale == null) return `${baseType}(${c.character_maximum_length})`;
-  if (c.numeric_scale != null && c.numeric_precision != null) {
-    if (c.numeric_scale === 0) return `${baseType}(${c.numeric_precision})`;
-    return `${baseType}(${c.numeric_precision},${c.numeric_scale})`;
-  }
-  return baseType;
-}
-
-function formatDefaultValue(value: string): string {
-  // Already quoted string literal — keep as-is.
-  if (/^'/.test(value)) return value;
-  // Numeric values — no quotes.
-  if (/^-?\d+(\.\d+)?$/.test(value)) return value;
-  // Expression default (wrapped in parentheses) — keep as-is.
-  if (/^\(/.test(value)) return value;
-  // SQL keywords (NULL, TRUE, FALSE, etc.) — no quotes.
-  if (isSqlKeyword(value)) return value;
-  // Well-known SQL functions commonly used as defaults — no quotes.
-  if (/^(current_timestamp|current_date|current_time|localtimestamp|localtime|now|random|gen_random_uuid|uuid)\s*(?:\(.*\))?$/i.test(value)) return value;
-  // Other bare string values (e.g. ENUM defaults like 'DIRECT') — wrap in quotes.
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function quoteIdentifier(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
-function quoteQualifiedName(qualifiedName: string): string {
-  const segments = qualifiedName.split(".");
-  return segments.map((seg) => (seg.startsWith('"') ? seg : quoteIdentifier(seg))).join(".");
-}
-
-function buildHoverTableSql(qualifiedName: string, columns: ColumnInfo[], indexes: IndexInfo[], tableComment?: string): string {
-  const primaryKeyIndex = indexes.find((idx) => idx.is_primary);
-  let pkColumns = primaryKeyIndex?.columns ?? [];
-  // Fallback to column-level flags when the PK index is not reported by
-  // the driver (e.g., listIndexes failed or the database omits it).
-  if (pkColumns.length === 0) {
-    pkColumns = columns.filter((c) => c.is_primary_key).map((c) => c.name);
-  }
-  const lines: string[] = [`create table ${qualifiedName} (`];
-  const nameWidth = Math.max(...columns.map((c) => c.name.length), 4);
-  const typeWidth = Math.max(
-    ...columns.map((c) => {
-      const t = formatColumnType(c);
-      return t.length;
-    }),
-    4,
-  );
-  for (const c of columns) {
-    const type = formatColumnType(c);
-    const namePad = " ".repeat(nameWidth - c.name.length);
-    const typePad = " ".repeat(typeWidth - type.length);
-    const def = `  ${quoteIdentifier(c.name)}${namePad}  ${type}${typePad}`;
-    const extras: string[] = [];
-    if (!c.is_nullable) extras.push("not null");
-    if (c.column_default != null) extras.push(`default ${formatDefaultValue(c.column_default)}`);
-    // Column-level primary key is omitted; a table-level primary key is
-    // generated once from the primary key index to correctly represent
-    // composite keys (e.g. primary key (tenant_id, order_id)).
-    if (c.extra) extras.push(c.extra);
-    if (c.comment) extras.push(`comment '${c.comment.replace(/'/g, "''")}'`);
-    lines.push(extras.length > 0 ? `${def}  ${extras.join("  ")},` : `${def},`);
-  }
-  if (columns.length === 0) {
-    lines.push(");");
-    return lines.join("\n");
-  }
-  const lastColumnIndex = columns.length - 1;
-  lines[lastColumnIndex] = lines[lastColumnIndex].replace(/,$/, "");
-  if (pkColumns.length > 0) {
-    lines.push(`  primary key (${pkColumns.map(quoteIdentifier).join(", ")})`);
-  }
-  const closeSuffix = tableComment && tableComment.trim() ? ` comment '${tableComment.replace(/'/g, "''")}';` : ";";
-  lines.push(`)${closeSuffix}`);
-  const nonPrimaryIndexes = indexes.filter((idx) => !idx.is_primary);
-  if (nonPrimaryIndexes.length > 0) {
-    lines.push("");
-    for (const idx of nonPrimaryIndexes) {
-      const uniquePrefix = idx.is_unique ? "unique " : "";
-      lines.push(`create ${uniquePrefix}index ${quoteIdentifier(idx.name)}`);
-      lines.push(`  on ${qualifiedName} (${idx.columns.map((c) => quoteIdentifier(c)).join(", ")});`);
-    }
-  }
-  return lines.join("\n");
-}
 
 function usesOracleSessionCompletionColumns(schema?: string | null): boolean {
   return shouldUseOracleSessionCompletionColumns({
@@ -1944,37 +1856,59 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       const hoverDatabase: string = resolvedLookupDatabase;
       const hoverSchema = resolvedLookupSchema ?? table.schema ?? "";
       const hoverQualifiedName = [hoverDatabase, hoverSchema, table.name].filter(Boolean).join(".");
-      let fullColumns: ColumnInfo[] = [];
-      let fullIndexes: IndexInfo[] = [];
-      let tableComment: string | undefined;
+      let sqlContent: string | undefined;
       let metadataLoadFailed = false;
+
+      // Primary path: the backend's raw getTableDdl (SHOW CREATE TABLE, pg_ddl,
+      // build_sqlserver_ddl, ...) is authoritative. Parse it into structured
+      // fields and rebuild with vertical field alignment (name, type, extra,
+      // default, nullable, comment), stripping charset/COLLATE noise.
       try {
-        const result: TableMetadataLoadResult = await loadTableMetadata({
-          connectionId: props.connectionId,
-          database: hoverDatabase,
-          schema: hoverSchema,
-          tableName: table.name,
-          databaseType: props.databaseType ?? "",
-        });
-        fullColumns = result.metadata.columns;
-        fullIndexes = result.metadata.indexes;
+        const rawDdl = await api.getTableDdl(props.connectionId, hoverDatabase, hoverSchema, table.name, undefined, props.catalog);
+        if (rawDdl && rawDdl.trim()) {
+          sqlContent = reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
+        }
       } catch (error) {
-        metadataLoadFailed = true;
-        console.warn(`[DBX] Failed to load table metadata for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
+        console.warn(`[DBX] Failed to load table DDL for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
       }
-      if (!metadataLoadFailed) {
+
+      // Fallback path: rebuild the DDL from cached table metadata when the
+      // backend DDL is unavailable (empty result or request failure).
+      if (!sqlContent) {
+        let fullColumns: ColumnInfo[] = [];
+        let fullIndexes: IndexInfo[] = [];
+        let tableComment: string | undefined;
         try {
-          const commentResult = await api.getTableComment(props.connectionId, hoverDatabase, hoverSchema, table.name);
-          if (commentResult) tableComment = commentResult;
+          const result: TableMetadataLoadResult = await loadTableMetadata({
+            connectionId: props.connectionId,
+            database: hoverDatabase,
+            schema: hoverSchema,
+            tableName: table.name,
+            databaseType: props.databaseType ?? "",
+          });
+          fullColumns = result.metadata.columns;
+          fullIndexes = result.metadata.indexes;
         } catch (error) {
-          console.warn(`[DBX] Failed to load table comment for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
+          metadataLoadFailed = true;
+          console.warn(`[DBX] Failed to load table metadata for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
+        }
+        if (!metadataLoadFailed) {
+          try {
+            const commentResult = await api.getTableComment(props.connectionId, hoverDatabase, hoverSchema, table.name);
+            if (commentResult) tableComment = commentResult;
+          } catch (error) {
+            console.warn(`[DBX] Failed to load table comment for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
+          }
+        }
+        if (fullColumns.length > 0) {
+          sqlContent = buildHoverTableSql(quoteQualifiedName(hoverQualifiedName), fullColumns, fullIndexes, tableComment);
+          metadataLoadFailed = false;
         }
       }
       // Re-check after async metadata load — the context menu may have opened
-      // while loadTableMetadata was in flight, and we must not display a hover
+      // while the DDL request was in flight, and we must not display a hover
       // tooltip on top of an open context menu.
       if (contextMenuOpen.value) return null;
-      const sqlContent = fullColumns.length > 0 ? buildHoverTableSql(quoteQualifiedName(hoverQualifiedName), fullColumns, fullIndexes, tableComment) : undefined;
       return {
         pos: range.from,
         end: range.to,

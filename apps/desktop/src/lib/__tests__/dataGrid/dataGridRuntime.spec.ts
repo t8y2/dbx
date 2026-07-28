@@ -30,13 +30,14 @@ describe("dataGridRuntime", () => {
   });
 
   it("keeps runtime modules independent from the DataGrid component", () => {
-    const sourceRoots = [join(process.cwd(), "apps/desktop/src/lib/dataGrid"), join(process.cwd(), "apps/desktop/src/composables")];
+    const repoRoot = process.cwd().replace(/[\\/]apps[\\/]desktop$/, "");
+    const sourceRoots = [join(repoRoot, "apps/desktop/src/lib/dataGrid"), join(repoRoot, "apps/desktop/src/composables")];
     const sourceFiles: string[] = [];
     const visit = (directory: string) => {
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         const path = join(directory, entry.name);
         if (entry.isDirectory()) visit(path);
-        else if (entry.name.endsWith(".ts") && (!directory.endsWith("/composables") || entry.name.startsWith("useDataGrid"))) sourceFiles.push(path);
+        else if (entry.name.endsWith(".ts") && (!directory.endsWith("composables") || entry.name.startsWith("useDataGrid"))) sourceFiles.push(path);
       }
     };
     sourceRoots.forEach(visit);

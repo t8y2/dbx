@@ -887,10 +887,10 @@ const targetConnectionInfo = computed(() => {
 <style scoped>
 :deep(.splitpanes--horizontal > .splitpanes__splitter) {
   height: 8px;
-  background: hsl(var(--border));
+  background: var(--border);
   cursor: row-resize;
 }
 :deep(.splitpanes--horizontal > .splitpanes__splitter:hover) {
-  background: hsl(var(--primary));
+  background: var(--primary);
 }
 </style>

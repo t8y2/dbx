@@ -514,6 +514,21 @@ pub fn prepare_data_grid_save(
 }
 
 #[tauri::command]
+pub async fn extract_data_grid_selection(
+    request: dbx_core::data_grid_extractors::DataGridExtractRequest,
+) -> Result<dbx_core::data_grid_extractors::DataGridExtractResult, dbx_core::data_grid_extractors::DataGridExtractError>
+{
+    tauri::async_runtime::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(request))
+        .await
+        .map_err(|error| {
+            dbx_core::data_grid_extractors::DataGridExtractError::new(
+                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+                format!("Data grid extractor worker failed: {error}"),
+            )
+        })?
+}
+
+#[tauri::command]
 pub fn build_data_grid_copy_update_statements(
     options: dbx_core::data_grid_sql::DataGridCopyUpdateStatementOptions,
 ) -> Result<Vec<String>, String> {

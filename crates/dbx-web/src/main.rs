@@ -2,6 +2,7 @@ mod auth;
 mod error;
 mod routes;
 mod sse;
+mod ssh_prompt;
 mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -21,8 +22,40 @@ use state::WebState;
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
+use utoipa::OpenApi;
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "DBX Data Grid Extractor API", description = "HTTP contract for data-grid clipboard extraction."),
+    paths(routes::query::extract_data_grid_selection),
+    tags((name = "data-grid", description = "Data grid extraction and clipboard formats"))
+)]
+struct ApiDoc;
+
+async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
+    axum::Json(ApiDoc::openapi())
+}
+
+#[cfg(test)]
+mod data_grid_extractor_openapi_tests {
+    use super::*;
+
+    #[test]
+    fn extractor_openapi_contains_the_versioned_request_and_error_responses() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize extractor OpenAPI document");
+        let operation = &document["paths"]["/api/query/extract-data-grid-selection"]["post"];
+
+        assert_eq!(operation["requestBody"]["required"], true);
+        assert!(operation["responses"].get("200").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("413").is_some());
+        assert!(operation["responses"].get("422").is_some());
+        assert!(operation["responses"].get("500").is_some());
+    }
+}
 
 fn web_compression_predicate() -> impl Predicate {
     // XLSX exports are already compressed ZIP archives, so gzip would only add CPU overhead.
@@ -201,12 +234,16 @@ async fn main() {
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
+        transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
+        ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
     });
+
+    ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
 
     // API routes
     let api = Router::new()
@@ -250,6 +287,8 @@ async fn main() {
         // System
         .route("/system/fonts", get(routes::jdbc::list_system_fonts))
         .route("/ssh/config-hosts", get(routes::ssh_config::list_ssh_config_hosts))
+        .route("/ssh/prompts", get(routes::ssh_prompt::stream_ssh_prompts))
+        .route("/ssh/prompts/resolve", post(routes::ssh_prompt::resolve_ssh_prompt))
         // Tunnel profiles
         .route("/tunnel-profiles/list", get(routes::tunnel_profiles::load_tunnel_profiles))
         .route("/tunnel-profiles/save", post(routes::tunnel_profiles::save_tunnel_profiles))
@@ -377,6 +416,12 @@ async fn main() {
         .route("/query/build-single-column-alter-sql", post(routes::query::build_single_column_alter_sql))
         .route("/query/analyze-editability", post(routes::query::analyze_editable_query_editability))
         .route("/query/prepare-data-grid-save", post(routes::query::prepare_data_grid_save))
+        .route("/query/data-grid-extractor-openapi.json", get(openapi_json))
+        .route(
+            "/query/extract-data-grid-selection",
+            post(routes::query::extract_data_grid_selection)
+                .layer(DefaultBodyLimit::max(DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES)),
+        )
         .route(
             "/query/build-data-grid-copy-update-statements",
             post(routes::query::build_data_grid_copy_update_statements),
@@ -459,6 +504,14 @@ async fn main() {
         .route("/zookeeper/get", post(routes::zookeeper::get))
         .route("/zookeeper/put", post(routes::zookeeper::put))
         .route("/zookeeper/delete", post(routes::zookeeper::delete))
+        // HBase REST
+        .route("/hbase/table-schema", post(routes::hbase::get_table_schema))
+        .route("/hbase/scan-rows", post(routes::hbase::scan_rows))
+        .route("/hbase/get-row", post(routes::hbase::get_row))
+        .route("/hbase/put-row", post(routes::hbase::put_row))
+        .route("/hbase/delete-row", post(routes::hbase::delete_row))
+        .route("/hbase/create-table", post(routes::hbase::create_table))
+        .route("/hbase/delete-table", post(routes::hbase::delete_table))
         // Nacos
         .route("/nacos/test-connection", post(routes::nacos::test_connection))
         .route("/nacos/namespaces/list", post(routes::nacos::list_namespaces))

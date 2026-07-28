@@ -93,6 +93,25 @@ describe("queryStore switchTab", () => {
     expect(tab.result.local_column_filters).toBeUndefined();
   });
 
+  it("stores hidden data-grid column keys on the tab result", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", "users", "data", "public");
+    const tab = queryStore.tabs.find((item) => item.id === tabId)!;
+    tab.result = {
+      columns: ["id", "status"],
+      rows: [[1, "active"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+
+    queryStore.updateDataGridHiddenColumnKeys(tabId, ["status\0\0"]);
+    expect(tab.result.local_hidden_column_keys).toEqual(["status\0\0"]);
+
+    queryStore.updateDataGridHiddenColumnKeys(tabId, []);
+    expect(tab.result.local_hidden_column_keys).toBeUndefined();
+  });
+
   it("opens one reusable Nacos dashboard tab per connection", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();

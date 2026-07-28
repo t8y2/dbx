@@ -237,8 +237,14 @@ export const AI_SKILL_DEFINITIONS: AiSkillDefinition[] = [
       zh: "执行当前的 SQL 并解释结果。先调用 execute_query 运行当前 SQL，再基于真实结果解释查询含义、数据特征和值得注意的点。",
     },
     systemRules: {
-      en: ["Only SELECT/WITH/SHOW/DESCRIBE/EXPLAIN can be executed. If the current SQL is a write operation, do not execute; explain its impact instead.", "Base explanations on real execution results; do not speculate about data."],
-      zh: ["只有 SELECT/WITH/SHOW/DESCRIBE/EXPLAIN 可执行。如果当前 SQL 是写操作，不要执行，改为解释其影响。", "解释要基于真实执行结果，不要凭空推测数据。"],
+      en: [
+        "If the current SQL is a write operation, first put its exact text in one ```sql code block and ask the user for explicit confirmation (e.g., 'Should I execute this SQL?') instead of executing immediately. After confirmation, execute that code-block SQL verbatim without rewriting, reformatting, or adding statements. Do not execute writes without user confirmation.",
+        "Base explanations on real execution results; do not speculate about data.",
+      ],
+      zh: [
+        "如果当前 SQL 是写操作，先在一个 ```sql 代码块中给出其精确文本，并在回复末尾明确询问用户是否确认执行（例如'需要我执行这条 SQL 吗？'），不要直接执行。确认后必须原样执行该代码块中的 SQL，不得改写、重新格式化或补充语句。禁止不经确认直接执行写入。",
+        "解释要基于真实执行结果，不要凭空推测数据。",
+      ],
     },
     outputContract: {
       en: ["Output format: lead with an execution-result summary, then step through the key data and its meaning."],

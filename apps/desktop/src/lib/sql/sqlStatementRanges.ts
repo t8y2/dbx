@@ -289,6 +289,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let customDelimiter: string | null = null;
   let state: QuoteState = "none";
   let dollarTag = "";
+  let postgresDollarQuotedRoutine = false;
   let i = 0;
 
   const isWhitespace = (ch: string) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
@@ -305,6 +306,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (statementStart === -1) {
       statementEnd = -1;
       pendingHintStart = -1;
+      postgresDollarQuotedRoutine = false;
       return;
     }
     const trimmedTo = trimRangeEnd(sql, statementStart, to);
@@ -314,6 +316,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     statementStart = -1;
     statementEnd = -1;
     pendingHintStart = -1;
+    postgresDollarQuotedRoutine = false;
   };
 
   while (i < len) {
@@ -470,6 +473,9 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       const tagMatch = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(i));
       if (tagMatch) {
         markContent(i);
+        if (databaseType === "gaussdb" && statementStart !== -1 && startsWithPostgresDollarQuotedRoutinePrefix(sql.slice(statementStart, i))) {
+          postgresDollarQuotedRoutine = true;
+        }
         dollarTag = tagMatch[0].slice(1, -1);
         i += tagMatch[0].length;
         state = "dollar";
@@ -497,7 +503,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         flush();
       } else {
         const statementSoFar = statementStart === -1 ? "" : sql.slice(statementStart, i);
-        const isOraclePlSql = isOracleLikeDatabase(databaseType) && statementStart !== -1 && startsWithOraclePlSqlBlock(statementSoFar);
+        const isOraclePlSql = isOracleLikeDatabase(databaseType) && !postgresDollarQuotedRoutine && statementStart !== -1 && startsWithOraclePlSqlBlock(statementSoFar);
         const isSapHanaScriptBlock = isSapHanaScriptBlockDatabase(databaseType) && statementStart !== -1 && startsWithSapHanaScriptBlock(statementSoFar);
         if (isOraclePlSql || isSapHanaScriptBlock) {
           markContent(i);
@@ -1625,6 +1631,13 @@ function startsWithOraclePlSqlBlock(sql: string): boolean {
   return ORACLE_PL_SQL_CREATE_OBJECT_TYPES.has(words[index] ?? "");
 }
 
+function startsWithPostgresDollarQuotedRoutinePrefix(sql: string): boolean {
+  const words = oraclePlSqlWords(sql);
+  if (words[0] !== "CREATE") return false;
+  const objectIndex = skipOraclePlSqlCreateModifiers(words, 1);
+  return (words[objectIndex] === "FUNCTION" || words[objectIndex] === "PROCEDURE") && words[words.length - 1] === "AS";
+}
+
 /** Skip OR REPLACE / FORCE / NOFORCE / EDITIONABLE modifiers after CREATE. */
 function skipOraclePlSqlCreateModifiers(words: readonly string[], startIndex: number): number {
   let index = startIndex;
@@ -1692,7 +1705,7 @@ function oraclePlSqlBlockIsComplete(sql: string): boolean {
     if (token.kind !== "word") continue;
 
     if (token.value === "DECLARE") {
-      stack.push("DECLARATION");
+      if (stack[stack.length - 1] !== "DECLARATION") stack.push("DECLARATION");
       continue;
     }
     if (token.value === "BEGIN") {

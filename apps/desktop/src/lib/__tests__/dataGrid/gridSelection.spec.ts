@@ -1,34 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { formatSelectionAsTsv, summarizeSelection } from "@/lib/dataGrid/gridSelection";
+import { dedupeColumnIndexes, summarizeSelection } from "@/lib/dataGrid/gridSelection";
 
 describe("gridSelection", () => {
-  it("formats TSV selections without headers by default", () => {
-    expect(
-      formatSelectionAsTsv({
-        columns: ["id", "name"],
-        rows: [
-          [1, "Ada"],
-          [2, "Lin"],
-        ],
-      }),
-    ).toBe("1\tAda\n2\tLin");
-  });
-
-  it("can include column headers in TSV selections", () => {
-    expect(
-      formatSelectionAsTsv(
-        {
-          columns: ["id", "name"],
-          rows: [
-            [1, "Ada"],
-            [2, "Lin"],
-          ],
-        },
-        true,
-      ),
-    ).toBe("id\tname\n1\tAda\n2\tLin");
-  });
-
   it("summarizes empty selections", () => {
     expect(summarizeSelection({ columns: [], rows: [] })).toEqual({
       cellCount: 0,
@@ -70,5 +43,15 @@ describe("gridSelection", () => {
       numericCount: 3,
       sum: 105.5,
     });
+  });
+
+  it("dedupeColumnIndexes preserves the first visible occurrence instead of sorting", () => {
+    // After drag-reordering, visible order is [2, 0, 1]; extraction must keep it,
+    // not revert to numeric [0, 1, 2].
+    expect(dedupeColumnIndexes([2, 0, 1])).toEqual([2, 0, 1]);
+  });
+
+  it("dedupeColumnIndexes dedups keeping the first occurrence and drops negatives", () => {
+    expect(dedupeColumnIndexes([2, 0, 2, -1, 1, 0])).toEqual([2, 0, 1]);
   });
 });

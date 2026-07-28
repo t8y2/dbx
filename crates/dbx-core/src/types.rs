@@ -245,6 +245,11 @@ pub struct QueryResult {
     pub session_id: Option<String>,
     #[serde(default)]
     pub has_more: bool,
+    /// For Elasticsearch REST search results parsed into a table from _source,
+    /// this carries the raw HTTP response body so the UI can offer a toggle
+    /// between the tabular view and the original JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elasticsearch_raw_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

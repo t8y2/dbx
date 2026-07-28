@@ -67,6 +67,7 @@ export const loadConnections = forward("loadConnections");
 export const loadTunnelProfiles = forward("loadTunnelProfiles");
 export const saveTunnelProfiles = forward("saveTunnelProfiles");
 export const testTunnelProfile = forward("testTunnelProfile");
+export const resolveSshPrompt = forward("resolveSshPrompt");
 export const readKeychainPassword = forward("readKeychainPassword");
 export const readKeychainPasswords = forward("readKeychainPasswords");
 export const decryptConfig = forward("decryptConfig");
@@ -165,6 +166,7 @@ export const listConstraints = forward("listConstraints");
 export const listPartitions = forward("listPartitions");
 export const listSubpartitions = forward("listSubpartitions");
 export const getTableDdl = forward("getTableDdl");
+export const getTableDisplayDdl = forward("getTableDisplayDdl");
 export const listFunctions = forward("listFunctions");
 export const listSequences = forward("listSequences");
 export const listRules = forward("listRules");
@@ -225,6 +227,7 @@ export const buildCreateTableSql = forward("buildCreateTableSql");
 export const buildSingleColumnAlterSql = forward("buildSingleColumnAlterSql");
 export const analyzeEditableQueryEditability = forward("analyzeEditableQueryEditability");
 export const prepareDataGridSave = forward("prepareDataGridSave");
+export const extractDataGridSelection = forward("extractDataGridSelection");
 export const buildDataGridCopyUpdateStatements = forward("buildDataGridCopyUpdateStatements");
 export const buildDataGridCopyInsertStatement = forward("buildDataGridCopyInsertStatement");
 export const buildDataGridContextFilterCondition = forward("buildDataGridContextFilterCondition");
@@ -421,6 +424,15 @@ export const zookeeperListPrefix = forward("zookeeperListPrefix");
 export const zookeeperGet = forward("zookeeperGet");
 export const zookeeperPut = forward("zookeeperPut");
 export const zookeeperDelete = forward("zookeeperDelete");
+
+// HBase
+export const hbaseGetTableSchema = forward("hbaseGetTableSchema");
+export const hbaseScanRows = forward("hbaseScanRows");
+export const hbaseGetRow = forward("hbaseGetRow");
+export const hbasePutRow = forward("hbasePutRow");
+export const hbaseDeleteRow = forward("hbaseDeleteRow");
+export const hbaseCreateTable = forward("hbaseCreateTable");
+export const hbaseDeleteTable = forward("hbaseDeleteTable");
 
 // Message Queue
 export const mqTestConnection = forward("mqTestConnection");

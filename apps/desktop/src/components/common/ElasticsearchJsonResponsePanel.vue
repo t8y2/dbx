@@ -13,6 +13,12 @@ import JsonTree from "./JsonTree.vue";
 const props = defineProps<{
   status: number;
   body: string;
+  /** When true, render a "Table" button to switch back to the grid view. */
+  canShowTable?: boolean;
+}>();
+
+const emit = defineEmits<{
+  showTable: [];
 }>();
 
 const { t } = useI18n();
@@ -100,6 +106,9 @@ onMounted(() => {
             @click="responseView = 'json'"
           >
             {{ t("redis.jsonView") }}
+          </button>
+          <button v-if="canShowTable" type="button" class="h-6 rounded-[4px] px-2 text-xs transition-colors bg-background font-medium text-foreground shadow-sm" @click="emit('showTable')">
+            {{ t("tabs.tableData") }}
           </button>
         </div>
       </div>

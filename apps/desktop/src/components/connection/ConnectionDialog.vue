@@ -96,7 +96,7 @@ import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
-import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
+import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
 
 type DbOption = { value: string; label: string };
 type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
@@ -213,6 +213,7 @@ function initialConfigTab(): ConfigTab {
 
 const defaultForm = (): ConnectionForm => ({
   name: "",
+  note: "",
   db_type: "mysql",
   driver_profile: "mysql",
   driver_label: "MySQL",
@@ -260,6 +261,7 @@ const defaultForm = (): ConnectionForm => ({
 
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
 const elasticsearchKibanaBasePath = ref("");
+const elasticsearchConnectivityCheckPath = ref("");
 const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, number>>({
   direct: 9200,
   kibana: 5601,
@@ -269,6 +271,7 @@ function resetElasticsearchProxyFields(externalConfig?: unknown) {
   const mode = elasticsearchConnectionModeFromConfig(externalConfig);
   elasticsearchConnectionMode.value = mode;
   elasticsearchKibanaBasePath.value = elasticsearchKibanaBasePathFromConfig(externalConfig);
+  elasticsearchConnectivityCheckPath.value = elasticsearchConnectivityCheckPathFromConfig(externalConfig);
   elasticsearchConnectionPorts.value = {
     direct: mode === "direct" ? form.value.port : 9200,
     kibana: mode === "kibana" ? form.value.port : 5601,
@@ -444,6 +447,23 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
+
+function resizeNoteTextarea() {
+  const textarea = noteTextareaRef.value;
+  if (!textarea) return;
+
+  const style = window.getComputedStyle(textarea);
+  const lineHeight = Number.parseFloat(style.lineHeight) || 20;
+  const paddingHeight = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0);
+  const borderHeight = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0);
+  const maxContentHeight = lineHeight * 3 + paddingHeight;
+
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.min(textarea.scrollHeight, maxContentHeight) + borderHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maxContentHeight ? "auto" : "hidden";
+}
+
 const showJdbcDependencyDriverManagerAction = computed(() => form.value.db_type === "jdbc" && isJdbcMissingRuntimeDependencyError(connectionErrorDetail.value));
 
 function externalConfigRecord(value: unknown): Record<string, unknown> {
@@ -517,6 +537,9 @@ const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
 const selectedDbCategory = ref<DbCategoryKey>("sql");
 const configTab = ref<ConfigTab>("connection");
+watch([() => form.value.note, configTab, dialogStep, open], () => {
+  void nextTick(resizeNoteTextarea);
+});
 const MQ_KAFKA_SECURITY_PROTOCOL_AUTO = "__auto";
 const mqAdminUrl = ref("http://127.0.0.1:8080");
 const mqSystemKind = ref<MqSystemKind>("pulsar");
@@ -803,6 +826,7 @@ const driverProfiles: Record<
     label: "Elasticsearch",
     icon: "elasticsearch",
   },
+  hbase: { type: "hbase", port: 8080, user: "", label: "Apache HBase", icon: "hbase" },
   qdrant: { type: "qdrant", port: 6333, user: "", label: "Qdrant", icon: "qdrant" },
   milvus: { type: "milvus", port: 19530, user: "root", label: "Milvus", icon: "milvus" },
   weaviate: { type: "weaviate", port: 8080, user: "", label: "Weaviate", icon: "weaviate" },
@@ -1922,6 +1946,7 @@ watch(
       const profileConfig = driverProfiles[profile];
       form.value = {
         name: config.name,
+        note: config.note || "",
         db_type: oceanbasePatch?.db_type || profileConfig?.type || config.db_type,
         driver_profile: oceanbasePatch?.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
@@ -2176,6 +2201,7 @@ const iconTypeMap: Record<string, string> = {
   sqlserver: "sqlserver",
   oracle: "oracle",
   elasticsearch: "elasticsearch",
+  hbase: "hbase",
   qdrant: "qdrant",
   milvus: "milvus",
   weaviate: "weaviate",
@@ -2255,6 +2281,7 @@ const dbOptions: DbOption[] = [
   { value: "sqlite", label: "SQLite" },
   { value: "sqlserver", label: "SQL Server" },
   { value: "elasticsearch", label: "Elasticsearch" },
+  { value: "hbase", label: "Apache HBase" },
   { value: "qdrant", label: "Qdrant" },
   { value: "milvus", label: "Milvus" },
   { value: "weaviate", label: "Weaviate" },
@@ -2291,6 +2318,7 @@ const dbOptions: DbOption[] = [
   { value: "gbase", label: "GBase" },
   { value: "kingbase", label: "KingBase" },
   { value: "highgo", label: "瀚高 HighGo" },
+  { value: "uxdb", label: "优炫 UXDB" },
   { value: "yashandb", label: "崖山 YashanDB" },
   { value: "vastbase", label: "Vastbase" },
   { value: "redshift", label: "Redshift" },
@@ -2345,7 +2373,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "domestic",
     titleKey: "connection.databaseCategoryDomestic",
-    optionValues: ["dm", "opengauss", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
+    optionValues: ["dm", "opengauss", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
   },
   {
     key: "lightweight",
@@ -2355,7 +2383,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "document",
     titleKey: "connection.databaseCategoryDocument",
-    optionValues: ["mongodb", "redis", "elasticsearch", "manticoresearch", "cassandra"],
+    optionValues: ["mongodb", "redis", "elasticsearch", "hbase", "manticoresearch", "cassandra"],
   },
   {
     key: "graph_ai",
@@ -2470,10 +2498,10 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "dameng", "redis", "etcd", "clickhouse", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "dameng", "redis", "etcd", "clickhouse", "elasticsearch", "hbase", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
-const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch");
+const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
@@ -3035,6 +3063,7 @@ function generateConnectionName(): string {
 function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionConfig {
   const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   config.database_info = undefined;
+  config.note = config.note?.trim() || undefined;
   if (selectedType.value === "oceanbase" && (config.driver_profile === "oceanbase" || config.driver_profile === "oceanbase-oracle")) {
     Object.assign(config, oceanbaseModeConnectionPatch(oceanbaseSubMode.value));
   }
@@ -3168,7 +3197,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       config.database = config.database?.trim() || undefined;
     }
   } else if (config.db_type === "elasticsearch") {
-    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value);
+    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value);
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else {
@@ -4682,7 +4711,7 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option group flex min-h-24 flex-col items-center justify-center gap-2 rounded-[4px] border bg-background/70 p-3 text-center transition hover:border-primary/40 hover:bg-muted/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'connection-db-picker-option--selected shadow-sm' : 'border-border'"
+                    :class="selectedType === opt.value ? 'dbx-tile-selected shadow-sm' : 'border-border'"
                     :aria-pressed="selectedType === opt.value"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
@@ -4700,7 +4729,7 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option flex items-center gap-3 rounded-[4px] border bg-background px-3 py-2 text-left transition hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'connection-db-picker-option--selected' : 'border-border'"
+                    :class="selectedType === opt.value ? 'dbx-tile-selected' : 'border-border'"
                     :aria-pressed="selectedType === opt.value"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
@@ -4744,7 +4773,7 @@ function openExternalUrl(url: string) {
             </div>
 
             <TabsContent value="connection" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2">
+              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2 pb-2">
                 <div v-if="!isJdbcConnection && form.db_type !== 'nacos'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
@@ -5851,6 +5880,11 @@ function openExternalUrl(url: string) {
                     <Input v-model="elasticsearchKibanaBasePath" class="col-span-3" placeholder="/kibana/s/default" @input="resetTestState" />
                   </div>
 
+                  <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckPath") }}</Label>
+                    <Input v-model="elasticsearchConnectivityCheckPath" class="col-span-3" :placeholder="t('connection.elasticsearchConnectivityCheckPathPlaceholder')" @input="resetTestState" />
+                  </div>
+
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.gbaseServer") }}</Label>
                     <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
@@ -5871,7 +5905,7 @@ function openExternalUrl(url: string) {
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'hbase'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                   </div>
@@ -6147,6 +6181,18 @@ function openExternalUrl(url: string) {
                       </dl>
                     </PopoverContent>
                   </Popover>
+                </div>
+
+                <div class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
+                  <textarea
+                    ref="noteTextareaRef"
+                    v-model="form.note"
+                    rows="1"
+                    class="col-span-3 min-h-8 w-full min-w-0 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
+                    :placeholder="t('connection.notePlaceholder')"
+                    @input="resizeNoteTextarea"
+                  />
                 </div>
               </div>
             </TabsContent>
@@ -7090,30 +7136,8 @@ function openExternalUrl(url: string) {
   color: var(--foreground);
 }
 
-.connection-db-picker-option--selected {
-  border-color: rgb(23, 23, 23);
-  background-color: rgba(23, 23, 23, 0.08);
-  box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.24);
-  color: rgb(10, 10, 10);
-}
-
-.connection-db-picker-option--selected:hover {
-  background-color: rgba(23, 23, 23, 0.12);
-}
-
 .connection-config-step :is([data-slot="input"], [data-slot="select-trigger"], [data-slot="tabs-list"], [data-slot="tabs-trigger"], textarea) {
   border-radius: var(--dbx-radius-fixed-4, 4px);
-}
-
-.dark .connection-db-picker-option--selected {
-  border-color: rgb(208, 208, 214);
-  background-color: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
-  color: rgb(221, 221, 226);
-}
-
-.dark .connection-db-picker-option--selected:hover {
-  background-color: rgba(255, 255, 255, 0.12);
 }
 
 .connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {

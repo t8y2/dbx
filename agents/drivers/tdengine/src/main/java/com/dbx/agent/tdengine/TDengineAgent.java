@@ -28,6 +28,8 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.temporal.ChronoField;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -47,7 +49,10 @@ import java.util.regex.Pattern;
 
 public final class TDengineAgent extends BaseDatabaseAgent {
     private static final DateTimeFormatter TDENGINE_TIMESTAMP_FORMAT =
-        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+        new DateTimeFormatterBuilder()
+            .appendPattern("yyyy-MM-dd HH:mm:ss")
+            .appendFraction(ChronoField.NANO_OF_SECOND, 3, 9, true)
+            .toFormatter();
     private static final Pattern NUMERIC_PRECISION_PATTERN =
         Pattern.compile("(?i)^(decimal|numeric)\\((\\d+)(?:,\\s*\\d+)?\\)");
     private static final Pattern NUMERIC_SCALE_PATTERN =

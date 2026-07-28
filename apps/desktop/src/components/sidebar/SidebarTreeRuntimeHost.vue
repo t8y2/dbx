@@ -516,14 +516,14 @@ async function toggle() {
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.
   const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
-  if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
+  if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }
 
-  if (node.type === "group-extensions" && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
+  if (node.type === "group-extensions" && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
@@ -554,6 +554,7 @@ async function toggle() {
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
+        // Expand: list indices (like other db types list databases).
         await connectionStore.loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
         await connectionStore.loadMilvusDatabases(node.connectionId);
@@ -1247,9 +1248,9 @@ async function generateDdlTemplate() {
     const schema = node.schema || node.database;
     let ddl: string;
     if (node.type === "table") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
+      ddl = await api.getTableDisplayDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
     } else if (node.type === "materialized_view") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
+      ddl = await api.getTableDisplayDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
     } else {
       const result = await api.getObjectSource(node.connectionId, node.database, schema, node.label, "VIEW");
       ddl = await buildViewDdl({
@@ -2043,7 +2044,13 @@ async function confirmBatchEmpty() {
 
 const canCreateTable = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return (activeNode.value.type === "database" || activeNode.value.type === "schema" || activeNode.value.type === "group-tables") && !isSqlServerLinkedNode(activeNode.value) && !!activeNode.value.database && supportsTableStructureEditing(tableStructureDatabaseTypeForConnection(config));
+  const supportsHBaseTableCreation = config?.db_type === "hbase" && !config.read_only;
+  return (
+    (activeNode.value.type === "database" || activeNode.value.type === "schema" || activeNode.value.type === "group-tables") &&
+    !isSqlServerLinkedNode(activeNode.value) &&
+    !!activeNode.value.database &&
+    (supportsHBaseTableCreation || supportsTableStructureEditing(tableStructureDatabaseTypeForConnection(config)))
+  );
 });
 
 const canCreateDatabase = computed(() => {
@@ -2904,6 +2911,12 @@ function openPasteTableDialog() {
 function createTable() {
   const node = activeNode.value;
   if (!node.connectionId || !node.database) return;
+  if (connectionStore.getConfig(node.connectionId)?.db_type === "hbase") {
+    const tabId = queryStore.createTab(node.connectionId, node.database, node.database, "hbase", undefined, "");
+    const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+    if (tab) tab.hbaseCreateTableOnOpen = true;
+    return;
+  }
   queryStore.openTableStructure(node.connectionId, node.database, node.schema, "");
 }
 
@@ -3693,6 +3706,20 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 4. Database / Schema
   if (node.type === "database" || node.type === "schema") {
+    if (currentDatabaseType() === "hbase") {
+      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      if (canCreateTable.value) {
+        items.push({ label: "", separator: true });
+        items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+      }
+      items.push({
+        label: t("contextMenu.refreshChildren"),
+        action: refresh,
+        icon: RefreshCw,
+        shortcut: shortcutRefresh,
+      });
+      return true;
+    }
     if (canCloseDatabaseConnection.value) {
       items.push({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
       items.push({ label: "", separator: true });
@@ -3702,9 +3729,11 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canOpenObjectBrowser.value) {
       items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }
-    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
-    const sqlHistoryMenu = savedSqlHistorySubmenu();
-    if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+    if (supportsConnectionQueryActions(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      const sqlHistoryMenu = savedSqlHistorySubmenu();
+      if (sqlHistoryMenu) items.push(sqlHistoryMenu);
+    }
     if (node.type === "database" && currentDatabaseType() !== "cloudflare-d1") {
       if (!isNodeDefaultDatabase.value) {
         items.push({ label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
@@ -3788,6 +3817,40 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 5. Redis DB / Mongo DB
+  if (currentDatabaseType() === "hbase" && node.type === "group-tables") {
+    if (canCreateTable.value) {
+      items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+      items.push({ label: "", separator: true });
+    }
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({
+      label: t("contextMenu.refreshChildren"),
+      action: refresh,
+      icon: RefreshCw,
+      shortcut: shortcutRefresh,
+    });
+    return true;
+  }
+
+  if (currentDatabaseType() === "hbase" && node.type === "table") {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+    items.push({
+      label: t("contextMenu.openInNewDataTab"),
+      action: openDataInNewTabImmediately,
+      icon: CopyPlus,
+      shortcut: shortcutOpenDataInNewTab.value,
+    });
+    items.push({
+      label: t("contextMenu.refreshChildren"),
+      action: refresh,
+      icon: RefreshCw,
+      shortcut: shortcutRefresh,
+    });
+    return true;
+  }
+
   if (node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "zookeeper-root") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;

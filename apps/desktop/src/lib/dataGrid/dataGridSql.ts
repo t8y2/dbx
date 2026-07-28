@@ -51,6 +51,7 @@ export interface DataGridCopyInsertStatementOptions {
   sourceColumns?: Array<string | undefined>;
   rows: GridCellValue[][];
   excludePrimaryKeys?: boolean;
+  includeComputedColumns?: boolean;
   insertMode?: DataGridCopyInsertMode;
 }
 

@@ -1381,6 +1381,11 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           if (sql.trim()) emit("sendSelectionToAi", sql);
           return true;
         }),
+        ...createQueryEditorSearchKeymap({
+          openSearch,
+          openReplace,
+          isReadOnly: () => !!props.readOnly,
+        }),
       ]),
     ) ?? [],
     codeMirrorKeymap.of(
@@ -3424,7 +3429,7 @@ onMounted(async () => {
       textUnderlineOffset: "3px",
     },
     ".cm-sql-semantic-warning": {
-      textDecoration: "underline wavy hsl(var(--warning, 38 92% 50%))",
+      textDecoration: "underline wavy var(--warning)",
       textUnderlineOffset: "3px",
     },
   });
@@ -3804,6 +3809,7 @@ onMounted(async () => {
       trimmedSelectionLayer(),
       selectionMatchOccurrences(),
       dropCursor(),
+      props.readOnly ? [] : scrollPastEnd(),
       EditorView.dragMovesSelection.of((event) => !event.ctrlKey && !event.metaKey),
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
@@ -3853,11 +3859,6 @@ onMounted(async () => {
       buildResultSourceRangeExtension(),
       Prec.highest(
         keymap.of([
-          ...createQueryEditorSearchKeymap({
-            openSearch,
-            openReplace,
-            isReadOnly: () => !!props.readOnly,
-          }),
           { key: "'", run: handleSqlSingleQuote },
           { key: "Tab", run: handleTab },
           {

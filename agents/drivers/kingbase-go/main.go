@@ -8,12 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	_ "gitea.com/kingbase/gokb"
+	"gitea.com/kingbase/gokb"
 )
 
 const (
@@ -128,6 +129,7 @@ type querySession struct {
 
 type server struct {
 	db                     *sql.DB
+	openDatabase           kingbaseDBOpener
 	params                 connectParams
 	mode                   kingbaseMode
 	usePgDefaultExpression bool
@@ -333,7 +335,7 @@ func (r *runtimeServer) closeAllSessions() error {
 }
 
 func newServer() *server {
-	return &server{sessions: map[string]*querySession{}}
+	return &server{openDatabase: openDBWithSSLMode, sessions: map[string]*querySession{}}
 }
 
 func (s *server) dispatch(method string, params map[string]json.RawMessage) (any, bool, error) {
@@ -355,14 +357,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		if err := decodeParams(params, &cp); err != nil {
 			return nil, false, err
 		}
-		db, err := openDB(cp)
-		if err != nil {
-			return nil, false, err
-		}
-		defer db.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultConnectTimeout)
-		defer cancel()
-		return map[string]bool{"ok": true}, false, db.PingContext(ctx)
+		return map[string]bool{"ok": true}, false, s.testConnection(cp)
 	case "validate_connection":
 		return map[string]bool{"ok": true}, false, s.validateConnection()
 	case "connection_info":
@@ -449,14 +444,8 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 
 func (s *server) connect(cp connectParams) error {
 	_ = s.disconnect()
-	db, err := openDB(cp)
+	db, err := openAndPingDB(cp, defaultConnectTimeout, s.openDatabase)
 	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultConnectTimeout)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
 		return err
 	}
 	s.db = db
@@ -466,8 +455,47 @@ func (s *server) connect(cp connectParams) error {
 	return nil
 }
 
-func openDB(cp connectParams) (*sql.DB, error) {
-	dsn := buildDSN(cp)
+func (s *server) testConnection(cp connectParams) error {
+	db, err := openAndPingDB(cp, defaultConnectTimeout, s.openDatabase)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return nil
+}
+
+type kingbaseDBOpener func(connectParams, string) (*sql.DB, error)
+
+func openAndPingDB(cp connectParams, timeout time.Duration, opener kingbaseDBOpener) (*sql.DB, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	sslMode := effectiveSSLMode(cp)
+	attempts := []string{sslMode}
+	if sslMode == "prefer" {
+		attempts = []string{"require", "disable"}
+	}
+	for index, attempt := range attempts {
+		db, err := opener(cp, attempt)
+		if err == nil {
+			err = db.PingContext(ctx)
+		}
+		if err == nil {
+			return db, nil
+		}
+		if db != nil {
+			_ = db.Close()
+		}
+		if index == 0 && len(attempts) == 2 && errors.Is(err, gokb.ErrSSLNotSupported) {
+			continue
+		}
+		return nil, err
+	}
+	return nil, errors.New("kingbase connection failed")
+}
+
+func openDBWithSSLMode(cp connectParams, sslMode string) (*sql.DB, error) {
+	dsn := buildDSNWithSSLMode(cp, sslMode)
 	db, err := sql.Open("kingbase", dsn)
 	if err != nil {
 		return nil, err
@@ -830,16 +858,20 @@ func (s *server) setSchema(schema string) error {
 }
 
 func buildDSN(cp connectParams) string {
+	sslMode := effectiveSSLMode(cp)
+	if sslMode == "prefer" {
+		sslMode = "require"
+	}
+	return buildDSNWithSSLMode(cp, sslMode)
+}
+
+func buildDSNWithSSLMode(cp connectParams, sslMode string) string {
 	if value := strings.TrimSpace(cp.ConnectionString); value != "" && !isKingbaseJDBCURL(value) {
-		return value
+		return rewriteNativeConnectionStringSSLMode(value, sslMode)
 	}
 	port := cp.Port
 	if port <= 0 {
 		port = 54321
-	}
-	sslMode := "disable"
-	if cp.SSL {
-		sslMode = "verify-full"
 	}
 	parts := []string{
 		"host=" + quoteDSNValue(cp.Host),
@@ -861,11 +893,175 @@ func buildDSN(cp connectParams) string {
 	}
 	for _, pair := range strings.FieldsFunc(cp.URLParams, func(r rune) bool { return r == '&' || r == ';' }) {
 		key, value, ok := strings.Cut(pair, "=")
-		if ok && isSafeParamKey(key) {
+		if ok && isSafeParamKey(key) && !strings.EqualFold(strings.TrimSpace(key), "sslmode") {
 			parts = append(parts, strings.TrimSpace(key)+"="+quoteDSNValue(strings.TrimSpace(value)))
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func effectiveSSLMode(cp connectParams) string {
+	if value := strings.TrimSpace(cp.ConnectionString); value != "" && !isKingbaseJDBCURL(value) {
+		if sslMode, ok := nativeConnectionStringSSLMode(value); ok && sslMode != "" {
+			return sslMode
+		}
+		return "prefer"
+	}
+	sslMode := ""
+	for _, pair := range strings.FieldsFunc(cp.URLParams, func(r rune) bool { return r == '&' || r == ';' }) {
+		key, value, ok := strings.Cut(pair, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+			sslMode = strings.ToLower(strings.TrimSpace(value))
+		}
+	}
+	if sslMode != "" {
+		return sslMode
+	}
+	if cp.SSL {
+		return "verify-full"
+	}
+	return "prefer"
+}
+
+func nativeConnectionStringSSLMode(value string) (string, bool) {
+	if strings.HasPrefix(strings.ToLower(value), "kingbase://") {
+		query := value
+		if _, after, ok := strings.Cut(query, "?"); ok {
+			query = after
+		} else {
+			return "", false
+		}
+		query, _, _ = strings.Cut(query, "#")
+		sslMode := ""
+		found := false
+		for _, pair := range strings.Split(query, "&") {
+			key, rawValue, ok := strings.Cut(pair, "=")
+			if !ok {
+				continue
+			}
+			decodedKey, err := url.QueryUnescape(key)
+			if err != nil || !strings.EqualFold(decodedKey, "sslmode") {
+				continue
+			}
+			decodedValue, err := url.QueryUnescape(rawValue)
+			if err != nil {
+				decodedValue = rawValue
+			}
+			sslMode = strings.ToLower(strings.TrimSpace(decodedValue))
+			found = true
+		}
+		return sslMode, found
+	}
+
+	sslMode := ""
+	found := false
+	for _, field := range splitNativeDSNFields(value) {
+		key, rawValue, ok := strings.Cut(field, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+			continue
+		}
+		sslMode = strings.ToLower(unquoteNativeDSNValue(rawValue))
+		found = true
+	}
+	return sslMode, found
+}
+
+func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
+	if strings.HasPrefix(strings.ToLower(value), "kingbase://") {
+		baseAndQuery, fragment, hasFragment := strings.Cut(value, "#")
+		base, query, hasQuery := strings.Cut(baseAndQuery, "?")
+		pairs := make([]string, 0)
+		if hasQuery {
+			for _, pair := range strings.Split(query, "&") {
+				key, _, _ := strings.Cut(pair, "=")
+				decodedKey, err := url.QueryUnescape(key)
+				if err == nil && strings.EqualFold(decodedKey, "sslmode") {
+					continue
+				}
+				if pair != "" {
+					pairs = append(pairs, pair)
+				}
+			}
+		}
+		pairs = append(pairs, "sslmode="+url.QueryEscape(sslMode))
+		result := base + "?" + strings.Join(pairs, "&")
+		if hasFragment {
+			result += "#" + fragment
+		}
+		return result
+	}
+
+	fields := splitNativeDSNFields(value)
+	result := make([]string, 0, len(fields)+1)
+	for _, field := range fields {
+		key, _, ok := strings.Cut(field, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+			continue
+		}
+		result = append(result, field)
+	}
+	result = append(result, "sslmode="+sslMode)
+	return strings.Join(result, " ")
+}
+
+func splitNativeDSNFields(value string) []string {
+	fields := make([]string, 0)
+	for index := 0; index < len(value); {
+		for index < len(value) && isNativeDSNSpace(value[index]) {
+			index++
+		}
+		if index >= len(value) {
+			break
+		}
+		start := index
+		for index < len(value) && value[index] != '=' {
+			index++
+		}
+		if index >= len(value) {
+			fields = append(fields, strings.TrimSpace(value[start:]))
+			break
+		}
+		index++
+		for index < len(value) && isNativeDSNSpace(value[index]) {
+			index++
+		}
+		quoted := index < len(value) && value[index] == '\''
+		if quoted {
+			index++
+		}
+		for index < len(value) {
+			if value[index] == '\\' && index+1 < len(value) {
+				index += 2
+				continue
+			}
+			if quoted {
+				if value[index] == '\'' {
+					index++
+					break
+				}
+			} else if isNativeDSNSpace(value[index]) {
+				break
+			}
+			index++
+		}
+		for index < len(value) && !isNativeDSNSpace(value[index]) {
+			index++
+		}
+		fields = append(fields, strings.TrimSpace(value[start:index]))
+	}
+	return fields
+}
+
+func unquoteNativeDSNValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+		value = value[1 : len(value)-1]
+	}
+	return strings.TrimSpace(value)
+}
+
+func isNativeDSNSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f'
 }
 
 func isKingbaseJDBCURL(value string) bool {

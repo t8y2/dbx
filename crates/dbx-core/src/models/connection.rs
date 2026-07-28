@@ -72,6 +72,8 @@ pub fn database_info_from_protocol_value(value: &Value) -> Option<DatabaseConnec
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -433,6 +435,7 @@ pub enum ProxyType {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
     Mysql,
@@ -452,6 +455,7 @@ pub enum DatabaseType {
     Oracle,
     #[serde(rename = "elasticsearch")]
     Elasticsearch,
+    Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
     #[serde(rename = "milvus")]
@@ -536,6 +540,8 @@ pub enum DatabaseType {
 struct ConnectionConfigData {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -631,6 +637,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
         Self {
             id: data.id,
             name: data.name,
+            note: data.note,
             db_type: data.db_type,
             driver_profile: data.driver_profile,
             driver_label: data.driver_label,
@@ -995,6 +1002,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -1143,6 +1151,7 @@ impl ConnectionConfig {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -2175,6 +2184,7 @@ mod tests {
         ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,
@@ -2241,6 +2251,20 @@ mod tests {
         .unwrap();
         assert!(serde_json::to_value(&legacy).unwrap().get("mcp_access").is_none());
         assert!(!legacy.read_only);
+    }
+
+    #[test]
+    fn connection_note_is_optional_and_round_trips_when_present() {
+        let config = mysql_config("root", "secret", Some("app"));
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("note").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note.is_empty());
+
+        let mut config = config;
+        config.note = "Production reporting".to_string();
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["note"], "Production reporting");
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note, config.note);
     }
 
     #[test]
@@ -2739,6 +2763,20 @@ mod tests {
         config.ssl = false;
         config.url_params = Some("secure=true".to_string());
         assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+    }
+
+    #[test]
+    fn hbase_rest_url_uses_http_or_https_without_embedding_credentials() {
+        let mut config = mysql_config("hbase-user", "secret", None);
+        config.db_type = DatabaseType::Hbase;
+        config.port = 8080;
+
+        assert_eq!(config.connection_url(), "http://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "http://10.1.2.3:8080");
+
+        config.ssl = true;
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "https://10.1.2.3:8080");
     }
 
     #[test]

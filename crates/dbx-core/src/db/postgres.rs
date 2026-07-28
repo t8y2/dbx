@@ -30,6 +30,22 @@ use crate::types::{
     OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresTablePrivilegeInfo {
+    pub grantor: String,
+    pub grantee: String,
+    pub privilege_type: String,
+    pub is_grantable: bool,
+    pub column_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresTableAccessInfo {
+    pub owner: String,
+    pub owner_default_privileges: Vec<String>,
+    pub privileges: Vec<PostgresTablePrivilegeInfo>,
+}
+
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
     if let Ok(v) = row.try_get::<_, DateTime<Local>>(idx) {
         return Some(serde_json::Value::String(format_pg_timestamptz(v)));
@@ -90,6 +106,69 @@ impl<'a> FromSql<'a> for PgRawBytes {
     fn accepts(_: &Type) -> bool {
         true
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PgInterval {
+    microseconds: i64,
+    days: i32,
+    months: i32,
+}
+
+impl<'a> FromSql<'a> for PgInterval {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_pg_interval_bytes(raw).ok_or_else(|| "expected 16 bytes for PostgreSQL interval".into())
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::INTERVAL
+    }
+}
+
+fn decode_pg_interval_bytes(raw: &[u8]) -> Option<PgInterval> {
+    let raw: [u8; 16] = raw.try_into().ok()?;
+    Some(PgInterval {
+        microseconds: i64::from_be_bytes(raw[0..8].try_into().ok()?),
+        days: i32::from_be_bytes(raw[8..12].try_into().ok()?),
+        months: i32::from_be_bytes(raw[12..16].try_into().ok()?),
+    })
+}
+
+fn push_pg_interval_component(parts: &mut Vec<String>, value: i64, singular: &str, plural: &str) {
+    if value == 0 {
+        return;
+    }
+    let unit = if value.abs() == 1 { singular } else { plural };
+    parts.push(format!("{value} {unit}"));
+}
+
+fn format_pg_interval_time(microseconds: i64) -> String {
+    let signed_microseconds = i128::from(microseconds);
+    let sign = if signed_microseconds < 0 { "-" } else { "" };
+    let absolute_microseconds = signed_microseconds.abs();
+    let hours = absolute_microseconds / 3_600_000_000;
+    let minutes = absolute_microseconds / 60_000_000 % 60;
+    let seconds = absolute_microseconds / 1_000_000 % 60;
+    let fraction = absolute_microseconds % 1_000_000;
+    let mut formatted = format!("{sign}{hours:02}:{minutes:02}:{seconds:02}");
+    if fraction != 0 {
+        let fraction = format!("{fraction:06}");
+        formatted.push('.');
+        formatted.push_str(fraction.trim_end_matches('0'));
+    }
+    formatted
+}
+
+fn format_pg_interval(interval: PgInterval) -> String {
+    let total_months = i64::from(interval.months);
+    let years = total_months / 12;
+    let months = total_months % 12;
+    let mut parts = Vec::with_capacity(4);
+    push_pg_interval_component(&mut parts, years, "year", "years");
+    push_pg_interval_component(&mut parts, months, "mon", "mons");
+    push_pg_interval_component(&mut parts, i64::from(interval.days), "day", "days");
+    parts.push(format_pg_interval_time(interval.microseconds));
+    parts.join(" ")
 }
 
 /// Decode pgvector binary format into a Vec<f32>.
@@ -321,6 +400,7 @@ pub(crate) enum PgColType {
     Bytea,
     Json,
     Bool,
+    Interval,
     Temporal { fallback: PgTemporalFallback },
     Numeric,
     Uuid,
@@ -363,6 +443,9 @@ pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
     }
     if upper == "BOOL" {
         return PgColType::Bool;
+    }
+    if upper == "INTERVAL" {
+        return PgColType::Interval;
     }
     if upper.contains("TIMESTAMP")
         || upper == "DATE"
@@ -441,6 +524,10 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
             serde_json::Value::Null
         }
         PgColType::Bool => row.try_get::<_, bool>(idx).map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
+        PgColType::Interval => row
+            .try_get::<_, PgInterval>(idx)
+            .map(|interval| serde_json::Value::String(format_pg_interval(interval)))
+            .unwrap_or_else(|_| pg_fallback_value_to_json(row, idx)),
         PgColType::Temporal { fallback } => {
             if let Some(v) = pg_temporal_to_json_value(row, idx) {
                 return v;
@@ -801,6 +888,7 @@ async fn execute_select_prepared(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }))
 }
 
@@ -863,6 +951,7 @@ async fn execute_select_text(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -2700,6 +2789,7 @@ pub async fn execute_query_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -3207,6 +3297,7 @@ async fn execute_query_with_max_rows_inner(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -3262,6 +3353,37 @@ const POSTGRES_OWNERS_SQL: &str =
      JOIN pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 \
        AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')";
+
+const POSTGRES_TABLE_OWNER_SQL: &str = "SELECT pg_get_userbyid(c.relowner)::text, \
+            ARRAY(SELECT default_acl.privilege_type::text \
+                  FROM pg_catalog.aclexplode(pg_catalog.acldefault('r', c.relowner)) default_acl \
+                  WHERE default_acl.grantee = c.relowner \
+                  ORDER BY default_acl.privilege_type) \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY c.oid LIMIT 1";
+
+const POSTGRES_TABLE_ACL_PRIVILEGES_SQL: &str =
+    "SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END::text, \
+            acl.privilege_type::text, acl.is_grantable, pg_get_userbyid(acl.grantor)::text \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) acl ON true \
+     LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY 4, 1, 2, 3";
+
+const POSTGRES_COLUMN_ACL_PRIVILEGES_SQL: &str =
+    "SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END::text, \
+            acl.privilege_type::text, acl.is_grantable, a.attname::text, pg_get_userbyid(acl.grantor)::text \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+     JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl ON true \
+     LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY 5, 1, 2, 3, 4";
 
 fn postgres_owner_object_type(relkind: &str) -> &str {
     match relkind {
@@ -3740,6 +3862,53 @@ pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, St
         .collect())
 }
 
+pub async fn get_table_access(pool: &Pool, schema: &str, table: &str) -> Result<PostgresTableAccessInfo, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
+    let owner_rows =
+        postgres_query_cached(&client, POSTGRES_TABLE_OWNER_SQL, &params).await.map_err(pg_error_to_string)?;
+    let owner_row = owner_rows.first().ok_or_else(|| "Table owner not found".to_string())?;
+    let owner = pg_row_try_string(owner_row, 0);
+    if owner.is_empty() {
+        return Err("Table owner not found".to_string());
+    }
+    let owner_default_privileges = owner_row.try_get::<_, Vec<String>>(1).unwrap_or_default();
+    if owner_default_privileges.is_empty() {
+        return Err("Table owner default privileges are unavailable".to_string());
+    }
+
+    let (table_privileges, column_privileges) = tokio::try_join!(
+        postgres_query_cached(&client, POSTGRES_TABLE_ACL_PRIVILEGES_SQL, &params),
+        postgres_query_cached(&client, POSTGRES_COLUMN_ACL_PRIVILEGES_SQL, &params),
+    )
+    .map_err(pg_error_to_string)?;
+
+    let privileges = table_privileges
+        .iter()
+        .map(|row| PostgresTablePrivilegeInfo {
+            grantor: pg_row_try_string(row, 3),
+            grantee: pg_row_try_string(row, 0),
+            privilege_type: pg_row_try_string(row, 1),
+            is_grantable: pg_row_try_bool(row, 2).unwrap_or(false),
+            column_name: None,
+        })
+        .chain(column_privileges.iter().map(|row| PostgresTablePrivilegeInfo {
+            grantor: pg_row_try_string(row, 4),
+            grantee: pg_row_try_string(row, 0),
+            privilege_type: pg_row_try_string(row, 1),
+            is_grantable: pg_row_try_bool(row, 2).unwrap_or(false),
+            column_name: Some(pg_row_try_string(row, 3)),
+        }))
+        .collect::<Vec<_>>();
+    if privileges.iter().any(|privilege| {
+        privilege.grantor.is_empty() || privilege.grantee.is_empty() || privilege.privilege_type.is_empty()
+    }) {
+        return Err("Table ACL metadata is incomplete".to_string());
+    }
+
+    Ok(PostgresTableAccessInfo { owner, owner_default_privileges, privileges })
+}
+
 /// Execute multiple SQL statements in a single round-trip using batch_execute.
 /// Best for DDL scripts where per-statement affected-row counts are not needed.
 pub async fn execute_batch(pool: &Pool, statements: &[String]) -> Result<(), String> {
@@ -3817,6 +3986,50 @@ mod tests {
     use std::process::Command;
     use std::time::Instant;
     use tokio_postgres::types::FromSql;
+
+    fn pg_interval_bytes(microseconds: i64, days: i32, months: i32) -> [u8; 16] {
+        let mut raw = [0_u8; 16];
+        raw[0..8].copy_from_slice(&microseconds.to_be_bytes());
+        raw[8..12].copy_from_slice(&days.to_be_bytes());
+        raw[12..16].copy_from_slice(&months.to_be_bytes());
+        raw
+    }
+
+    #[test]
+    fn postgres_interval_binary_decodes_and_formats_components() {
+        let microseconds = 4 * 3_600_000_000 + 5 * 60_000_000 + 6 * 1_000_000 + 123_456;
+        let interval = PgInterval::from_sql(&Type::INTERVAL, &pg_interval_bytes(microseconds, 3, 14)).unwrap();
+
+        assert_eq!(interval, PgInterval { microseconds, days: 3, months: 14 });
+        assert_eq!(format_pg_interval(interval), "1 year 2 mons 3 days 04:05:06.123456");
+    }
+
+    #[test]
+    fn postgres_interval_formats_negative_mixed_and_zero_values() {
+        assert_eq!(
+            format_pg_interval(PgInterval { microseconds: -3_723_450_000, days: -2, months: -13 }),
+            "-1 year -1 mon -2 days -01:02:03.45"
+        );
+        assert_eq!(
+            format_pg_interval(PgInterval { microseconds: -1, days: 2, months: -1 }),
+            "-1 mon 2 days -00:00:00.000001"
+        );
+        assert_eq!(format_pg_interval(PgInterval { microseconds: 0, days: 0, months: 0 }), "00:00:00");
+    }
+
+    #[test]
+    fn postgres_interval_formats_now_minus_xact_start_shape() {
+        let elapsed = PgInterval { microseconds: 123_450_000, days: 0, months: 0 };
+        assert_eq!(format_pg_interval(elapsed), "00:02:03.45");
+    }
+
+    #[test]
+    fn postgres_interval_rejects_invalid_binary_and_keeps_binary_protocol() {
+        assert!(PgInterval::from_sql(&Type::INTERVAL, &[0; 15]).is_err());
+        assert_eq!(classify_pg_type("interval"), PgColType::Interval);
+        assert_eq!(classify_pg_type("_interval"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
+        assert!(!pg_type_requires_text_protocol(&Type::INTERVAL, PgColType::Interval));
+    }
 
     #[test]
     fn postgres_custom_other_type_requires_text_protocol() {
@@ -3912,7 +4125,7 @@ mod tests {
         assert_eq!(classify_pg_type("date"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("time"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("timetz"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
-        assert_eq!(classify_pg_type("interval"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
+        assert_eq!(classify_pg_type("interval"), PgColType::Interval);
         // 时间数组类型名在原实现中先进时间分支、解码失败后落到通用数组分支
         assert_eq!(classify_pg_type("_timestamp"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
         assert_eq!(classify_pg_type("_interval"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
@@ -4496,6 +4709,19 @@ mod tests {
         // Double quotes should be doubled, not breaking out
         assert_eq!(escaped, r#""public""; DROP TABLE users; --""#);
         assert!(escaped.matches('"').count().is_multiple_of(2), "quote count should be even");
+    }
+
+    #[test]
+    fn postgres_table_access_reads_complete_catalog_acls() {
+        assert!(POSTGRES_TABLE_OWNER_SQL.contains("acldefault('r', c.relowner)"));
+        assert!(
+            POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))")
+        );
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("aclexplode(a.attacl)"));
+        assert!(POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("acl.grantee = 0 THEN 'PUBLIC'"));
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("acl.grantee = 0 THEN 'PUBLIC'"));
+        assert!(POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("pg_get_userbyid(acl.grantor)"));
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("pg_get_userbyid(acl.grantor)"));
     }
 
     // --- query_result_row_limit ---

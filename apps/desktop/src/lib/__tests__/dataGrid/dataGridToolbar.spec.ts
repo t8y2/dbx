@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { dataGridToolbarIntervalOptions, selectDataGridToolbarAutoRefreshInterval, selectDataGridToolbarExportItem, toggleDataGridToolbarAutoRefresh, triggerDataGridToolbarAction, type DataGridToolbarAutoRefreshCapability } from "@/lib/dataGrid/dataGridToolbar";
+import {
+  dataGridToolbarIntervalOptions,
+  selectDataGridToolbarAutoRefreshInterval,
+  selectDataGridToolbarCopyItem,
+  selectDataGridToolbarExportItem,
+  toggleDataGridToolbarAutoRefresh,
+  triggerDataGridToolbarAction,
+  triggerDataGridToolbarCopy,
+  type DataGridToolbarAutoRefreshCapability,
+  type DataGridToolbarCopyCapability,
+} from "@/lib/dataGrid/dataGridToolbar";
 
 function autoRefreshCapability(overrides: Partial<DataGridToolbarAutoRefreshCapability> = {}): DataGridToolbarAutoRefreshCapability {
   return {
@@ -80,5 +90,27 @@ describe("data grid toolbar capabilities", () => {
     await expect(selectDataGridToolbarExportItem(capability, "xlsx")).resolves.toBe(false);
     expect(onSelect).toHaveBeenCalledOnce();
     expect(onSelect).toHaveBeenCalledWith("csv");
+  });
+
+  it("keeps copy format selection available when the current copy action is disabled", async () => {
+    const onCopy = vi.fn();
+    const onSelect = vi.fn();
+    const capability: DataGridToolbarCopyCapability = {
+      label: "SQL Updates",
+      disabled: true,
+      currentValue: "sql-updates",
+      items: [
+        { value: "tsv", label: "TSV" },
+        { value: "sql-updates", label: "SQL Updates", disabled: true },
+      ],
+      onCopy,
+      onSelect,
+    };
+
+    await expect(triggerDataGridToolbarCopy(capability)).resolves.toBe(false);
+    await expect(selectDataGridToolbarCopyItem(capability, "tsv")).resolves.toBe(true);
+    await expect(selectDataGridToolbarCopyItem(capability, "sql-updates")).resolves.toBe(false);
+    expect(onCopy).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledWith("tsv");
   });
 });

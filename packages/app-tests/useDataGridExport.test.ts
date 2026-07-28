@@ -23,10 +23,13 @@ const apiMock = vi.hoisted(() => ({
 const clipboardMock = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
 }));
+const runtimeMock = vi.hoisted(() => ({ isTauri: false }));
+const dialogMock = vi.hoisted(() => ({ save: vi.fn() }));
 
 vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/lib/common/clipboard", () => clipboardMock);
-vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtimeMock.isTauri }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMock.save }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
@@ -79,6 +82,7 @@ function buildExportHarness(
     exportFileBaseName?: string;
     columns?: string[];
     columnTypes?: Array<string | undefined>;
+    allColumnTypes?: Array<string | undefined>;
     rows?: QueryResult["rows"];
     allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
     completeLocalResult?: QueryResult;
@@ -109,7 +113,7 @@ function buildExportHarness(
   const fullExportResult = vi.fn(async () => {
     throw new Error("fullExportResult should not be called for streaming CSV/XLSX query exports");
   });
-  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt"; includeSqlSheet?: boolean }) => ({
+  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => ({
     exportId: options.exportId,
     connectionId: "conn-1",
     database: "db",
@@ -121,6 +125,8 @@ function buildExportHarness(
     filePath: options.filePath,
     format: options.format,
     includeSqlSheet: options.includeSqlSheet,
+    exportTableName: options.exportTableName,
+    exportColumnTypes: options.exportColumnTypes,
     pageSize: 1000,
     rowLimit: 100000,
     totalRows: 2,
@@ -142,6 +148,7 @@ function buildExportHarness(
     context: computed(() => options.context ?? "results"),
     sourceColumns: computed(() => options.sourceColumns),
     columnTypes: computed(() => options.columnTypes),
+    allColumnTypes: computed(() => options.allColumnTypes),
     whereInput: computed(() => undefined),
     orderBy: computed(() => undefined),
     exportBatchSize: computed(() => 1000),
@@ -236,6 +243,8 @@ function buildTableDataExportHarness() {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  runtimeMock.isTauri = false;
+  dialogMock.save.mockResolvedValue(null);
   clipboardMock.copyToClipboard.mockResolvedValue(undefined);
   apiMock.startQueryResultExport.mockImplementation(async (_request, onProgress) => {
     onProgress({ exportId: _request.exportId, tableName: "", rowsExported: 2, totalRows: 2, status: "Done" });
@@ -342,335 +351,6 @@ test("copy row JSON keeps nested JSON strings for non-MongoDB rows", async () =>
   });
 });
 
-test("copy MongoDB row as INSERT uses Mongo shell insert syntax", async () => {
-  const contextCell = ref({ rowId: 1, rowIndex: 0, col: 0 });
-  const jsonString = '{"endingBalance":{"beginningBalance":"0","endingBalance":"100","endingDate":"2024-11-25"},"Line":[]}';
-  const row = {
-    id: 1,
-    sourceIndex: 0,
-    data: ["6743e4bfa3f6f84bc3fff6c8", "577", "done", jsonString, 'ISODate("2024-11-25T02:45:36.184Z")'],
-    isNew: false,
-    isDeleted: false,
-    isDirtyCol: [false, false, false, false, false],
-    status: "",
-  };
-  const composable = useDataGridExport({
-    columns: computed(() => ["_id", "accountId", "status", "data", "lastUpdatedDate"]),
-    displayItems: computed(() => [row]),
-    sql: computed(() => undefined),
-    tableMeta: computed(() => undefined),
-    copyInsertTargetLabel: computed(() => "accounting_reconciliations"),
-    databaseType: computed(() => "mongodb"),
-    connectionId: computed(() => "conn-1"),
-    database: computed(() => "db"),
-    context: computed(() => "results"),
-    sourceColumns: computed(() => undefined),
-    mongoDocuments: computed(() => [
-      {
-        _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
-        accountId: 577,
-        status: "done",
-        data: { endingBalance: { beginningBalance: "0", endingBalance: "100", endingDate: "2024-11-25" }, Line: [] },
-        lastUpdatedDate: { $date: "2024-11-25T02:45:36.184Z" },
-      },
-    ]),
-    columnTypes: computed(() => undefined),
-    whereInput: computed(() => undefined),
-    orderBy: computed(() => undefined),
-    exportBatchSize: computed(() => 1000),
-    hasCellSelection: computed(() => false),
-    selectedCells: computed(() => ({ columns: [], rows: [] })),
-    selectedRange: computed(() => null),
-    contextCell,
-    getRowItem: () => row,
-    selectedRowIds: ref(new Set<number>()),
-    hasRowSelection: computed(() => false),
-  });
-
-  await composable.prefetchRowAsInsertStatement(false);
-  await composable.copyRowAsInsert();
-
-  assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 0);
-  assert.equal(
-    clipboardMock.copyToClipboard.mock.calls[0][0],
-    `db.getCollection("accounting_reconciliations").insert({
-  "_id": ObjectId("6743e4bfa3f6f84bc3fff6c8"),
-  "accountId": 577,
-  "status": "done",
-  "data": {
-    "endingBalance": {
-      "beginningBalance": "0",
-      "endingBalance": "100",
-      "endingDate": "2024-11-25"
-    },
-    "Line": []
-  },
-  "lastUpdatedDate": ISODate("2024-11-25T02:45:36.184Z")
-});`,
-  );
-});
-
-test("copy MongoDB rows as INSERT excludes _id for insert without primary keys", async () => {
-  const selectedRowIds = ref(new Set([1, 2]));
-  const rows = [
-    { id: 1, data: ["6743e4bfa3f6f84bc3fff6c8", "done"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-    { id: 2, data: ["6743e4bfa3f6f84bc3fff6c9", "draft"], isNew: false, isDeleted: false, isDirtyCol: [false, false], status: "" },
-  ];
-  const composable = useDataGridExport({
-    columns: computed(() => ["_id", "status"]),
-    displayItems: computed(() => rows),
-    sql: computed(() => undefined),
-    tableMeta: computed(() => ({
-      tableName: "accounting_reconciliations",
-      primaryKeys: ["_id"],
-    })),
-    databaseType: computed(() => "mongodb"),
-    connectionId: computed(() => "conn-1"),
-    database: computed(() => "db"),
-    context: computed(() => "results"),
-    sourceColumns: computed(() => undefined),
-    columnTypes: computed(() => undefined),
-    whereInput: computed(() => undefined),
-    orderBy: computed(() => undefined),
-    exportBatchSize: computed(() => 1000),
-    hasCellSelection: computed(() => false),
-    selectedCells: computed(() => ({ columns: [], rows: [] })),
-    selectedRange: computed(() => null),
-    contextCell: ref(null),
-    getRowItem: (rowId: number) => rows.find((item) => item.id === rowId),
-    selectedRowIds,
-    hasRowSelection: computed(() => true),
-  });
-
-  await composable.prefetchRowAsInsertStatement(true);
-  await composable.copyRowAsInsertWithoutPrimaryKeys();
-
-  assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 0);
-  assert.equal(
-    clipboardMock.copyToClipboard.mock.calls[0][0],
-    `db.getCollection("accounting_reconciliations")
-  .insertMany([
-    {
-      "status": "done"
-    },
-    {
-      "status": "draft"
-    }
-  ]);`,
-  );
-});
-
-test("copy row as INSERT refreshes prepared SQL after row data changes", async () => {
-  const contextCell = ref({ rowId: 1, rowIndex: 0, col: 0 });
-  const row = {
-    id: 1,
-    data: [1, "before"],
-    isNew: false,
-    isDeleted: false,
-    isDirtyCol: [false, false],
-    status: "",
-  };
-  apiMock.buildDataGridCopyInsertStatement.mockResolvedValueOnce("INSERT INTO users (id, name) VALUES (1, 'before');").mockResolvedValueOnce("INSERT INTO users (id, name) VALUES (1, 'after');");
-  const composable = useDataGridExport({
-    columns: computed(() => ["id", "name"]),
-    displayItems: computed(() => [row]),
-    sql: computed(() => undefined),
-    tableMeta: computed(() => ({
-      tableName: "users",
-      primaryKeys: ["id"],
-    })),
-    databaseType: computed(() => "mysql"),
-    connectionId: computed(() => "conn-1"),
-    database: computed(() => "db"),
-    context: computed(() => "table-data"),
-    sourceColumns: computed(() => undefined),
-    columnTypes: computed(() => undefined),
-    whereInput: computed(() => undefined),
-    orderBy: computed(() => undefined),
-    exportBatchSize: computed(() => 1000),
-    hasCellSelection: computed(() => false),
-    selectedCells: computed(() => ({ columns: [], rows: [] })),
-    selectedRange: computed(() => null),
-    contextCell,
-    getRowItem: () => row,
-    selectedRowIds: ref(new Set<number>()),
-    hasRowSelection: computed(() => false),
-  });
-
-  await composable.prefetchRowAsInsertStatement(false);
-  await composable.copyRowAsInsert();
-  row.data = [1, "after"];
-  await composable.prefetchRowAsInsertStatement(false);
-  await composable.copyRowAsInsert();
-
-  assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 2);
-  assert.deepEqual(
-    apiMock.buildDataGridCopyInsertStatement.mock.calls.map((call) => call[0].rows),
-    [[[1, "before"]], [[1, "after"]]],
-  );
-  assert.deepEqual(
-    clipboardMock.copyToClipboard.mock.calls.map((call) => call[0]),
-    ["INSERT INTO users (id, name) VALUES (1, 'before');", "INSERT INTO users (id, name) VALUES (1, 'after');"],
-  );
-});
-
-test("copy row as INSERT works without prior prefetch (first context-menu click)", async () => {
-  const contextCell = ref({ rowId: 1, rowIndex: 0, col: 0 });
-  const row = {
-    id: 1,
-    data: [1, "alice"],
-    isNew: false,
-    isDeleted: false,
-    isDirtyCol: [false, false],
-    status: "",
-  };
-  apiMock.buildDataGridCopyInsertStatement.mockResolvedValueOnce("INSERT INTO users (id, name) VALUES (1, 'alice');");
-  const composable = useDataGridExport({
-    columns: computed(() => ["id", "name"]),
-    displayItems: computed(() => [row]),
-    sql: computed(() => undefined),
-    tableMeta: computed(() => ({
-      tableName: "users",
-      primaryKeys: ["id"],
-    })),
-    databaseType: computed(() => "mysql"),
-    connectionId: computed(() => "conn-1"),
-    database: computed(() => "db"),
-    context: computed(() => "table-data"),
-    sourceColumns: computed(() => undefined),
-    columnTypes: computed(() => undefined),
-    whereInput: computed(() => undefined),
-    orderBy: computed(() => undefined),
-    exportBatchSize: computed(() => 1000),
-    hasCellSelection: computed(() => false),
-    selectedCells: computed(() => ({ columns: [], rows: [] })),
-    selectedRange: computed(() => null),
-    contextCell,
-    getRowItem: () => row,
-    selectedRowIds: ref(new Set<number>()),
-    hasRowSelection: computed(() => false),
-  });
-
-  assert.equal(composable.canCopyRowAsInsert.value, true);
-  assert.equal(composable.canCopyPreparedInsert(false), false);
-
-  await composable.copyRowAsInsert();
-
-  assert.equal(apiMock.buildDataGridCopyInsertStatement.mock.calls.length, 1);
-  assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], "INSERT INTO users (id, name) VALUES (1, 'alice');");
-  assert.equal(composable.canCopyPreparedInsert(false), true);
-});
-
-test("copy row as INSERT without primary keys works without prior prefetch", async () => {
-  const contextCell = ref({ rowId: 1, rowIndex: 0, col: 0 });
-  const row = {
-    id: 1,
-    data: [1, "alice"],
-    isNew: false,
-    isDeleted: false,
-    isDirtyCol: [false, false],
-    status: "",
-  };
-  apiMock.buildDataGridCopyInsertStatement.mockResolvedValueOnce("INSERT INTO users (name) VALUES ('alice');");
-  const composable = useDataGridExport({
-    columns: computed(() => ["id", "name"]),
-    displayItems: computed(() => [row]),
-    sql: computed(() => undefined),
-    tableMeta: computed(() => ({
-      tableName: "users",
-      primaryKeys: ["id"],
-    })),
-    databaseType: computed(() => "mysql"),
-    connectionId: computed(() => "conn-1"),
-    database: computed(() => "db"),
-    context: computed(() => "table-data"),
-    sourceColumns: computed(() => undefined),
-    columnTypes: computed(() => undefined),
-    whereInput: computed(() => undefined),
-    orderBy: computed(() => undefined),
-    exportBatchSize: computed(() => 1000),
-    hasCellSelection: computed(() => false),
-    selectedCells: computed(() => ({ columns: [], rows: [] })),
-    selectedRange: computed(() => null),
-    contextCell,
-    getRowItem: () => row,
-    selectedRowIds: ref(new Set<number>()),
-    hasRowSelection: computed(() => false),
-  });
-
-  assert.equal(composable.canCopyRowAsInsertWithoutPrimaryKeys.value, true);
-  assert.equal(composable.canCopyPreparedInsert(true), false);
-
-  await composable.copyRowAsInsertWithoutPrimaryKeys();
-
-  assert.deepEqual(apiMock.buildDataGridCopyInsertStatement.mock.calls[0][0], {
-    databaseType: "mysql",
-    tableMeta: { tableName: "users", primaryKeys: ["id"] },
-    columns: ["id", "name"],
-    columnTypes: undefined,
-    sourceColumns: undefined,
-    rows: [[1, "alice"]],
-    excludePrimaryKeys: true,
-    insertMode: "merged",
-  });
-  assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], "INSERT INTO users (name) VALUES ('alice');");
-  assert.equal(composable.canCopyPreparedInsert(true), true);
-});
-
-test("copy row as INSERT without primary keys remains available when the primary key is hidden", async () => {
-  const contextCell = ref({ rowId: 1, rowIndex: 0, col: 0 });
-  const row = {
-    id: 1,
-    data: ["alice", "active"],
-    isNew: false,
-    isDeleted: false,
-    isDirtyCol: [false, false],
-    status: "",
-  };
-  apiMock.buildDataGridCopyInsertStatement.mockResolvedValueOnce("INSERT INTO users (name, status) VALUES ('alice', 'active');");
-  const composable = useDataGridExport({
-    columns: computed(() => ["name", "status"]),
-    displayItems: computed(() => [row]),
-    sql: computed(() => "SELECT name, status FROM users"),
-    tableMeta: computed(() => ({
-      tableName: "users",
-      primaryKeys: ["id"],
-    })),
-    databaseType: computed(() => "mysql"),
-    connectionId: computed(() => "conn-1"),
-    database: computed(() => "db"),
-    context: computed(() => "results"),
-    sourceColumns: computed(() => ["name", "status"]),
-    columnTypes: computed(() => undefined),
-    whereInput: computed(() => undefined),
-    orderBy: computed(() => undefined),
-    exportBatchSize: computed(() => 1000),
-    hasCellSelection: computed(() => false),
-    selectedCells: computed(() => ({ columns: [], rows: [] })),
-    selectedRange: computed(() => null),
-    contextCell,
-    getRowItem: () => row,
-    selectedRowIds: ref(new Set<number>()),
-    hasRowSelection: computed(() => false),
-  });
-
-  assert.equal(composable.canCopyRowAsInsertWithoutPrimaryKeys.value, true);
-
-  await composable.copyRowAsInsertWithoutPrimaryKeys();
-
-  assert.deepEqual(apiMock.buildDataGridCopyInsertStatement.mock.calls[0][0], {
-    databaseType: "mysql",
-    tableMeta: { tableName: "users", primaryKeys: ["id"] },
-    columns: ["name", "status"],
-    columnTypes: undefined,
-    sourceColumns: ["name", "status"],
-    rows: [["alice", "active"]],
-    excludePrimaryKeys: true,
-    insertMode: "merged",
-  });
-  assert.equal(clipboardMock.copyToClipboard.mock.calls[0][0], "INSERT INTO users (name, status) VALUES ('alice', 'active');");
-});
-
 test("default data grid export file names use sanitized base names and compact local timestamps", () => {
   vi.useFakeTimers();
   try {
@@ -720,7 +400,7 @@ test("complete local query result XLSX export does not re-execute the query", as
   assert.equal(fullExportResult.mock.calls.length, 0);
   assert.equal(queryResultExportRequest.mock.calls.length, 0);
   assert.equal(apiMock.startQueryResultExport.mock.calls.length, 0);
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1), ["Export", ["id", "name"], ["int4", "text"], completeLocalResult.rows]);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 5), ["Export", ["id", "name"], ["int4", "text"], completeLocalResult.rows]);
 });
 
 test("MySQL joined query SQL export keeps result aliases instead of source column names", async () => {
@@ -757,6 +437,22 @@ test("MySQL joined query SQL export keeps result aliases instead of source colum
   } finally {
     download.restore();
   }
+});
+
+test("background SQL export keeps full result column types when visible columns are reordered", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
+  const { composable, queryResultExportRequest } = buildExportHarness({
+    columns: ["payload", "created_at"],
+    columnTypes: ["jsonb", "timestamp"],
+    allColumnTypes: ["bytea", "jsonb", "timestamp"],
+    tableMeta: { tableName: "events", primaryKeys: ["id"] },
+  });
+
+  await composable.exportSql();
+
+  assert.deepEqual(queryResultExportRequest.mock.calls[0][0].exportColumnTypes, ["bytea", "jsonb", "timestamp"]);
+  assert.deepEqual(apiMock.startQueryResultExport.mock.calls[0][0].exportColumnTypes, ["bytea", "jsonb", "timestamp"]);
 });
 
 test("table data SQL export keeps source column names", async () => {
@@ -803,7 +499,7 @@ test("complete local query result export removes only internal hidden columns", 
 
   await composable.exportXlsx();
 
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1), [
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 5), [
     "Export",
     ["id", "name"],
     ["int4", "text"],
@@ -978,6 +674,35 @@ test("selected query result XLSX export uses the current source label as the she
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][2], ["id", "name"]);
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][3], ["bigint(20)", "varchar(64)"]);
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][4], [[1, "Ada"]]);
+});
+
+test("selected query result XLSX export forwards the numericColumnRightAlign setting to the backend", async () => {
+  const settingsStore = useSettingsStore();
+  settingsStore.updateEditorSettings({ numericColumnRightAlign: false });
+  const { composable } = buildExportHarness({ columnTypes: ["bigint(20)", "varchar(64)"] });
+
+  await composable.exportXlsx([1]);
+
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls.length, 1);
+  // Argument 5 is `numericColumnRightAlign`, and must reflect the persisted
+  // setting rather than always defaulting to true.
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][5], false);
+
+  settingsStore.updateEditorSettings({ numericColumnRightAlign: true });
+  await composable.exportXlsx([1]);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[1][5], true);
+});
+
+test("streaming query result XLSX export carries numericColumnRightAlign in the backend request", async () => {
+  const settingsStore = useSettingsStore();
+  settingsStore.updateEditorSettings({ numericColumnRightAlign: false });
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportXlsxWithSql();
+
+  assert.equal(queryResultExportRequest.mock.calls.length, 1);
+  assert.equal(apiMock.startQueryResultExport.mock.calls.length, 1);
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].numericColumnRightAlign, false);
 });
 
 test("streaming XLSX with SQL marks the backend request as opt in", async () => {

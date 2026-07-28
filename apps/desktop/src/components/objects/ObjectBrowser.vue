@@ -934,7 +934,7 @@ async function fetchTableDdl() {
   tableDdlLoading.value = true;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database || "", schema, row.name, tableDdlObjectType(row.type), props.catalog);
+    const ddl = await api.getTableDisplayDdl(props.connection.id, props.database || "", schema, row.name, tableDdlObjectType(row.type), props.catalog);
     if (sidePanelGuard.isStale(epoch)) return;
     tableDdlContent.value = ddl;
   } catch (e: any) {
@@ -2700,7 +2700,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     'bg-primary/10': sidePanelRow?.id === item.id && !selectedTableIds.has(item.id),
                     'bg-primary/5': selectedTableIds.has(item.id),
                   }"
-                  :style="{ gridTemplateColumns, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 hsl(var(--primary))' : undefined }"
+                  :style="{ gridTemplateColumns, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 var(--primary)' : undefined }"
                   @click="onRowClick(item, $event)"
                   @contextmenu="onContextMenu"
                 >

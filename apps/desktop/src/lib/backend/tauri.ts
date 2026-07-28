@@ -61,6 +61,7 @@ import type {
   DataGridSaveStatementOptions,
   HiveTablePropertiesSqlOptions,
 } from "@/lib/dataGrid/dataGridSql";
+import type { DataGridExtractRequest, DataGridExtractResult } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
@@ -72,6 +73,13 @@ import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
 import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
+
+export interface SshPromptResolution {
+  id: string;
+  action: "accept" | "reject" | "secret";
+  remember?: boolean;
+  secret?: string;
+}
 
 export interface AgentDriverInfo {
   db_type: string;
@@ -389,7 +397,20 @@ export type AgentEvent =
   | { type: "context_compacted"; summary: string; summary_tokens: number; compacted_messages: number; estimated_before: number; estimated_after: number }
   | { type: "error"; message: string };
 
-export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: AgentEvent) => void, mode?: string, allowWriteSql = false, _signal?: AbortSignal): Promise<string> {
+export async function aiAgentStream(
+  sessionId: string,
+  request: AiCompletionRequest,
+  connectionId: string,
+  database: string,
+  dbType: string,
+  onEvent: (event: AgentEvent) => void,
+  mode?: string,
+  allowWriteSql = false,
+  confirmedWriteSql?: string,
+  confirmedConnectionId?: string,
+  confirmedDatabase?: string,
+  _signal?: AbortSignal,
+): Promise<string> {
   const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
     onEvent(event.payload);
     if (event.payload.type === "agent_end" || event.payload.type === "error") {
@@ -397,7 +418,7 @@ export async function aiAgentStream(sessionId: string, request: AiCompletionRequ
     }
   });
   try {
-    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType, mode, allowWriteSql });
+    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType, mode, allowWriteSql, confirmedWriteSql, confirmedConnectionId, confirmedDatabase });
   } catch (e) {
     unlisten();
     throw e;
@@ -1105,6 +1126,10 @@ export async function prepareDataGridSave(options: DataGridSaveStatementOptions)
   return invoke("prepare_data_grid_save", { options });
 }
 
+export async function extractDataGridSelection(request: DataGridExtractRequest): Promise<DataGridExtractResult> {
+  return invoke("extract_data_grid_selection", { request });
+}
+
 export async function buildDataGridCopyUpdateStatements(options: DataGridCopyUpdateStatementOptions): Promise<string[]> {
   return invoke("build_data_grid_copy_update_statements", { options });
 }
@@ -1197,6 +1222,10 @@ export async function getTableDdl(connectionId: string, database: string, schema
   return invoke("get_table_ddl", { connectionId, database, schema, table, objectType, catalog });
 }
 
+export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
+  return invoke("get_table_ddl", { connectionId, database, schema, table, objectType, catalog, includePostgresAccess: true });
+}
+
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
   return invoke("prepare_schema_diff", { options });
 }
@@ -1256,6 +1285,10 @@ export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<voi
 
 export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
   return invoke("test_tunnel_profile", { profile });
+}
+
+export async function resolveSshPrompt(resolution: SshPromptResolution): Promise<void> {
+  await invoke("resolve_ssh_prompt", { resolution });
 }
 
 export async function readKeychainPassword(service: string): Promise<string> {
@@ -1487,6 +1520,7 @@ export interface UpdateInfo {
   latest_version: string;
   update_available: boolean;
   portable_mode: boolean;
+  manual_update_only: boolean;
   release_name: string;
   release_url: string;
   release_notes: string;
@@ -2052,6 +2086,35 @@ export async function zookeeperDelete(connectionId: string, key: string): Promis
   return invoke("zookeeper_delete", { connectionId, key });
 }
 
+// --- HBase ---
+export async function hbaseGetTableSchema(connectionId: string, namespace: string, table: string): Promise<import("@/types/hbase").HBaseTableSchema> {
+  return invoke("hbase_get_table_schema", { connectionId, namespace, table });
+}
+
+export async function hbaseScanRows(connectionId: string, namespace: string, table: string, rowKeyPrefix: string | undefined, limit: number): Promise<import("@/types/hbase").HBaseScanResult> {
+  return invoke("hbase_scan_rows", { connectionId, namespace, table, rowKeyPrefix, limit });
+}
+
+export async function hbaseGetRow(connectionId: string, namespace: string, table: string, rowKey: string, rowKeyEncoding?: import("@/types/hbase").HBaseValueEncoding): Promise<import("@/types/hbase").HBaseRow | null> {
+  return invoke("hbase_get_row", { connectionId, namespace, table, rowKey, rowKeyEncoding });
+}
+
+export async function hbasePutRow(connectionId: string, namespace: string, table: string, input: import("@/types/hbase").HBasePutRowInput): Promise<void> {
+  return invoke("hbase_put_row", { connectionId, namespace, table, input });
+}
+
+export async function hbaseDeleteRow(connectionId: string, namespace: string, table: string, rowKey: string, rowKeyEncoding?: import("@/types/hbase").HBaseValueEncoding): Promise<void> {
+  return invoke("hbase_delete_row", { connectionId, namespace, table, rowKey, rowKeyEncoding });
+}
+
+export async function hbaseCreateTable(connectionId: string, namespace: string, table: string, columnFamilies: string[]): Promise<void> {
+  return invoke("hbase_create_table", { connectionId, namespace, table, columnFamilies });
+}
+
+export async function hbaseDeleteTable(connectionId: string, namespace: string, table: string): Promise<void> {
+  return invoke("hbase_delete_table", { connectionId, namespace, table });
+}
+
 // --- Document stores ---
 export interface DocumentQueryResult {
   documents: any[];
@@ -2462,6 +2525,7 @@ export interface TransferProgress {
   status: "running" | "tableDone" | "done" | "error" | "cancelled";
   error: string | null;
   terminal: boolean;
+  transferFailuresOmitted?: number;
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {
@@ -2703,6 +2767,7 @@ export interface TableExportRequest {
   batchSize?: number;
   rowLimit?: number | null;
   dateTimeFormat?: string;
+  numericColumnRightAlign?: boolean;
 }
 
 export interface TableCsvExportOptions {
@@ -2736,7 +2801,7 @@ export interface QueryResultExportRequest {
   databaseType: DatabaseType;
   useAgentCursor: boolean;
   filePath: string;
-  format: "csv" | "xlsx" | "txt";
+  format: "csv" | "xlsx" | "txt" | "sql";
   includeSqlSheet?: boolean;
   pageSize: number;
   rowLimit?: number | null;
@@ -2746,6 +2811,9 @@ export interface QueryResultExportRequest {
   clientSessionId?: string;
   executionId?: string;
   dateTimeFormat?: string;
+  exportTableName?: string;
+  exportColumnTypes?: Array<string | null | undefined>;
+  numericColumnRightAlign?: boolean;
 }
 
 export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {
@@ -2877,7 +2945,7 @@ export async function exportTableDataCsv(options: TableCsvExportOptions): Promis
   return invoke("export_table_data_csv", { request: options });
 }
 
-export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], rows: readonly (readonly XlsxCellValue[])[], numericColumnRightAlign?: boolean): Promise<void> {
   return invoke("export_query_result_xlsx", {
     request: {
       filePath,
@@ -2885,11 +2953,12 @@ export async function exportQueryResultXlsx(filePath: string, sheetName: string 
       columns,
       columnTypes,
       rows,
+      numericColumnRightAlign,
     },
   });
 }
 
-export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: readonly string[]; columnTypes?: readonly string[]; rows: readonly (readonly XlsxCellValue[])[] }[]): Promise<void> {
+export async function exportQueryResultsXlsx(filePath: string, worksheets: readonly { sheetName?: string; columns: readonly string[]; columnTypes?: readonly string[]; rows: readonly (readonly XlsxCellValue[])[]; numericColumnRightAlign?: boolean }[]): Promise<void> {
   return invoke("export_query_results_xlsx", {
     request: {
       filePath,

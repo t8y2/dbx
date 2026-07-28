@@ -29,6 +29,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   mongodb: { deferred: "database options are not modeled as SQL database properties" },
   oracle: { deferred: "Oracle database properties are instance/user/tablespace administration" },
   elasticsearch: { deferred: "index settings are not database properties" },
+  hbase: { deferred: "namespace and table properties need a dedicated HBase workflow" },
   qdrant: { deferred: "collection settings are not database properties" },
   milvus: { deferred: "collection/database settings need a dedicated vector workflow" },
   weaviate: { deferred: "collection settings are not database properties" },

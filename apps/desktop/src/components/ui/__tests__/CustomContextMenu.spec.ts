@@ -96,4 +96,46 @@ describe("CustomContextMenu lifecycle", () => {
 
     app.unmount();
   });
+
+  it("keeps the menu open when scrolling inside a scrollable submenu", async () => {
+    const children = Array.from({ length: 40 }, (_, index) => ({ label: `Copy option ${index}` }));
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(
+            CustomContextMenu,
+            { items: [{ label: "Copy", children }] },
+            {
+              default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "context-target", onContextmenu: onContextMenu }, "Target"),
+            },
+          );
+      },
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+
+    const target = container.querySelector("#context-target");
+    target?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 20 }));
+    await nextTick();
+
+    const copyTrigger = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("Copy"));
+    expect(copyTrigger).toBeTruthy();
+    copyTrigger?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, clientX: 20, clientY: 30 }));
+    await nextTick();
+
+    const submenu = Array.from(document.body.querySelectorAll("[data-dbx-context-menu]")).find((el) => el.textContent?.includes("Copy option 0"));
+    expect(submenu).toBeTruthy();
+    submenu?.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+    expect(document.body.textContent).toContain("Copy option 0");
+
+    document.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+    expect(document.body.textContent).not.toContain("Copy option 0");
+
+    app.unmount();
+  });
 });

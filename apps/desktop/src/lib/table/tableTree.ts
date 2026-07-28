@@ -742,3 +742,90 @@ export function expandCachedObjectBrowserNodes(nodes: TreeNode[]): TreeNode[] {
     ];
   });
 }
+
+/** Suffix appended to the parent's nodeId when building a favorites
+ *  placeholder id, and used to recover the original parent id from a
+ *  placeholder node. Kept as a constant so the encoder and decoder cannot
+ *  drift out of sync. */
+const FAVORITES_PLACEHOLDER_SUFFIX = "::favorites";
+/** Separator used between the placeholder's parent id and the group id when
+ *  building a favorites-group subnode id. */
+const FAVORITES_GROUP_SEPARATOR = "::group::";
+
+/** Type guard for a favorites placeholder node. */
+export function isFavoritesPlaceholderNode(node: { type: TreeNodeType }): boolean {
+  return node.type === "favorites";
+}
+
+/** Inverse of `buildFavoritesPlaceholderNode`: given a placeholder node,
+ *  return the parent node's id (i.e. the id of the database/schema that
+ *  owns the placeholder). Returns `null` if the node is not a favorites
+ *  placeholder or the id does not carry the expected suffix. */
+export function favoritesNodeParentId(node: TreeNode): string | null {
+  if (!isFavoritesPlaceholderNode(node)) return null;
+  const idx = node.id.lastIndexOf(FAVORITES_PLACEHOLDER_SUFFIX);
+  if (idx < 0) return null;
+  return node.id.slice(0, idx);
+}
+
+/** Build the favorites placeholder that lives as the first child of every
+ *  database (or other scope-owner) node. The placeholder is what the user
+ *  clicks to expand; its real children are populated by the favorites
+ *  controller on the next render. The id is derived from the parent id so
+ *  the sidebar runtime can recover the parent on toggle/refresh. */
+export function buildFavoritesPlaceholderNode({ nodeId, connectionId, database, schema }: { nodeId: string; connectionId: string; database: string; schema?: string }): TreeNode {
+  return {
+    id: `${nodeId}${FAVORITES_PLACEHOLDER_SUFFIX}`,
+    label: "tree.favorites",
+    type: "favorites",
+    connectionId,
+    database,
+    schema,
+    isExpanded: false,
+    objectCount: 0,
+    children: [],
+  };
+}
+
+/** Build a single favorites-group subnode (e.g. "Default" or any custom
+ *  group the user has created). The id is derived from the parent
+ *  placeholder id and the group id so the runtime can recover both — the
+ *  group id is what the controller uses to update the group's collapsed
+ *  state when the user toggles it. */
+export function buildFavoritesGroupSubnode({
+  parentId,
+  group,
+}: {
+  parentId: string;
+  group: {
+    id: string;
+    name: string;
+    connectionId: string;
+    database: string;
+    schema?: string;
+    collapsed: boolean;
+  };
+}): TreeNode {
+  return {
+    id: `${parentId}${FAVORITES_GROUP_SEPARATOR}${group.id}`,
+    label: group.name,
+    type: "favorites-group",
+    connectionId: group.connectionId,
+    database: group.database,
+    schema: group.schema,
+    isExpanded: !group.collapsed,
+    objectCount: 0,
+    children: [],
+  };
+}
+
+/** Inverse of `buildFavoritesGroupSubnode`: given a favorites-group
+ *  subnode, return the underlying favorite group's id. Returns `null` if
+ *  the node is not a favorites-group subnode or the id does not carry the
+ *  expected separator. */
+export function extractFavoriteGroupIdFromSubnode(node: TreeNode): string | null {
+  if (node.type !== "favorites-group") return null;
+  const idx = node.id.indexOf(FAVORITES_GROUP_SEPARATOR);
+  if (idx < 0) return null;
+  return node.id.slice(idx + FAVORITES_GROUP_SEPARATOR.length);
+}

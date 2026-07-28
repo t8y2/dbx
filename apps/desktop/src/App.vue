@@ -2075,7 +2075,7 @@ onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   if (isDesktop) {
-    document.addEventListener("contextmenu", handleContextMenu);
+    document.addEventListener("contextmenu", handleContextMenu, true);
   }
   // macOS: Ctrl+click fires both click and contextmenu.
   // Intercept click in capture phase to prevent unwanted navigation.
@@ -2139,7 +2139,7 @@ onUnmounted(() => {
   }
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
-  document.removeEventListener("contextmenu", handleContextMenu);
+  document.removeEventListener("contextmenu", handleContextMenu, true);
 });
 </script>
 

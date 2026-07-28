@@ -730,7 +730,9 @@ export type TreeNodeType =
   | "mongo-collection"
   | "vector-database"
   | "vector-collection"
-  | "elasticsearch-index";
+  | "elasticsearch-index"
+  | "favorites"
+  | "favorites-group";
 
 export interface ConnectionGroup {
   id: string;
@@ -778,6 +780,10 @@ export interface TreeNode {
   partitionParentSchema?: string;
   partitionParentName?: string;
   hiddenChildren?: TreeNode[];
+  /** Set on cloned favorite rows to preserve the original id so the favorite
+   *  key stays stable across re-renders and the virtual scroller can use a
+   *  synthetic id for instance stability. */
+  favoritedFromId?: string;
   tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;

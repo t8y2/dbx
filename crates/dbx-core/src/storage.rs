@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
@@ -106,6 +106,7 @@ pub fn maybe_import_user_data_db(
 
 pub struct Storage {
     db: SqliteHandle,
+    data_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,9 +388,14 @@ impl Storage {
     pub async fn open(db_path: &Path) -> Result<Self, String> {
         let db_path = db_path.to_string_lossy().to_string();
         let db = connect_path_create_if_missing(&db_path).await?;
-        let storage = Self { db };
+        let data_dir = Path::new(&db_path).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+        let storage = Self { db, data_dir };
         storage.init_schema().await?;
         Ok(storage)
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     async fn init_schema(&self) -> Result<(), String> {

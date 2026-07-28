@@ -1452,6 +1452,14 @@ export async function savePinnedTreeNodeIds(_ids: string[]): Promise<void> {
   return post("/api/app-settings/pinned-tree-node-ids", { ids: _ids });
 }
 
+export async function loadFavoritesState(): Promise<unknown> {
+  return get("/api/app-settings/favorites-state");
+}
+
+export async function saveFavoritesState(favorites: unknown): Promise<void> {
+  return post("/api/app-settings/favorites-state", favorites);
+}
+
 // --- AI Conversations ---
 
 export async function saveAiConversation(conversation: AiConversation): Promise<void> {

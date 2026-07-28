@@ -57,6 +57,7 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
+import { effortPreferenceUpdateForCapability, effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
 import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
 import { ACTIVE_TEMPLATES_TOTAL_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
 
@@ -333,7 +334,7 @@ const activeFullConfig = computed(() => {
   const item = settings.aiConfigs.find((c) => c.id === settings.activeModel!.configId);
   if (!item) return null;
   const modelId = settings.activeModel.modelId;
-  return normalizeAiConfig({ ...item, model: modelId, runtimeEffort: settings.activeEffort ?? { kind: "providerDefault" } });
+  return normalizeAiConfig({ ...item, model: modelId, runtimeEffort: runtimeEffortFromPreference(settings.activeEffort) });
 });
 
 function getModelsForConfig(configId: string) {
@@ -390,34 +391,13 @@ watch(providerSelectorOpen, (open) => {
   }
 });
 
-function capabilityDefault(capability: AiEffortCapability): AiEffortSelection | null {
-  if (capability.kind === "unsupported" || capability.kind === "freeText") return null;
-  return capability.default;
-}
-
-function effortSelectionSupported(capability: AiEffortCapability, selection: AiEffortSelection | null): boolean {
-  if (!selection || selection.kind === "providerDefault") return true;
-  if (capability.kind === "enum") {
-    return capability.options.some((option) => effortSelectionEquals(option.selection, selection));
-  }
-  if (capability.kind === "integer") {
-    if (selection.kind === "integer") {
-      const isSteppedValue = selection.value >= capability.min && selection.value <= capability.max && (selection.value - capability.min) % capability.step === 0;
-      return isSteppedValue || !!capability.specialValues?.some((option) => effortSelectionEquals(option.selection, selection));
-    }
-    return !!capability.specialValues?.some((option) => effortSelectionEquals(option.selection, selection));
-  }
-  if (capability.kind === "boolean") return selection.kind === "boolean" || selection.kind === "disabled";
-  if (capability.kind === "freeText") return selection.kind === "text";
-  return false;
-}
-
 async function ensureModelEffort(config: AiConfigItem, modelId: string, force = false) {
   try {
     const capability = await resolveEffort(config, modelId, force);
     const isActiveModel = settings.activeModel?.configId === config.id && settings.activeModel.modelId === modelId;
-    if (isActiveModel && (!settings.activeEffort || !effortSelectionSupported(capability, settings.activeEffort))) {
-      settings.updateActiveEffort(capabilityDefault(capability));
+    if (isActiveModel) {
+      const preferenceUpdate = effortPreferenceUpdateForCapability(capability, settings.activeEffort);
+      if (preferenceUpdate !== undefined) settings.updateActiveEffort(preferenceUpdate);
     }
     syncEffortInputs(capability);
   } catch {
@@ -514,10 +494,6 @@ function commitIntegerEffort(capability: Extract<AiEffortCapability, { kind: "in
 function commitTextEffort() {
   const value = effortTextValue.value.trim();
   settings.updateActiveEffort(value ? { kind: "text", value } : { kind: "providerDefault" });
-}
-
-function effortSelectionEquals(left: AiEffortSelection | null, right: AiEffortSelection): boolean {
-  return !!left && left.kind === right.kind && ("value" in left ? left.value === ("value" in right ? right.value : undefined) : !("value" in right));
 }
 
 function effortSelectionLabel(selection: AiEffortSelection | null): string {

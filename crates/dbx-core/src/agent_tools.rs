@@ -77,13 +77,15 @@ pub fn verify_confirmed_target(
         || confirmed_database.as_deref() != Some(actual_database);
     if target_mismatch {
         log::warn!(
-            "Write-SQL grant voided: confirmed target (conn={:?}, db={:?}) does not match actual (conn={}, db={}). Confirmed SQL: {}",
+            "Write-SQL grant voided: confirmed target (conn={:?}, db={:?}) does not match actual (conn={}, db={}).",
             confirmed_connection_id,
             confirmed_database,
             actual_connection_id,
             actual_database,
-            confirmed_sql,
         );
+        // SQL can contain literals or credentials. Keep diagnostic visibility
+        // behind the shared debug-only redaction boundary.
+        crate::sql_diagnostics::debug_sql("write_sql_grant_voided", confirmed_sql);
         return (Some(false), None);
     }
     (allow_write_sql, confirmed_write_sql)
@@ -1120,6 +1122,15 @@ mod tests {
     fn confirmed_sql_default_is_none() {
         let perms = AgentSqlPermissions::default();
         assert_eq!(perms.confirmed_write_sql, None);
+    }
+
+    #[test]
+    fn confirmed_write_sql_diagnostics_redact_sensitive_literals() {
+        let confirmed_sql = "CREATE USER app_user WITH PASSWORD 'secret-123'";
+        let diagnostic = crate::sql_diagnostics::redact_sql_for_diagnostics(confirmed_sql);
+
+        assert!(!diagnostic.contains("secret-123"));
+        assert!(diagnostic.contains("'[REDACTED]'"));
     }
 
     #[test]

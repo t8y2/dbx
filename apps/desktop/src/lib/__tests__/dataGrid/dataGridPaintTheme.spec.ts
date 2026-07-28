@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import {
-  DATA_GRID_DARK_ACTIVE_ROW_BG,
-  DATA_GRID_LIGHT_ACTIVE_ROW_BG,
-  dataGridActiveRowBackground,
-  resolveDataGridPaintTheme,
-} from "@/lib/dataGrid/dataGridPaintTheme";
+import { DATA_GRID_DARK_ACTIVE_ROW_BG, DATA_GRID_LIGHT_ACTIVE_ROW_BG, dataGridActiveRowBackground, resolveDataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
 
 function parseRgb(value: string): { r: number; g: number; b: number } | null {
   const match = value.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);

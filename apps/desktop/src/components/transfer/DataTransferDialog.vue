@@ -15,8 +15,10 @@ import * as api from "@/lib/backend/api";
 import type { TransferMode, TransferTableNameCase } from "@/lib/backend/api";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
+import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
+import type { CatalogInfo } from "@/types/database";
 import { ArrowRightLeft, ArrowLeftRight, Loader2, Square, CheckSquare } from "@lucide/vue";
 
 const { t } = useI18n();
@@ -34,6 +36,8 @@ const sqlConnections = computed(() => store.connections.filter((c) => supportsTr
 
 // Source state
 const sourceConnectionId = ref("");
+const sourceCatalog = ref("");
+const sourceCatalogs = ref<CatalogInfo[]>([]);
 const sourceDatabase = ref("");
 const sourceDatabases = ref<string[]>([]);
 const sourceSchemas = ref<string[]>([]);
@@ -45,6 +49,8 @@ const loadingTables = ref(false);
 
 // Target state
 const targetConnectionId = ref("");
+const targetCatalog = ref("");
+const targetCatalogs = ref<CatalogInfo[]>([]);
 const targetDatabase = ref("");
 const targetDatabases = ref<string[]>([]);
 const targetSchemas = ref<string[]>([]);
@@ -77,6 +83,11 @@ function isMongoConnection(id: string): boolean {
   return connectionType(id) === "mongodb";
 }
 
+function isCatalogCapable(id: string): boolean {
+  const config = store.getConfig(id);
+  return isDorisFamilyCatalogCapable(config?.db_type, config?.driver_profile);
+}
+
 const canStart = computed(() => sourceConnectionId.value && sourceDatabase.value && targetConnectionId.value && targetDatabase.value && selectedTables.value.size > 0 && sourceConnectionId.value + sourceDatabase.value !== targetConnectionId.value + targetDatabase.value);
 
 function toggleSelectAll() {
@@ -95,6 +106,37 @@ function toggleTable(table: string) {
   }
 }
 
+async function loadCatalogs(connectionId: string, side: "source" | "target") {
+  if (!connectionId || !isCatalogCapable(connectionId)) {
+    if (side === "source") {
+      sourceCatalogs.value = [];
+      sourceCatalog.value = "";
+    } else {
+      targetCatalogs.value = [];
+      targetCatalog.value = "";
+    }
+    return;
+  }
+  try {
+    const catalogs = await api.listDorisCatalogs(connectionId);
+    if (side === "source") {
+      sourceCatalogs.value = catalogs;
+      sourceCatalog.value = catalogs.length === 1 ? catalogs[0].name : "";
+    } else {
+      targetCatalogs.value = catalogs;
+      targetCatalog.value = catalogs.length === 1 ? catalogs[0].name : "";
+    }
+  } catch {
+    if (side === "source") {
+      sourceCatalogs.value = [];
+      sourceCatalog.value = "";
+    } else {
+      targetCatalogs.value = [];
+      targetCatalog.value = "";
+    }
+  }
+}
+
 async function loadDatabases(connectionId: string, target: "source" | "target") {
   if (!connectionId) return;
   try {
@@ -102,6 +144,25 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
     const config = store.getConfig(connectionId);
     if (!config) return;
     const names = isMongoConnection(connectionId) ? databaseOptionsForConnection(await api.mongoListDatabases(connectionId), config) : await fetchNamespaceOptionsForConnection(connectionId, config);
+    if (target === "source") {
+      sourceDatabases.value = names;
+      sourceDatabase.value = names.length === 1 ? names[0] : "";
+    } else {
+      targetDatabases.value = names;
+      targetDatabase.value = names.length === 1 ? names[0] : "";
+    }
+  } catch {
+    if (target === "source") sourceDatabases.value = [];
+    else targetDatabases.value = [];
+  }
+}
+
+async function loadDatabasesForCatalog(connectionId: string, catalog: string, target: "source" | "target") {
+  if (!connectionId || !catalog) return;
+  try {
+    await store.ensureConnected(connectionId);
+    const dbs = await api.listDorisCatalogDatabases(connectionId, catalog);
+    const names = dbs.map((db) => db.name);
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -163,7 +224,8 @@ async function loadTables() {
     const config = store.getConfig(sourceConnectionId.value);
     const needsSchema = isSchemaAware(config?.db_type);
     const schema = needsSchema && sourceSchema.value ? sourceSchema.value : sourceDatabase.value;
-    const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema);
+    const catalog = sourceCatalog.value || undefined;
+    const tables = await api.listTables(sourceConnectionId.value, sourceDatabase.value, schema, undefined, undefined, undefined, undefined, catalog);
     sourceTables.value = tables.filter((t) => t.table_type === "TABLE" || t.table_type === "BASE TABLE").map((t) => t.name);
     selectedTables.value = new Set(sourceTables.value);
   } catch {
@@ -175,15 +237,34 @@ async function loadTables() {
 
 const skipSourceWatch = ref(false);
 
-watch(sourceConnectionId, (id) => {
+watch(sourceConnectionId, async (id) => {
   if (skipSourceWatch.value) {
     skipSourceWatch.value = false;
     return;
   }
+  sourceCatalog.value = "";
+  sourceCatalogs.value = [];
   sourceDatabase.value = "";
   sourceTables.value = [];
   selectedTables.value.clear();
-  loadDatabases(id, "source");
+  if (isCatalogCapable(id)) {
+    await loadCatalogs(id, "source");
+    if (sourceCatalog.value) {
+      await loadDatabasesForCatalog(id, sourceCatalog.value, "source");
+    }
+  } else {
+    await loadDatabases(id, "source");
+  }
+});
+
+watch(sourceCatalog, async (catalog) => {
+  if (!sourceConnectionId.value) return;
+  sourceDatabase.value = "";
+  sourceTables.value = [];
+  selectedTables.value.clear();
+  if (catalog) {
+    await loadDatabasesForCatalog(sourceConnectionId.value, catalog, "source");
+  }
 });
 
 watch(sourceDatabase, async (db) => {
@@ -204,11 +285,30 @@ watch(sourceDatabase, async (db) => {
 
 watch(sourceSchema, () => loadTables());
 
-watch(targetConnectionId, (id) => {
+watch(targetConnectionId, async (id) => {
+  targetCatalog.value = "";
+  targetCatalogs.value = [];
   targetDatabase.value = "";
   targetSchemas.value = [];
   targetSchema.value = "";
-  loadDatabases(id, "target");
+  if (isCatalogCapable(id)) {
+    await loadCatalogs(id, "target");
+    if (targetCatalog.value) {
+      await loadDatabasesForCatalog(id, targetCatalog.value, "target");
+    }
+  } else {
+    await loadDatabases(id, "target");
+  }
+});
+
+watch(targetCatalog, async (catalog) => {
+  if (!targetConnectionId.value) return;
+  targetDatabase.value = "";
+  targetSchemas.value = [];
+  targetSchema.value = "";
+  if (catalog) {
+    await loadDatabasesForCatalog(targetConnectionId.value, catalog, "target");
+  }
 });
 
 watch(targetDatabase, async (db) => {
@@ -233,7 +333,14 @@ watch(
       if (props.prefillConnectionId) {
         skipSourceWatch.value = true;
         sourceConnectionId.value = props.prefillConnectionId;
-        await loadDatabases(props.prefillConnectionId, "source");
+        if (isCatalogCapable(props.prefillConnectionId)) {
+          await loadCatalogs(props.prefillConnectionId, "source");
+          if (sourceCatalog.value) {
+            await loadDatabasesForCatalog(props.prefillConnectionId, sourceCatalog.value, "source");
+          }
+        } else {
+          await loadDatabases(props.prefillConnectionId, "source");
+        }
         if (props.prefillDatabase) {
           sourceDatabase.value = props.prefillDatabase;
         }
@@ -245,6 +352,8 @@ watch(
 
 function resetState() {
   sourceConnectionId.value = "";
+  sourceCatalog.value = "";
+  sourceCatalogs.value = [];
   sourceDatabase.value = "";
   sourceDatabases.value = [];
   sourceSchemas.value = [];
@@ -253,6 +362,8 @@ function resetState() {
   selectedTables.value.clear();
   tableSearch.value = "";
   targetConnectionId.value = "";
+  targetCatalog.value = "";
+  targetCatalogs.value = [];
   targetDatabase.value = "";
   targetDatabases.value = [];
   targetSchemas.value = [];
@@ -285,9 +396,11 @@ async function startTransfer() {
     sourceConnectionId: sourceConnectionId.value,
     sourceDatabase: sourceDatabaseName,
     sourceSchema: effectiveSourceSchema,
+    sourceCatalog: sourceCatalog.value || undefined,
     targetConnectionId: targetConnection,
     targetDatabase: targetDatabaseName,
     targetSchema: effectiveTargetSchema,
+    targetCatalog: targetCatalog.value || undefined,
     tables: [...selectedTables.value],
     createTable: createTable.value,
     mode: transferMode.value,
@@ -399,6 +512,21 @@ function getConnectionName(id: string) {
                 </SearchableSelect>
               </div>
 
+              <!-- Source Catalog (Doris/StarRocks multi-catalog) -->
+              <div v-if="sourceCatalogs.length > 1" class="space-y-1.5">
+                <Label class="text-xs">{{ t("transfer.sourceCatalog") }}</Label>
+                <SearchableSelect
+                  v-model="sourceCatalog"
+                  :options="sourceCatalogs.map((c) => c.name)"
+                  :placeholder="t('transfer.selectCatalog')"
+                  :search-placeholder="t('transfer.searchCatalog')"
+                  :empty-text="t('common.noResults')"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
+              </div>
+
               <div class="space-y-1.5">
                 <Label class="text-xs">{{ t("transfer.sourceDatabase") }}</Label>
                 <SearchableSelect
@@ -461,6 +589,21 @@ function getConnectionName(id: string) {
                     </div>
                   </template>
                 </SearchableSelect>
+              </div>
+
+              <!-- Target Catalog (Doris/StarRocks multi-catalog) -->
+              <div v-if="targetCatalogs.length > 1" class="space-y-1.5">
+                <Label class="text-xs">{{ t("transfer.targetCatalog") }}</Label>
+                <SearchableSelect
+                  v-model="targetCatalog"
+                  :options="targetCatalogs.map((c) => c.name)"
+                  :placeholder="t('transfer.selectCatalog')"
+                  :search-placeholder="t('transfer.searchCatalog')"
+                  :empty-text="t('common.noResults')"
+                  trigger-variant="outline"
+                  trigger-class="h-8 w-full justify-between text-xs"
+                  content-class="w-[var(--reka-popover-trigger-width)]"
+                />
               </div>
 
               <div class="space-y-1.5">

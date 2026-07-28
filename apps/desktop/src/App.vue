@@ -41,6 +41,7 @@ import * as api from "@/lib/backend/api";
 import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
 import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
@@ -1539,6 +1540,30 @@ function changeActiveSchema(schema: string | undefined) {
   const tab = activeTab.value;
   if (tab) queryStore.updateSchema(tab.id, schema);
 }
+
+function changeActiveCatalog(catalog: string | undefined) {
+  const tab = activeTab.value;
+  if (tab) {
+    queryStore.updateCatalog(tab.id, catalog);
+    // Refresh the database options from the selected catalog so the
+    // EditorToolbar dropdown shows the correct databases immediately.
+    if (tab.connectionId) {
+      const connection = connectionStore.getConfig(tab.connectionId);
+      if (connection && catalog && isDorisFamilyCatalogCapable(connection?.db_type, connection?.driver_profile)) {
+        import("@/lib/backend/api").then((api) => {
+          api
+            .listDorisCatalogDatabases(tab.connectionId!, catalog)
+            .then((dbs) => {
+              tab.database = dbs.length === 1 ? dbs[0].name : "";
+            })
+            .catch(() => {});
+        });
+      } else {
+        getDatabaseOptions(tab.connectionId).catch(() => {});
+      }
+    }
+  }
+}
 function openGitHub() {
   openUrl("https://github.com/t8y2/dbx");
 }
@@ -2258,6 +2283,7 @@ onUnmounted(() => {
                   @change-connection="changeActiveConnection"
                   @change-database="changeActiveDatabase"
                   @change-schema="changeActiveSchema"
+                  @change-catalog="changeActiveCatalog"
                   @set-default-database="setActiveDatabaseAsDefault"
                   @clear-default-database="clearActiveDefaultDatabase"
                 />

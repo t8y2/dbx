@@ -2488,9 +2488,11 @@ export interface TransferRequest {
   sourceConnectionId: string;
   sourceDatabase: string;
   sourceSchema: string;
+  sourceCatalog?: string;
   targetConnectionId: string;
   targetDatabase: string;
   targetSchema: string;
+  targetCatalog?: string;
   tables: string[];
   createTable: boolean;
   mode: TransferMode;

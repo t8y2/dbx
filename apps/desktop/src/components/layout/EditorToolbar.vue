@@ -11,14 +11,16 @@ import ProductionContextBadge from "@/components/common/ProductionContextBadge.v
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
+import * as api from "@/lib/backend/api";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
 import { useConnectionGroupLabel } from "@/composables/useConnectionGroupLabel";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
+import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
-import type { QueryTab, ConnectionConfig } from "@/types/database";
+import type { QueryTab, ConnectionConfig, CatalogInfo } from "@/types/database";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -48,6 +50,7 @@ const emit = defineEmits<{
   changeConnection: [connectionId: string];
   changeDatabase: [database: string];
   changeSchema: [schema: string | undefined];
+  changeCatalog: [catalog: string | undefined];
   setDefaultDatabase: [];
   clearDefaultDatabase: [];
   "update:blockDangerousRedisCommands": [value: boolean];
@@ -61,6 +64,35 @@ const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions } = useDatabaseOptions();
 const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas, isSchemaAware } = useSchemaOptions();
+
+const catalogOptions = ref<CatalogInfo[]>([]);
+const loadingCatalogs = ref(false);
+
+const isCatalogCapableConnection = computed(() => {
+  return isDorisFamilyCatalogCapable(props.activeConnection?.db_type, props.activeConnection?.driver_profile);
+});
+
+async function loadCatalogOptions(connectionId: string) {
+  if (!connectionId || !isCatalogCapableConnection.value) {
+    catalogOptions.value = [];
+    return;
+  }
+  loadingCatalogs.value = true;
+  try {
+    const catalogs = await api.listDorisCatalogs(connectionId);
+    catalogOptions.value = catalogs;
+  } catch {
+    catalogOptions.value = [];
+  } finally {
+    loadingCatalogs.value = false;
+  }
+}
+
+watchEffect(() => {
+  if (props.activeConnection && isCatalogCapableConnection.value && props.activeTab.catalog === undefined) {
+    loadCatalogOptions(props.activeConnection.id).catch(() => {});
+  }
+});
 
 const activeDatabaseOptions = computed(() => {
   const connection = props.activeConnection;
@@ -364,6 +396,33 @@ function databaseOptionIsProduction(database: string): boolean {
           </template>
         </SearchableSelect>
       </div>
+      <!-- Catalog selector (Doris / StarRocks multi-catalog) -->
+      <div v-if="isCatalogCapableConnection" class="flex items-center gap-1">
+        <SearchableSelect
+          :model-value="activeTab.catalog ?? ''"
+          :options="catalogOptions.map((c) => c.name)"
+          :placeholder="t('editor.selectCatalog')"
+          :search-placeholder="t('editor.searchCatalog')"
+          :empty-text="t('grid.noSearchResults')"
+          :loading-text="t('common.loading')"
+          :loading="loadingCatalogs"
+          trigger-class="gap-1.5"
+          @update:model-value="(catalog) => emit('changeCatalog', catalog || undefined)"
+          @update:open="
+            (open: boolean) => {
+              if (open && activeConnection) loadCatalogOptions(activeConnection.id).catch(() => {});
+            }
+          "
+        >
+          <template #trigger-label="{ label, loading }">
+            <Database class="h-3.5 w-3.5 shrink-0" />
+            <span class="truncate">{{ loading ? t("common.loading") : label }}</span>
+          </template>
+          <template #option-label="{ label }">
+            <TruncatedTextTooltip :text="label" class="min-w-0 flex-1" side="left" :side-offset="8" />
+          </template>
+        </SearchableSelect>
+      </div>
       <div
         v-if="activeConnection?.db_type !== 'elasticsearch' && activeConnection?.db_type !== 'qdrant' && activeConnection?.db_type !== 'milvus' && activeConnection?.db_type !== 'weaviate' && activeConnection?.db_type !== 'chromadb' && activeConnection?.db_type !== 'zookeeper' && !isSingleDb"
         class="flex items-center gap-1"
@@ -384,7 +443,7 @@ function databaseOptionIsProduction(database: string): boolean {
           @update:model-value="(database) => emit('changeDatabase', database)"
           @update:open="
             (open: boolean) => {
-              if (open && activeConnection) loadDatabaseOptions(activeConnection.id).catch(() => {});
+              if (open && activeConnection) loadDatabaseOptions(activeConnection.id, activeTab.catalog).catch(() => {});
             }
           "
         >

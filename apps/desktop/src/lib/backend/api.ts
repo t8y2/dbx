@@ -179,6 +179,7 @@ export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 // Query
 export const executeQuery = forward("executeQuery");
 export const executeMulti = forward("executeMulti");
+export const executeMultiWithProgress = forward("executeMultiWithProgress");
 export const executeBatch = forward("executeBatch");
 export const executeScript = forward("executeScript");
 export const executeInTransaction = forward("executeInTransaction");

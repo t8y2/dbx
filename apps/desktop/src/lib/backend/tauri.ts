@@ -934,6 +934,42 @@ export async function executeMulti(
   return invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...options });
 }
 
+export interface ExecuteMultiProgress {
+  executionId: string;
+  completed: number;
+  total: number;
+  success: boolean;
+}
+
+export async function executeMultiWithProgress(
+  connectionId: string,
+  database: string,
+  sql: string,
+  onProgress: (progress: ExecuteMultiProgress) => void,
+  schema?: string,
+  options?: {
+    maxRows?: number;
+    fetchSize?: number;
+    pageSize?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    useTransaction?: boolean;
+    continueOnError?: boolean;
+    executionMode?: "simple";
+  },
+): Promise<QueryResult[]> {
+  const executionId = crypto.randomUUID();
+  const unlisten = await listen<ExecuteMultiProgress>("query-batch-progress", (event) => {
+    if (event.payload.executionId === executionId) onProgress(event.payload);
+  });
+  try {
+    return await invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...options });
+  } finally {
+    unlisten();
+  }
+}
+
 export async function refreshConnections(): Promise<void> {
   return invoke("refresh_connections");
 }

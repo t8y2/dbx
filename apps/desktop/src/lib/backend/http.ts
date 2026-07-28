@@ -817,6 +817,37 @@ export async function executeMulti(
   return post("/api/query/execute-multi", { connectionId, database, sql, schema, executionId, ...options });
 }
 
+export interface ExecuteMultiProgress {
+  executionId: string;
+  completed: number;
+  total: number;
+  success: boolean;
+}
+
+export async function executeMultiWithProgress(
+  connectionId: string,
+  database: string,
+  sql: string,
+  onProgress: (progress: ExecuteMultiProgress) => void,
+  schema?: string,
+  options?: {
+    maxRows?: number;
+    fetchSize?: number;
+    pageSize?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    useTransaction?: boolean;
+    continueOnError?: boolean;
+    executionMode?: "simple";
+  },
+): Promise<QueryResult[]> {
+  const executionId = crypto.randomUUID();
+  const results = await executeMulti(connectionId, database, sql, schema, executionId, options);
+  onProgress({ executionId, completed: results.length, total: results.length, success: !results.some((result) => result.execution_error === true) });
+  return results;
+}
+
 export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string): Promise<boolean> {
   return post("/api/query/close-session", { connectionId, database, sessionId, clientSessionId });
 }

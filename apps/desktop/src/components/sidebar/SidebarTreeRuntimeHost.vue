@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, watch, onBeforeUnmount, inject, reactive, shallowRef } from "vue";
+import { computed, nextTick, watch, onBeforeUnmount, inject, reactive, ref, shallowRef } from "vue";
 import { createRoutedSidebarDialogController } from "./sidebarDialogControllerRouting";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
@@ -411,6 +411,8 @@ const { isTableNotView, supportsTruncate, canDropTableCascade, canTruncateTableC
   closeDroppedTableObjectTabsForNode,
   refreshMutatedTableDataTabsForNode,
 });
+
+const batchDropProgress = ref({ completed: 0, total: 0 });
 
 const treeItemDialogOwner = Symbol("sidebar-tree-dialog-owner");
 
@@ -1726,6 +1728,7 @@ function requestBatchDrop() {
   if (!targets.length) return;
   batchDropTargets.value = targets.slice();
   batchDropCascade.value = false;
+  batchDropProgress.value = { completed: 0, total: 0 };
   void refreshBatchDropPreviewSql();
   showBatchDropConfirm.value = true;
 }
@@ -1979,6 +1982,37 @@ async function confirmBatchDrop() {
       return;
     }
     const useCascade = batchDropCascade.value && targets.every((node) => node.type !== "table" || supportsDropTableCascade(databaseTypeForNode(node)));
+    if (targets.every((node) => node.type === "table" && node.connectionId && node.database)) {
+      const first = targets[0]!;
+      await connectionStore.ensureConnected(first.connectionId!);
+      batchDropProgress.value = { completed: 0, total: targets.length };
+      const statements = await Promise.all(targets.map((target) => dropSqlForTreeNode(target, { cascade: useCascade })));
+      const batchSql = statements.filter((sql): sql is string => !!sql).join(";\n");
+      const results = await executeWithProductionSqlGuard({
+        connection: connectionStore.getConfig(first.connectionId!),
+        database: first.database!,
+        sql: batchSql,
+        source: t("production.sourceSidebar"),
+        execute: () =>
+          api.executeMultiWithProgress(first.connectionId!, first.database!, batchSql, (progress) => {
+            batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
+          }),
+      });
+      if (!results) return;
+
+      const succeededIndexes = new Set(results.filter((result) => result.execution_error !== true && Number.isInteger(result.statement_index)).map((result) => result.statement_index!));
+      const succeededTargets = targets.filter((_, index) => succeededIndexes.has(index));
+      for (const target of succeededTargets) {
+        closeDroppedTableObjectTabsForNode(target);
+        connectionStore.removeTreeNode(target.id);
+        releaseActiveNodeReference([target.id]);
+      }
+      const failedResult = results.find((result) => result.execution_error === true);
+      if (failedResult) throw new Error(String(failedResult.rows[0]?.[0] ?? "Batch drop failed"));
+      toast(t("contextMenu.batchDropSuccess", { count: succeededTargets.length }), 3000);
+      showBatchDropConfirm.value = false;
+      return;
+    }
     for (const target of targets) {
       if (!target.connectionId || !target.database) continue;
       await connectionStore.ensureConnected(target.connectionId);
@@ -3186,6 +3220,9 @@ routeDangerDialog(showBatchDropConfirm, () =>
       return batchDropPreviewSql.value;
     },
     confirmLabel: batchDropMenuLabel(),
+    get progress() {
+      return batchDropProgress.value.total > 0 ? batchDropProgress.value : undefined;
+    },
     option: canBatchDropCascade.value
       ? {
           checked: batchDropCascade.value,

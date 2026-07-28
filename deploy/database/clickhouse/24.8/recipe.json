@@ -1,0 +1,13 @@
+{
+  "database": "clickhouse",
+  "name": "ClickHouse",
+  "version": "24.8.14.39",
+  "displayVersion": "24.8",
+  "image": "docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 8123,
+  "connection": { "host": "127.0.0.1", "port": 8124, "username": "default", "password": "123456", "database": "dbx" },
+  "shell": ["clickhouse-client", "--user", "default", "--password", "${DB_PASSWORD}", "--database", "dbx"],
+  "smoke": { "steps": [{ "name": "query initialized row", "command": ["clickhouse-client", "--user", "default", "--password", "${DB_PASSWORD}", "--database", "dbx", "--query", "SELECT note FROM dbx_smoke WHERE id = 1"], "expect": "DBX smoke" }] }
+}

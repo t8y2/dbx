@@ -145,6 +145,8 @@ pub async fn get_columns(client: &RqliteClient, _schema: &str, table: &str) -> R
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,
+            enum_values: None,
+            ..Default::default()
         })
         .collect())
 }
@@ -272,7 +274,7 @@ pub async fn object_source(
         )
         .await?,
     )?;
-    Ok(ObjectSource { name: name.to_string(), object_type: object_type.clone(), schema: None, source })
+    Ok(ObjectSource { name: name.to_string(), object_type: object_type.clone(), schema: None, source, editable: None })
 }
 
 pub async fn execute_query(client: &RqliteClient, sql: &str) -> Result<QueryResult, String> {
@@ -301,6 +303,7 @@ pub async fn execute_query_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -350,6 +353,7 @@ fn query_result_from_rqlite_result(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 

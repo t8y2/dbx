@@ -65,21 +65,24 @@ async function connect() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   connecting.value = true;
   try {
-    ws = await api.redisPubSubConnect(props.connectionId);
+    const socket = await api.redisPubSubConnect(props.connectionId);
+    ws = socket;
 
-    ws.onopen = () => {
+    socket.onopen = () => {
+      if (ws !== socket) return;
       connected.value = true;
       connecting.value = false;
       // Re-subscribe existing channels
       if (channels.value.length > 0) {
-        ws!.send(JSON.stringify({ type: "subscribe", channels: channels.value }));
+        socket.send(JSON.stringify({ type: "subscribe", channels: channels.value }));
       }
       if (patterns.value.length > 0) {
-        ws!.send(JSON.stringify({ type: "psubscribe", patterns: patterns.value }));
+        socket.send(JSON.stringify({ type: "psubscribe", patterns: patterns.value }));
       }
     };
 
-    ws.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (ws !== socket) return;
       try {
         const data = JSON.parse(event.data as string);
         if (data.error) {
@@ -92,13 +95,15 @@ async function connect() {
       }
     };
 
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (ws !== socket) return;
       connected.value = false;
       connecting.value = false;
       ws = null;
     };
 
-    ws.onerror = () => {
+    socket.onerror = () => {
+      if (ws !== socket) return;
       connected.value = false;
       connecting.value = false;
       ws = null;
@@ -110,11 +115,11 @@ async function connect() {
 }
 
 function disconnect() {
-  if (ws) {
-    ws.close();
-    ws = null;
-    connected.value = false;
-  }
+  const socket = ws;
+  ws = null;
+  connected.value = false;
+  connecting.value = false;
+  if (socket) socket.close();
 }
 
 function subscribe() {
@@ -159,11 +164,6 @@ async function publish() {
   if (!ch || !msg) return;
   try {
     await api.redisPubSubPublish(props.connectionId, props.db, ch, msg);
-    // Echo locally only if subscribed — Redis PubSub doesn't deliver to publisher
-    const isSubscribed = channels.value.includes(ch) || patterns.value.some((p) => new RegExp("^" + p.replace(/\*/g, ".*") + "$").test(ch));
-    if (isSubscribed) {
-      addMessage(ch, null, msg);
-    }
     publishMessage.value = "";
   } catch (e) {
     toast(t("redis.pubsubPublishFailed", { error: e instanceof Error ? e.message : String(e) }), 3000);

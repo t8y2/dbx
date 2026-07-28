@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint } from "../../apps/desktop/src/lib/connection/agentDriverInstallHint.ts";
+import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint } from "../../apps/desktop/src/lib/connection/agentDriverInstallHint.ts";
 
 test("hides the agent driver install hint when the selected driver is installed", () => {
   assert.equal(showAgentDriverInstallHint("informix", [{ db_type: "informix", installed: true }]), false);
@@ -29,7 +29,25 @@ test("uses the unified Oracle driver for legacy Oracle profiles", () => {
   assert.equal(showAgentDriverInstallHint("oracle", [{ db_type: "oracle", installed: false }], "oracle"), true);
 });
 
-test("uses selected non-Oracle agent driver profiles for install hints", () => {
+test("uses the GBase 8a agent for generic, missing, and explicit 8a profiles", () => {
+  const drivers = [
+    { db_type: "gbase8a", installed: true },
+    { db_type: "gbase8s", installed: false },
+  ];
+
+  assert.equal(showAgentDriverInstallHint("gbase", drivers), false);
+  assert.equal(showAgentDriverInstallHint("gbase", drivers, "gbase"), false);
+  assert.equal(showAgentDriverInstallHint("gbase", drivers, "gbase8a"), false);
+});
+
+test("maps GBase profiles to their matching agent driver keys", () => {
+  assert.equal(agentDriverInstallKey("gbase"), "gbase8a");
+  assert.equal(agentDriverInstallKey("gbase", "gbase"), "gbase8a");
+  assert.equal(agentDriverInstallKey("gbase", "gbase8a"), "gbase8a");
+  assert.equal(agentDriverInstallKey("gbase", "gbase8s"), "gbase8s");
+});
+
+test("uses the selected GBase 8s agent for install hints", () => {
   assert.equal(
     showAgentDriverInstallHint(
       "gbase",

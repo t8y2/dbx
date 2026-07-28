@@ -1,6 +1,12 @@
 pub mod agent_driver;
 pub mod clickhouse_driver;
+pub mod cloudberry;
+pub mod cloudflare_d1;
+pub use cloudflare_d1 as cloudflare_d1_driver;
+pub mod document_result;
+pub mod doris;
 pub mod duckdb_driver;
+pub mod duckdb_sql;
 #[cfg(feature = "duckdb-bundled")]
 pub mod duckdb_worker_process;
 #[cfg(feature = "duckdb-bundled")]
@@ -10,11 +16,13 @@ pub mod duckdb_worker_runtime;
 pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
 pub mod file_validator;
+pub mod hbase_driver;
 pub mod http_tunnel;
 pub mod influxdb_driver;
 pub mod manticoresearch;
 pub mod mongo_driver;
 pub mod mysql;
+pub mod mysql_compatible;
 pub mod ob_oracle;
 pub mod postgres;
 pub mod proxy_tunnel;
@@ -23,7 +31,10 @@ pub mod redis_driver;
 pub mod rqlite_driver;
 pub mod sqlite;
 pub mod sqlserver;
+pub mod ssh_host_key;
+pub mod ssh_prompt;
 pub mod ssh_tunnel;
+pub mod starrocks;
 pub mod transport_layer_tunnel;
 pub mod turso_driver;
 pub mod vector_driver;
@@ -74,7 +85,12 @@ pub fn json_value_for_js(value: serde_json::Value) -> serde_json::Value {
             } else if let Some(value) = number.as_u64() {
                 safe_u64_to_json(value)
             } else {
-                serde_json::Value::Number(number)
+                let value = number.to_string();
+                if value.bytes().all(|byte| byte == b'-' || byte.is_ascii_digit()) {
+                    serde_json::Value::String(value)
+                } else {
+                    serde_json::Value::Number(number)
+                }
             }
         }
         serde_json::Value::Array(values) => {
@@ -161,5 +177,48 @@ mod tests {
     #[test]
     fn binary_values_are_displayed_as_prefixed_hex() {
         assert_eq!(binary_value_to_json(&[0x00, 0x01, 0xab, 0xff]), serde_json::json!("0x0001abff"));
+    }
+
+    #[test]
+    fn arbitrary_precision_integers_are_strings_for_js() {
+        let value = serde_json::from_str(
+            r#"{
+                "positive": 20240302001417986771,
+                "negative": -20240302001417986771
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            json_value_for_js(value),
+            serde_json::json!({
+                "positive": "20240302001417986771",
+                "negative": "-20240302001417986771"
+            })
+        );
+    }
+
+    #[test]
+    fn json_value_for_js_preserves_existing_value_behavior_recursively() {
+        let value = serde_json::from_str(
+            r#"{
+                "safe": [9007199254740991, -9007199254740991],
+                "unsafe": [9007199254740992, -9007199254740992],
+                "non_integer": [1.25, 1e-2],
+                "other": [null, true, "text"]
+            }"#,
+        )
+        .unwrap();
+        let expected: serde_json::Value = serde_json::from_str(
+            r#"{
+                "safe": [9007199254740991, -9007199254740991],
+                "unsafe": ["9007199254740992", "-9007199254740992"],
+                "non_integer": [1.25, 1e-2],
+                "other": [null, true, "text"]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(json_value_for_js(value), expected);
     }
 }

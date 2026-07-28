@@ -1,21 +1,23 @@
 [package]
 name = "dbx"
-version = "0.5.45"
+version = "0.5.68"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 
 [lib]
 name = "dbx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["duckdb-bundled", "mq-admin"]
-duckdb-bundled = ["duckdb", "dbx-core/duckdb-bundled"]
+default = ["duckdb-bundled", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+duckdb-bundled = ["duckdb", "duckdb/parquet", "dbx-core/duckdb-bundled"]
 mq-admin = ["dbx-core/mq-admin"]
+sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
+system-fonts = ["dbx-core/system-fonts"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
@@ -52,6 +54,9 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
 mongodb = "3.2.5"
 percent-encoding = "2"
+minisign-verify = "0.2.5"
+semver = "1"
+sha2 = "0.10"
 russh = "0.60"
 csv = "1.4.0"
 calamine = "0.30.1"
@@ -60,7 +65,12 @@ dbx-core = { path = "../crates/dbx-core", default-features = false }
 axum = { version = "0.8", features = ["ws"] }
 font-kit = "0.14.3"
 tauri-plugin-clipboard-manager = "2.3.2"
+sys-locale = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSDockTile", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSString"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"

@@ -7,6 +7,24 @@ export interface DataGridSortState {
   direction: DataGridSortDirection;
 }
 
+export type DataGridHeaderSortAction = { kind: "menu" } | { kind: "sort"; direction: DataGridSortDirection; mode: DataGridSortMode };
+
+export function resolveDataGridHeaderSortAction(options: { enabled: boolean; configuredDirection: DataGridSortDirection; configuredMode: DataGridSortMode; currentDirection: DataGridSortDirection; currentMode: DataGridSortMode; currentColumnSorted: boolean }): DataGridHeaderSortAction {
+  if (!options.enabled) return { kind: "menu" };
+  if (options.currentColumnSorted) {
+    return {
+      kind: "sort",
+      direction: options.currentDirection === "asc" ? "desc" : "asc",
+      mode: options.currentMode,
+    };
+  }
+  return {
+    kind: "sort",
+    direction: options.configuredDirection,
+    mode: options.configuredMode,
+  };
+}
+
 export function nextDataGridSortState(current: DataGridSortState, column: string, columnIndex: number): DataGridSortState {
   if (current.column === column && current.columnIndex === columnIndex) {
     if (current.direction === "asc") {
@@ -23,6 +41,10 @@ type DataGridRow = DataGridCellValue[];
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 export function sortDataGridRows<T extends DataGridRow>(rows: readonly T[], columnIndex: number, direction: DataGridSortDirection): T[] {
+  return sortDataGridRowIndexes(rows, columnIndex, direction).map((index) => rows[index]!);
+}
+
+export function sortDataGridRowIndexes(rows: readonly DataGridRow[], columnIndex: number, direction: DataGridSortDirection): number[] {
   const directionMultiplier = direction === "asc" ? 1 : -1;
   return rows
     .map((row, index) => ({ row, index }))
@@ -33,7 +55,7 @@ export function sortDataGridRows<T extends DataGridRow>(rows: readonly T[], colu
       if (compared !== 0) return compared * directionMultiplier;
       return left.index - right.index;
     })
-    .map((item) => item.row);
+    .map((item) => item.index);
 }
 
 export function compareDataGridValues(left: DataGridCellValue, right: DataGridCellValue): number {

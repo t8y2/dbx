@@ -18,8 +18,8 @@ describe("mqTenantForm", () => {
   });
 
   it("requires both a tenant name and at least one allowed cluster", () => {
-    expect(validateTenantForm("", { adminRoles: [], allowedClusters: ["standalone"] })).toBe("Tenant name is required");
-    expect(validateTenantForm("tenant-a", { adminRoles: [], allowedClusters: [] })).toBe("Allowed clusters are required");
+    expect(validateTenantForm("", { adminRoles: [], allowedClusters: ["standalone"] })).toBe("mqTenants.tenantNameRequired");
+    expect(validateTenantForm("tenant-a", { adminRoles: [], allowedClusters: [] })).toBe("mqTenants.allowedClustersRequired");
     expect(validateTenantForm("tenant-a", { adminRoles: [], allowedClusters: ["standalone"] })).toBeUndefined();
   });
 });

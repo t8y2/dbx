@@ -82,7 +82,6 @@ impl DriverProductCapabilities {
 #[serde(rename_all = "camelCase")]
 struct DriverProfileEntry {
     profile: String,
-    label: String,
     agent_key: String,
 }
 
@@ -113,9 +112,12 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Databend, None), Some("databend"));
     assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
+    assert_eq!(agent_key(&DatabaseType::Uxdb, None), Some("uxdb"));
     assert_eq!(agent_key(&DatabaseType::ZooKeeper, None), Some("zookeeper"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle"));
+    assert_eq!(agent_key(&DatabaseType::SqlServer, Some("sqlserver-legacy")), Some("sqlserver-legacy"));
+    assert_eq!(agent_key(&DatabaseType::SqlServer, None), None);
     assert_eq!(agent_key(&DatabaseType::Postgres, None), None);
 }
 
@@ -128,6 +130,8 @@ fn driver_store_entries_do_not_repeat_agent_keys() {
     assert!(duplicate_keys.is_empty(), "driver store agent keys should be unique: {duplicate_keys:?}");
     assert_eq!(entries.iter().filter(|(key, _)| *key == "gbase8a").count(), 1);
     assert_eq!(entries.iter().filter(|(key, _)| *key == "gbase8s").count(), 1);
+    assert_eq!(entries.iter().filter(|(key, _)| *key == "sqlserver-legacy").count(), 1);
+    assert_eq!(agent_catalog::label_for_key("sqlserver-legacy"), Some("SQL Server legacy compatibility component"));
 }
 
 #[test]
@@ -322,4 +326,31 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(zookeeper.capabilities.query_execution);
     assert!(zookeeper.capabilities.driver_management);
     assert!(!zookeeper.capabilities.metadata_browse);
+
+    let uxdb = find_driver(DatabaseType::Uxdb);
+    assert_eq!(uxdb.label, "优炫 UXDB");
+    assert_eq!(uxdb.runtime_mode, "agent");
+    assert_eq!(uxdb.agent_key.as_deref(), Some("uxdb"));
+    assert_eq!(uxdb.support_level, "operate");
+    assert!(uxdb.capabilities.query_execution);
+    assert!(uxdb.capabilities.metadata_browse);
+    assert!(uxdb.capabilities.table_structure_edit);
+    assert!(!uxdb.capabilities.data_transfer);
+    assert!(!uxdb.capabilities.user_admin);
+
+    let starrocks = find_driver(DatabaseType::StarRocks);
+    assert!(starrocks.capabilities.user_admin);
+}
+
+#[test]
+fn kingbase_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let kingbase = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Kingbase)
+        .expect("Kingbase manifest entry");
+
+    assert!(kingbase.capabilities.table_import);
+    assert!(kingbase.capabilities.data_transfer);
 }

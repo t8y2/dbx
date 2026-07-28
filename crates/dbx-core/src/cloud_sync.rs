@@ -9,10 +9,10 @@ use reqwest::{header, Client, Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::ai::AiConfig;
+use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
-    MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+    MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
@@ -20,6 +20,9 @@ use crate::storage::{DesktopSettings, Storage};
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_REMOTE_PATH: &str = "DBX/sync/snapshot.json";
+const DEFAULT_SNIPPET_FILE_NAME: &str = "dbx-sync.json";
+const GITHUB_API_BASE: &str = "https://api.github.com";
+const GITEE_API_BASE: &str = "https://gitee.com/api/v5";
 const SECRET_KEYS: &[&str] = &[
     "password",
     "ssh_password",
@@ -27,12 +30,14 @@ const SECRET_KEYS: &[&str] = &[
     "proxy_password",
     "redis_sentinel_password",
     "connection_string",
+    "init_script",
     MQ_AUTH_TOKEN_KEY,
     MQ_AUTH_PASSWORD_KEY,
     MQ_AUTH_API_KEY_VALUE_KEY,
     MQ_AUTH_CLIENT_SECRET_KEY,
     MQ_TOKEN_SIGNING_KEY,
     NACOS_AUTH_PASSWORD_KEY,
+    NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
 ];
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
@@ -44,6 +49,28 @@ pub struct WebDavConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub remote_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SnippetProvider {
+    #[serde(rename = "github", alias = "git_hub")]
+    GitHub,
+    #[serde(rename = "gitee")]
+    Gitee,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetSyncConfig {
+    pub provider: SnippetProvider,
+    pub token: Option<String>,
+    pub snippet_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetTokenStatus {
+    pub has_saved_token: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -66,6 +93,10 @@ pub struct SyncSnapshot {
     pub exported_at: String,
     pub app_version: String,
     pub connections: Vec<ConnectionConfig>,
+    /// Shared tunnel profiles (secrets scrubbed). `None` means the snapshot
+    /// predates tunnel profiles — applying it leaves local profiles alone.
+    #[serde(default)]
+    pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
     pub sidebar_layout: Option<serde_json::Value>,
     pub pinned_tree_node_ids: Vec<String>,
     pub saved_sql: SavedSqlLibrary,
@@ -89,7 +120,15 @@ pub struct EncryptedSecretsBlob {
 #[serde(rename_all = "camelCase")]
 pub struct SensitiveSyncPayload {
     pub connection_secrets: Vec<ConnectionSecretSnapshot>,
-    pub ai_config: Option<AiConfig>,
+    // None = legacy snapshot (fall through to ai_config migration),
+    // Some(vec) = explicit state (empty vec means all configs were deleted)
+    pub ai_configs: Option<Vec<AiConfigItem>>,
+    /// Legacy field, used only for deserializing old data; not serialized
+    #[serde(default, skip_serializing)]
+    pub ai_config: Option<crate::ai::AiConfig>,
+    /// Full tunnel profiles including their secrets.
+    #[serde(default)]
+    pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +160,16 @@ pub struct WebDavSyncSummary {
     pub app_version: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetSyncSummary {
+    pub provider: SnippetProvider,
+    pub snippet_id: String,
+    pub bytes: usize,
+    pub exported_at: Option<String>,
+    pub app_version: Option<String>,
+}
+
 pub async fn build_sync_snapshot(
     storage: &Storage,
     app_version: impl Into<String>,
@@ -128,14 +177,19 @@ pub async fn build_sync_snapshot(
     secrets_passphrase: Option<&str>,
 ) -> Result<SyncSnapshot, String> {
     let mut connections = storage.load_connections().await?;
+    let mut tunnel_profiles = storage.load_tunnel_profiles().await?;
     let encrypted_secrets = match normalized_passphrase(secrets_passphrase) {
-        Some(passphrase) => {
-            Some(encrypt_sensitive_payload(&build_sensitive_payload(storage, &connections).await?, passphrase)?)
-        }
+        Some(passphrase) => Some(encrypt_sensitive_payload(
+            &build_sensitive_payload(storage, &connections, &tunnel_profiles).await?,
+            passphrase,
+        )?),
         None => None,
     };
     for config in &mut connections {
         scrub_connection_secrets(config);
+    }
+    for profile in &mut tunnel_profiles {
+        profile.scrub_secrets();
     }
 
     Ok(SyncSnapshot {
@@ -143,6 +197,7 @@ pub async fn build_sync_snapshot(
         exported_at: Utc::now().to_rfc3339(),
         app_version: app_version.into(),
         connections,
+        tunnel_profiles: Some(tunnel_profiles),
         sidebar_layout: storage.load_sidebar_layout().await?,
         pinned_tree_node_ids: storage.load_pinned_tree_node_ids().await?,
         saved_sql: storage.load_saved_sql_library().await?,
@@ -188,6 +243,9 @@ pub async fn apply_sync_snapshot(
     }
 
     storage.save_connection_metadata_preserving_secrets(&connections).await?;
+    if let Some(profiles) = &snapshot.tunnel_profiles {
+        storage.save_tunnel_profiles_preserving_secrets(profiles).await?;
+    }
     if let Some(layout) = &snapshot.sidebar_layout {
         storage.save_sidebar_layout(layout).await?;
     }
@@ -204,6 +262,11 @@ pub async fn apply_sync_snapshot(
 pub struct WebDavClient {
     http: Client,
     config: WebDavConfig,
+}
+
+pub struct SnippetSyncClient {
+    http: Client,
+    config: SnippetSyncConfig,
 }
 
 pub async fn webdav_saved_password_status(
@@ -235,6 +298,38 @@ pub async fn resolve_webdav_password(storage: &Storage, config: &mut WebDavConfi
     let blob: EncryptedSecretsBlob = serde_json::from_value(value).map_err(|e| e.to_string())?;
     let secret = storage.load_or_create_local_device_secret().await?;
     config.password = Some(decrypt_text_with_secret(&blob, &secret)?);
+    Ok(())
+}
+
+pub async fn snippet_saved_token_status(
+    storage: &Storage,
+    config: &SnippetSyncConfig,
+) -> Result<SnippetTokenStatus, String> {
+    let account = snippet_token_account(config.provider);
+    Ok(SnippetTokenStatus { has_saved_token: storage.load_webdav_password_blob(&account).await?.is_some() })
+}
+
+pub async fn save_snippet_token(storage: &Storage, config: &SnippetSyncConfig, token: &str) -> Result<(), String> {
+    let secret = storage.load_or_create_local_device_secret().await?;
+    let blob = encrypt_text_with_secret(token, &secret)?;
+    let value = serde_json::to_value(blob).map_err(|e| e.to_string())?;
+    storage.save_webdav_password_blob(&snippet_token_account(config.provider), &value).await
+}
+
+pub async fn forget_snippet_token(storage: &Storage, config: &SnippetSyncConfig) -> Result<(), String> {
+    storage.delete_webdav_password_blob(&snippet_token_account(config.provider)).await
+}
+
+pub async fn resolve_snippet_token(storage: &Storage, config: &mut SnippetSyncConfig) -> Result<(), String> {
+    if config.token.as_deref().is_some_and(|token| !token.trim().is_empty()) {
+        return Ok(());
+    }
+    let Some(value) = storage.load_webdav_password_blob(&snippet_token_account(config.provider)).await? else {
+        return Ok(());
+    };
+    let blob: EncryptedSecretsBlob = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    let secret = storage.load_or_create_local_device_secret().await?;
+    config.token = Some(decrypt_text_with_secret(&blob, &secret)?);
     Ok(())
 }
 
@@ -372,6 +467,125 @@ impl WebDavClient {
     }
 }
 
+impl SnippetSyncClient {
+    pub fn new(config: SnippetSyncConfig) -> Self {
+        Self { http: Client::new(), config }
+    }
+
+    pub async fn test(&self) -> Result<(), String> {
+        self.require_token()?;
+        let url = match (self.config.provider, normalized_snippet_id(self.config.snippet_id.as_deref())) {
+            (SnippetProvider::GitHub, Some(id)) => format!("{GITHUB_API_BASE}/gists/{id}"),
+            (SnippetProvider::GitHub, None) => format!("{GITHUB_API_BASE}/user"),
+            (SnippetProvider::Gitee, Some(id)) => format!("{GITEE_API_BASE}/gists/{id}"),
+            (SnippetProvider::Gitee, None) => format!("{GITEE_API_BASE}/user"),
+        };
+        let response = self.request(Method::GET, &url)?.send().await.map_err(|e| e.to_string())?;
+        ensure_snippet_success(response.status(), "test")
+    }
+
+    pub async fn put_snapshot(&self, snapshot: &SyncSnapshot) -> Result<SnippetSyncSummary, String> {
+        self.require_token()?;
+        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| e.to_string())?;
+        let content = String::from_utf8(bytes.clone()).map_err(|e| e.to_string())?;
+        let existing_id = normalized_snippet_id(self.config.snippet_id.as_deref());
+        let (method, url) = match (self.config.provider, existing_id) {
+            (SnippetProvider::GitHub, Some(id)) => (Method::PATCH, format!("{GITHUB_API_BASE}/gists/{id}")),
+            (SnippetProvider::GitHub, None) => (Method::POST, format!("{GITHUB_API_BASE}/gists")),
+            (SnippetProvider::Gitee, Some(id)) => (Method::PATCH, format!("{GITEE_API_BASE}/gists/{id}")),
+            (SnippetProvider::Gitee, None) => (Method::POST, format!("{GITEE_API_BASE}/gists")),
+        };
+
+        let response = match self.config.provider {
+            SnippetProvider::GitHub => {
+                let payload = serde_json::json!({
+                    "description": "DBX encrypted configuration sync",
+                    "public": false,
+                    "files": { DEFAULT_SNIPPET_FILE_NAME: { "content": content } }
+                });
+                self.request(method, &url)?.json(&payload).send().await
+            }
+            SnippetProvider::Gitee => {
+                let payload = gitee_snippet_payload(content);
+                // Gitee validates `files` as a nested object; form encoding turns it into a string and is rejected.
+                self.request(method, &url)?.json(&payload).send().await
+            }
+        }
+        .map_err(|e| e.to_string())?;
+        let status = response.status();
+        let response_body = response.text().await.map_err(|e| e.to_string())?;
+        ensure_snippet_response_success(status, "upload", &response_body)?;
+        let value: serde_json::Value = serde_json::from_str(&response_body).map_err(|e| e.to_string())?;
+        let snippet_id = snippet_response_id(&value)
+            .or_else(|| existing_id.map(str::to_string))
+            .ok_or_else(|| "Snippet API response did not include an id".to_string())?;
+        Ok(SnippetSyncSummary {
+            provider: self.config.provider,
+            snippet_id,
+            bytes: bytes.len(),
+            exported_at: Some(snapshot.exported_at.clone()),
+            app_version: Some(snapshot.app_version.clone()),
+        })
+    }
+
+    pub async fn get_snapshot(&self) -> Result<(SyncSnapshot, SnippetSyncSummary), String> {
+        self.require_token()?;
+        let snippet_id = normalized_snippet_id(self.config.snippet_id.as_deref())
+            .ok_or_else(|| "Snippet id is required for download".to_string())?;
+        let url = match self.config.provider {
+            SnippetProvider::GitHub => format!("{GITHUB_API_BASE}/gists/{snippet_id}"),
+            SnippetProvider::Gitee => format!("{GITEE_API_BASE}/gists/{snippet_id}"),
+        };
+        let response = self.request(Method::GET, &url)?.send().await.map_err(|e| e.to_string())?;
+        let status = response.status();
+        let response_body = response.text().await.map_err(|e| e.to_string())?;
+        ensure_snippet_response_success(status, "download", &response_body)?;
+        let value: serde_json::Value = serde_json::from_str(&response_body).map_err(|e| e.to_string())?;
+        let (content, raw_url) = snippet_file_content(&value, DEFAULT_SNIPPET_FILE_NAME)?;
+        let content = match content {
+            Some(content) => content,
+            None => {
+                let raw_url = raw_url.ok_or_else(|| "Snippet file content is unavailable".to_string())?;
+                let response = self.request(Method::GET, &raw_url)?.send().await.map_err(|e| e.to_string())?;
+                ensure_snippet_success(response.status(), "raw download")?;
+                response.text().await.map_err(|e| e.to_string())?
+            }
+        };
+        let snapshot: SyncSnapshot = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        let summary = SnippetSyncSummary {
+            provider: self.config.provider,
+            snippet_id: snippet_id.to_string(),
+            bytes: content.len(),
+            exported_at: Some(snapshot.exported_at.clone()),
+            app_version: Some(snapshot.app_version.clone()),
+        };
+        Ok((snapshot, summary))
+    }
+
+    fn require_token(&self) -> Result<&str, String> {
+        self.config
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| "Access token is required".to_string())
+    }
+
+    fn request(&self, method: Method, url: &str) -> Result<reqwest::RequestBuilder, String> {
+        let token = self.require_token()?;
+        let request = self.http.request(method, url);
+        Ok(match self.config.provider {
+            SnippetProvider::GitHub => request
+                .header(header::ACCEPT, "application/vnd.github+json")
+                .header(header::USER_AGENT, "DBX")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .bearer_auth(token),
+            // Gitee API v5 documents access_token as a request parameter rather than an Authorization header.
+            SnippetProvider::Gitee => request.query(&[("access_token", token)]),
+        })
+    }
+}
+
 fn scrub_connection_secrets(config: &mut ConnectionConfig) {
     config.password.clear();
     for layer in &mut config.transport_layers {
@@ -390,6 +604,7 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
     }
     config.redis_sentinel_password.clear();
     config.connection_string = None;
+    config.init_script = None;
     scrub_mq_external_config_secrets(config);
     scrub_nacos_auth_secrets(config);
 }
@@ -405,10 +620,12 @@ fn webdav_password_account(config: &WebDavConfig) -> String {
 async fn build_sensitive_payload(
     storage: &Storage,
     connections: &[ConnectionConfig],
+    tunnel_profiles: &[TransportLayerConfig],
 ) -> Result<SensitiveSyncPayload, String> {
     let mut connection_secrets = Vec::new();
     for config in connections {
         push_secret(&mut connection_secrets, &config.id, "password", &config.password);
+        push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
         for (index, layer) in config.transport_layers.iter().enumerate() {
             match layer {
                 TransportLayerConfig::Ssh(ssh) => {
@@ -451,7 +668,12 @@ async fn build_sensitive_payload(
         push_nacos_external_config_secrets(&mut connection_secrets, config);
     }
 
-    Ok(SensitiveSyncPayload { connection_secrets, ai_config: storage.load_ai_config().await? })
+    Ok(SensitiveSyncPayload {
+        connection_secrets,
+        ai_configs: Some(storage.load_ai_configs().await.unwrap_or_default()),
+        ai_config: None,
+        tunnel_profiles: Some(tunnel_profiles.to_vec()),
+    })
 }
 
 fn push_mq_external_config_secrets(secrets: &mut Vec<ConnectionSecretSnapshot>, config: &ConnectionConfig) {
@@ -499,16 +721,25 @@ fn push_nacos_external_config_secrets(secrets: &mut Vec<ConnectionSecretSnapshot
     if config.db_type != DatabaseType::Nacos {
         return;
     }
-    let Some(auth) = config
+    if let Some(auth) = config
         .external_config
         .as_ref()
         .and_then(|external_config| external_config.get("auth"))
         .and_then(serde_json::Value::as_object)
-    else {
-        return;
-    };
-    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
-        push_json_secret(secrets, &config.id, NACOS_AUTH_PASSWORD_KEY, auth, "password");
+    {
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            push_json_secret(secrets, &config.id, NACOS_AUTH_PASSWORD_KEY, auth, "password");
+        }
+    }
+    if let Some(auth) = config
+        .external_config
+        .as_ref()
+        .and_then(|external_config| external_config.get("rnacosConsoleAuth"))
+        .and_then(serde_json::Value::as_object)
+    {
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            push_json_secret(secrets, &config.id, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, auth, "password");
+        }
     }
 }
 
@@ -539,17 +770,25 @@ fn scrub_nacos_auth_secrets(config: &mut ConnectionConfig) {
     if config.db_type != DatabaseType::Nacos {
         return;
     }
-    let Some(auth) = config
+    if let Some(auth) = config
         .external_config
         .as_mut()
         .and_then(|external_config| external_config.get_mut("auth"))
         .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") && auth.contains_key("password")
     {
-        scrub_json_secret(auth, "password");
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            scrub_json_secret(auth, "password");
+        }
+    }
+    if let Some(auth) = config
+        .external_config
+        .as_mut()
+        .and_then(|external_config| external_config.get_mut("rnacosConsoleAuth"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
+            scrub_json_secret(auth, "password");
+        }
     }
 }
 
@@ -569,8 +808,24 @@ async fn apply_sensitive_payload(storage: &Storage, payload: &SensitiveSyncPaylo
         }
         storage.set_secret(&secret.connection_id, &secret.key, &secret.secret).await?;
     }
-    if let Some(ai_config) = &payload.ai_config {
-        storage.save_ai_config(ai_config).await?;
+    if let Some(configs) = &payload.ai_configs {
+        // New format: save directly (empty = all configs were deleted)
+        storage.save_ai_configs(configs).await?;
+    } else if let Some(old_config) = &payload.ai_config {
+        // A legacy snapshot still represents the complete AI configuration state.
+        // Replace local configs just like the new list format so a generated ID
+        // cannot conflict with an existing config that has the same name.
+        let provider_name = old_config.provider.as_str().to_string();
+        let item = AiConfigItem {
+            id: AiConfigItem::new_id(),
+            name: provider_name,
+            is_default: true,
+            config: old_config.clone(),
+        };
+        storage.save_ai_configs(&[item]).await?;
+    }
+    if let Some(profiles) = &payload.tunnel_profiles {
+        storage.save_tunnel_profiles(profiles).await?;
     }
     Ok(())
 }
@@ -690,6 +945,83 @@ fn normalized_passphrase(passphrase: Option<&str>) -> Option<&str> {
     passphrase.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn normalized_snippet_id(snippet_id: Option<&str>) -> Option<&str> {
+    snippet_id.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn snippet_token_account(provider: SnippetProvider) -> String {
+    match provider {
+        SnippetProvider::GitHub => "snippet-token:github".to_string(),
+        SnippetProvider::Gitee => "snippet-token:gitee".to_string(),
+    }
+}
+
+fn ensure_snippet_success(status: StatusCode, operation: &str) -> Result<(), String> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("Snippet {operation} failed with HTTP {status}"))
+    }
+}
+
+fn ensure_snippet_response_success(status: StatusCode, operation: &str, response_body: &str) -> Result<(), String> {
+    if status.is_success() {
+        return Ok(());
+    }
+    let message = serde_json::from_str::<serde_json::Value>(response_body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .or_else(|| value.get("error_description"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| response_body.trim().chars().take(300).collect());
+    if message.is_empty() {
+        Err(format!("Snippet {operation} failed with HTTP {status}"))
+    } else {
+        Err(format!("Snippet {operation} failed with HTTP {status}: {message}"))
+    }
+}
+
+fn snippet_response_id(value: &serde_json::Value) -> Option<String> {
+    if let Some(id) = value.get("id").and_then(serde_json::Value::as_str) {
+        return Some(id.to_string());
+    }
+    // Some Gitee endpoints historically document an array response despite returning one created snippet.
+    value.as_array()?.first()?.get("id")?.as_str().map(str::to_string)
+}
+
+fn gitee_snippet_payload(content: String) -> serde_json::Value {
+    serde_json::json!({
+        "description": "DBX configuration sync",
+        "public": false,
+        "files": { DEFAULT_SNIPPET_FILE_NAME: { "content": content } }
+    })
+}
+
+fn snippet_file_content(
+    value: &serde_json::Value,
+    file_name: &str,
+) -> Result<(Option<String>, Option<String>), String> {
+    let files = value.get("files").ok_or_else(|| "Snippet response did not include files".to_string())?;
+    let files = if let Some(value) = files.as_str() {
+        serde_json::from_str::<serde_json::Value>(value).map_err(|e| e.to_string())?
+    } else {
+        files.clone()
+    };
+    let file = files
+        .get(file_name)
+        .or_else(|| files.as_object().and_then(|files| files.values().next()))
+        .ok_or_else(|| format!("Snippet does not contain {file_name}"))?;
+    let truncated = file.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let content =
+        if truncated { None } else { file.get("content").and_then(serde_json::Value::as_str).map(str::to_string) };
+    let raw_url = file.get("raw_url").and_then(serde_json::Value::as_str).map(str::to_string);
+    Ok((content, raw_url))
+}
+
 fn normalized_remote_path(value: Option<&str>) -> String {
     let value = value.unwrap_or(DEFAULT_REMOTE_PATH).trim().replace('\\', "/");
     let mut parts: Vec<&str> = Vec::new();
@@ -729,29 +1061,71 @@ fn parent_collection_paths(remote_path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload, encrypt_sensitive_payload,
-        forget_webdav_sync_secrets_passphrase, normalized_remote_path, parent_collection_paths,
-        resolve_webdav_sync_secrets_passphrase, save_webdav_sync_secrets_preference, scrub_connection_secrets,
-        webdav_sync_secrets_status, ConnectionSecretSnapshot, SensitiveSyncPayload,
+        apply_sensitive_payload, apply_sync_snapshot, build_sync_snapshot, build_sync_snapshot_with_saved_secrets,
+        decrypt_sensitive_payload, encrypt_sensitive_payload, forget_webdav_sync_secrets_passphrase,
+        gitee_snippet_payload, normalized_remote_path, parent_collection_paths, resolve_webdav_sync_secrets_passphrase,
+        save_webdav_sync_secrets_preference, scrub_connection_secrets, snippet_file_content, snippet_response_id,
+        webdav_sync_secrets_status, ApplySnapshotOptions, ConnectionSecretSnapshot, SensitiveSyncPayload,
     };
+    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem};
     use crate::connection_secrets::NACOS_AUTH_PASSWORD_KEY;
     use crate::models::connection::{
-        default_redis_key_separator, ConnectionConfig, DatabaseType, TransportLayerConfig,
+        default_redis_key_separator, ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::storage::Storage;
 
+    fn make_test_config(name: &str, is_default: bool) -> AiConfigItem {
+        AiConfigItem {
+            id: format!("cfg-{name}"),
+            name: name.to_string(),
+            is_default,
+            config: AiConfig {
+                provider: crate::ai::AiProvider::Openai,
+                api_key: String::new(),
+                auth_method: AiAuthMethod::Bearer,
+                endpoint: "https://api.openai.com/v1".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                models: vec![],
+                api_style: AiApiStyle::Completions,
+                proxy_enabled: false,
+                proxy_url: String::new(),
+                enable_thinking: true,
+                reasoning_level: crate::ai::AiReasoningLevel::Default,
+                runtime_effort: None,
+                context_window: None,
+                codex_cli_path: None,
+                codex_cli_env: Default::default(),
+                claude_code_cli_path: None,
+                claude_code_cli_env: Default::default(),
+                pi_agent_cli_path: None,
+                pi_agent_cli_env: Default::default(),
+            },
+        }
+    }
+
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("dbx-cloud-sync-{name}-{}.db", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn gitee_snippet_payload_keeps_files_as_nested_object() {
+        let payload = gitee_snippet_payload("snapshot".to_string());
+
+        assert_eq!(payload["files"]["dbx-sync.json"]["content"], "snapshot");
+        assert!(payload["files"].is_object());
+        assert_eq!(payload["public"], false);
     }
 
     fn postgres_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
             id: id.to_string(),
             name: "Postgres".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "127.0.0.1".to_string(),
             port: 5432,
             username: "app".to_string(),
@@ -759,7 +1133,9 @@ mod tests {
             database: Some("app_db".to_string()),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
@@ -790,6 +1166,9 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -797,10 +1176,12 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "127.0.0.1".to_string(),
             port: 8848,
             username: "nacos".to_string(),
@@ -808,7 +1189,9 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: 5,
@@ -847,6 +1230,9 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -883,10 +1269,12 @@ mod tests {
         let mut config = ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "localhost".to_string(),
             port: 5432,
             username: "user".to_string(),
@@ -894,10 +1282,13 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
+            init_script: Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string()),
             color: None,
             transport_layers: vec![
                 TransportLayerConfig::Ssh(crate::models::connection::SshTunnelConfig {
+                    profile_id: String::new(),
                     id: "hop-1".to_string(),
                     name: String::new(),
                     enabled: true,
@@ -911,8 +1302,10 @@ mod tests {
                     expose_lan: false,
                     use_ssh_agent: false,
                     ssh_agent_sock_path: String::new(),
+                    auth_method: "password".to_string(),
                 }),
                 TransportLayerConfig::HttpTunnel(crate::models::connection::HttpTunnelConfig {
+                    profile_id: String::new(),
                     id: "http".to_string(),
                     name: String::new(),
                     enabled: true,
@@ -949,6 +1342,9 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
         };
         scrub_connection_secrets(&mut config);
         assert!(config.password.is_empty());
@@ -965,11 +1361,16 @@ mod tests {
         }
         assert!(config.redis_sentinel_password.is_empty());
         assert!(config.connection_string.is_none());
+        assert!(config.init_script.is_none());
+        let public_json = serde_json::to_string(&config).unwrap();
+        assert!(!public_json.contains("token-value"));
+        assert!(super::SECRET_KEYS.contains(&"init_script"));
     }
 
     #[test]
     fn encrypted_sensitive_payload_round_trips() {
         let payload = SensitiveSyncPayload {
+            tunnel_profiles: None,
             connection_secrets: vec![
                 ConnectionSecretSnapshot {
                     connection_id: "c1".to_string(),
@@ -982,6 +1383,7 @@ mod tests {
                     secret: "hop-secret".to_string(),
                 },
             ],
+            ai_configs: None,
             ai_config: None,
         };
         let encrypted = encrypt_sensitive_payload(&payload, "sync-pass").unwrap();
@@ -994,15 +1396,61 @@ mod tests {
     #[test]
     fn encrypted_sensitive_payload_rejects_wrong_passphrase() {
         let payload = SensitiveSyncPayload {
+            tunnel_profiles: None,
             connection_secrets: vec![ConnectionSecretSnapshot {
                 connection_id: "c1".to_string(),
                 key: "password".to_string(),
                 secret: "secret".to_string(),
             }],
+            ai_configs: None,
             ai_config: None,
         };
         let encrypted = encrypt_sensitive_payload(&payload, "sync-pass").unwrap();
         assert!(decrypt_sensitive_payload(&encrypted, "wrong-pass").is_err());
+    }
+
+    #[test]
+    fn snippet_response_id_supports_github_object_and_gitee_array() {
+        assert_eq!(snippet_response_id(&serde_json::json!({ "id": "github-id" })).as_deref(), Some("github-id"));
+        assert_eq!(snippet_response_id(&serde_json::json!([{ "id": "gitee-id" }])).as_deref(), Some("gitee-id"));
+    }
+
+    #[test]
+    fn snippet_provider_uses_frontend_wire_values() {
+        assert_eq!(serde_json::to_string(&super::SnippetProvider::GitHub).unwrap(), "\"github\"");
+        assert_eq!(
+            serde_json::from_str::<super::SnippetProvider>("\"github\"").unwrap(),
+            super::SnippetProvider::GitHub
+        );
+        assert_eq!(
+            serde_json::from_str::<super::SnippetProvider>("\"git_hub\"").unwrap(),
+            super::SnippetProvider::GitHub
+        );
+        assert_eq!(serde_json::to_string(&super::SnippetProvider::Gitee).unwrap(), "\"gitee\"");
+    }
+
+    #[test]
+    fn snippet_file_content_uses_raw_url_for_truncated_github_files() {
+        let value = serde_json::json!({
+            "files": {
+                "dbx-sync.json": {
+                    "content": "truncated",
+                    "truncated": true,
+                    "raw_url": "https://example.com/raw"
+                }
+            }
+        });
+        assert_eq!(
+            snippet_file_content(&value, "dbx-sync.json").unwrap(),
+            (None, Some("https://example.com/raw".to_string()))
+        );
+    }
+
+    #[test]
+    fn snippet_file_content_parses_gitee_string_files() {
+        let files = serde_json::json!({ "dbx-sync.json": { "content": "{}" } }).to_string();
+        let value = serde_json::json!({ "files": files });
+        assert_eq!(snippet_file_content(&value, "dbx-sync.json").unwrap(), (Some("{}".to_string()), None));
     }
 
     #[tokio::test]
@@ -1067,5 +1515,123 @@ mod tests {
         assert!(decrypted.connection_secrets.iter().any(|secret| {
             secret.connection_id == "nacos" && secret.key == NACOS_AUTH_PASSWORD_KEY && secret.secret == "nacos-secret"
         }));
+    }
+
+    #[tokio::test]
+    async fn sync_snapshot_round_trips_tunnel_profiles() {
+        let storage = Storage::open(&temp_db_path("tunnel-profiles-src")).await.unwrap();
+        let profile = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "profile-1".to_string(),
+            name: "Bastion".to_string(),
+            enabled: true,
+            host: "bastion.example.com".to_string(),
+            port: 22,
+            user: "deploy".to_string(),
+            password: "tunnel-secret".to_string(),
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            connect_timeout_secs: 5,
+            expose_lan: false,
+            use_ssh_agent: false,
+            ssh_agent_sock_path: String::new(),
+            auth_method: "password".to_string(),
+            profile_id: String::new(),
+        });
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
+
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, Some("sync-pass")).await.unwrap();
+
+        // The plain snapshot carries the profiles with secrets scrubbed.
+        let public_profiles = snapshot.tunnel_profiles.as_ref().expect("tunnel profiles in snapshot");
+        let public_json = serde_json::to_string(public_profiles).unwrap();
+        assert!(!public_json.contains("tunnel-secret"));
+
+        // Applying with the passphrase restores the full profile on the target.
+        let target = Storage::open(&temp_db_path("tunnel-profiles-dst")).await.unwrap();
+        apply_sync_snapshot(&target, &snapshot, ApplySnapshotOptions { secrets_passphrase: Some("sync-pass") })
+            .await
+            .unwrap();
+        assert_eq!(target.load_tunnel_profiles().await.unwrap(), vec![profile]);
+    }
+
+    // ---- AI configs sync tests ----
+
+    #[tokio::test]
+    async fn sensitive_payload_ai_configs_none_falls_through_to_legacy() {
+        let storage = Storage::open(&temp_db_path("ai-cfg-none")).await.unwrap();
+
+        // No ai_configs in payload — fall through to ai_config (legacy) branch
+        let payload = SensitiveSyncPayload {
+            connection_secrets: vec![],
+            ai_configs: None,
+            ai_config: None,
+            tunnel_profiles: None,
+        };
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert!(loaded.is_empty(), "None → no configs written");
+    }
+
+    #[tokio::test]
+    async fn sensitive_payload_ai_configs_empty_clears_table() {
+        let storage = Storage::open(&temp_db_path("ai-cfg-empty")).await.unwrap();
+
+        // Pre-populate with a config
+        let cfg = make_test_config("to-be-cleared", true);
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        // Some([]) — explicit clear
+        let payload = SensitiveSyncPayload {
+            connection_secrets: vec![],
+            ai_configs: Some(vec![]),
+            ai_config: None,
+            tunnel_profiles: None,
+        };
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert!(loaded.is_empty(), "Some([]) → table cleared");
+    }
+
+    #[tokio::test]
+    async fn sensitive_payload_ai_configs_some_saves_configs() {
+        let storage = Storage::open(&temp_db_path("ai-cfg-some")).await.unwrap();
+
+        let cfg = make_test_config("synced", true);
+        let payload = SensitiveSyncPayload {
+            connection_secrets: vec![],
+            ai_configs: Some(vec![cfg]),
+            ai_config: None,
+            tunnel_profiles: None,
+        };
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "synced");
+    }
+
+    #[tokio::test]
+    async fn sensitive_payload_legacy_ai_config_replaces_local_configs_with_same_name() {
+        let storage = Storage::open(&temp_db_path("ai-cfg-legacy-replace")).await.unwrap();
+        storage.save_ai_config_item(&make_test_config("openai", true)).await.unwrap();
+        storage.save_ai_config_item(&make_test_config("local-only", false)).await.unwrap();
+
+        let mut legacy_config = make_test_config("unused", true).config;
+        legacy_config.model = "snapshot-model".to_string();
+        let payload = SensitiveSyncPayload {
+            connection_secrets: vec![],
+            ai_configs: None,
+            ai_config: Some(legacy_config),
+            tunnel_profiles: None,
+        };
+
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+        // Reapplying the same old snapshot must not collide with the generated ID.
+        apply_sensitive_payload(&storage, &payload).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "openai");
+        assert_eq!(loaded[0].config.model, "snapshot-model");
+        assert!(loaded[0].is_default);
     }
 }

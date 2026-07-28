@@ -108,6 +108,33 @@ public final class StandardJdbcMetadata {
         return MetadataListConstraints.orNone(constraints).filterObjects(result);
     }
 
+    public List<ObjectInfo> listObjects(
+        Connection conn,
+        JdbcAgentProfile profile,
+        String configuredDatabase,
+        String schema,
+        MetadataListConstraints constraints
+    ) {
+        return unchecked(() -> {
+            MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+            MetadataListConstraints tableConstraints =
+                new MetadataListConstraints(normalized.getFilter(), null, null, normalized.getObjectTypes());
+            List<ObjectInfo> result = new ArrayList<>(
+                listObjects(listTables(conn, profile, configuredDatabase, schema, tableConstraints), schema)
+            );
+            DatabaseMetaData meta = conn.getMetaData();
+            appendRoutines(result, meta, null, schema, schema);
+            if (!containsRoutine(result)
+                && profile.getCatalogFallbackEnabled()
+                && configuredDatabase != null
+                && !configuredDatabase.trim().isEmpty()) {
+                appendRoutines(result, meta, configuredDatabase, schema, schema);
+            }
+            result.sort(Comparator.comparing(ObjectInfo::getName));
+            return normalized.filterObjects(result);
+        });
+    }
+
     public List<String> listDataTypes(Connection conn) {
         return unchecked(() -> {
             Set<String> seen = new LinkedHashSet<>();
@@ -168,7 +195,11 @@ public final class StandardJdbcMetadata {
             Set<String> primaryKeys = primaryKeys(meta, null, schema, table);
             List<ColumnInfo> result = new ArrayList<>();
             appendColumns(result, meta, null, schema, table, primaryKeys);
-            if (result.isEmpty() && profile.getCatalogFallbackEnabled() && !configuredDatabase.trim().isEmpty()) {
+            if (!result.isEmpty() && primaryKeys.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
+                Set<String> fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, table);
+                markPrimaryKeys(result, fallbackPrimaryKeys);
+            }
+            if (result.isEmpty() && profile.getCatalogFallbackEnabled() && hasConfiguredDatabase(configuredDatabase)) {
                 Set<String> fallbackPrimaryKeys = primaryKeys(meta, configuredDatabase, schema, table);
                 appendColumns(result, meta, configuredDatabase, schema, table, fallbackPrimaryKeys);
             }
@@ -301,7 +332,9 @@ public final class StandardJdbcMetadata {
             return;
         }
         // JDBC has no portable metadata limit/offset. Use table types for safe pushdown and filter/page locally.
-        try (ResultSet rs = meta.getTables(catalog, blankToNull(schema), "%", tableTypes)) {
+        // schema 是 DatabaseMetaData.getTables() 的 schemaPattern，_ 和 % 具有通配符语义；
+        // HANA 存在 _SYS_RT 等含下划线的 schema，需按 getSearchStringEscape() 转义，避免混入其他 schema 的对象。
+        try (ResultSet rs = meta.getTables(catalog, escapeSchemaPattern(meta, schema), "%", tableTypes)) {
             while (rs.next()) {
                 result.add(new TableInfo(
                     rs.getString("TABLE_NAME"),
@@ -522,6 +555,21 @@ public final class StandardJdbcMetadata {
         return keys;
     }
 
+    private static boolean hasConfiguredDatabase(String configuredDatabase) {
+        return configuredDatabase != null && !configuredDatabase.trim().isEmpty();
+    }
+
+    private static void markPrimaryKeys(List<ColumnInfo> columns, Set<String> primaryKeys) {
+        if (primaryKeys.isEmpty()) {
+            return;
+        }
+        for (ColumnInfo column : columns) {
+            if (primaryKeys.contains(column.getName())) {
+                column.setIs_primary_key(true);
+            }
+        }
+    }
+
     private static void appendSchemas(Set<String> names, ResultSet rs) throws Exception {
         try (ResultSet closeable = rs) {
             while (closeable.next()) {
@@ -568,6 +616,49 @@ public final class StandardJdbcMetadata {
         return type;
     }
 
+    private static void appendRoutines(
+        List<ObjectInfo> result,
+        DatabaseMetaData meta,
+        String catalog,
+        String schema,
+        String schemaLabel
+    ) {
+        // schema 作为 getProcedures/getFunctions 的 schemaPattern，同样需要转义 _ 和 % 通配符。
+        String schemaPattern = escapeSchemaPattern(meta, schema);
+        Set<String> procedureNames = new LinkedHashSet<>();
+        try (ResultSet rs = meta.getProcedures(catalog, schemaPattern, "%")) {
+            while (rs.next()) {
+                String name = rs.getString("PROCEDURE_NAME");
+                if (name != null && !name.trim().isEmpty()) {
+                    procedureNames.add(name);
+                    result.add(new ObjectInfo(name, "PROCEDURE", schemaLabel, rs.getString("REMARKS")));
+                }
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            // Some JDBC drivers don't implement routine metadata.
+        }
+        try (ResultSet rs = meta.getFunctions(catalog, schemaPattern, "%")) {
+            while (rs.next()) {
+                String name = rs.getString("FUNCTION_NAME");
+                if (name != null && !name.trim().isEmpty() && !procedureNames.contains(name)) {
+                    result.add(new ObjectInfo(name, "FUNCTION", schemaLabel, rs.getString("REMARKS")));
+                }
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            // Some JDBC drivers don't implement function metadata separately.
+        }
+    }
+
+    private static boolean containsRoutine(List<ObjectInfo> objects) {
+        for (ObjectInfo object : objects) {
+            if ("PROCEDURE".equalsIgnoreCase(object.getObject_type())
+                || "FUNCTION".equalsIgnoreCase(object.getObject_type())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static Integer intOrNull(ResultSet rs, String column) throws Exception {
         Object value = rs.getObject(column);
         return value instanceof Number ? ((Number) value).intValue() : null;
@@ -587,6 +678,38 @@ public final class StandardJdbcMetadata {
 
     private static String blankToNull(String value) {
         return value == null || value.trim().isEmpty() ? null : value;
+    }
+
+    /**
+     * 将 schema 名转义为可安全用作 {@link DatabaseMetaData#getTables(String, String, String, String[])}
+     * 等 schemaPattern 参数的形式。
+     *
+     * <p>JDBC 的 schemaPattern 把 {@code _}（匹配任意单字符）和 {@code %}（匹配任意字符序列）当作通配符。
+     * 当 schema 名本身含有这些字符时（例如 HANA 的 {@code _SYS_RT}、{@code _SYS_BIC}，或被引号引用的含
+     * {@code %} 的 schema），直接作为 schemaPattern 传入会误匹配到其他 schema 的对象。参考 DBeaver 的
+     * {@code JDBCUtils.escapeWildCards()}，按 {@link DatabaseMetaData#getSearchStringEscape()} 对通配符做转义。
+     *
+     * <p>当 schema 为空白（将映射为 {@code null}，表示不做 schema 过滤）或驱动未提供转义字符时，原样返回。
+     */
+    private static String escapeSchemaPattern(DatabaseMetaData meta, String schema) {
+        String normalized = blankToNull(schema);
+        if (normalized == null) {
+            return null;
+        }
+        String escape;
+        try {
+            escape = meta.getSearchStringEscape();
+        } catch (Exception ignored) {
+            escape = null;
+        }
+        if (escape == null || escape.isEmpty()) {
+            return normalized;
+        }
+        // 先转义 escape 自身，再转义 % 和 _，顺序与 PreparedStatement.setEscapeProcessing / DBeaver 一致。
+        String escapedEscape = normalized.replace(escape, escape + escape);
+        String escapedPercent = escapedEscape.replace("%", escape + "%");
+        String escapedUnderscore = escapedPercent.replace("_", escape + "_");
+        return escapedUnderscore;
     }
 
     private static void addNonBlank(Set<String> values, String value) {

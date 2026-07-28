@@ -1,15 +1,27 @@
 package com.dbx.agent.tdengine;
 
-import com.dbx.agent.test.TestSupport;
+import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ExecuteQueryOptions;
+import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.JdbcAgentFake;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
 import com.dbx.agent.test.JdbcMetadataSqlFake;
+import com.dbx.agent.test.TestSupport;
+import com.taosdata.jdbc.TSDBDriver;
+import com.taosdata.jdbc.rs.RestfulConnection;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Properties;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -63,7 +75,7 @@ class TDengineAgentMetadataTest {
     }
 
     @Test
-    void usesTdengineMetadataStatements() {
+    void usesTdengineShowStatementsForMetadata() {
         TDengineAgent agent = new TDengineAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
 
@@ -71,15 +83,158 @@ class TDengineAgentMetadataTest {
         agent.listTables("power");
         agent.getColumns("power", "meters");
 
-        Assertions.assertEquals(
-            Arrays.asList(
-                "SHOW DATABASES",
-                "SHOW `power`.STABLES",
-                "SHOW `power`.TABLES",
-                "DESCRIBE `power`.`meters`"
-            ),
-            JdbcMetadataSqlFake.statements
+        Assertions.assertEquals("SHOW DATABASES", JdbcMetadataSqlFake.statements.get(0));
+        Assertions.assertEquals("SHOW `power`.STABLES", JdbcMetadataSqlFake.statements.get(1));
+        Assertions.assertEquals("SHOW `power`.TABLES", JdbcMetadataSqlFake.statements.get(2));
+        Assertions.assertFalse(JdbcMetadataSqlFake.statements.stream().anyMatch(sql -> sql.contains("information_schema")));
+        Assertions.assertTrue(JdbcMetadataSqlFake.statements.contains("DESCRIBE `power`.`meters`"));
+    }
+
+    @Test
+    void showMetadataCachesFullResultsForLocalPaging() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
+
+        List<TableInfo> firstPage = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints(null, 2, null, List.of("TABLE"))
         );
+        List<TableInfo> secondPage = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints(null, 2, 2, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals(List.of("meters", "device_a"), firstPage.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals(List.of("device_b", "standalone"), secondPage.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals("meters", secondPage.get(0).getParent_name());
+        Assertions.assertTrue(maxRows.isEmpty());
+        Assertions.assertEquals(
+            List.of(
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
+            ),
+            statements
+        );
+    }
+
+    @Test
+    void showMetadataFiltersLocallyBeforeApplyingRowLimit() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
+
+        List<TableInfo> tables = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints("stand", 1, null, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals(List.of("standalone"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertTrue(maxRows.isEmpty());
+        Assertions.assertEquals(
+            List.of(
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
+            ),
+            statements
+        );
+    }
+
+    @Test
+    void showMetadataFallsBackToLocalFilteringForLongLikePatterns() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
+
+        agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints("a".repeat(50), 1, null, List.of("TABLE"))
+        );
+
+        Assertions.assertTrue(maxRows.isEmpty());
+        Assertions.assertEquals(
+            List.of(
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
+            ),
+            statements
+        );
+    }
+
+    @Test
+    void showMetadataDoesNotLoadTableComments() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
+
+        List<TableInfo> tables = agent.listTables("dbx_alpha");
+
+        Assertions.assertNull(tables.get(0).getComment());
+        Assertions.assertEquals(
+            List.of(
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
+            ),
+            statements
+        );
+    }
+
+    @Test
+    void showMetadataFiltersByNameWithoutInformationSchema() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
+
+        List<TableInfo> tables = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints("device_b", 1, null, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals(List.of("device_b"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertTrue(maxRows.isEmpty());
+    }
+
+    @Test
+    void sortsSupertablesBeforeTheirChildTables() {
+        List<TableInfo> tables = new ArrayList<>(Arrays.asList(
+            new TableInfo("device_b", "TABLE", null, null, "meters"),
+            new TableInfo("standalone", "TABLE", null),
+            new TableInfo("meters", "STABLE", null),
+            new TableInfo("device_a", "TABLE", null, null, "meters")
+        ));
+
+        TDengineAgent.sortTablesForHierarchy(tables);
+
+        Assertions.assertEquals(
+            Arrays.asList("meters", "device_a", "device_b", "standalone"),
+            tables.stream().map(TableInfo::getName).toList()
+        );
+        Assertions.assertEquals("meters", tables.get(1).getParent_name());
+    }
+
+    @Test
+    void marksTimestampAndCompositeKeyDescribeColumnsAsPrimaryKeys() throws Exception {
+        ResultSet resultSet = describeResultSet(new String[][] {
+            {"ts", "TIMESTAMP", "8", ""},
+            {"seq", "INT", "4", "COMPOSITE KEY"},
+            {"voltage", "FLOAT", "4", ""},
+            {"site", "VARCHAR(32)", "32", "TAG"}
+        });
+
+        List<ColumnInfo> columns = TDengineAgent.readDescribeColumns(resultSet);
+
+        Assertions.assertTrue(columns.get(0).getIs_primary_key());
+        Assertions.assertFalse(columns.get(0).getIs_nullable());
+        Assertions.assertTrue(columns.get(1).getIs_primary_key());
+        Assertions.assertFalse(columns.get(1).getIs_nullable());
+        Assertions.assertFalse(columns.get(2).getIs_primary_key());
+        Assertions.assertFalse(columns.get(3).getIs_primary_key());
+        Assertions.assertEquals("TAG", columns.get(3).getExtra());
     }
 
     @Test
@@ -91,6 +246,85 @@ class TDengineAgentMetadataTest {
         Assertions.assertTrue(JdbcMetadataSqlFake.statements.isEmpty());
     }
 
+    private static Connection showMetadataConnection(List<String> statements, List<Integer> maxRows) {
+        return proxy(Connection.class, (proxy, method, args) -> {
+            String name = method.getName();
+            if ("createStatement".equals(name)) {
+                return showMetadataStatement(statements, maxRows);
+            }
+            if ("isClosed".equals(name)) return false;
+            if ("close".equals(name)) return null;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static java.sql.Statement showMetadataStatement(List<String> statements, List<Integer> maxRows) {
+        int[] activeMaxRows = {0};
+        return proxy(java.sql.Statement.class, (proxy, method, args) -> {
+            String name = method.getName();
+            if ("setMaxRows".equals(name)) {
+                activeMaxRows[0] = (Integer) args[0];
+                maxRows.add(activeMaxRows[0]);
+                return null;
+            }
+            if ("executeQuery".equals(name)) {
+                String sql = (String) args[0];
+                statements.add(sql);
+                if (sql.endsWith("STABLES")) {
+                    return showTableResultSet(List.of(new String[] {"meters"}, new String[] {"weather"}), activeMaxRows[0]);
+                }
+                if (sql.endsWith("TABLES")) {
+                    return showTableResultSet(
+                        List.of(
+                            new String[] {"device_a", "", "", "meters"},
+                            new String[] {"device_b", "", "", "meters"},
+                            new String[] {"standalone", "", "", ""}
+                        ),
+                        activeMaxRows[0]
+                    );
+                }
+            }
+            if ("close".equals(name)) return null;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static ResultSet showTableResultSet(List<String[]> rows, int maxRows) {
+        List<String[]> limitedRows = maxRows > 0 ? rows.subList(0, Math.min(rows.size(), maxRows)) : rows;
+        int[] index = {-1};
+        return proxy(ResultSet.class, (proxy, method, args) -> {
+            String name = method.getName();
+            if ("next".equals(name)) {
+                index[0] += 1;
+                return index[0] < limitedRows.size();
+            }
+            if ("getString".equals(name)) {
+                int column = (Integer) args[0];
+                String[] row = limitedRows.get(index[0]);
+                return column <= row.length ? row[column - 1] : null;
+            }
+            if ("isClosed".equals(name)) return false;
+            if ("close".equals(name)) return null;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static <T> T proxy(Class<T> type, InvocationHandler handler) {
+        return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, handler));
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (Boolean.TYPE.equals(type)) return false;
+        if (Integer.TYPE.equals(type)) return 0;
+        if (Long.TYPE.equals(type)) return 0L;
+        if (Double.TYPE.equals(type)) return 0.0d;
+        if (Float.TYPE.equals(type)) return 0.0f;
+        if (Short.TYPE.equals(type)) return (short) 0;
+        if (Byte.TYPE.equals(type)) return (byte) 0;
+        if (Character.TYPE.equals(type)) return '\0';
+        return null;
+    }
+
     @Test
     void setsDatabaseBeforeExecutionWhenSchemaIsProvided() {
         TDengineAgent agent = new TDengineAgent();
@@ -98,9 +332,35 @@ class TDengineAgentMetadataTest {
 
         agent.executeQuery("SELECT 1", "power", new ExecuteQueryOptions());
 
+        // JdbcSchemaSwitcher executes the USE statement (recorded as "execute")
+        // before the query runs, so the database is switched prior to execution.
         Assertions.assertEquals(
-            Arrays.asList("setMaxRows:10001", "execute"),
+            Arrays.asList("execute", "setMaxRows:10001", "execute"),
             JdbcAgentFake.calls
+        );
+    }
+
+    @Test
+    void restExecutionSwitchesCatalogWithoutGeneratingUseSql() throws Exception {
+        try (RestfulConnection connection = restfulConnection()) {
+            String executionSchema = TDengineAgent.prepareExecutionSchema(connection, " power-data ");
+
+            Assertions.assertNull(executionSchema);
+            Assertions.assertEquals("power-data", connection.getCatalog());
+            Assertions.assertEquals(
+                "power-data",
+                connection.getClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME)
+            );
+        }
+    }
+
+    @Test
+    void websocketExecutionKeepsSchemaForUseSqlSwitching() throws Exception {
+        Connection connection = JdbcAgentFake.connection();
+
+        Assertions.assertEquals(
+            "power",
+            TDengineAgent.prepareExecutionSchema(connection, "power")
         );
     }
 
@@ -117,6 +377,18 @@ class TDengineAgentMetadataTest {
         Assertions.assertEquals(
             "2026-05-16 09:35:58.123",
             TDengineAgent.decodeTdengineValue(Timestamp.valueOf("2026-05-16 09:35:58.123"))
+        );
+        Assertions.assertEquals(
+            "2026-05-16 09:35:58.000",
+            TDengineAgent.decodeTdengineValue(Timestamp.valueOf("2026-05-16 09:35:58"))
+        );
+        Assertions.assertEquals(
+            "2026-05-16 09:35:58.123456",
+            TDengineAgent.decodeTdengineValue(Timestamp.valueOf("2026-05-16 09:35:58.123456"))
+        );
+        Assertions.assertEquals(
+            "2026-05-16 09:35:58.123456789",
+            TDengineAgent.decodeTdengineValue(Timestamp.valueOf("2026-05-16 09:35:58.123456789"))
         );
     }
 
@@ -145,5 +417,40 @@ class TDengineAgentMetadataTest {
         );
 
         Assertions.assertEquals("jdbc:TAOS-RS://127.0.0.1:6041/db?timezone=UTC#anchor", sanitized);
+    }
+
+    private static ResultSet describeResultSet(String[][] rows) {
+        int[] rowIndex = {-1};
+        return (ResultSet) Proxy.newProxyInstance(
+            ResultSet.class.getClassLoader(),
+            new Class<?>[] {ResultSet.class},
+            (proxy, method, args) -> {
+                if ("next".equals(method.getName())) {
+                    rowIndex[0] += 1;
+                    return rowIndex[0] < rows.length;
+                }
+                if ("getString".equals(method.getName())) {
+                    return rows[rowIndex[0]][((Integer) args[0]) - 1];
+                }
+                if ("close".equals(method.getName())) {
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
+    private static RestfulConnection restfulConnection() {
+        return new RestfulConnection(
+            "127.0.0.1",
+            "6041",
+            new Properties(),
+            "",
+            "jdbc:TAOS-RS://127.0.0.1:6041/",
+            null,
+            false,
+            null,
+            null
+        );
     }
 }

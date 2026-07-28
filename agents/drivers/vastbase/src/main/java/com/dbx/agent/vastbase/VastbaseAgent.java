@@ -1,6 +1,6 @@
 package com.dbx.agent.vastbase;
 
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.PostgresLikeAgent;
 import com.dbx.agent.PostgresLikeAgentProfile;
@@ -16,7 +16,7 @@ public final class VastbaseAgent extends PostgresLikeAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new VastbaseAgent()).run();
+        new MultiSessionJsonRpcServer(VastbaseAgent::new).run();
     }
 
     @Override

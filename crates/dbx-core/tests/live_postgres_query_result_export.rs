@@ -1,9 +1,11 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::io::Read;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use dbx_core::connection::AppState;
 use dbx_core::db::postgres;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
+use dbx_core::query::execute_sql_statement;
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::storage::Storage;
 
@@ -18,10 +20,12 @@ fn live_postgres_config(
     ConnectionConfig {
         id: id.to_string(),
         name: id.to_string(),
+        note: String::new(),
         db_type: DatabaseType::Postgres,
         driver_profile: None,
         driver_label: None,
         url_params: None,
+        agent_java_options: Vec::new(),
         host: host.to_string(),
         port,
         username: user.to_string(),
@@ -30,6 +34,7 @@ fn live_postgres_config(
         visible_databases: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
+        init_script: None,
         color: None,
         transport_layers: Vec::new(),
         connect_timeout_secs: 10,
@@ -60,6 +65,10 @@ fn live_postgres_config(
         jdbc_driver_paths: Vec::new(),
         one_time: false,
         read_only: false,
+        is_production: false,
+        production_databases: vec![],
+        show_system_schemas: false,
+        database_info: None,
     }
 }
 
@@ -113,10 +122,12 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         schema: Some(schema.clone()),
         sql: sql.clone(),
         query_base_sql: sql,
+        setup_sql: Vec::new(),
         database_type: DatabaseType::Postgres,
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),
         format: "csv".to_string(),
+        include_sql_sheet: false,
         page_size: 100,
         row_limit: None,
         total_rows: None,
@@ -124,6 +135,10 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         keyset_optimization_enabled: true,
         client_session_id: None,
         execution_id: Some(format!("live-postgres-query-export-{suffix}")),
+        date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -145,4 +160,281 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
     assert!(csv.contains("\"1\",\"1\""));
     assert!(csv.contains("\"2050\",\"1\""));
     assert_eq!(csv.lines().count(), 2051, "unexpected csv row count");
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_HOST/PORT/USER/PASSWORD/DATABASE pointing at a writable PostgreSQL database"]
+async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+    let url = format!("postgresql://{user}:{password}@{host}:{port}/{database}");
+    let setup_pool = postgres::connect(&url, Duration::from_secs(10)).await.expect("connect PostgreSQL");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let schema = format!("dbx_xlsx_temporal_{}", &suffix[..8]);
+    let setup = vec![
+        format!("CREATE SCHEMA \"{schema}\""),
+        format!("CREATE TABLE \"{schema}\".events (day date, created_at timestamp without time zone, label text)"),
+        format!("INSERT INTO \"{schema}\".events VALUES ('2024-02-25', '2024-02-25 13:02:15', '2024-02-25')"),
+    ];
+    let cleanup = vec![format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE")];
+    let _ = postgres::execute_batch(&setup_pool, &cleanup).await;
+    postgres::execute_batch(&setup_pool, &setup).await.expect("create temporal export fixture");
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-xlsx-temporal-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "live-postgres-xlsx-temporal";
+    let config = live_postgres_config(connection_id, &host, port, &user, &password, &database);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let file_path = dir.join("result.xlsx");
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-xlsx-temporal-{suffix}"),
+        connection_id: connection_id.to_string(),
+        database: database.clone(),
+        schema: Some(schema.clone()),
+        sql: format!("SELECT day, created_at, label FROM \"{schema}\".events"),
+        query_base_sql: format!("SELECT day, created_at, label FROM \"{schema}\".events"),
+        setup_sql: Vec::new(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "xlsx".to_string(),
+        include_sql_sheet: false,
+        page_size: 100,
+        row_limit: None,
+        total_rows: None,
+        timeout_secs: Some(30),
+        keyset_optimization_enabled: false,
+        client_session_id: Some(format!("live-postgres-xlsx-temporal-{suffix}")),
+        execution_id: Some(format!("live-postgres-xlsx-temporal-{suffix}")),
+        date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        numeric_column_right_align: false,
+    };
+
+    export_query_result_core(&state, &request, None, |_| {}).await.expect("export temporal XLSX");
+
+    let workbook = std::fs::read(&file_path).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(workbook)).expect("open generated XLSX");
+    let mut sheet = String::new();
+    archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut sheet).unwrap();
+    assert!(sheet.contains("<c r=\"A2\" s=\"2\"><v>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"B2\" s=\"3\"><v>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>2024-02-25</t></is></c>"), "sheet={sheet}");
+
+    let cleanup_result = postgres::execute_batch(&setup_pool, &cleanup).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    cleanup_result.expect("cleanup temporal export fixture");
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_* env vars for temporary-table CSV/XLSX export"]
+async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let short_suffix = &suffix[..8];
+    let connection_id = format!("live-postgres-temp-export-{short_suffix}");
+    let config = live_postgres_config(&connection_id, &host, port, &user, &password, &database);
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-temp-export-{short_suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let t1 = format!("dbx_temp_t1_{short_suffix}");
+    let t2 = format!("dbx_temp_t2_{short_suffix}");
+    let t5 = format!("dbx_temp_t5_{short_suffix}");
+    let setup_sql = vec![
+        format!("CREATE TEMPORARY TABLE {t1} AS SELECT i AS id FROM generate_series(1, 30123) AS source(i)"),
+        format!("CREATE INDEX {t1}_id ON {t1}(id)"),
+        format!("CREATE TEMPORARY TABLE {t2} AS SELECT id FROM {t1}"),
+        format!("DROP TABLE {t1}"),
+        format!("CREATE TEMPORARY TABLE {t5} AS SELECT id FROM {t2}"),
+        format!("DROP TABLE {t2}"),
+    ];
+    let sql = format!("SELECT id FROM {t5} ORDER BY id");
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-temp-export-csv-{short_suffix}"),
+        connection_id: connection_id.clone(),
+        database: database.clone(),
+        schema: Some("public".to_string()),
+        sql: sql.clone(),
+        query_base_sql: sql.clone(),
+        setup_sql: setup_sql.clone(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: dir.join("result.csv").to_string_lossy().to_string(),
+        format: "csv".to_string(),
+        include_sql_sheet: false,
+        page_size: 2000,
+        row_limit: None,
+        total_rows: None,
+        timeout_secs: Some(30),
+        keyset_optimization_enabled: false,
+        client_session_id: Some(format!("temp-export-csv-{short_suffix}")),
+        execution_id: Some(format!("temp-export-csv-{short_suffix}")),
+        date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        numeric_column_right_align: false,
+    };
+    let csv_rows = AtomicU64::new(0);
+    export_query_result_core(&state, &request, None, |progress| {
+        csv_rows.store(progress.rows_exported, Ordering::Relaxed);
+    })
+    .await
+    .expect("export temporary-table result to CSV");
+    let csv = std::fs::read_to_string(&request.file_path).unwrap();
+    assert_eq!(csv_rows.load(Ordering::Relaxed), 30_123);
+    assert_eq!(csv.lines().count(), 30_124);
+
+    let xlsx_path = dir.join("result.xlsx");
+    let xlsx_request = QueryResultExportRequest {
+        export_id: format!("live-postgres-temp-export-xlsx-{short_suffix}"),
+        file_path: xlsx_path.to_string_lossy().to_string(),
+        format: "xlsx".to_string(),
+        client_session_id: Some(format!("temp-export-xlsx-{short_suffix}")),
+        execution_id: Some(format!("temp-export-xlsx-{short_suffix}")),
+        ..request
+    };
+    let xlsx_rows = AtomicU64::new(0);
+    export_query_result_core(&state, &xlsx_request, None, |progress| {
+        xlsx_rows.store(progress.rows_exported, Ordering::Relaxed);
+    })
+    .await
+    .expect("export temporary-table result to XLSX");
+    assert_eq!(xlsx_rows.load(Ordering::Relaxed), 30_123);
+    assert!(xlsx_path.metadata().unwrap().len() > 100_000);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_* env vars for a 650,000-row XLSX export"]
+async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arriving() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-postgres-query-export-timeout-{suffix}");
+    let config = live_postgres_config(&connection_id, &host, port, &user, &password, &database);
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-query-export-timeout-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let file_path = dir.join("result.xlsx");
+    let sql = "SELECT i AS id, repeat('x', 64) AS payload FROM generate_series(1, 650000) AS source(i)";
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-query-export-timeout-{suffix}"),
+        connection_id,
+        database,
+        schema: Some("public".to_string()),
+        sql: sql.to_string(),
+        query_base_sql: sql.to_string(),
+        setup_sql: Vec::new(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "xlsx".to_string(),
+        include_sql_sheet: false,
+        page_size: 10_000,
+        row_limit: None,
+        total_rows: Some(650_000),
+        timeout_secs: Some(1),
+        keyset_optimization_enabled: false,
+        client_session_id: None,
+        execution_id: Some(format!("live-postgres-query-export-timeout-{suffix}")),
+        date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        numeric_column_right_align: false,
+    };
+    let rows_exported = AtomicU64::new(0);
+    let done_seen = AtomicBool::new(false);
+    let started_at = Instant::now();
+    let result = export_query_result_core(&state, &request, None, |progress| {
+        rows_exported.store(progress.rows_exported, Ordering::Relaxed);
+        if matches!(progress.status, ExportStatus::Done) {
+            done_seen.store(true, Ordering::Relaxed);
+        }
+    })
+    .await;
+    let elapsed = started_at.elapsed();
+    let file_len = std::fs::metadata(&file_path).map(|metadata| metadata.len()).unwrap_or(0);
+    let _ = std::fs::remove_dir_all(dir);
+
+    result.expect("stream 650,000 PostgreSQL rows to XLSX");
+    assert!(elapsed > Duration::from_secs(1), "export should outlive configured timeout: {elapsed:?}");
+    assert_eq!(rows_exported.load(Ordering::Relaxed), 650_000);
+    assert!(done_seen.load(Ordering::Relaxed));
+    assert!(file_len > 1_000_000);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_* env vars"]
+async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-postgres-query-export-stall-{suffix}");
+    let config = live_postgres_config(&connection_id, &host, port, &user, &password, &database);
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-query-export-stall-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let file_path = dir.join("result.csv");
+    let sql = "SELECT pg_sleep(5), 1 AS id";
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-query-export-stall-{suffix}"),
+        connection_id: connection_id.clone(),
+        database: database.clone(),
+        schema: Some("public".to_string()),
+        sql: sql.to_string(),
+        query_base_sql: sql.to_string(),
+        setup_sql: Vec::new(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "csv".to_string(),
+        include_sql_sheet: false,
+        page_size: 100,
+        row_limit: None,
+        total_rows: Some(1),
+        timeout_secs: Some(1),
+        keyset_optimization_enabled: false,
+        client_session_id: None,
+        execution_id: Some(format!("live-postgres-query-export-stall-{suffix}")),
+        date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        numeric_column_right_align: false,
+    };
+    let started_at = Instant::now();
+    let result = export_query_result_core(&state, &request, None, |_| {}).await;
+    let elapsed = started_at.elapsed();
+    let recovery = execute_sql_statement(&state, &connection_id, &database, "SELECT 1 AS id", None, None).await;
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(result, Err("Query timed out after 1 seconds".to_string()));
+    assert!(elapsed < Duration::from_secs(5), "stalled query was not cancelled promptly: {elapsed:?}");
+    assert_eq!(recovery.expect("PostgreSQL connection should recover after export timeout").rows.len(), 1);
 }

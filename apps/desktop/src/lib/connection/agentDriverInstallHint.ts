@@ -4,14 +4,36 @@ import { supportsDriverManagement } from "@/lib/database/databaseCapabilities";
 export interface AgentDriverInstallState {
   db_type: string;
   installed: boolean;
+  installed_version?: string | null;
   update_available?: boolean;
+}
+
+/** Returns whether a locally installed native Agent meets a required release. */
+export function hasInstalledAgentVersion(drivers: readonly AgentDriverInstallState[], driverKey: string, minimumVersion: string): boolean {
+  const installedVersion = drivers.find((driver) => driver.db_type === driverKey && driver.installed)?.installed_version;
+  if (!installedVersion) return false;
+
+  const parse = (version: string): number[] | null => {
+    const match = version.trim().match(/^(\d+)\.(\d+)\.(\d+)$/);
+    return match ? match.slice(1).map(Number) : null;
+  };
+  const installed = parse(installedVersion);
+  const minimum = parse(minimumVersion);
+  if (!installed || !minimum) return false;
+  return installed[0] > minimum[0] || (installed[0] === minimum[0] && (installed[1] > minimum[1] || (installed[1] === minimum[1] && installed[2] >= minimum[2])));
 }
 
 export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverProfile?: string): string | undefined {
   if (dbType === "oracle") return "oracle";
   if (dbType === "mongodb") return "mongodb";
   if (dbType === "dameng") return "dameng";
-  if (dbType === "mq") return driverProfile === "kafka" ? "kafka" : undefined;
+  if (dbType === "gbase") return driverProfile === "gbase8s" ? "gbase8s" : "gbase8a";
+  if (dbType === "mq") {
+    if (driverProfile === "kafka") return "kafka";
+    if (driverProfile === "rocketmq") return "rocketmq";
+    if (driverProfile === "rabbitmq") return "rabbitmq";
+    return undefined;
+  }
   return driverProfile && driverProfile !== dbType ? driverProfile : dbType;
 }
 
@@ -32,4 +54,15 @@ export function appendAgentDriverUpdateHint(message: string, hint: string): stri
   if (!message.trim()) return hint;
   if (message.includes(hint)) return message;
   return `${message}\n\n${hint}`;
+}
+
+export type DriverStoreTab = "agent" | "jdbc" | "storage" | "runtime";
+
+export type DriverStoreFocus = { target: "driver"; driver?: string } | { target: "jre" } | { target: "tab"; tab: DriverStoreTab };
+
+/** Maps a backend connect error to the Driver Store item that can fix it. */
+export function driverStoreFocusForInstallError(message: string, dbType?: DatabaseType, driverProfile?: string): DriverStoreFocus | null {
+  if (message.includes("JRE") && message.includes("not installed")) return { target: "jre" };
+  if (!message.includes("is not installed") && !message.includes("reinstall it from the Driver Manager")) return null;
+  return { target: "driver", driver: agentDriverInstallKey(dbType, driverProfile) };
 }

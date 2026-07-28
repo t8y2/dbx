@@ -2,7 +2,7 @@ package com.dbx.agent.teradata;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 
 public final class TeradataAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile TERADATA_PROFILE = new JdbcAgentProfile(
@@ -16,6 +16,6 @@ public final class TeradataAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new TeradataAgent()).run();
+        new MultiSessionJsonRpcServer(TeradataAgent::new).run();
     }
 }

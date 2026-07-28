@@ -8,7 +8,11 @@ pub struct QueryResultXlsxExportRequest {
     pub file_path: String,
     pub sheet_name: Option<String>,
     pub columns: Vec<String>,
+    #[serde(default)]
+    pub column_types: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    #[serde(default)]
+    pub numeric_column_right_align: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,11 +25,18 @@ pub struct QueryResultsXlsxExportRequest {
 #[tauri::command]
 pub async fn export_query_result_xlsx(request: QueryResultXlsxExportRequest) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+        let mut data = XlsxWorksheetData {
             sheet_name: request.sheet_name,
             columns: request.columns,
+            column_types: request.column_types,
             rows: request.rows,
-        })?;
+            numeric_column_right_align: request.numeric_column_right_align,
+        };
+        // Ensure consistency: if the feature is disabled, clear the flag.
+        if !data.numeric_column_right_align {
+            data.numeric_column_right_align = false;
+        }
+        let workbook = build_xlsx_workbook(&data)?;
         std::fs::write(&request.file_path, workbook).map_err(|err| err.to_string())
     })
     .await

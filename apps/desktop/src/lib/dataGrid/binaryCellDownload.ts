@@ -3,6 +3,11 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 export type BinaryCellDownloadMode = "binary" | "utf8" | "gbk";
 
+export interface BinaryCellPosition {
+  rowIndex: number;
+  col: number;
+}
+
 export interface BinaryCellDownloadPayload {
   data: Uint8Array | string;
   mimeType: string;
@@ -16,6 +21,10 @@ export interface BinaryCellDownloadResult {
 }
 
 export const BINARY_CELL_DOWNLOAD_MODES: BinaryCellDownloadMode[] = ["binary", "utf8", "gbk"];
+
+export function retainBinaryCellDownloadMenuForHover(openCell: BinaryCellPosition | null, hoveredCell: BinaryCellPosition): BinaryCellPosition | null {
+  return openCell?.rowIndex === hoveredCell.rowIndex && openCell.col === hoveredCell.col ? openCell : null;
+}
 
 const HEX_VALUE_RE = /^(?:0[xX]|\\x)([0-9a-fA-F\s]+)$/;
 const BARE_HEX_RE = /^[0-9a-fA-F\s]+$/;

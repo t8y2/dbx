@@ -4,7 +4,8 @@ import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 export const TREE_SCHEMA_DEFAULT_DATABASE_SELECT_VALUE = "__dbx_tree_schema_default_database__";
 export const EMPTY_DATABASE_SELECT_VALUE = "__dbx_empty_database__";
 
-export function resolveDefaultDatabase(connection: Pick<ConnectionConfig, "database">, options: string[]): string {
+export function resolveDefaultDatabase(connection: Pick<ConnectionConfig, "database"> & Partial<Pick<ConnectionConfig, "db_type">>, options: string[]): string {
+  if (connection.db_type === "cloudflare-d1") return "main";
   return connection.database || options[0] || "";
 }
 
@@ -29,6 +30,7 @@ export function formatDatabaseLabel(connection: Pick<ConnectionConfig, "db_type"
   return database || labels.noDatabase;
 }
 
-export function isDefaultDatabase(connection: Pick<ConnectionConfig, "database"> | undefined, database: string): boolean {
+export function isDefaultDatabase(connection: (Pick<ConnectionConfig, "database"> & Partial<Pick<ConnectionConfig, "db_type">>) | undefined, database: string): boolean {
+  if (connection?.db_type === "cloudflare-d1") return database === "main";
   return !!connection?.database && !!database && connection.database === database;
 }

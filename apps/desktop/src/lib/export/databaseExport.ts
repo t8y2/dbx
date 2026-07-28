@@ -46,6 +46,7 @@ export interface BuildExportInsertStatementsOptions {
 
 export interface BuildExportPageSqlOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   schema?: string;
   tableName: string;
   limit?: number;
@@ -72,6 +73,7 @@ export function buildInsertStatements(options: BuildExportInsertStatementsOption
 export async function buildExportPageSql(options: BuildExportPageSqlOptions): Promise<string> {
   return buildTableSelectSql({
     databaseType: options.databaseType,
+    identifierQuote: options.identifierQuote,
     schema: options.schema,
     tableName: options.tableName,
     limit: options.limit ?? DATABASE_EXPORT_PAGE_SIZE,
@@ -81,6 +83,21 @@ export async function buildExportPageSql(options: BuildExportPageSqlOptions): Pr
 
 export function generateDatabaseExportId(): string {
   return uuid();
+}
+
+export async function runDatabaseExportUntilTerminal(request: api.DatabaseExportRequest, onProgress: (progress: api.ExportProgress) => void): Promise<api.ExportProgress> {
+  return new Promise<api.ExportProgress>((resolve, reject) => {
+    api
+      .exportDatabaseSql(request, (progress) => {
+        onProgress(progress);
+        if (progress.status === "Done" || progress.status === "Cancelled") {
+          resolve(progress);
+        } else if (progress.status === "Error") {
+          reject(new Error(progress.error || "Export failed"));
+        }
+      })
+      .catch(reject);
+  });
 }
 
 export function buildAllDatabaseExportPlan(options: AllDatabaseExportPlanInput): AllDatabaseExportPlanItem[] {

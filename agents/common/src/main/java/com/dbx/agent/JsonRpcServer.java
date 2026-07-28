@@ -17,12 +17,15 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.sql.Connection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class JsonRpcServer {
     private static final long CONNECTION_VALIDATION_INTERVAL_MILLIS = 5_000L;
 
     private final DatabaseAgent agent;
+    private final JdbcExecutor jdbcExecutor;
     private final Gson gson = new GsonBuilder()
         // JDBC DECIMAL/NUMERIC values can exceed JavaScript Number precision after JSON-RPC parsing.
         .registerTypeAdapter(
@@ -39,6 +42,7 @@ public final class JsonRpcServer {
 
     public JsonRpcServer(DatabaseAgent agent) {
         this.agent = agent;
+        this.jdbcExecutor = new JdbcExecutor();
     }
 
     public void run() {
@@ -84,6 +88,14 @@ public final class JsonRpcServer {
         }
     }
 
+    Object dispatchForRuntime(String method, JsonObject params) throws Exception {
+        return AgentExecutionContext.withJdbcExecutor(jdbcExecutor, () -> dispatch(method, params));
+    }
+
+    void cancelActiveStatements() {
+        jdbcExecutor.cancelActiveStatements();
+    }
+
     private Object dispatch(String method, JsonObject params) throws Exception {
         if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
             return AgentProtocol.handshakeResult();
@@ -95,10 +107,11 @@ public final class JsonRpcServer {
             return Collections.singletonMap("ok", true);
         }
         if (AgentProtocol.METHOD_TEST_CONNECTION.equals(method)) {
-            if (!agent.testConnection(gson.fromJson(params, ConnectParams.class))) {
+            Map<String, Object> result = agent.testConnectionWithInfo(gson.fromJson(params, ConnectParams.class));
+            if (!Boolean.TRUE.equals(result.get("ok"))) {
                 throw new RuntimeException("Connection failed");
             }
-            return Collections.singletonMap("ok", true);
+            return result;
         }
         if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)) {
             Connection conn = agent.getConnection();
@@ -115,6 +128,15 @@ public final class JsonRpcServer {
             return Collections.singletonMap("ok", true);
         }
         ensureLiveConnection(method);
+        if (AgentProtocol.METHOD_CONNECTION_INFO.equals(method)) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("identifierQuote", agent.getIdentifierQuote());
+            Map<String, String> databaseInfo = agent.getDatabaseInfo();
+            if (databaseInfo != null && !databaseInfo.isEmpty()) {
+                result.put("databaseInfo", databaseInfo);
+            }
+            return result;
+        }
         if (AgentProtocol.METHOD_LIST_DATABASES.equals(method)) {
             return agent.listDatabases();
         }
@@ -243,18 +265,17 @@ public final class JsonRpcServer {
             return agent.executeBatch(statements, stringOrNull(params, "schema"));
         }
         if (AgentProtocol.METHOD_DISCONNECT.equals(method)) {
-            JdbcExecutor.INSTANCE.closeAllQuerySessions();
-            JdbcExecutor.INSTANCE.closeAllTableReadSessions();
+            jdbcExecutor.closeAllQuerySessions();
+            jdbcExecutor.closeAllTableReadSessions();
             agent.disconnect();
             lastConnectParams = null;
             return Collections.singletonMap("ok", true);
         }
         if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
-            JdbcExecutor.INSTANCE.closeAllQuerySessions();
-            JdbcExecutor.INSTANCE.closeAllTableReadSessions();
+            jdbcExecutor.closeAllQuerySessions();
+            jdbcExecutor.closeAllTableReadSessions();
             agent.disconnect();
             lastConnectParams = null;
-            System.exit(0);
             return Collections.singletonMap("ok", true);
         }
         throw new IllegalArgumentException("Unknown method: " + method);
@@ -300,8 +321,8 @@ public final class JsonRpcServer {
             return;
         }
 
-        JdbcExecutor.INSTANCE.closeAllQuerySessions();
-        JdbcExecutor.INSTANCE.closeAllTableReadSessions();
+        jdbcExecutor.closeAllQuerySessions();
+        jdbcExecutor.closeAllTableReadSessions();
         try {
             agent.disconnect();
         } catch (Exception ignored) {

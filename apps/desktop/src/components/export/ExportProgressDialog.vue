@@ -1,12 +1,18 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, XCircle, AlertCircle, X } from "@lucide/vue";
+import { Loader2, CheckCircle2, XCircle, AlertCircle, FolderOpen, Minimize2, X } from "@lucide/vue";
+import { useToast } from "@/composables/useToast";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import * as api from "@/lib/backend/api";
+import { translateBackendError } from "@/i18n/backend-errors";
 
 const { t } = useI18n();
+const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
+const isRevealing = ref(false);
 
 const props = defineProps<{
   title: string;
@@ -16,16 +22,21 @@ const props = defineProps<{
   totalRows: number | null;
   status: string;
   errorMessage: string | null;
+  filePath?: string | null;
   disableCancel?: boolean;
+  canMinimize?: boolean;
 }>();
 
 const emit = defineEmits<{
   cancel: [];
+  minimize: [];
   "update:open": [value: boolean];
 }>();
 
+const translatedErrorMessage = computed(() => (props.errorMessage ? translateBackendError(t, props.errorMessage) : ""));
 const isActive = computed(() => props.status === "Running" || props.status === "Writing");
 const isFinished = computed(() => props.status === "Done" || props.status === "Error" || props.status === "Cancelled");
+const canRevealFile = computed(() => props.status === "Done" && !!props.filePath && isTauriRuntime());
 const progressPercent = computed(() => {
   if (!props.totalRows || props.totalRows <= 0) return 0;
   return Math.min(100, Math.round((props.rowsExported / props.totalRows) * 100));
@@ -39,6 +50,18 @@ const rowsText = computed(() => {
   }
   return t("exportProgress.rowsExported", { count: props.rowsExported.toLocaleString() });
 });
+
+async function revealExportFile() {
+  if (!props.filePath || isRevealing.value) return;
+  isRevealing.value = true;
+  try {
+    await api.revealPathInFileManager(props.filePath);
+  } catch (error) {
+    toast(t("exportProgress.openFolderFailed", { message: translateBackendError(t, error) }), 5000);
+  } finally {
+    isRevealing.value = false;
+  }
+}
 </script>
 
 <template>
@@ -86,7 +109,7 @@ const rowsText = computed(() => {
           </template>
           <template v-else-if="status === 'Error'">
             <XCircle class="h-4 w-4 text-destructive" />
-            <span class="text-destructive">{{ errorMessage || t("exportProgress.error") }}</span>
+            <span class="text-destructive">{{ translatedErrorMessage || t("exportProgress.error") }}</span>
           </template>
           <template v-else-if="status === 'Cancelled'">
             <AlertCircle class="h-4 w-4 text-yellow-500" />
@@ -102,12 +125,21 @@ const rowsText = computed(() => {
 
       <DialogFooter>
         <template v-if="isActive">
+          <Button v-if="canMinimize" variant="ghost" size="sm" @click="emit('minimize')">
+            <Minimize2 class="h-3.5 w-3.5 mr-1" />
+            {{ t("exportProgress.minimize") }}
+          </Button>
           <Button variant="outline" size="sm" :disabled="disableCancel" @click="emit('cancel')">
             <X class="h-3.5 w-3.5 mr-1" />
             {{ t("exportProgress.cancel") }}
           </Button>
         </template>
         <template v-else-if="isFinished">
+          <Button v-if="canRevealFile" size="sm" :disabled="isRevealing" @click="revealExportFile">
+            <Loader2 v-if="isRevealing" class="mr-1 h-3.5 w-3.5 animate-spin" />
+            <FolderOpen v-else class="mr-1 h-3.5 w-3.5" />
+            {{ t("exportProgress.openFolder") }}
+          </Button>
           <Button variant="outline" size="sm" @click="emit('update:open', false)">
             {{ t("exportProgress.close") }}
           </Button>

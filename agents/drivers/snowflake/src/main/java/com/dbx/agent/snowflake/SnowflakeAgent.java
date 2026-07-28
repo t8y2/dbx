@@ -7,7 +7,7 @@ import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcIdentifiers;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
@@ -376,6 +376,6 @@ public final class SnowflakeAgent extends AbstractJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new SnowflakeAgent()).run();
+        new MultiSessionJsonRpcServer(SnowflakeAgent::new).run();
     }
 }

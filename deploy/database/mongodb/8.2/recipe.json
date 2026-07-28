@@ -1,0 +1,13 @@
+{
+  "database": "mongodb",
+  "name": "MongoDB",
+  "version": "8.2.3",
+  "displayVersion": "8.2",
+  "image": "docker.cnb.cool/znb/images/mongo:8.2.3-noble",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 27017,
+  "connection": { "host": "127.0.0.1", "port": 27018, "username": "root", "password": "123456", "database": "dbx", "authSource": "admin" },
+  "shell": ["mongosh", "--quiet", "--host", "127.0.0.1", "--port", "27017", "--username", "root", "--password", "${DB_PASSWORD}", "--authenticationDatabase", "admin", "dbx"],
+  "smoke": { "steps": [{ "name": "query initialized document over TCP", "command": ["mongosh", "--quiet", "--host", "127.0.0.1", "--port", "27017", "--username", "root", "--password", "${DB_PASSWORD}", "--authenticationDatabase", "admin", "dbx", "--eval", "db.dbx_smoke.findOne({_id: 1}).note"], "expect": "DBX smoke" }] }
+}

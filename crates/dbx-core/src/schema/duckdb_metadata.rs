@@ -185,6 +185,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+            ..Default::default()
             })
         })
         .map_err(|e| e.to_string())?;
@@ -197,6 +198,6 @@ pub(super) async fn duckdb_attached_database_names(state: &AppState, connection_
         .read()
         .await
         .get(connection_id)
-        .map(|config| config.attached_databases.iter().map(|database| database.name.clone()).collect())
+        .map(crate::db::duckdb_sql::config_attached_names)
         .unwrap_or_default()
 }

@@ -6,9 +6,11 @@ pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, t
         dialect,
         StructureDialect::Postgres
             | StructureDialect::Oracle
+            | StructureDialect::Dameng
             | StructureDialect::SqlServer
             | StructureDialect::H2
             | StructureDialect::Informix
+            | StructureDialect::Sqlite
     ) && schema.is_some_and(|schema| !schema.trim().is_empty())
     {
         return format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, table_name));
@@ -18,7 +20,10 @@ pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, t
 
 pub(super) fn quote_ident(dialect: StructureDialect, name: &str) -> String {
     match dialect {
-        StructureDialect::Mysql | StructureDialect::ManticoreSearch | StructureDialect::Questdb => {
+        StructureDialect::Mysql
+        | StructureDialect::Doris
+        | StructureDialect::ManticoreSearch
+        | StructureDialect::Questdb => {
             format!("`{}`", name.replace('`', "``"))
         }
         StructureDialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
@@ -117,7 +122,9 @@ pub(super) fn is_protected_manticore_id_column(dialect: StructureDialect, column
 pub(super) fn is_temporal_type_for_default(dialect: StructureDialect, base_type: &str) -> bool {
     let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     match dialect {
-        StructureDialect::Mysql => matches!(normalized.as_str(), "date" | "datetime" | "timestamp" | "time" | "year"),
+        StructureDialect::Mysql | StructureDialect::Doris => {
+            matches!(normalized.as_str(), "date" | "datetime" | "timestamp" | "time" | "year")
+        }
         StructureDialect::Postgres => {
             matches!(
                 normalized.as_str(),
@@ -137,7 +144,7 @@ pub(super) fn is_temporal_type_for_default(dialect: StructureDialect, base_type:
             normalized.as_str(),
             "date" | "time" | "datetime" | "datetime2" | "smalldatetime" | "datetimeoffset"
         ),
-        StructureDialect::Oracle => matches!(
+        StructureDialect::Oracle | StructureDialect::Dameng => matches!(
             normalized.as_str(),
             "date"
                 | "timestamp"
@@ -183,7 +190,7 @@ pub(super) fn is_temporal_expression(value: &str) -> bool {
 pub(super) fn is_string_type_for_default(dialect: StructureDialect, base_type: &str) -> bool {
     let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     match dialect {
-        StructureDialect::Mysql => matches!(
+        StructureDialect::Mysql | StructureDialect::Doris => matches!(
             normalized.as_str(),
             "char"
                 | "varchar"
@@ -223,7 +230,7 @@ pub(super) fn is_string_type_for_default(dialect: StructureDialect, base_type: &
             normalized.as_str(),
             "char" | "varchar" | "nchar" | "nvarchar" | "text" | "ntext" | "xml" | "uniqueidentifier" | "sysname"
         ),
-        StructureDialect::Oracle => matches!(
+        StructureDialect::Oracle | StructureDialect::Dameng => matches!(
             normalized.as_str(),
             "char" | "nchar" | "varchar2" | "nvarchar2" | "clob" | "nclob" | "long" | "raw" | "long raw" | "bfile"
         ),

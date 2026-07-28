@@ -1,5 +1,7 @@
-import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
+import { JDBCX_JDBC_DRIVER_CLASS } from "@/lib/database/jdbcxBuiltinDriver";
+import { buildSidebarLayoutFromFolderPaths } from "@/lib/sidebar/sidebarLayout";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
@@ -12,10 +14,16 @@ type DbeaverImportPayload = {
 type DbeaverConnectionEntry = {
   id: string;
   name?: string;
+  folder?: string;
   provider?: string;
   driver?: string;
   configuration?: Record<string, any>;
   [key: string]: any;
+};
+
+export type DbeaverImportResult = {
+  connections: ConnectionConfig[];
+  layout?: SidebarLayout;
 };
 
 type ConnectionProfile = {
@@ -33,6 +41,7 @@ const profileMap: Record<string, ConnectionProfile> = {
   mariadb: { dbType: "mysql", profile: "mariadb", label: "MariaDB", port: 3306, user: "root" },
   postgresql: { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
   postgres: { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
+  cloudberry: { dbType: "postgres", profile: "cloudberry", label: "Apache Cloudberry", port: 5432, user: "postgres" },
   sqlite: { dbType: "sqlite", profile: "sqlite", label: "SQLite", port: 0, user: "" },
   sqlserver: { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
   mssql: { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
@@ -45,13 +54,14 @@ const profileMap: Record<string, ConnectionProfile> = {
   elasticsearch: { dbType: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", port: 9200, user: "" },
   doris: { dbType: "doris", profile: "doris", label: "Doris", port: 9030, user: "root" },
   starrocks: { dbType: "starrocks", profile: "starrocks", label: "StarRocks", port: 9030, user: "root" },
-  dameng: { dbType: "dameng", profile: "dm", label: "DM (Dameng)", port: 5236, user: "SYSDBA" },
-  dm: { dbType: "dameng", profile: "dm", label: "DM (Dameng)", port: 5236, user: "SYSDBA" },
+  dameng: { dbType: "dameng", profile: "dm", label: "达梦 Dameng", port: 5236, user: "SYSDBA" },
+  dm: { dbType: "dameng", profile: "dm", label: "达梦 Dameng", port: 5236, user: "SYSDBA" },
   gaussdb: { dbType: "gaussdb", profile: "gaussdb", label: "GaussDB", port: 5432, user: "gaussdb" },
   kwdb: { dbType: "kwdb", profile: "kwdb", label: "KWDB", port: 26257, user: "root" },
   opengauss: { dbType: "gaussdb", profile: "opengauss", label: "openGauss", port: 5432, user: "gaussdb" },
   questdb: { dbType: "questdb", profile: "questdb", label: "QuestDB", port: 8812, user: "questdb" },
   influxdb: { dbType: "influxdb", profile: "influxdb", label: "InfluxDB", port: 8086, user: "" },
+  jdbcx: { dbType: "jdbc", profile: "jdbcx", label: "JDBCX", port: 0, user: "" },
 };
 
 function normalizeKey(value: unknown) {
@@ -70,6 +80,9 @@ function getNumber(value: unknown) {
 }
 
 function inferProfile(entry: DbeaverConnectionEntry): ConnectionProfile {
+  if (/^jdbcx:/i.test(getString(entry.configuration?.url))) return profileMap.jdbcx;
+  const driverProfile = profileMap[normalizeKey(entry.driver)];
+  if (driverProfile) return driverProfile;
   const candidates = [entry.provider, entry.driver, entry.configuration?.url, entry.name].map(normalizeKey).join(" ");
   for (const [needle, profile] of Object.entries(profileMap)) {
     if (candidates.includes(needle)) return profile;
@@ -190,6 +203,19 @@ function extractConnections(parsed: any): DbeaverConnectionEntry[] {
     .map(([id, entry]) => ({ ...(entry as Record<string, any>), id: getString((entry as any).id || id) }));
 }
 
+function extractFolderPaths(parsed: any): string[] {
+  const folders = parsed?.folders;
+  if (!folders || typeof folders !== "object") return [];
+
+  const entries = Array.isArray(folders) ? folders.map((folder) => [getString(folder?.name), folder] as const) : Object.entries(folders);
+
+  return entries.flatMap(([name, folder]) => {
+    if (!name || !folder || typeof folder !== "object") return [];
+    const parent = getString((folder as Record<string, any>).parent);
+    return [parent ? `${parent}/${name}` : name];
+  });
+}
+
 function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<typeof readCredentials>): ConnectionConfig | null {
   const profile = inferProfile(entry);
   const config = entry.configuration || {};
@@ -218,7 +244,7 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
     ssl: false,
     oracle_connection_type: profile.dbType === "oracle" ? parsedUrl.oracleConnectionType || "service_name" : undefined,
     connection_string: profile.dbType === "jdbc" || profile.dbType === "mongodb" ? url || undefined : undefined,
-    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || entry.driver) || undefined : undefined,
+    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || (profile.profile === "jdbcx" ? JDBCX_JDBC_DRIVER_CLASS : entry.driver)) || undefined : undefined,
     jdbc_driver_paths: [],
   };
 
@@ -234,7 +260,7 @@ export function isDbeaverImportPayload(content: string) {
   }
 }
 
-export async function parseDbeaverConnections(content: string): Promise<ConnectionConfig[]> {
+export async function parseDbeaverImport(content: string): Promise<DbeaverImportResult> {
   const payload = JSON.parse(content) as DbeaverImportPayload;
   if (payload.format !== "dbeaver-import" || !payload.dataSources) {
     throw new Error("Invalid DBeaver import payload");
@@ -243,6 +269,7 @@ export async function parseDbeaverConnections(content: string): Promise<Connecti
   const dataSources = JSON.parse(payload.dataSources);
   const encryptedCredentials = await decryptCredentialsFile(payload.credentialsBase64);
   const configs: ConnectionConfig[] = [];
+  const connectionFolderPaths = new Map<string, string>();
   const seen = new Set<string>();
 
   for (const entry of extractConnections(dataSources)) {
@@ -252,7 +279,21 @@ export async function parseDbeaverConnections(content: string): Promise<Connecti
     if (seen.has(key)) continue;
     seen.add(key);
     configs.push(config);
+    const folderPath = getString(entry.folder);
+    if (folderPath) connectionFolderPaths.set(config.id, folderPath);
   }
 
-  return configs;
+  // DBeaver stores declared folders separately and connections reference full
+  // slash-delimited paths. Missing ancestors are created during DBeaver load,
+  // so mirror that behavior when producing DBX's nested sidebar layout.
+  const layout = buildSidebarLayoutFromFolderPaths(
+    configs.map((config) => config.id),
+    extractFolderPaths(dataSources),
+    connectionFolderPaths,
+  );
+  return { connections: configs, layout };
+}
+
+export async function parseDbeaverConnections(content: string): Promise<ConnectionConfig[]> {
+  return (await parseDbeaverImport(content)).connections;
 }

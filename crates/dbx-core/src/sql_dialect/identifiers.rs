@@ -71,6 +71,45 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
     quote_table_identifier(database_type, table_name)
 }
 
+/// Like `qualified_table_name`, but prefixes a Doris/StarRocks external
+/// catalog (`<catalog>.<database>.<table>`) when `catalog` is present,
+/// non-empty, and not the engine's `internal` catalog. The middle segment is
+/// the database — Doris/StarRocks have no separate schema concept, so
+/// `schema` is only used when a caller passes it that way; otherwise `database`
+/// fills the middle slot. When neither is set the name degrades to the 2-part
+/// `<catalog>.<table>` form. The `internal` guard is defensive — built-in
+/// catalog tables never carry a catalog in the first place (the sidebar routes
+/// them through the standard path), so this only ever prefixes genuine
+/// external catalogs. Other engines ignore `catalog` (they have no 3-part
+/// catalog naming).
+pub fn qualified_table_name_with_catalog(
+    database_type: Option<DatabaseType>,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    database: Option<&str>,
+    table_name: &str,
+) -> String {
+    let catalog = catalog.map(str::trim).filter(|catalog| !catalog.is_empty() && *catalog != "internal");
+    match (catalog, database_type) {
+        (Some(catalog), Some(DatabaseType::Doris | DatabaseType::StarRocks)) => {
+            let middle = schema
+                .map(str::trim)
+                .filter(|schema| !schema.is_empty())
+                .or_else(|| database.map(str::trim).filter(|database| !database.is_empty()));
+            let table = match middle {
+                Some(middle) => format!(
+                    "{}.{}",
+                    quote_table_identifier(database_type, middle),
+                    quote_table_identifier(database_type, table_name)
+                ),
+                None => quote_table_identifier(database_type, table_name),
+            };
+            format!("{}.{}", quote_table_identifier(database_type, catalog), table)
+        }
+        _ => qualified_table_name(database_type, schema, table_name),
+    }
+}
+
 pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -> String {
     match database_type {
         Some(DatabaseType::Iotdb) => name.to_string(),
@@ -86,6 +125,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             | DatabaseType::StarRocks
             | DatabaseType::ManticoreSearch
             | DatabaseType::Hive
+            | DatabaseType::Spark
             | DatabaseType::Databend
             | DatabaseType::Tdengine
             | DatabaseType::Access
@@ -119,6 +159,7 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
         | DatabaseType::Doris
         | DatabaseType::StarRocks
         | DatabaseType::Hive
+        | DatabaseType::Spark
         | DatabaseType::Questdb => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('\"', "\"\"")),

@@ -37,7 +37,7 @@ test("table metadata loader deduplicates equivalent in-flight requests and cache
   };
   const first = loadTableMetadata(request);
   const second = loadTableMetadata(request);
-  await Promise.resolve();
+  await vi.waitFor(() => assert.equal(listIndexes.mock.calls.length, 1));
   assert.equal(getColumns.mock.calls.length, 1);
 
   columnsGate.resolve([

@@ -13,55 +13,85 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
-import { type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
+import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
-import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
-import { canAddTableStructureColumn, getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
+import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
+import { getPostgresDataTypeHelp } from "@/lib/table/postgresDataTypeHelp";
+import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
+import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
+import { shouldLoadTableStructureTriggers, TRIGGERS_ONLY_REFRESH_SCOPE, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
+import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
+import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
+import type { TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
+  applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
+  canEditStructuredTriggerDraft,
+  canEditManticoreColumnProperties,
   combineDataTypeForDatabase,
+  combineDataTypeForDatabaseWithLengthUnit,
   createColumnDrafts,
   createForeignKeyDrafts,
   createIndexDrafts,
   createTriggerDrafts,
   dataTypeLengthInputValue,
+  dataTypeLengthUnitValue,
+  defaultNewColumnDataType,
   generateIndexName,
   generateUniqueIndexName,
   getColumnEditorControls,
   getDataTypeOptions,
+  getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
+  hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
-  isSqlServerIdentityCompatibleDataType,
+  isDamengIdentityCompatibleDataType,
+  isMysqlEnumDataType,
+  isMysqlCharacterDataType,
   isProtectedManticoreIdColumn,
+  isSqlServerIdentityCompatibleDataType,
+  mysqlEnumDataType,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
+  resolveInsertColumnIndex,
+  restoreDamengLengthUnitsAfterSave,
   splitDataType,
   toColumnNames,
-  applyManticoreDdlColumnExtras,
-  canEditManticoreColumnProperties,
 } from "@/lib/table/tableStructureEditorState";
+import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import type { CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
 const { isDark } = useTheme();
 const store = useConnectionStore();
+const productionSafetyStore = useProductionSafetyStore();
 const queryStore = useQueryStore();
 const historyStore = useHistoryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const rootRef = ref<HTMLElement>();
+type StructureScrollerRef = HTMLElement | { $el?: HTMLElement };
+const columnsScrollerRef = ref<StructureScrollerRef>();
+const indexesScrollerRef = ref<StructureScrollerRef>();
+const foreignKeysScrollerRef = ref<StructureScrollerRef>();
+const triggersScrollerRef = ref<StructureScrollerRef>();
+const ddlScrollerRef = ref<StructureScrollerRef>();
 const dynamicDataTypeOptionsCache = new Map<string, string[]>();
 
 const sqlHighlighter = ref<SqlHighlighter>();
@@ -73,18 +103,20 @@ onMounted(async () => {
 
 const highlightedSql = computed(() => {
   if (!pendingStatements.value.length) return "";
-  const sql = pendingStatements.value.join("\n");
+  const sql = previewSqlText.value;
   return sqlHighlighter.value?.(sql) ?? sql;
 });
-const previewSqlText = computed(() => pendingStatements.value.join("\n"));
+const previewSqlText = computed(() => joinSqlStatementsForScript(pendingStatements.value, databaseType.value));
 
 const props = defineProps<{
   connectionId: string;
   database: string;
+  catalog?: string;
   schema?: string;
   tableName: string;
   initialTab?: TableInfoTab;
   initialTabRequestId?: number;
+  initialTarget?: TableStructureEditorTarget;
   draft?: TableStructureEditorDraft;
 }>();
 
@@ -105,13 +137,26 @@ const foreignKeysLoading = ref(false);
 const triggersLoading = ref(false);
 const ddlContent = ref("");
 const ddlLoading = ref(false);
+const ddlPreRef = ref<HTMLPreElement | null>(null);
+function onDdlKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+    e.preventDefault();
+    const el = ddlPreRef.value;
+    if (!el) return;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }
+}
 const ddlFetched = ref(false);
 
 async function fetchDdl() {
   if (!props.connectionId || !props.database || !props.tableName || ddlFetched.value || !tableMetadataCapabilities.value.ddl) return;
   ddlLoading.value = true;
   try {
-    const ddl = await api.getTableDdl(props.connectionId, props.database, metadataSchema.value, props.tableName);
+    const ddl = await api.getTableDisplayDdl(props.connectionId, props.database, metadataSchema.value, props.tableName, undefined, props.catalog);
     ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
     ddlFetched.value = true;
   } catch (e: any) {
@@ -126,25 +171,11 @@ const columns = ref<EditableStructureColumn[]>([]);
 const indexes = ref<EditableStructureIndex[]>([]);
 const pendingStatements = ref<string[]>([]);
 const warnings = ref<string[]>([]);
+const sqliteSchemaRevision = ref<string>();
 const foreignKeys = ref<EditableStructureForeignKey[]>([]);
 const triggers = ref<EditableStructureTrigger[]>([]);
+const triggersLoaded = ref(false);
 const secondaryMetadataLoading = computed(() => indexesLoading.value || foreignKeysLoading.value || triggersLoading.value);
-
-interface StructureRefreshScope {
-  columns: boolean;
-  indexes: boolean;
-  foreignKeys: boolean;
-  triggers: boolean;
-  tableComment: boolean;
-}
-
-const FULL_STRUCTURE_REFRESH_SCOPE: StructureRefreshScope = {
-  columns: true,
-  indexes: true,
-  foreignKeys: true,
-  triggers: true,
-  tableComment: true,
-};
 
 function sameList(left: string[] | null | undefined, right: string[] | null | undefined): boolean {
   const a = left ?? [];
@@ -160,13 +191,15 @@ function columnChanged(column: EditableStructureColumn, index: number): boolean 
   if (!column.original || column.markedForDrop) return true;
   const original = column.original;
   return (
-    column.originalPosition !== index ||
+    isPhysicalTableColumnOrderChange(databaseType.value, connection.value?.db_type, column.originalPosition, index) ||
     column.name !== original.name ||
     column.dataType !== original.data_type ||
     column.isNullable !== original.is_nullable ||
     !sameText(column.defaultValue, original.column_default) ||
     !sameText(column.comment, original.comment) ||
     column.isPrimaryKey !== original.is_primary_key ||
+    !sameText(column.characterSet, original.character_set) ||
+    !sameText(column.collation, original.collation) ||
     JSON.stringify(column.extra) !== JSON.stringify(parseExtraToColumnExtra(original.extra, databaseType.value))
   );
 }
@@ -205,7 +238,7 @@ function triggerChanged(trigger: EditableStructureTrigger): boolean {
   return trigger.name !== original.name || trigger.timing !== original.timing || trigger.event !== original.event || !sameText(trigger.statement, original.statement);
 }
 
-function captureStructureRefreshScope(): StructureRefreshScope {
+function captureStructureRefreshScope(): TableStructureRefreshScope {
   return {
     columns: columns.value.some(columnChanged),
     indexes: indexes.value.some(indexChanged),
@@ -225,7 +258,7 @@ const structureDensityValues: StructureEditorDensity[] = ["compact", "standard",
 const STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-column-widths";
 const STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-index-column-widths";
 const STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY = "dbx-structure-editor-sql-preview-collapsed";
-const STRUCTURE_COLUMN_WIDTH_COUNT = 10;
+const STRUCTURE_COLUMN_WIDTH_COUNT = 12;
 const STRUCTURE_INDEX_COLUMN_WIDTH_COUNT = 8;
 const PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS = new Set([0, 1, 6]);
 const structureDensityMetrics: Record<
@@ -234,6 +267,7 @@ const structureDensityMetrics: Record<
     columns: number[];
     indexes: number[];
     minColumnWidth: number;
+    minLengthColumnWidth: number;
     minIndexColumnWidth: number;
     actionButtonWidth: number;
     fontSize: number;
@@ -249,9 +283,10 @@ const structureDensityMetrics: Record<
   }
 > = {
   compact: {
-    columns: [28, 168, 136, 82, 60, 52, 108, 220, 144, 108],
+    columns: [28, 168, 136, 82, 60, 52, 108, 220, 80, 120, 144, 108],
     indexes: [120, 180, 60, 88, 124, 144, 120, 70],
     minColumnWidth: 24,
+    minLengthColumnWidth: 140,
     minIndexColumnWidth: 48,
     actionButtonWidth: 24,
     fontSize: 11,
@@ -266,9 +301,10 @@ const structureDensityMetrics: Record<
     lineHeight: 1.35,
   },
   standard: {
-    columns: [32, 200, 160, 104, 72, 64, 128, 260, 160, 136],
+    columns: [32, 200, 160, 104, 72, 64, 128, 260, 90, 140, 160, 136],
     indexes: [148, 224, 72, 108, 148, 180, 148, 84],
     minColumnWidth: 28,
+    minLengthColumnWidth: 156,
     minIndexColumnWidth: 60,
     actionButtonWidth: 28,
     fontSize: 12,
@@ -283,9 +319,10 @@ const structureDensityMetrics: Record<
     lineHeight: 1.4,
   },
   comfortable: {
-    columns: [36, 232, 188, 116, 84, 76, 152, 300, 188, 148],
+    columns: [36, 232, 188, 116, 84, 76, 152, 300, 100, 160, 188, 148],
     indexes: [176, 260, 84, 124, 176, 216, 176, 104],
     minColumnWidth: 32,
+    minLengthColumnWidth: 176,
     minIndexColumnWidth: 64,
     actionButtonWidth: 32,
     fontSize: 13,
@@ -310,10 +347,17 @@ function metricsForDensity(density: StructureEditorDensity) {
 }
 
 function normalizeStructureColumnWidths(value: unknown, density: StructureEditorDensity): number[] | null {
-  if (!Array.isArray(value) || value.length !== STRUCTURE_COLUMN_WIDTH_COUNT) return null;
-  const minWidth = metricsForDensity(density).minColumnWidth;
-  const widths = value.map((item) => Number(item));
+  if (!Array.isArray(value)) return null;
+  let widths = value.map((item) => Number(item));
   if (widths.some((item) => !Number.isFinite(item))) return null;
+  // Backward compatibility: pad old 11-column persisted layout to 12 by inserting
+  // a default collation width at index 9.
+  if (widths.length === STRUCTURE_COLUMN_WIDTH_COUNT - 1) {
+    const defaultWidths = metricsForDensity(density).columns;
+    widths = [...widths.slice(0, 9), defaultWidths[9], ...widths.slice(9)];
+  }
+  if (widths.length !== STRUCTURE_COLUMN_WIDTH_COUNT) return null;
+  const minWidth = metricsForDensity(density).minColumnWidth;
   return widths.map((item) => Math.max(minWidth, item));
 }
 
@@ -493,9 +537,14 @@ const indexColWidths = ref(loadStructureIndexColumnWidths(structureDensity.value
 const resizing = ref<{ col: number; startX: number; startW: number } | null>(null);
 const columnSearchInputRef = ref<InstanceType<typeof Input>>();
 const columnSearchText = ref("");
+const selectedColumnId = ref<string | null>(null);
 const highlightedColumnId = ref<string | null>(null);
+const indexSearchInputRef = ref<InstanceType<typeof Input>>();
+const indexSearchText = ref("");
+const highlightedIndexId = ref<string | null>(null);
 const sqlPreviewCollapsed = ref(loadSqlPreviewCollapsed());
 let columnHighlightTimer: ReturnType<typeof window.setTimeout> | undefined;
+let indexHighlightTimer: ReturnType<typeof window.setTimeout> | undefined;
 
 watch(
   structureDensity,
@@ -515,11 +564,12 @@ watch(localStructureDensity, (density, previousDensity) => {
 function onColResize(e: MouseEvent, col: number) {
   e.preventDefault();
   const widthIndex = columnWidthIndex(col);
-  colResizing.value = { col: widthIndex, startX: e.clientX, startW: colWidths.value[widthIndex] };
+  const minimumWidth = widthIndex === 3 && databaseType.value === "dameng" ? structureDensityMetric.value.minLengthColumnWidth : structureDensityMetric.value.minColumnWidth;
+  colResizing.value = { col: widthIndex, startX: e.clientX, startW: Math.max(colWidths.value[widthIndex] ?? minimumWidth, minimumWidth) };
   const onMove = (ev: MouseEvent) => {
     if (!colResizing.value) return;
     const delta = ev.clientX - colResizing.value.startX;
-    colWidths.value[widthIndex] = Math.max(structureDensityMetric.value.minColumnWidth, colResizing.value.startW + delta);
+    colWidths.value[widthIndex] = Math.max(minimumWidth, colResizing.value.startW + delta);
   };
   const onUp = () => {
     colResizing.value = null;
@@ -553,7 +603,8 @@ function onIndexColResize(e: MouseEvent, col: number) {
 
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
-const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value));
+const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
+const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);
 const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
@@ -633,14 +684,63 @@ const defaultValuePresets = computed((): DefaultValuePreset[] => {
 });
 
 function isPostgresIdentityType(dbType: string | undefined): boolean {
-  return dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "highgo" || dbType === "vastbase" || dbType === "kingbase";
+  return dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "highgo" || dbType === "uxdb" || dbType === "vastbase" || dbType === "kingbase";
 }
 
 const showExtendedProperties = computed(() => {
   const dt = databaseType.value;
-  return dt === "mysql" || dt === "manticoresearch" || isPostgresIdentityType(dt) || dt === "sqlserver";
+  return dt === "mysql" || dt === "dameng" || dt === "manticoresearch" || isPostgresIdentityType(dt) || dt === "sqlserver";
 });
-const extendedPropertiesColumnIndex = 8;
+const showCharacterSet = computed(() => structureDialect.value === "mysql");
+
+const serverCharsetMetadata = ref<CreateDatabaseCharsetMetadata>();
+const charsetMetadataLoading = ref(false);
+
+const mysqlCharsetOptions = computed<string[]>(() => {
+  const meta = serverCharsetMetadata.value;
+  return meta ? meta.charsets : ([...CREATE_DATABASE_CHARSET_OPTIONS] as string[]);
+});
+
+function collationOptionsForCharset(charset: string): string[] {
+  const meta = serverCharsetMetadata.value;
+  if (meta) {
+    return meta.collationsByCharset[normalizeCreateDatabaseCharsetKey(charset)] ?? [];
+  }
+  return createDatabaseCollationOptionsForCharset(charset);
+}
+
+async function loadCharsetMetadata() {
+  if (charsetMetadataLoading.value || !showCharacterSet.value) return;
+  charsetMetadataLoading.value = true;
+  try {
+    await store.ensureConnected(props.connectionId);
+    const [charsetResult, collationResult] = await Promise.all([api.executeQuery(props.connectionId, props.database, "SHOW CHARACTER SET"), api.executeQuery(props.connectionId, props.database, "SHOW COLLATION")]);
+    serverCharsetMetadata.value = parseCreateDatabaseCharsetMetadata(charsetResult, collationResult);
+  } catch {
+    serverCharsetMetadata.value = fallbackCreateDatabaseCharsetMetadata();
+  } finally {
+    charsetMetadataLoading.value = false;
+  }
+}
+
+function onCharsetChange(column: EditableStructureColumn, charset: string) {
+  column.characterSet = charset;
+  // If the collation is no longer valid for the new charset, clear it so the
+  // server picks its default (COLLATE is only emitted when explicitly chosen).
+  if (column.collation && !collationOptionsForCharset(charset).includes(column.collation)) {
+    column.collation = "";
+  }
+}
+
+function columnCharset(column: EditableStructureColumn): string {
+  return column.characterSet ?? "";
+}
+
+function columnCollation(column: EditableStructureColumn): string {
+  return column.collation ?? "";
+}
+
+const extendedPropertiesColumnIndex = 10;
 const actionButtonGap = 2;
 const columnActionButtonCount = computed(() => (canShowColumnDragControls.value ? 2 : 1));
 const columnActionsWidth = computed(() => {
@@ -649,7 +749,13 @@ const columnActionsWidth = computed(() => {
   return metric.actionButtonWidth * count + actionButtonGap * Math.max(0, count - 1) + metric.cellPaddingX * 2;
 });
 const visibleColumnIndexes = computed(() => colLabels.value.map((column) => column.widthIndex));
-const visibleColWidths = computed(() => colLabels.value.map((column) => (column.key === "actions" ? columnActionsWidth.value : (colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth))));
+const visibleColWidths = computed(() =>
+  colLabels.value.map((column) => {
+    if (column.key === "actions") return columnActionsWidth.value;
+    const width = colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth;
+    return column.key === "length" && databaseType.value === "dameng" ? Math.max(width, structureDensityMetric.value.minLengthColumnWidth) : width;
+  }),
+);
 
 function columnWidthIndex(visibleIndex: number) {
   return visibleColumnIndexes.value[visibleIndex] ?? visibleIndex;
@@ -666,10 +772,12 @@ const colLabels = computed(() => {
   if (columnEditorControls.value.primaryKey) labels.push({ key: "primaryKey", label: t("structureEditor.primaryKey"), widthIndex: 5 });
   if (columnEditorControls.value.defaultValue) labels.push({ key: "defaultValue", label: t("structureEditor.defaultValue"), widthIndex: 6 });
   if (columnEditorControls.value.comment) labels.push({ key: "comment", label: t("structureEditor.comment"), widthIndex: 7 });
+  if (showCharacterSet.value) labels.push({ key: "characterSet", label: t("structureEditor.characterSet"), widthIndex: 8 });
+  if (showCharacterSet.value) labels.push({ key: "collation", label: t("structureEditor.collation"), widthIndex: 9 });
   if (showExtendedProperties.value) {
     labels.push({ key: "extendedProperties", label: t("structureEditor.extendedProperties"), widthIndex: extendedPropertiesColumnIndex });
   }
-  labels.push({ key: "actions", label: t("structureEditor.actions"), widthIndex: 9 });
+  labels.push({ key: "actions", label: t("structureEditor.actions"), widthIndex: 11 });
   return labels;
 });
 const indexColLabels = computed(() => [t("structureEditor.indexName"), t("structureEditor.indexColumns"), t("structureEditor.unique"), t("structureEditor.indexType"), t("structureEditor.includedColumns"), t("structureEditor.filter"), t("structureEditor.comment"), t("structureEditor.actions")]);
@@ -689,12 +797,20 @@ const filteredColumnRowIds = computed(() => {
   );
 });
 const columnSearchMatchCount = computed(() => (columnSearchText.value.trim() ? filteredColumnRowIds.value.size : 0));
+const filteredIndexRowIds = computed(() => {
+  const query = indexSearchText.value.trim().toLowerCase();
+  if (!query) return new Set<string>();
+  return new Set(indexes.value.filter((index) => indexMatchesSearch(index, query)).map((index) => index.id));
+});
+const indexSearchMatchCount = computed(() => (indexSearchText.value.trim() ? filteredIndexRowIds.value.size : 0));
 const foreignKeyActionOptions = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION"];
 const triggerTimingOptions = ["BEFORE", "AFTER"];
 const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
 const metadataSchema = computed(() => connectionObjectTreeQuerySchema(connection.value, props.database, props.schema));
 const refreshVersion = computed(() => (props.connectionId && props.tableName ? queryStore.tableStructureRefreshVersion(props.connectionId, props.database, props.schema, props.tableName) : 0));
 const isCreateMode = computed(() => !props.tableName);
+const usesSqliteRebuildStrategy = computed(() => !isCreateMode.value && structureCapabilities.value.alterStrategy === "sqlite-rebuild");
+const hasSqliteTypeChange = computed(() => usesSqliteRebuildStrategy.value && hasExistingColumnTypeChange(columns.value));
 const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value));
 const newTableName = ref("");
 const tableComment = ref("");
@@ -723,13 +839,67 @@ let restoringDraft = false;
 let syncingDraft = false;
 let draftHydrated = false;
 let hydratingRestoredDraft = false;
+let structureScrollFrame = 0;
+// A context-menu target may arrive before metadata rows render, so search text
+// and row scrolling are tracked separately for each request.
+let appliedInitialTargetSearchKey = "";
+let appliedInitialTargetScrollKey = "";
 
 function cloneDraftValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+const structureScrollPositions = ref<Partial<Record<TableInfoTab, TableStructureEditorViewport>>>({});
+
+function structureScrollerElement(scroller: StructureScrollerRef | undefined): HTMLElement | undefined {
+  if (!scroller) return undefined;
+  if (scroller instanceof HTMLElement) return scroller;
+  return scroller.$el instanceof HTMLElement ? scroller.$el : undefined;
+}
+
+function structureScrollerForTab(tab: TableInfoTab): HTMLElement | undefined {
+  if (tab === "columns") return structureScrollerElement(columnsScrollerRef.value);
+  if (tab === "indexes") return structureScrollerElement(indexesScrollerRef.value);
+  if (tab === "foreignKeys") return structureScrollerElement(foreignKeysScrollerRef.value);
+  if (tab === "triggers") return structureScrollerElement(triggersScrollerRef.value);
+  if (tab === "ddl") return structureScrollerElement(ddlScrollerRef.value);
+  return undefined;
+}
+
+function restoreStructureScrollPosition(tab = activeTab.value) {
+  const position = structureScrollPositions.value[tab];
+  if (!position) return;
+  nextTick(() => {
+    const scroller = structureScrollerForTab(tab);
+    if (!scroller) return;
+    scroller.scrollTop = Math.max(0, position.scrollTop);
+    scroller.scrollLeft = Math.max(0, position.scrollLeft);
+  });
+}
+
+function onStructureContentScroll(tab: TableInfoTab, event: Event) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return;
+  const position: TableStructureEditorViewport = {
+    scrollTop: Math.max(0, Math.round(target.scrollTop)),
+    scrollLeft: Math.max(0, Math.round(target.scrollLeft)),
+  };
+  const previous = structureScrollPositions.value[tab];
+  if (previous?.scrollTop === position.scrollTop && previous.scrollLeft === position.scrollLeft) return;
+  structureScrollPositions.value = {
+    ...structureScrollPositions.value,
+    [tab]: position,
+  };
+  if (structureScrollFrame) return;
+  structureScrollFrame = window.requestAnimationFrame(() => {
+    structureScrollFrame = 0;
+    syncDraftToParent();
+  });
+}
+
 function createCurrentDraft(initialized = true): TableStructureEditorDraft {
   return {
+    dirty: hasPendingStructureChanges(),
     activeTab: activeTab.value as TableStructureEditorDraft["activeTab"],
     newTableName: newTableName.value,
     tableComment: tableComment.value,
@@ -738,6 +908,8 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     indexes: cloneDraftValue(indexes.value),
     foreignKeys: cloneDraftValue(foreignKeys.value),
     triggers: cloneDraftValue(triggers.value),
+    triggersLoaded: triggersLoaded.value,
+    scrollPositions: cloneDraftValue(structureScrollPositions.value),
     initialized,
   };
 }
@@ -761,8 +933,12 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   indexes.value = cloneDraftValue(draft.indexes || []);
   foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
   triggers.value = cloneDraftValue(draft.triggers || []);
+  // Drafts created before lazy trigger loading always contained live trigger metadata.
+  triggersLoaded.value = draft.triggersLoaded ?? true;
+  structureScrollPositions.value = cloneDraftValue(draft.scrollPositions || {});
   restoringDraft = false;
   draftHydrated = !needsColumnDraftMetadataHydration();
+  restoreStructureScrollPosition();
 }
 
 function needsColumnDraftMetadataHydration() {
@@ -773,6 +949,7 @@ async function hydrateRestoredDraftFromDatabase() {
   if (!needsColumnDraftMetadataHydration() || hydratingRestoredDraft) return;
   const connectionId = props.connectionId;
   const database = props.database;
+  const catalog = props.catalog;
   const schema = metadataSchema.value;
   const tableName = props.tableName;
   if (!connectionId || !database || !tableName) return;
@@ -781,10 +958,10 @@ async function hydrateRestoredDraftFromDatabase() {
   let shouldRefreshPreview = false;
   try {
     await store.ensureConnected(connectionId);
-    let nextColumns = await api.getColumns(connectionId, database, schema, tableName);
+    let nextColumns = await api.getColumns(connectionId, database, schema, tableName, catalog);
     if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
       try {
-        const ddl = await api.getTableDdl(connectionId, database, schema, tableName);
+        const ddl = await api.getTableDisplayDdl(connectionId, database, schema, tableName, undefined, catalog);
         ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
         ddlFetched.value = true;
         nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
@@ -826,6 +1003,7 @@ function clearSqlPreviewState() {
   sqlPreviewLoading.value = false;
   pendingStatements.value = [];
   warnings.value = [];
+  sqliteSchemaRevision.value = undefined;
 }
 
 function dataTypeOptionsCacheKey(connectionId: string, database: string) {
@@ -844,6 +1022,32 @@ function mergeDataTypeOptions(primary: readonly string[], fallback: readonly str
     result.push(trimmed);
   }
   return result;
+}
+
+function mysqlDataTypeTooltip(option: string): string | undefined {
+  if (databaseType.value !== "mysql") return undefined;
+  const product = connection.value?.driver_profile === "mariadb" ? "mariadb" : connection.value?.driver_profile === "mysql" ? "mysql" : undefined;
+  const help = getMysqlDataTypeHelp(option, { product });
+  return help ? [help.key, ...(help.warningKeys ?? [])].map((key) => t(`structureEditor.mysqlDataTypeHelp.${key}`)).join("\n\n") : undefined;
+}
+
+function postgresDataTypeTooltip(option: string): string | undefined {
+  if (databaseType.value !== "postgres") return undefined;
+  const help = getPostgresDataTypeHelp(option);
+  return help ? t(`structureEditor.postgresDataTypeHelp.${help.key}`) : undefined;
+}
+
+function sqliteDataTypeTooltip(option: string): string | undefined {
+  if (databaseType.value !== "sqlite") return undefined;
+  const help = getSqliteDataTypeHelp(option);
+  return help ? t(`structureEditor.sqliteDataTypeHelp.${help.key}`) : undefined;
+}
+
+function dataTypeTooltip(option: string): string | undefined {
+  if (databaseType.value === "mysql") return mysqlDataTypeTooltip(option);
+  if (databaseType.value === "postgres") return postgresDataTypeTooltip(option);
+  if (databaseType.value === "sqlite") return sqliteDataTypeTooltip(option);
+  return undefined;
 }
 
 async function loadDynamicDataTypeOptions() {
@@ -880,52 +1084,36 @@ async function loadDynamicDataTypeOptions() {
 }
 
 function scheduleSqlPreviewRefresh() {
-  if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) {
-    if (sqlPreviewDebounceTimer) {
-      clearTimeout(sqlPreviewDebounceTimer);
-      sqlPreviewDebounceTimer = undefined;
-    }
-    sqlPreviewRequestId++;
-    deferredSqlPreviewRefresh = false;
-    pendingStatements.value = [];
-    warnings.value = [];
-    sqlPreviewLoading.value = true;
-    return;
+  if (sqlPreviewDebounceTimer) {
+    clearTimeout(sqlPreviewDebounceTimer);
+    sqlPreviewDebounceTimer = undefined;
   }
-  if (!hasPendingStructureChanges()) {
-    clearSqlPreviewState();
-    return;
-  }
-  if (!isCreateMode.value && secondaryMetadataLoading.value) {
-    if (sqlPreviewDebounceTimer) {
-      clearTimeout(sqlPreviewDebounceTimer);
-      sqlPreviewDebounceTimer = undefined;
-    }
-    deferredSqlPreviewRefresh = true;
-    sqlPreviewLoading.value = true;
-    return;
-  }
+  sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  if (sqlPreviewDebounceTimer) clearTimeout(sqlPreviewDebounceTimer);
+  pendingStatements.value = [];
+  warnings.value = [];
+  sqliteSchemaRevision.value = undefined;
+  if (!hasPendingStructureChanges()) {
+    sqlPreviewLoading.value = false;
+    return;
+  }
+  sqlPreviewLoading.value = true;
+  if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) return;
+  if (!isCreateMode.value && secondaryMetadataLoading.value) {
+    deferredSqlPreviewRefresh = true;
+    return;
+  }
   sqlPreviewDebounceTimer = setTimeout(() => {
     sqlPreviewDebounceTimer = undefined;
     void refreshSqlPreview();
   }, 80);
 }
 
-async function refreshSqlPreview() {
-  const requestId = ++sqlPreviewRequestId;
-  if (!hasPendingStructureChanges()) {
-    pendingStatements.value = [];
-    warnings.value = [];
-    sqlPreviewLoading.value = false;
-    return;
-  }
-  sqlPreviewLoading.value = true;
-  const options = {
+function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
+  return {
     databaseType: databaseType.value,
     schema: props.schema,
-    tableName: isCreateMode.value ? newTableName.value : props.tableName || "",
+    tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
     columns: columns.value,
     indexes: indexes.value,
     foreignKeys: foreignKeys.value,
@@ -933,22 +1121,47 @@ async function refreshSqlPreview() {
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
   };
+}
+
+async function refreshSqlPreview() {
+  const requestId = ++sqlPreviewRequestId;
+  if (!hasPendingStructureChanges()) {
+    pendingStatements.value = [];
+    warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    return;
+  }
+  sqlPreviewLoading.value = true;
+  const options = structureChangeOptions();
   try {
-    const result = isCreateMode.value ? await api.buildCreateTableSql(options) : await api.buildTableStructureChangeSql(options);
+    const result = isCreateMode.value ? await api.buildCreateTableSql(options) : hasSqliteTypeChange.value ? await api.previewSqliteTableStructureChange(props.connectionId, props.database, options) : await api.buildTableStructureChangeSql(options);
     if (requestId !== sqlPreviewRequestId) return;
     pendingStatements.value = result.statements;
     warnings.value = result.warnings;
+    sqliteSchemaRevision.value = "schemaRevision" in result && typeof result.schemaRevision === "string" ? result.schemaRevision : undefined;
   } catch (e: any) {
     if (requestId !== sqlPreviewRequestId) return;
     pendingStatements.value = [];
     warnings.value = [e?.message || String(e)];
+    sqliteSchemaRevision.value = undefined;
   } finally {
     if (requestId === sqlPreviewRequestId) sqlPreviewLoading.value = false;
   }
 }
 
 const canApply = computed(
-  () => !loading.value && !saving.value && !postSaveRefreshing.value && !secondaryMetadataLoading.value && !sqlPreviewLoading.value && pendingStatements.value.length > 0 && warnings.value.length === 0 && !!props.connectionId && (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
+  () =>
+    !loading.value &&
+    !saving.value &&
+    !postSaveRefreshing.value &&
+    !secondaryMetadataLoading.value &&
+    !sqlPreviewLoading.value &&
+    pendingStatements.value.length > 0 &&
+    warnings.value.length === 0 &&
+    (!hasSqliteTypeChange.value || !!sqliteSchemaRevision.value) &&
+    !!props.connectionId &&
+    (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
 );
 
 function clearDraft() {
@@ -957,7 +1170,6 @@ function clearDraft() {
 }
 
 function resetState() {
-  activeTab.value = "columns";
   loading.value = false;
   saving.value = false;
   postSaveRefreshing.value = false;
@@ -970,33 +1182,47 @@ function resetState() {
   indexes.value = [];
   pendingStatements.value = [];
   warnings.value = [];
+  sqliteSchemaRevision.value = undefined;
   foreignKeys.value = [];
   triggers.value = [];
+  triggersLoaded.value = false;
+  selectedColumnId.value = null;
   ddlContent.value = "";
   ddlFetched.value = false;
   newTableName.value = "";
   tableComment.value = "";
   originalTableComment.value = "";
+  columnSearchText.value = "";
+  highlightedColumnId.value = null;
+  indexSearchText.value = "";
+  highlightedIndexId.value = null;
+  appliedInitialTargetSearchKey = "";
+  appliedInitialTargetScrollKey = "";
+  localColumnOrderNoticeShown.value = false;
 }
 
 async function reloadStructureFromDatabase() {
   if (isCreateMode.value) return;
   draftHydrated = false;
-  await loadStructure(false, FULL_STRUCTURE_REFRESH_SCOPE, true, { blockSecondaryMetadata: true });
+  if (activeTab.value !== "triggers") {
+    triggers.value = [];
+    triggersLoaded.value = false;
+  }
+  await loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true });
 }
 
-function setSecondaryMetadataLoading(scope: StructureRefreshScope, value: boolean) {
+function setSecondaryMetadataLoading(scope: TableStructureRefreshScope, value: boolean) {
   if (scope.indexes && tableMetadataCapabilities.value.indexes) indexesLoading.value = value;
   if (scope.foreignKeys && tableMetadataCapabilities.value.foreignKeys) foreignKeysLoading.value = value;
   if (scope.triggers && tableMetadataCapabilities.value.triggers) triggersLoading.value = value;
 }
 
-async function fetchTableCommentValue(connectionId: string, database: string, schema: string, tableName: string): Promise<string | undefined> {
+async function fetchTableCommentValue(connectionId: string, database: string, schema: string, tableName: string, catalog?: string): Promise<string | undefined> {
   try {
-    return (await api.getTableComment(connectionId, database, schema, tableName)) || "";
+    return (await api.getTableComment(connectionId, database, schema, tableName, catalog)) || "";
   } catch {
     try {
-      const tables = await api.listTables(connectionId, database, schema);
+      const tables = await api.listTables(connectionId, database, schema, undefined, undefined, undefined, undefined, catalog);
       const table = tables.find((t) => t.name.toLowerCase() === tableName.toLowerCase() && t.table_type !== "VIEW");
       return table?.comment || "";
     } catch {
@@ -1005,9 +1231,10 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean } = {}) {
+async function loadStructure(silent = false, scope: TableStructureRefreshScope = visibleTableStructureRefreshScope(activeTab.value), showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean; damengLengthUnitsAfterSave?: ReadonlyMap<string, string> } = {}) {
   const connectionId = props.connectionId;
   const database = props.database;
+  const catalog = props.catalog;
   const schema = metadataSchema.value;
   const tableName = props.tableName;
   if (!connectionId || !database || !tableName) return;
@@ -1020,17 +1247,17 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
   try {
     await store.ensureConnected(connectionId);
 
-    const columnsPromise = scope.columns ? api.getColumns(connectionId, database, schema, tableName) : Promise.resolve(undefined);
-    const indexesPromise = scope.indexes ? (tableMetadataCapabilities.value.indexes ? api.listIndexes(connectionId, database, schema, tableName).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const foreignKeysPromise = scope.foreignKeys ? (tableMetadataCapabilities.value.foreignKeys ? api.listForeignKeys(connectionId, database, schema, tableName).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const triggersPromise = scope.triggers ? (tableMetadataCapabilities.value.triggers ? api.listTriggers(connectionId, database, schema, tableName).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
-    const tableCommentPromise = scope.tableComment && structureCapabilities.value.comment ? fetchTableCommentValue(connectionId, database, schema, tableName) : Promise.resolve(undefined);
+    const columnsPromise = scope.columns ? api.getColumns(connectionId, database, schema, tableName, catalog) : Promise.resolve(undefined);
+    const indexesPromise = scope.indexes ? (tableMetadataCapabilities.value.indexes ? api.listIndexes(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
+    const foreignKeysPromise = scope.foreignKeys ? (tableMetadataCapabilities.value.foreignKeys ? api.listForeignKeys(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
+    const triggersPromise = scope.triggers ? (tableMetadataCapabilities.value.triggers ? api.listTriggers(connectionId, database, schema, tableName, catalog).catch(() => []) : Promise.resolve([])) : Promise.resolve(undefined);
+    const tableCommentPromise = scope.tableComment && structureCapabilities.value.comment ? fetchTableCommentValue(connectionId, database, schema, tableName, catalog) : Promise.resolve(undefined);
 
     let nextColumns = await columnsPromise;
     if (nextColumns) {
       if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
         try {
-          const ddl = await api.getTableDdl(connectionId, database, schema, tableName);
+          const ddl = await api.getTableDisplayDdl(connectionId, database, schema, tableName, undefined, catalog);
           ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
@@ -1038,7 +1265,13 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
           /* ignore — Manticore column properties can still come from SHOW COLUMNS when available */
         }
       }
-      columns.value = createColumnDrafts(nextColumns, databaseType.value);
+      // Load live charset/collation metadata from the MySQL server so the column
+      // editor shows the correct options for the server version.
+      void loadCharsetMetadata();
+      const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
+      const hydratedColumnDrafts = databaseType.value === "dameng" && options.damengLengthUnitsAfterSave ? restoreDamengLengthUnitsAfterSave(nextColumnDrafts, options.damengLengthUnitsAfterSave) : nextColumnDrafts;
+      columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
+      if (!options.preserveDraft) selectedColumnId.value = null;
     }
 
     const nextTableComment = await tableCommentPromise;
@@ -1051,7 +1284,10 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
       if (requestId !== structureLoadRequestId) return;
       if (nextIndexes) indexes.value = createIndexDrafts(nextIndexes);
       if (nextForeignKeys) foreignKeys.value = createForeignKeyDrafts(nextForeignKeys);
-      if (nextTriggers) triggers.value = createTriggerDrafts(nextTriggers);
+      if (nextTriggers) {
+        triggers.value = createTriggerDrafts(nextTriggers);
+        triggersLoaded.value = true;
+      }
     };
 
     secondaryMetadataScheduled = true;
@@ -1083,9 +1319,9 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
   }
 }
 
-async function refreshStructureAfterSave(scope: StructureRefreshScope) {
+async function refreshStructureAfterSave(scope: TableStructureRefreshScope, damengLengthUnitsAfterSave: ReadonlyMap<string, string>) {
   try {
-    await loadStructure(true, scope, false, { blockSecondaryMetadata: true });
+    await loadStructure(true, scope, false, { blockSecondaryMetadata: true, damengLengthUnitsAfterSave });
   } catch (e) {
     console.warn("[DBX][structure-editor:post-save-refresh-failed]", e);
   } finally {
@@ -1094,29 +1330,43 @@ async function refreshStructureAfterSave(scope: StructureRefreshScope) {
   }
 }
 
-async function addColumn() {
-  if (!canAddColumn.value) return;
-  activeTab.value = "columns";
-  const dataType = databaseType.value === "manticoresearch" ? combineDataTypeForDatabase(databaseType.value, dataTypeOptions.value[0] ?? "text", getDefaultLengthForType(databaseType.value, dataTypeOptions.value[0] ?? "text")) : "varchar(255)";
-  const column: EditableStructureColumn = {
-    id: `new:${uuid()}`,
-    name: "",
-    dataType,
-    isNullable: true,
-    defaultValue: "",
-    comment: "",
-    isPrimaryKey: false,
-    extra: {},
-    markedForDrop: false,
-  };
-  columns.value.push(column);
+async function focusColumnNameInput(columnId: string) {
   await nextTick();
-  const newRows = rootRef.value?.querySelectorAll<HTMLElement>('[data-new-column-row="true"]');
-  const row = newRows?.[newRows.length - 1];
+  const row = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-column-row-index]") ?? []).find((element) => element.dataset.columnId === columnId);
   const input = row?.querySelector<HTMLInputElement>("[data-column-name-input]");
   row?.scrollIntoView({ block: "nearest" });
   input?.focus();
   input?.select();
+}
+
+function onColumnRowActivate(column: EditableStructureColumn) {
+  if (column.markedForDrop || !columns.value.some((item) => item.id === column.id)) return;
+  selectedColumnId.value = column.id;
+}
+
+async function addColumn() {
+  if (!canAddColumn.value) return;
+  activeTab.value = "columns";
+  const dataType = defaultNewColumnDataType(databaseType.value, dataTypeOptions.value);
+  const column: EditableStructureColumn = {
+    id: `new:${uuid()}`,
+    name: "",
+    dataType,
+    enumValues: [],
+    isNullable: true,
+    defaultValue: "",
+    comment: "",
+    isPrimaryKey: false,
+    characterSet: "",
+    collation: "",
+    extra: {},
+    markedForDrop: false,
+  };
+  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  columns.value.splice(insertAt, 0, column);
+  selectedColumnId.value = column.id;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder();
+  await focusColumnNameInput(column.id);
 }
 
 function applyColumnTemplate(templateId: string) {
@@ -1130,11 +1380,15 @@ function applyColumnTemplate(templateId: string) {
     createId: uuid,
   });
   if (!templateColumns.length) return;
-  columns.value.push(...templateColumns);
+  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  columns.value.splice(insertAt, 0, ...templateColumns);
+  selectedColumnId.value = templateColumns[templateColumns.length - 1]?.id ?? selectedColumnId.value;
+  if (usesLocalTableColumnOrder.value) persistLocalColumnOrder();
 }
 
 function removeNewColumn(column: EditableStructureColumn) {
   columns.value = columns.value.filter((item) => item.id !== column.id);
+  if (selectedColumnId.value === column.id) selectedColumnId.value = null;
 }
 
 type ColumnDragState = {
@@ -1144,6 +1398,7 @@ type ColumnDragState = {
 };
 
 const columnDragState = ref<ColumnDragState | null>(null);
+const localColumnOrderNoticeShown = ref(false);
 let columnDragPreviousBodyUserSelect = "";
 let columnDragPreviousBodyCursor = "";
 let columnDragTracking = false;
@@ -1169,7 +1424,53 @@ function canDropColumnAt(sourceIndex: number, insertionIndex: number): boolean {
   return crossedColumns.every((column) => !column.original);
 }
 
-const canShowColumnDragControls = computed(() => isCreateMode.value || structureCapabilities.value.reorderColumn);
+const usesLocalTableColumnOrder = computed(() => !isCreateMode.value && supportsLocalTableColumnReorder(databaseType.value, connection.value?.db_type));
+const canShowColumnDragControls = computed(() => isCreateMode.value || structureCapabilities.value.reorderColumn || usesLocalTableColumnOrder.value);
+
+function localTableColumnOrderScopeKey(): string {
+  return tableDataGridColumnOrderScopeKey({
+    connectionId: props.connectionId,
+    database: props.database,
+    schema: props.schema,
+    tableName: props.tableName,
+  });
+}
+
+function localColumnOrderKeys(items: readonly EditableStructureColumn[]): string[] {
+  return uniqueDataGridColumnOrderKeys(items.map((column) => column.name));
+}
+
+const hasLocalColumnOrderChange = computed(() => {
+  if (!usesLocalTableColumnOrder.value) return false;
+  return hasLocalTableColumnOrderChange(columns.value);
+});
+
+function applyStoredLocalColumnOrder(items: EditableStructureColumn[]): EditableStructureColumn[] {
+  if (!usesLocalTableColumnOrder.value) return items;
+  const orderedKeys = loadTableDataGridColumnOrder(localTableColumnOrderScopeKey());
+  if (!orderedKeys.length) return items;
+  const columnKeys = uniqueDataGridColumnOrderKeys(items.map((column) => column.name));
+  const indexes = orderedColumnIndexes({
+    availableIndexes: items.map((_, index) => index),
+    columnKeys,
+    orderedKeys,
+  });
+  return indexes.map((index) => items[index]).filter((column): column is EditableStructureColumn => !!column);
+}
+
+function persistLocalColumnOrder(showNotice = true) {
+  if (!usesLocalTableColumnOrder.value) return;
+  const scopeKey = localTableColumnOrderScopeKey();
+  if (hasLocalColumnOrderChange.value) {
+    saveTableDataGridColumnOrder(scopeKey, localColumnOrderKeys(columns.value));
+  } else {
+    removeTableDataGridColumnOrder(scopeKey);
+  }
+  notifyTableDataGridColumnOrderChanged(scopeKey);
+  if (!showNotice || localColumnOrderNoticeShown.value) return;
+  localColumnOrderNoticeShown.value = true;
+  toast(t("structureEditor.localColumnOrderNotice"), 4000);
+}
 
 function isSqlServerIdentityChecked(column: EditableStructureColumn): boolean {
   return !!column.extra.autoIncrement || !!column.extra.identity;
@@ -1229,14 +1530,105 @@ function updateSqlServerIdentityIncrement(column: EditableStructureColumn, value
   column.extra.identity!.increment = parseOptionalNumberInput(value);
 }
 
+function isDamengIdentityChecked(column: EditableStructureColumn): boolean {
+  return !!column.extra.autoIncrement || !!column.extra.identity;
+}
+
+function canEditDamengIdentity(column: EditableStructureColumn): boolean {
+  if (column.original || column.markedForDrop || !isDamengIdentityCompatibleDataType(column.dataType)) return false;
+  // DM8 permits only one identity column per table, so prevent creating an invalid draft in the editor.
+  return isDamengIdentityChecked(column) || !columns.value.some((candidate) => candidate !== column && !candidate.markedForDrop && isDamengIdentityChecked(candidate));
+}
+
+function clearDamengIdentity(column: EditableStructureColumn) {
+  column.extra.autoIncrement = false;
+  column.extra.identity = undefined;
+}
+
+function syncDamengIdentityForDataType(column: EditableStructureColumn) {
+  if (databaseType.value !== "dameng") return;
+  if (!isDamengIdentityChecked(column)) return;
+  if (isDamengIdentityCompatibleDataType(column.dataType)) return;
+  clearDamengIdentity(column);
+}
+
+function ensureDamengIdentity(column: EditableStructureColumn) {
+  column.extra.autoIncrement = true;
+  column.extra.identity = {
+    seed: column.extra.identity?.seed ?? 1,
+    increment: column.extra.identity?.increment ?? 1,
+  };
+}
+
+function setDamengIdentity(column: EditableStructureColumn, checked: boolean) {
+  if (!canEditDamengIdentity(column)) return;
+  if (checked) {
+    ensureDamengIdentity(column);
+    column.isNullable = false;
+  } else {
+    clearDamengIdentity(column);
+  }
+}
+
+function updateDamengIdentitySeed(column: EditableStructureColumn, value: string | number) {
+  if (!canEditDamengIdentity(column)) return;
+  ensureDamengIdentity(column);
+  column.extra.identity!.seed = parseOptionalNumberInput(value);
+}
+
+function updateDamengIdentityIncrement(column: EditableStructureColumn, value: string | number) {
+  if (!canEditDamengIdentity(column)) return;
+  ensureDamengIdentity(column);
+  column.extra.identity!.increment = parseOptionalNumberInput(value);
+}
+
 function updateColumnDataType(column: EditableStructureColumn, baseType: string) {
-  column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType));
+  if (isMysqlEnumDataType(databaseType.value, baseType)) {
+    if (!column.enumValues?.length) column.enumValues = [""];
+    column.dataType = mysqlEnumDataType(column.enumValues);
+  } else {
+    column.dataType = combineDataTypeForDatabase(databaseType.value, baseType, getDefaultLengthForType(databaseType.value, baseType, { omitMysqlDeprecatedDefaults: usesMysql8SafeDefaults.value }));
+  }
   syncSqlServerIdentityForDataType(column);
+  syncDamengIdentityForDataType(column);
+  // Clear charset/collation when switching to a non-character MySQL type
+  if (showCharacterSet.value && !isMysqlCharacterDataType(column.dataType)) {
+    column.characterSet = "";
+    column.collation = "";
+  }
+}
+
+function updateMysqlEnumValue(column: EditableStructureColumn, index: number, value: string | number) {
+  if (!column.enumValues || index < 0 || index >= column.enumValues.length) return;
+  column.enumValues[index] = String(value);
+  column.dataType = mysqlEnumDataType(column.enumValues);
+}
+
+function addMysqlEnumValue(column: EditableStructureColumn) {
+  column.enumValues ??= [];
+  column.enumValues.push("");
+  column.dataType = mysqlEnumDataType(column.enumValues);
+}
+
+function removeMysqlEnumValue(column: EditableStructureColumn, index: number) {
+  if (!column.enumValues || column.enumValues.length <= 1) return;
+  column.enumValues.splice(index, 1);
+  column.dataType = mysqlEnumDataType(column.enumValues);
 }
 
 function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
-  column.dataType = combineDataTypeForDatabase(databaseType.value, splitDataType(column.dataType).baseType, String(value));
+  const baseType = splitDataType(column.dataType).baseType;
+  column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, String(value), dataTypeLengthUnitValue(databaseType.value, column.dataType));
   syncSqlServerIdentityForDataType(column);
+  syncDamengIdentityForDataType(column);
+}
+
+function updateColumnDataTypeLengthUnit(column: EditableStructureColumn, value: unknown) {
+  const baseType = splitDataType(column.dataType).baseType;
+  const unit = value === "__default" ? "" : String(value ?? "");
+  column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, dataTypeLengthInputValue(databaseType.value, column.dataType), unit);
+  syncSqlServerIdentityForDataType(column);
+  syncDamengIdentityForDataType(column);
 }
 
 function moveColumnTo(index: number, insertionIndex: number) {
@@ -1247,6 +1639,7 @@ function moveColumnTo(index: number, insertionIndex: number) {
   const adjustedInsertionIndex = insertionIndex > index ? insertionIndex - 1 : insertionIndex;
   nextColumns.splice(adjustedInsertionIndex, 0, column);
   columns.value = nextColumns;
+  persistLocalColumnOrder();
 }
 
 function onColumnDragPointerDown(index: number, event: PointerEvent) {
@@ -1368,10 +1761,12 @@ function onColumnDragEnd() {
 function columnRowClass(column: EditableStructureColumn, index: number) {
   const dragState = columnDragState.value;
   const isSearchMatch = filteredColumnRowIds.value.has(column.id);
+  const isSelected = selectedColumnId.value === column.id && !column.markedForDrop;
   return {
     "bg-destructive/5 opacity-60": column.markedForDrop,
     "structure-column-search-match": isSearchMatch,
-    "structure-column-search-current": highlightedColumnId.value === column.id,
+    // Reuse the existing search-current highlight for the active/selected row.
+    "structure-column-search-current": highlightedColumnId.value === column.id || isSelected,
     "opacity-55": dragState?.columnId === column.id,
     "bg-primary/5": dragState && (dragState.insertionIndex === index || dragState.insertionIndex === index + 1),
     "[&>td]:border-t-2 [&>td]:border-t-primary": dragState?.insertionIndex === index,
@@ -1441,6 +1836,76 @@ function onColumnSearchKeydown(event: KeyboardEvent) {
   scrollToColumnSearchMatch(event.shiftKey ? -1 : 1);
 }
 
+function indexMatchesSearch(index: EditableStructureIndex, searchQuery = indexSearchText.value.trim().toLowerCase()): boolean {
+  if (!searchQuery) return false;
+  return [index.name, toColumnNames(index.columns), index.includedColumns.join(", "), index.indexType, index.filter, index.comment].some((value) =>
+    String(value ?? "")
+      .toLowerCase()
+      .includes(searchQuery),
+  );
+}
+
+function indexFieldMatchesSearch(value: string | null | undefined): boolean {
+  const query = indexSearchText.value.trim().toLowerCase();
+  return (
+    !!query &&
+    String(value ?? "")
+      .toLowerCase()
+      .includes(query)
+  );
+}
+
+function indexRowClass(index: EditableStructureIndex) {
+  const isSearchMatch = filteredIndexRowIds.value.has(index.id);
+  return {
+    "bg-destructive/5 opacity-60": index.markedForDrop,
+    "structure-column-search-match": isSearchMatch,
+    "structure-column-search-current": highlightedIndexId.value === index.id,
+  };
+}
+
+function indexSearchFieldClass(index: EditableStructureIndex, value: string | null | undefined) {
+  const matches = indexFieldMatchesSearch(value);
+  return {
+    "!border-primary/60 !bg-primary/10": matches,
+    "!border-primary !ring-2 !ring-primary/30": matches && highlightedIndexId.value === index.id,
+  };
+}
+
+function focusIndexSearch() {
+  activeTab.value = "indexes";
+  void nextTick(() => {
+    const input = indexSearchInputRef.value?.$el as HTMLInputElement | undefined;
+    input?.focus();
+    input?.select();
+  });
+}
+
+function scrollToIndexSearchMatch(direction: 1 | -1 = 1) {
+  const query = indexSearchText.value.trim();
+  if (!query) {
+    focusIndexSearch();
+    return;
+  }
+  const rows = Array.from(rootRef.value?.querySelectorAll<HTMLElement>("[data-index-row-index]") ?? []);
+  const matches = indexes.value.map((index, rowIndex) => ({ index, rowIndex })).filter(({ index }) => indexMatchesSearch(index));
+  if (!matches.length) return;
+  const currentIndex = highlightedIndexId.value ? matches.findIndex(({ index }) => index.id === highlightedIndexId.value) : -1;
+  const nextMatch = matches[(currentIndex + direction + matches.length) % matches.length] ?? matches[0];
+  highlightedIndexId.value = nextMatch.index.id;
+  rows[nextMatch.rowIndex]?.scrollIntoView({ block: "center", inline: "nearest" });
+  if (indexHighlightTimer) window.clearTimeout(indexHighlightTimer);
+  indexHighlightTimer = window.setTimeout(() => {
+    highlightedIndexId.value = null;
+  }, 1800);
+}
+
+function onIndexSearchKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  scrollToIndexSearchMatch(event.shiftKey ? -1 : 1);
+}
+
 function columnDragInsertionIndex(index: number, event: DragEvent): number {
   const target = event.currentTarget;
   if (!(target instanceof HTMLElement)) return index;
@@ -1451,6 +1916,9 @@ function columnDragInsertionIndex(index: number, event: DragEvent): number {
 function toggleDropColumn(column: EditableStructureColumn) {
   if (!canDropColumn(column)) return;
   column.markedForDrop = !column.markedForDrop;
+  if (column.markedForDrop && selectedColumnId.value === column.id) {
+    selectedColumnId.value = null;
+  }
 }
 
 function isColumnNameDisabled(column: EditableStructureColumn): boolean {
@@ -1469,6 +1937,14 @@ function isColumnLengthDisabled(column: EditableStructureColumn): boolean {
   return isDataTypeLengthDisabled(databaseType.value, baseType);
 }
 
+function columnLengthUnitOptions(column: EditableStructureColumn) {
+  return getDataTypeLengthUnitOptions(databaseType.value, column.dataType);
+}
+
+function isColumnLengthUnitDisabled(column: EditableStructureColumn): boolean {
+  return isColumnLengthDisabled(column) || !dataTypeLengthInputValue(databaseType.value, column.dataType).trim();
+}
+
 function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || column.isPrimaryKey || (!!column.original && !structureCapabilities.value.alterNullability);
 }
@@ -1479,6 +1955,12 @@ function isColumnDefaultDisabled(column: EditableStructureColumn): boolean {
 
 function isColumnCommentDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || !structureCapabilities.value.comment;
+}
+
+function isColumnCharsetDisabled(column: EditableStructureColumn): boolean {
+  if (column.markedForDrop) return true;
+  if (!showCharacterSet.value) return true;
+  return !isMysqlCharacterDataType(column.dataType);
 }
 
 function isPrimaryKeyDisabled(column: EditableStructureColumn): boolean {
@@ -1606,7 +2088,8 @@ function canDropIndex(index: EditableStructureIndex): boolean {
 }
 
 const canEditForeignKeys = computed(() => structureCapabilities.value.foreignKey);
-const canEditMysqlTriggers = computed(() => structureDialect.value === "mysql");
+const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle");
+const isOracleTriggerEditor = computed(() => structureDialect.value === "oracle");
 
 function generatedForeignKeyName(column = ""): string {
   const table = structureIndexTableName() || "table";
@@ -1654,14 +2137,14 @@ function canEditForeignKeyDraft(foreignKey: EditableStructureForeignKey): boolea
 }
 
 function addTrigger() {
-  if (!canEditMysqlTriggers.value || triggersLoading.value) return;
+  if (!canEditTriggers.value || triggersLoading.value) return;
   activeTab.value = "triggers";
   triggers.value.push({
     id: `new:${uuid()}`,
     name: "",
-    timing: "BEFORE",
+    timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : "BEFORE",
     event: "INSERT",
-    statement: "BEGIN\n  \nEND",
+    statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : "BEGIN\n  \nEND",
     markedForDrop: false,
   });
 }
@@ -1676,7 +2159,7 @@ function toggleDropTrigger(trigger: EditableStructureTrigger) {
 }
 
 function canEditTriggerDraft(trigger: EditableStructureTrigger): boolean {
-  return !triggersLoading.value && canEditMysqlTriggers.value && !trigger.markedForDrop;
+  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop && canEditStructuredTriggerDraft(databaseType.value, trigger);
 }
 
 function primarySqlOperation(sql: string): string {
@@ -1699,7 +2182,7 @@ async function recordStructureHistory(sql: string, start: number, success: boole
       success,
       error,
       activity_kind: "schema_change",
-      operation: primarySqlOperation(sql),
+      operation: hasSqliteTypeChange.value ? "ALTER TABLE" : primarySqlOperation(sql),
       target: isCreateMode.value ? newTableName.value.trim() : props.tableName,
       affected_rows: success ? result?.affected_rows : undefined,
     });
@@ -1718,26 +2201,57 @@ async function copyPreviewSql() {
   }
 }
 
+async function copyDdlContent() {
+  if (!ddlContent.value.trim()) return;
+  try {
+    await copyToClipboard(ddlContent.value);
+    toast(t("contextMenu.ddlCopied"), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 function toggleSqlPreviewCollapsed() {
   sqlPreviewCollapsed.value = !sqlPreviewCollapsed.value;
   safeLocalStorageSet(STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY, String(sqlPreviewCollapsed.value));
 }
 
 async function applyChanges() {
-  if (!canApply.value || !props.connectionId || !props.database) return;
+  if (!canApply.value || !props.connectionId || !props.database) return false;
+  const sql = previewSqlText.value;
+  const connection = store.getConfig(props.connectionId);
+  const productionContext = productionContextForDatabase(connection, props.database);
+  if (productionContext.active) {
+    const confirmed = await productionSafetyStore.requestConfirmation({
+      sql,
+      connectionName: connection?.name,
+      database: props.database,
+      productionDatabases: productionContext.databases,
+      source: t("production.sourceStructure"),
+    });
+    if (!confirmed) return false;
+  }
   saving.value = true;
   errorMessage.value = "";
-  const sql = previewSqlText.value;
   const refreshScope = captureStructureRefreshScope();
+  const damengLengthUnitsAfterSave = new Map<string, string>();
+  if (databaseType.value === "dameng") {
+    for (const column of columns.value) {
+      if (!column.markedForDrop && dataTypeLengthUnitValue("dameng", column.dataType)) {
+        damengLengthUnitsAfterSave.set(column.name.trim().toLowerCase(), column.dataType);
+      }
+    }
+  }
   const startedAt = Date.now();
   try {
-    const connection = store.getConfig(props.connectionId);
-    const timeoutSecs = queryTimeoutSecsForConnection(connection);
-    const result = await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, timeoutSecs);
+    const result = hasSqliteTypeChange.value
+      ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
+      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, queryTimeoutSecsForConnection(connection));
     await recordStructureHistory(sql, startedAt, true, result);
     toast(t("structureEditor.saved"), 2500);
     pendingStatements.value = [];
     warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
     ddlFetched.value = false;
     ddlContent.value = "";
     if (isCreateMode.value) {
@@ -1745,19 +2259,25 @@ async function applyChanges() {
       emit("saved", tableComment.value !== originalTableComment.value);
       emit("close");
     } else {
+      // Refresh persisted keys after successful renames/additions before metadata reloads.
+      persistLocalColumnOrder(false);
       saving.value = false;
       postSaveRefreshing.value = true;
       skipNextRefreshVersion = true;
       emit("saved", tableComment.value !== originalTableComment.value);
-      void refreshStructureAfterSave(refreshScope);
+      await refreshStructureAfterSave(refreshScope, damengLengthUnitsAfterSave);
     }
+    return true;
   } catch (e: any) {
     errorMessage.value = e?.message || String(e);
     await recordStructureHistory(sql, startedAt, false, undefined, errorMessage.value);
+    return false;
   } finally {
     saving.value = false;
   }
 }
+
+defineExpose({ applyChanges });
 
 function addItemForActiveTab(): boolean {
   if (activeTab.value === "columns" && canAddColumn.value) {
@@ -1772,7 +2292,7 @@ function addItemForActiveTab(): boolean {
     addForeignKey();
     return true;
   }
-  if (activeTab.value === "triggers" && canEditMysqlTriggers.value) {
+  if (activeTab.value === "triggers" && canEditTriggers.value && !triggersLoading.value) {
     addTrigger();
     return true;
   }
@@ -1816,16 +2336,19 @@ function unregisterStructureEditorShortcuts() {
 onMounted(() => {
   resetState();
   applyInitialStructureTab();
+  applyInitialStructureTarget();
   registerStructureEditorShortcuts();
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized) {
     restoreDraft(props.draft);
-    applyInitialStructureTab();
-    void hydrateRestoredDraftFromDatabase();
+    // A restored draft owns its saved tab unless navigation explicitly requested another one.
+    applyInitialStructureTab(false);
+    applyInitialStructureTarget();
+    void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
   } else {
-    void loadStructure(false, FULL_STRUCTURE_REFRESH_SCOPE, true, { blockSecondaryMetadata: true });
+    void loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
   }
 });
 
@@ -1834,8 +2357,10 @@ onActivated(() => {
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized && !draftHydrated) {
     restoreDraft(props.draft);
-    void hydrateRestoredDraftFromDatabase();
+    applyInitialStructureTarget();
+    void hydrateRestoredDraftFromDatabase().then(() => applyInitialStructureTarget());
   }
+  restoreStructureScrollPosition();
 });
 onDeactivated(unregisterStructureEditorShortcuts);
 onBeforeUnmount(() => {
@@ -1843,39 +2368,79 @@ onBeforeUnmount(() => {
   unregisterStructureEditorShortcuts();
   clearSqlPreviewState();
   if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
+  if (indexHighlightTimer) window.clearTimeout(indexHighlightTimer);
+  if (structureScrollFrame) window.cancelAnimationFrame(structureScrollFrame);
   persistStructureDensity();
 });
 
-function firstStructureMetadataTab(capabilities = tableMetadataCapabilities.value) {
-  if (capabilities.columns) return "columns";
-  if (capabilities.indexes) return "indexes";
-  if (capabilities.foreignKeys) return "foreignKeys";
-  if (capabilities.triggers) return "triggers";
-  if (capabilities.ddl && !isCreateMode.value) return "ddl";
-  return "columns";
+function localFirstStructureMetadataTab(capabilities = tableMetadataCapabilities.value) {
+  return firstStructureMetadataTab(capabilities, isCreateMode.value);
 }
 
-function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities = tableMetadataCapabilities.value) {
-  return (tab === "columns" && capabilities.columns) || (tab === "indexes" && capabilities.indexes) || (tab === "foreignKeys" && capabilities.foreignKeys) || (tab === "triggers" && capabilities.triggers) || (tab === "ddl" && capabilities.ddl && !isCreateMode.value);
+function localIsStructureMetadataTabSupported(tab: TableInfoTab, capabilities = tableMetadataCapabilities.value) {
+  return isStructureMetadataTabSupported(tab, capabilities, isCreateMode.value);
 }
 
 function resolveStructureMetadataTab(tab: TableInfoTab | undefined, capabilities = tableMetadataCapabilities.value): TableInfoTab {
-  if (tab && isStructureMetadataTabSupported(tab, capabilities)) return tab;
-  return firstStructureMetadataTab(capabilities);
+  if (tab && localIsStructureMetadataTabSupported(tab, capabilities)) return tab;
+  return localFirstStructureMetadataTab(capabilities);
 }
 
-function applyInitialStructureTab() {
-  if (!props.initialTab) return;
-  activeTab.value = resolveStructureMetadataTab(props.initialTab);
+function applyInitialStructureTab(useDefault = true) {
+  if (props.initialTab) {
+    activeTab.value = resolveStructureMetadataTab(props.initialTab);
+  } else if (useDefault) {
+    activeTab.value = resolveStructureMetadataTab(undefined);
+  }
+}
+
+function initialTargetKey(target: TableStructureEditorTarget): string {
+  return `${props.initialTabRequestId ?? 0}:${target.kind}:${target.name}`;
+}
+
+function applyInitialStructureTarget() {
+  const target = props.initialTarget;
+  const targetName = target?.name.trim();
+  if (!target || !targetName) return;
+
+  const key = initialTargetKey(target);
+  if (appliedInitialTargetSearchKey !== key) {
+    if (target.kind === "column") {
+      activeTab.value = resolveStructureMetadataTab("columns");
+      columnSearchText.value = targetName;
+      highlightedColumnId.value = null;
+    } else {
+      activeTab.value = resolveStructureMetadataTab("indexes");
+      indexSearchText.value = targetName;
+      highlightedIndexId.value = null;
+    }
+    appliedInitialTargetSearchKey = key;
+  }
+
+  if (appliedInitialTargetScrollKey === key) return;
+  const hasMatch = target.kind === "column" ? columns.value.some((column) => columnMatchesSearch(column)) : indexes.value.some((index) => indexMatchesSearch(index));
+  if (!hasMatch) return;
+  appliedInitialTargetScrollKey = key;
+  void nextTick(() => {
+    if (target.kind === "column") {
+      scrollToColumnSearchMatch(1);
+    } else {
+      scrollToIndexSearchMatch(1);
+    }
+  });
 }
 
 watch(tableMetadataCapabilities, (capabilities) => {
-  if (!isStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = firstStructureMetadataTab(capabilities);
+  if (!localIsStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = localFirstStructureMetadataTab(capabilities);
 });
 
-watch([() => props.initialTab, () => props.initialTabRequestId], () => {
-  if (!props.initialTab) return;
-  applyInitialStructureTab();
+watch([() => props.initialTab, () => props.initialTabRequestId, () => props.initialTarget], () => {
+  if (props.initialTab) applyInitialStructureTab();
+  applyInitialStructureTarget();
+});
+
+watch([columns, indexes], () => {
+  applyInitialStructureTarget();
 });
 
 watch([() => props.connectionId, () => props.database, databaseType], () => {
@@ -1883,7 +2448,7 @@ watch([() => props.connectionId, () => props.database, databaseType], () => {
 });
 
 watch(
-  [isCreateMode, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, columns, indexes, foreignKeys, triggers],
+  [isCreateMode, () => props.connectionId, () => props.database, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, columns, indexes, foreignKeys, triggers],
   () => {
     scheduleSqlPreviewRefresh();
     syncDraftToParent();
@@ -1892,9 +2457,41 @@ watch(
 );
 
 watch(activeTab, () => {
+  selectedColumnId.value = null;
   highlightedColumnId.value = null;
+  highlightedIndexId.value = null;
+  restoreStructureScrollPosition();
   syncDraftToParent();
 });
+
+async function loadTriggersIfNeeded() {
+  if (
+    !shouldLoadTableStructureTriggers({
+      activeTab: activeTab.value,
+      isCreateMode: isCreateMode.value,
+      supported: tableMetadataCapabilities.value.triggers,
+      loaded: triggersLoaded.value,
+      loading: triggersLoading.value,
+      structureLoading: loading.value,
+    })
+  )
+    return;
+  await loadStructure(true, TRIGGERS_ONLY_REFRESH_SCOPE, true, { blockSecondaryMetadata: true, preserveDraft: true });
+}
+
+watch([activeTab, loading], () => {
+  void loadTriggersIfNeeded();
+});
+
+watch(
+  columns,
+  (items) => {
+    if (selectedColumnId.value && !items.some((column) => column.id === selectedColumnId.value)) {
+      selectedColumnId.value = null;
+    }
+  },
+  { deep: false },
+);
 
 watch(secondaryMetadataLoading, (value) => {
   if (value || !deferredSqlPreviewRefresh) return;
@@ -1913,12 +2510,28 @@ watch(refreshVersion, (version, previous) => {
     skipNextRefreshVersion = false;
     return;
   }
-  void loadStructure(true);
+  if (activeTab.value !== "triggers") {
+    triggers.value = [];
+    triggersLoaded.value = false;
+  }
+  void loadStructure(true, visibleTableStructureRefreshScope(activeTab.value));
 });
 
-watch(activeTab, (tab) => {
-  if (tab === "ddl") {
-    void fetchDdl();
+watch(
+  activeTab,
+  (tab) => {
+    if (tab === "ddl") {
+      void fetchDdl();
+    }
+  },
+  { immediate: true },
+);
+
+watch([activeTab, ddlLoading], ([tab, loading]) => {
+  if (tab === "ddl" && !loading) {
+    void nextTick(() => {
+      ddlPreRef.value?.focus();
+    });
   }
 });
 </script>
@@ -1961,11 +2574,11 @@ watch(activeTab, (tab) => {
         <Tabs v-model="activeTab" class="flex h-full min-h-0 flex-col">
           <div class="flex shrink-0 items-center justify-between gap-2 border-b px-2 py-[var(--structure-header-py)]">
             <TabsList>
+              <TabsTrigger v-if="tableMetadataCapabilities.ddl && !isCreateMode" value="ddl">DDL</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.columns" value="columns">{{ t("structureEditor.columns") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.indexes" value="indexes">{{ t("structureEditor.indexes") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys">{{ t("structureEditor.foreignKeys") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.triggers" value="triggers">{{ t("structureEditor.triggers") }}</TabsTrigger>
-              <TabsTrigger v-if="tableMetadataCapabilities.ddl && !isCreateMode" value="ddl">DDL</TabsTrigger>
             </TabsList>
             <div class="flex shrink-0 items-center gap-1.5">
               <div class="flex items-center gap-1.5">
@@ -2036,6 +2649,19 @@ watch(activeTab, (tab) => {
                 </TooltipTrigger>
                 <TooltipContent>{{ t("structureEditor.configureColumnTemplates") }}</TooltipContent>
               </Tooltip>
+              <div v-if="activeTab === 'indexes'" class="relative flex w-40 shrink-0 items-center">
+                <Search :class="[structureIconClass, 'pointer-events-none absolute left-2 text-muted-foreground']" />
+                <Input ref="indexSearchInputRef" v-model="indexSearchText" :placeholder="t('structureEditor.searchIndexes')" :class="[structureControlClass, 'pl-7 pr-14 text-[length:var(--structure-font-size)] placeholder:text-[length:var(--structure-font-size)]']" @keydown="onIndexSearchKeydown" />
+                <button
+                  v-if="indexSearchText"
+                  type="button"
+                  class="absolute right-1.5 top-1/2 -translate-y-1/2 rounded px-1 text-[length:var(--structure-font-size)] text-muted-foreground hover:bg-muted hover:text-foreground"
+                  :title="t('structureEditor.nextIndexMatch')"
+                  @click="scrollToIndexSearchMatch(1)"
+                >
+                  {{ indexSearchMatchCount }}
+                </button>
+              </div>
               <Button v-if="activeTab === 'indexes'" size="sm" :class="structureToolbarButtonClass" :disabled="!structureCapabilities.createIndex || indexesLoading" @click="addIndex">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addIndex") }}
@@ -2044,14 +2670,14 @@ watch(activeTab, (tab) => {
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addForeignKey") }}
               </Button>
-              <Button v-if="activeTab === 'triggers'" size="sm" :class="structureToolbarButtonClass" :disabled="!canEditMysqlTriggers || triggersLoading" @click="addTrigger">
+              <Button v-if="activeTab === 'triggers'" size="sm" :class="structureToolbarButtonClass" :disabled="!canEditTriggers || triggersLoading" @click="addTrigger">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addTrigger") }}
               </Button>
             </div>
           </div>
 
-          <TabsContent v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0">
+          <TabsContent ref="columnsScrollerRef" v-if="tableMetadataCapabilities.columns" value="columns" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('columns', $event)">
             <table class="border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: visibleColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
@@ -2070,7 +2696,18 @@ watch(activeTab, (tab) => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(column, index) in columns" :key="column.id" :class="columnRowClass(column, index)" :data-new-column-row="!column.original ? 'true' : undefined" :data-column-row-index="index" @dragover="onColumnDragOver(index, $event)" @drop="onColumnDrop(index, $event)">
+                <tr
+                  v-for="(column, index) in columns"
+                  :key="column.id"
+                  :class="columnRowClass(column, index)"
+                  :data-new-column-row="!column.original ? 'true' : undefined"
+                  :data-column-row-index="index"
+                  :data-column-id="column.id"
+                  @click="onColumnRowActivate(column)"
+                  @focusin="onColumnRowActivate(column)"
+                  @dragover="onColumnDragOver(index, $event)"
+                  @drop="onColumnDrop(index, $event)"
+                >
                   <td :class="[structureCellClass, 'text-muted-foreground']">
                     <div class="flex items-center gap-1">
                       <span>{{ index + 1 }}</span>
@@ -2090,13 +2727,54 @@ watch(activeTab, (tab) => {
                       :empty-text="t('structureEditor.noMatchingType')"
                       :loading-text="t('common.loading')"
                       :allow-custom="true"
+                      :option-tooltip="dataTypeTooltip"
                       :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />
                     <Input v-else :model-value="splitDataType(column.dataType).baseType" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
-                    <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                    <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
+                      <PopoverTrigger as-child>
+                        <Button variant="outline" size="sm" :class="[structureMonoControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
+                          <span>{{ t("structureEditor.enumValueCount", { count: column.enumValues?.length ?? 0 }) }}</span>
+                          <ListChevronsUpDown :class="structureIconClass" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent class="w-80 p-3" align="start">
+                        <div class="mb-2 flex items-center justify-between gap-2">
+                          <span class="text-sm font-medium">{{ t("structureEditor.enumValues") }}</span>
+                          <Button variant="outline" size="sm" class="h-7 px-2" @click="addMysqlEnumValue(column)">
+                            <Plus class="mr-1 h-3.5 w-3.5" />
+                            {{ t("structureEditor.addEnumValue") }}
+                          </Button>
+                        </div>
+                        <div class="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+                          <div v-for="(value, valueIndex) in column.enumValues" :key="valueIndex" class="flex items-center gap-1.5">
+                            <Input :model-value="value" :class="structureMonoControlClass" :placeholder="t('structureEditor.enumValuePlaceholder')" @update:model-value="updateMysqlEnumValue(column, valueIndex, $event)" />
+                            <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :disabled="(column.enumValues?.length ?? 0) <= 1" :title="t('structureEditor.removeEnumValue')" @click="removeMysqlEnumValue(column, valueIndex)">
+                              <Trash2 class="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                    <div v-else class="flex min-w-0 items-center gap-1">
+                      <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureMonoControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                      <Select v-if="columnLengthUnitOptions(column).length" :model-value="dataTypeLengthUnitValue(databaseType, column.dataType) || '__default'" :disabled="isColumnLengthUnitDisabled(column)" @update:model-value="updateColumnDataTypeLengthUnit(column, $event)">
+                        <SelectTrigger
+                          :aria-label="t('structureEditor.lengthUnit')"
+                          :title="t('structureEditor.lengthUnit')"
+                          class="h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
+                        >
+                          <SelectValue :placeholder="t('structureEditor.unitPlaceholder')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default">{{ t("structureEditor.defaultAction") }}</SelectItem>
+                          <SelectItem v-for="unit in columnLengthUnitOptions(column)" :key="unit" :value="unit">{{ unit }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </td>
                   <td v-if="columnEditorControls.nullable" :class="structureCellClass">
                     <label class="flex items-center gap-1.5">
@@ -2162,6 +2840,32 @@ watch(activeTab, (tab) => {
                       </Popover>
                     </div>
                   </td>
+                  <td v-if="showCharacterSet" :class="structureCellClass">
+                    <SearchableSelect
+                      :model-value="columnCharset(column)"
+                      :options="mysqlCharsetOptions"
+                      :placeholder="t('structureEditor.charsetPlaceholder')"
+                      :search-placeholder="t('structureEditor.charsetPlaceholder')"
+                      :empty-text="t('structureEditor.noMatchingType')"
+                      :allow-custom="true"
+                      :disabled="isColumnCharsetDisabled(column)"
+                      :trigger-class="[structureMonoControlClass, 'w-20']"
+                      @update:model-value="(v: string) => onCharsetChange(column, v)"
+                    />
+                  </td>
+                  <td v-if="showCharacterSet" :class="structureCellClass">
+                    <SearchableSelect
+                      :model-value="columnCollation(column)"
+                      :options="collationOptionsForCharset(columnCharset(column))"
+                      :placeholder="t('structureEditor.collationPlaceholder')"
+                      :search-placeholder="t('structureEditor.collationPlaceholder')"
+                      :empty-text="t('structureEditor.noMatchingType')"
+                      :allow-custom="true"
+                      :disabled="isColumnCharsetDisabled(column)"
+                      :trigger-class="[structureMonoControlClass, 'w-28']"
+                      @update:model-value="(v: string) => (column.collation = v)"
+                    />
+                  </td>
                   <td v-if="showExtendedProperties" :class="structureCellClass">
                     <div :class="structurePropertyListClass">
                       <!-- Manticore Search: character data type properties -->
@@ -2197,6 +2901,31 @@ watch(activeTab, (tab) => {
                           <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" />
                           <span class="min-w-0 truncate">{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
                         </label>
+                      </template>
+                      <!-- Dameng: IDENTITY -->
+                      <template v-else-if="databaseType === 'dameng'">
+                        <label :class="structurePropertyLabelClass" :title="t('structureEditor.identity')">
+                          <input :checked="isDamengIdentityChecked(column)" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="!canEditDamengIdentity(column)" @change="setDamengIdentity(column, ($event.target as HTMLInputElement).checked)" />
+                          <span class="min-w-0 truncate">{{ t("structureEditor.autoIncrement") }}</span>
+                        </label>
+                        <template v-if="isDamengIdentityChecked(column)">
+                          <Input
+                            :model-value="column.extra.identity?.seed?.toString() ?? '1'"
+                            type="number"
+                            :class="[structureControlClass, 'w-14']"
+                            :placeholder="t('structureEditor.identitySeed')"
+                            :disabled="!canEditDamengIdentity(column)"
+                            @update:model-value="(v) => updateDamengIdentitySeed(column, v)"
+                          />
+                          <Input
+                            :model-value="column.extra.identity?.increment?.toString() ?? '1'"
+                            type="number"
+                            :class="[structureControlClass, 'w-14']"
+                            :placeholder="t('structureEditor.identityIncrement')"
+                            :disabled="!canEditDamengIdentity(column)"
+                            @update:model-value="(v) => updateDamengIdentityIncrement(column, v)"
+                          />
+                        </template>
                       </template>
                       <!-- PostgreSQL: IDENTITY -->
                       <template v-else-if="structureDialect === 'postgres'">
@@ -2288,7 +3017,7 @@ watch(activeTab, (tab) => {
                         type="button"
                         variant="ghost"
                         size="icon"
-                        :class="[structureActionButtonClass, canDragColumn(index) ? 'cursor-grab active:cursor-grabbing' : 'cursor-not-allowed']"
+                        :class="[structureActionButtonClass, canDragColumn(index) ? 'cursor-grab active:cursor-grabbing' : 'cursor-not-allowed', hasLocalColumnOrderChange ? 'border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary' : '']"
                         :disabled="!canDragColumn(index)"
                         :title="t('structureEditor.dragColumn')"
                         :aria-label="t('structureEditor.dragColumn')"
@@ -2307,12 +3036,12 @@ watch(activeTab, (tab) => {
                         :disabled="!canDropColumn(column)"
                         :title="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
                         :aria-label="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
-                        @click="toggleDropColumn(column)"
+                        @click.stop="toggleDropColumn(column)"
                       >
                         <RefreshCw v-if="column.markedForDrop" :class="structureIconClass" />
                         <Trash2 v-else :class="structureIconClass" />
                       </Button>
-                      <Button v-else variant="ghost" size="icon" :class="structureActionButtonClass" :title="t('structureEditor.remove')" :aria-label="t('structureEditor.remove')" @click="removeNewColumn(column)">
+                      <Button v-else variant="ghost" size="icon" :class="structureActionButtonClass" :title="t('structureEditor.remove')" :aria-label="t('structureEditor.remove')" @click.stop="removeNewColumn(column)">
                         <X :class="structureIconClass" />
                       </Button>
                     </div>
@@ -2322,7 +3051,7 @@ watch(activeTab, (tab) => {
             </table>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.indexes" value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0">
+          <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
             <div v-if="indexesLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2345,9 +3074,9 @@ watch(activeTab, (tab) => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="index in indexes" :key="index.id" :class="index.markedForDrop ? 'bg-destructive/5 opacity-60' : ''" :data-new-index-row="!index.original ? 'true' : undefined">
+                <tr v-for="(index, rowIndex) in indexes" :key="index.id" :class="indexRowClass(index)" :data-new-index-row="!index.original ? 'true' : undefined" :data-index-row-index="rowIndex">
                   <td :class="structureCellClass">
-                    <Input :model-value="index.name" :class="structureControlClass" :disabled="!canEditIndexDraft(index)" data-index-name-input @update:model-value="(value: string | number) => onIndexNameInput(index, value)" />
+                    <Input :model-value="index.name" :class="[structureControlClass, indexSearchFieldClass(index, index.name)]" :disabled="!canEditIndexDraft(index)" data-index-name-input @update:model-value="(value: string | number) => onIndexNameInput(index, value)" />
                   </td>
                   <td :class="[structureCellClass, 'overflow-hidden']">
                     <DropdownMenu v-if="canEditIndexDraft(index)">
@@ -2405,10 +3134,10 @@ watch(activeTab, (tab) => {
                     <span v-else class="text-[length:var(--structure-font-size)] text-muted-foreground">{{ index.includedColumns.join(", ") }}</span>
                   </td>
                   <td :class="structureCellClass">
-                    <Input v-model="index.filter" :class="structureMonoControlClass" :placeholder="index.original?.filter || ''" :disabled="!canEditIndexFilter(index)" />
+                    <Input v-model="index.filter" :class="[structureMonoControlClass, indexSearchFieldClass(index, index.filter)]" :placeholder="index.original?.filter || ''" :disabled="!canEditIndexFilter(index)" />
                   </td>
                   <td :class="structureCellClass">
-                    <Input v-model="index.comment" :class="structureControlClass" :disabled="!canEditIndexComment(index)" />
+                    <Input v-model="index.comment" :class="[structureControlClass, indexSearchFieldClass(index, index.comment)]" :disabled="!canEditIndexComment(index)" />
                   </td>
                   <td :class="structureLastCellClass">
                     <Badge v-if="index.isPrimary" variant="outline">{{ t("structureEditor.primary") }}</Badge>
@@ -2426,7 +3155,7 @@ watch(activeTab, (tab) => {
             </table>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="foreignKeysScrollerRef" v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('foreignKeys', $event)">
             <div v-if="foreignKeysLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2476,7 +3205,7 @@ watch(activeTab, (tab) => {
             </div>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.triggers" value="triggers" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="triggersScrollerRef" v-if="tableMetadataCapabilities.triggers" value="triggers" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('triggers', $event)">
             <div v-if="triggersLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -2486,9 +3215,10 @@ watch(activeTab, (tab) => {
             </div>
             <div v-else class="space-y-1.5">
               <div v-for="trigger in triggers" :key="trigger.id" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="trigger.markedForDrop ? 'bg-destructive/5 opacity-60' : ''">
-                <div class="grid grid-cols-[minmax(140px,1fr)_110px_110px_auto] gap-1.5">
+                <div class="grid grid-cols-[minmax(140px,1fr)_minmax(130px,180px)_minmax(140px,1fr)_auto] gap-1.5">
                   <Input v-model="trigger.name" :class="structureControlClass" :placeholder="t('structureEditor.triggerName')" :disabled="!canEditTriggerDraft(trigger)" />
-                  <Select v-model="trigger.timing" :disabled="!canEditTriggerDraft(trigger)">
+                  <Input v-if="isOracleTriggerEditor" v-model="trigger.timing" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
+                  <Select v-else v-model="trigger.timing" :disabled="!canEditTriggerDraft(trigger)">
                     <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                       <SelectValue />
                     </SelectTrigger>
@@ -2496,7 +3226,8 @@ watch(activeTab, (tab) => {
                       <SelectItem v-for="timing in triggerTimingOptions" :key="timing" :value="timing">{{ timing }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Select v-model="trigger.event" :disabled="!canEditTriggerDraft(trigger)">
+                  <Input v-if="isOracleTriggerEditor" v-model="trigger.event" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
+                  <Select v-else v-model="trigger.event" :disabled="!canEditTriggerDraft(trigger)">
                     <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                       <SelectValue />
                     </SelectTrigger>
@@ -2525,12 +3256,18 @@ watch(activeTab, (tab) => {
             </div>
           </TabsContent>
 
-          <TabsContent v-if="tableMetadataCapabilities.ddl" value="ddl" class="m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]">
+          <TabsContent ref="ddlScrollerRef" v-if="tableMetadataCapabilities.ddl" value="ddl" class="relative m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('ddl', $event)">
             <div v-if="ddlLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <pre v-else class="m-0 min-h-0 flex-1 whitespace-pre p-3 font-mono text-xs leading-5 select-text" v-html="ddlContent ? (sqlHighlighter?.(ddlContent) ?? ddlContent) : t('structureEditor.emptyReadonly')"></pre>
+            <template v-else>
+              <Button v-if="ddlContent" variant="outline" size="sm" class="absolute right-3 top-3 z-10 h-7 gap-1 px-2" :title="t('grid.copyDdl')" @click="copyDdlContent">
+                <Copy class="h-3.5 w-3.5" />
+                {{ t("grid.copyDdl") }}
+              </Button>
+              <pre ref="ddlPreRef" tabindex="0" class="m-0 min-h-0 flex-1 whitespace-pre p-3 font-mono text-xs leading-5 select-text outline-none" v-html="ddlContent ? (sqlHighlighter?.(ddlContent) ?? ddlContent) : t('structureEditor.emptyReadonly')" @keydown="onDdlKeydown"></pre>
+            </template>
           </TabsContent>
         </Tabs>
       </div>
@@ -2566,6 +3303,10 @@ watch(activeTab, (tab) => {
           </div>
         </div>
         <div v-if="!sqlPreviewCollapsed" class="min-h-0 flex-1 overflow-auto p-2.5">
+          <div v-if="hasSqliteTypeChange" class="mb-2 flex gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-primary">
+            <Info :class="[structureIconClass, 'mt-0.5 shrink-0']" />
+            <span>{{ t("structureEditor.sqliteRebuildNotice") }}</span>
+          </div>
           <div v-if="warnings.length" class="mb-2 space-y-1">
             <div v-for="warning in warnings" :key="warning" class="flex gap-1.5 rounded-md border border-yellow-300/40 bg-yellow-500/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-yellow-700 dark:text-yellow-300">
               <AlertTriangle :class="[structureIconClass, 'mt-0.5 shrink-0']" />
@@ -2595,20 +3336,27 @@ watch(activeTab, (tab) => {
 </template>
 
 <style scoped>
+/* --primary is rgb/oklch; use color-mix like DataGrid, not channel-based hsl wrappers. */
 .structure-column-search-match > td:first-child {
-  box-shadow: inset 3px 0 0 hsl(var(--primary) / 0.55);
+  box-shadow: inset 3px 0 0 color-mix(in oklab, var(--primary) 55%, transparent);
 }
 
 .structure-column-search-current > td {
+  background-color: color-mix(in oklab, var(--primary) 8%, transparent);
   box-shadow:
-    inset 0 1px 0 hsl(var(--primary) / 0.55),
-    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+    inset 0 1px 0 color-mix(in oklab, var(--primary) 55%, transparent),
+    inset 0 -1px 0 color-mix(in oklab, var(--primary) 55%, transparent);
 }
 
 .structure-column-search-current > td:first-child {
   box-shadow:
-    inset 3px 0 0 hsl(var(--primary)),
-    inset 0 1px 0 hsl(var(--primary) / 0.55),
-    inset 0 -1px 0 hsl(var(--primary) / 0.55);
+    inset 3px 0 0 var(--primary),
+    inset 0 1px 0 color-mix(in oklab, var(--primary) 55%, transparent),
+    inset 0 -1px 0 color-mix(in oklab, var(--primary) 55%, transparent);
+}
+
+/* Inputs are bg-transparent; give them a solid surface on the selected row so fields stay readable. */
+.structure-column-search-current :is(input, button, [role="combobox"], [data-slot="select-trigger"]) {
+  background-color: var(--background);
 }
 </style>

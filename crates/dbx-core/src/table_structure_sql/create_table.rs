@@ -1,4 +1,7 @@
-use super::column_format::{column_data_type, column_extra_clause};
+use super::column_format::{
+    column_data_type, column_extra_clause, has_dameng_identity, is_dameng_identity_compatible_type,
+    is_mysql_character_data_type,
+};
 use super::comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql;
@@ -6,11 +9,13 @@ use super::indexes::build_create_index_statements;
 use super::triggers::build_trigger_sql;
 use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{clean, format_default_for_sql, normalize_default, qualified_table, quote_ident, quote_string};
-use super::validation::validate_columns;
+use super::validation::{validate_columns, validate_dameng_identity};
+use crate::models::connection::DatabaseType;
 
-pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructureSqlResult {
+pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    options.table_name = clean(&options.table_name);
     let mut warnings = Vec::new();
-    if clean(&options.table_name).is_empty() {
+    if options.table_name.is_empty() {
         warnings.push("Table name is required.".to_string());
     }
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
@@ -18,6 +23,7 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
         warnings.push("At least one column is required.".to_string());
     }
     validate_columns(&active_columns, &mut warnings);
+    validate_dameng_identity(&options, &active_columns, &mut warnings);
     if !warnings.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings };
     }
@@ -25,12 +31,33 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
     let capabilities = capabilities_for(options.database_type);
     let dialect = capabilities.dialect;
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
+    if dialect == StructureDialect::Dameng {
+        for column in &active_columns {
+            if has_dameng_identity(column) && !is_dameng_identity_compatible_type(&column.data_type) {
+                warnings.push(format!(
+                    "Dameng identity column \"{}\" must use tinyint, smallint, int, integer, bigint, number, numeric, or decimal/dec with scale 0.",
+                    column.name
+                ));
+            }
+        }
+        if !warnings.is_empty() {
+            return TableStructureSqlResult { statements: Vec::new(), warnings };
+        }
+    }
     let mut statements = Vec::new();
     let mut column_definitions = Vec::new();
 
     for column in &active_columns {
         let data_type = column_data_type(dialect, column);
         let mut parts = vec![quote_ident(dialect, &column.name), data_type];
+        if options.database_type == Some(DatabaseType::Mysql) && is_mysql_character_data_type(&column.data_type) {
+            if !column.character_set.trim().is_empty() {
+                parts.push(format!("CHARACTER SET {}", quote_ident(dialect, &column.character_set)));
+            }
+            if !column.collation.trim().is_empty() {
+                parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
+            }
+        }
         if !column.is_nullable
             && !column.is_primary_key
             && !matches!(dialect, StructureDialect::ClickHouse | StructureDialect::ManticoreSearch)
@@ -73,7 +100,10 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
                 if let Some(last) = statements.last_mut() {
                     *last = last.replace(");", &format!(") COMMENT = {};", quote_string(&table_comment)));
                 }
-            } else if matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::H2) {
+            } else if matches!(
+                dialect,
+                StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2
+            ) {
                 statements.push(format!("COMMENT ON TABLE {table} IS {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::ClickHouse {
                 statements.push(format!("ALTER TABLE {table} MODIFY COMMENT {};", quote_string(&table_comment)));
@@ -89,7 +119,10 @@ pub fn build_create_table_sql(options: TableStructureSqlOptions) -> TableStructu
     }
 
     if capabilities.comment
-        && matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::H2)
+        && matches!(
+            dialect,
+            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2
+        )
     {
         for column in &active_columns {
             if !clean(&column.comment).is_empty() {

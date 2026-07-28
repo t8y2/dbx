@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canActivateExistingDataTableTab } from "../../apps/desktop/src/lib/tabs/dataTabActivation.ts";
+import { canActivateExistingDataTableTab, dataTableDoubleClickAction } from "../../apps/desktop/src/lib/tabs/dataTabActivation.ts";
 import type { QueryTab } from "../../apps/desktop/src/types/database.ts";
 
 function dataTab(overrides: Partial<QueryTab> = {}): QueryTab {
@@ -20,6 +20,10 @@ function dataTab(overrides: Partial<QueryTab> = {}): QueryTab {
 
 test("activates an existing data table tab while it is still loading", () => {
   assert.equal(canActivateExistingDataTableTab(dataTab({ isExecuting: true })), true);
+});
+
+test("sidebar can restart a loading tab after superseding its request", () => {
+  assert.equal(canActivateExistingDataTableTab(dataTab({ isExecuting: true }), { activateExecuting: false }), false);
 });
 
 test("activates an existing data table tab with a usable result", () => {
@@ -55,5 +59,64 @@ test("reloads existing data table tabs showing an error result", () => {
       }),
     ),
     false,
+  );
+});
+
+test("single activation leaves double click handling to the first click", () => {
+  assert.equal(dataTableDoubleClickAction(undefined, "single"), "none");
+  assert.equal(dataTableDoubleClickAction(dataTab({ isExecuting: true }), "single"), "none");
+  assert.equal(
+    dataTableDoubleClickAction(
+      dataTab({
+        result: {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      }),
+      "single",
+    ),
+    "none",
+  );
+});
+
+test("double activation opens a missing table without a first-click snapshot", () => {
+  assert.equal(dataTableDoubleClickAction(undefined, "double"), "open");
+});
+
+test("double activation reuses loading and successful tabs without refreshing", () => {
+  assert.equal(dataTableDoubleClickAction(dataTab({ isExecuting: true }), "double"), "activate");
+  assert.equal(
+    dataTableDoubleClickAction(
+      dataTab({
+        result: {
+          columns: ["id"],
+          rows: [[1]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      }),
+      "double",
+    ),
+    "activate",
+  );
+});
+
+test("double activation preserves restored and error recovery behavior", () => {
+  assert.equal(dataTableDoubleClickAction(dataTab(), "double"), "open");
+  assert.equal(
+    dataTableDoubleClickAction(
+      dataTab({
+        result: {
+          columns: ["Error"],
+          rows: [["connection failed"]],
+          affected_rows: 0,
+          execution_time_ms: 0,
+        },
+      }),
+      "double",
+    ),
+    "open",
   );
 });

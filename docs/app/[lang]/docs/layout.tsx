@@ -22,7 +22,7 @@ export default async function Layout({ params, children }: { params: Promise<{ l
       themeSwitch={{ enabled: false }}
       sidebar={{
         defaultOpenLevel: 1,
-        footer: <DocsSidebarFooter />,
+        footer: <DocsSidebarFooter key="docs-sidebar-footer" />,
       }}
     >
       {children}

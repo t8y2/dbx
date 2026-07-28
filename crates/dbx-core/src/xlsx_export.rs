@@ -2,12 +2,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Cursor, Seek, Write};
 
+use crate::temporal_format::{excel_temporal_serial, ExcelTemporalKind};
+
+const XLSX_DATE_STYLE: usize = 2;
+const XLSX_DATETIME_STYLE: usize = 3;
+const NUMERIC_RIGHT_ALIGN_STYLE: usize = 4;
+const NUMERIC_LEFT_ALIGN_STYLE: usize = 5;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XlsxWorksheetData {
     pub sheet_name: Option<String>,
     pub columns: Vec<String>,
+    #[serde(default)]
+    pub column_types: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    #[serde(default)]
+    pub numeric_column_right_align: bool,
 }
 
 /// Streaming XLSX writer that incrementally writes rows to a ZIP-backed
@@ -16,7 +27,11 @@ pub struct XlsxWorksheetData {
 pub struct StreamingXlsxWriter<W: Write + Seek> {
     zip: zip::ZipWriter<W>,
     columns: Vec<String>,
+    column_types: Vec<String>,
     next_row_number: usize,
+    trailing_sheets: Vec<XlsxWorksheetData>,
+    date_time_format: Option<String>,
+    numeric_right_align: bool,
 }
 
 /// Estimate column widths from header names only (used by the streaming path
@@ -49,12 +64,22 @@ pub(crate) fn header_row_xml(columns: &[String]) -> String {
     )
 }
 
-/// Build a single `<row>` XML fragment for a data row.
-pub(crate) fn data_row_xml(row_number: usize, columns: &[String], row: &[Value]) -> String {
+fn data_row_xml_with_date_time_format(
+    row_number: usize,
+    columns: &[String],
+    column_types: &[String],
+    row: &[Value],
+    date_time_format: Option<&str>,
+    numeric_right_align: bool,
+) -> String {
     let cells = columns
         .iter()
         .enumerate()
-        .map(|(col_index, _)| cell_xml(row.get(col_index), row_number - 1, col_index, None))
+        .map(|(col_index, _)| {
+            let col_type = column_types.get(col_index);
+            let align_style = numeric_column_style(col_type, numeric_right_align);
+            typed_cell_xml(row.get(col_index), col_type, row_number - 1, col_index, align_style, date_time_format)
+        })
         .collect::<String>();
     format!("<row r=\"{row_number}\">{cells}</row>")
 }
@@ -75,20 +100,54 @@ fn write_zip_entry<W: Write + Seek>(zip: &mut zip::ZipWriter<W>, path: &str, con
 /// column widths (estimated from header names) and the header row are written
 /// immediately.  Callers then feed data rows via [`StreamingXlsxWriter::write_row`]
 /// and finalize with [`StreamingXlsxWriter::finish`].
+#[cfg(test)]
 pub(crate) fn start_streaming_xlsx_workbook<W: Write + Seek>(
     writer: W,
     sheet_name: Option<&str>,
     columns: &[String],
+    column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    let sheet_name = normalize_sheet_name(sheet_name);
+    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], None, false)
+}
+
+#[cfg(test)]
+pub(crate) fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek>(
+    writer: W,
+    sheet_name: Option<&str>,
+    columns: &[String],
+    column_types: &[String],
+    trailing_sheets: &[XlsxWorksheetData],
+) -> Result<StreamingXlsxWriter<W>, String> {
+    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, trailing_sheets, None, false)
+}
+
+pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
+    writer: W,
+    sheet_name: Option<&str>,
+    columns: &[String],
+    column_types: &[String],
+    trailing_sheets: &[XlsxWorksheetData],
+    date_time_format: Option<&str>,
+    numeric_right_align: bool,
+) -> Result<StreamingXlsxWriter<W>, String> {
+    let primary_sheet = XlsxWorksheetData {
+        sheet_name: sheet_name.map(str::to_string),
+        columns: columns.to_vec(),
+        column_types: column_types.to_vec(),
+        rows: Vec::new(),
+        numeric_column_right_align: numeric_right_align,
+    };
+    let all_sheets = std::iter::once(primary_sheet).chain(trailing_sheets.iter().cloned()).collect::<Vec<_>>();
+    let sheet_names = normalize_unique_sheet_names(&all_sheets);
+    let sheet_count = sheet_names.len();
     let widths = estimate_header_widths(columns);
 
     let mut zip = zip::ZipWriter::new(writer);
-    write_zip_entry(&mut zip, "[Content_Types].xml", &content_types_xml())?;
+    write_zip_entry(&mut zip, "[Content_Types].xml", &content_types_xml_for_sheet_count(sheet_count))?;
     write_zip_entry(&mut zip, "_rels/.rels", root_rels_xml())?;
-    write_zip_entry(&mut zip, "xl/workbook.xml", &workbook_xml(&sheet_name))?;
-    write_zip_entry(&mut zip, "xl/_rels/workbook.xml.rels", &workbook_rels_xml())?;
-    write_zip_entry(&mut zip, "xl/styles.xml", styles_xml())?;
+    write_zip_entry(&mut zip, "xl/workbook.xml", &workbook_xml_for_sheets(&sheet_names))?;
+    write_zip_entry(&mut zip, "xl/_rels/workbook.xml.rels", &workbook_rels_xml_for_sheet_count(sheet_count))?;
+    write_zip_entry(&mut zip, "xl/styles.xml", &styles_xml(date_time_format))?;
 
     // Begin the sheet1.xml entry with header, frozen pane, column widths and
     // the header row.
@@ -111,14 +170,32 @@ pub(crate) fn start_streaming_xlsx_workbook<W: Write + Seek>(
     zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
     zip.write_all(header_row_xml(columns).as_bytes()).map_err(|err| err.to_string())?;
 
-    Ok(StreamingXlsxWriter { zip, columns: columns.to_vec(), next_row_number: 2 })
+    Ok(StreamingXlsxWriter {
+        zip,
+        columns: columns.to_vec(),
+        column_types: column_types.to_vec(),
+        next_row_number: 2,
+        trailing_sheets: trailing_sheets.to_vec(),
+        date_time_format: date_time_format.map(str::to_string),
+        numeric_right_align,
+    })
 }
 
 impl<W: Write + Seek> StreamingXlsxWriter<W> {
     /// Append a single data row to the worksheet.
     pub fn write_row(&mut self, row: &[Value]) -> Result<(), String> {
         self.zip
-            .write_all(data_row_xml(self.next_row_number, &self.columns, row).as_bytes())
+            .write_all(
+                data_row_xml_with_date_time_format(
+                    self.next_row_number,
+                    &self.columns,
+                    &self.column_types,
+                    row,
+                    self.date_time_format.as_deref(),
+                    self.numeric_right_align,
+                )
+                .as_bytes(),
+            )
             .map_err(|err| err.to_string())?;
         self.next_row_number += 1;
         Ok(())
@@ -132,6 +209,12 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
         self.zip
             .write_all(format!("</sheetData><autoFilter ref=\"{range}\"/></worksheet>").as_bytes())
             .map_err(|err| err.to_string())?;
+        for (index, sheet) in self.trailing_sheets.iter().enumerate() {
+            self.zip
+                .start_file(format!("xl/worksheets/sheet{}.xml", index + 2), xlsx_zip_options())
+                .map_err(|err| err.to_string())?;
+            self.zip.write_all(worksheet_xml(sheet).as_bytes()).map_err(|err| err.to_string())?;
+        }
         self.zip.finish().map_err(|err| err.to_string())
     }
 }
@@ -248,6 +331,137 @@ fn cell_xml(value: Option<&Value>, row_index: usize, col_index: usize, style: Op
     }
 }
 
+fn is_numeric_column_type(column_type: Option<&String>) -> bool {
+    let mut normalized = column_type.map(|value| value.trim().to_ascii_lowercase()).unwrap_or_default();
+    while normalized.ends_with(')') {
+        let Some(open_index) = normalized.find('(') else {
+            break;
+        };
+        if !matches!(normalized[..open_index].trim(), "nullable" | "lowcardinality") {
+            break;
+        }
+        normalized = normalized[open_index + 1..normalized.len() - 1].trim().to_string();
+    }
+    let base = normalized.split(['(', ' ', '[']).next().unwrap_or_default();
+    matches!(
+        base,
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "serial"
+            | "smallserial"
+            | "bigserial"
+            | "int2"
+            | "int4"
+            | "int8"
+            | "int1"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "int128"
+            | "int256"
+            | "intn"
+            | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uint128"
+            | "uint256"
+            | "float"
+            | "float4"
+            | "float8"
+            | "float16"
+            | "float32"
+            | "float64"
+            | "floatn"
+            | "real"
+            | "double"
+            | "decimal"
+            | "decimal32"
+            | "decimal64"
+            | "decimal128"
+            | "decimal256"
+            | "decimaln"
+            | "numeric"
+            | "numericn"
+            | "number"
+            | "dec"
+            | "fixed"
+            | "money"
+            | "money4"
+            | "moneyn"
+            | "smallmoney"
+            | "smallmoneyn"
+            | "binary_float"
+            | "binary_double"
+    )
+}
+
+fn numeric_column_style(column_type: Option<&String>, enabled: bool) -> Option<usize> {
+    if !is_numeric_column_type(column_type) {
+        return None;
+    }
+    if enabled {
+        Some(NUMERIC_RIGHT_ALIGN_STYLE)
+    } else {
+        Some(NUMERIC_LEFT_ALIGN_STYLE)
+    }
+}
+
+fn safe_excel_number(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.parse::<f64>().ok().is_none_or(|number| !number.is_finite()) {
+        return None;
+    }
+    // Excel stores numbers with at most 15 significant decimal digits. Keep
+    // higher-precision database values as text rather than silently rounding.
+    let significant_digits = trimmed
+        .split(['e', 'E'])
+        .next()
+        .unwrap_or(trimmed)
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .skip_while(|ch| *ch == '0')
+        .count();
+    (significant_digits <= 15).then_some(trimmed)
+}
+
+fn typed_cell_xml(
+    value: Option<&Value>,
+    column_type: Option<&String>,
+    row_index: usize,
+    col_index: usize,
+    style: Option<usize>,
+    date_time_format: Option<&str>,
+) -> String {
+    if let Some(Value::String(value)) = value {
+        if let Some((serial, temporal_kind)) =
+            excel_temporal_serial(value, column_type.map(String::as_str), date_time_format)
+        {
+            let reference = cell_ref(row_index, col_index);
+            let style = match temporal_kind {
+                ExcelTemporalKind::Date => XLSX_DATE_STYLE,
+                ExcelTemporalKind::DateTime => XLSX_DATETIME_STYLE,
+            };
+            return format!("<c r=\"{reference}\" s=\"{style}\"><v>{serial}</v></c>");
+        }
+    }
+    if is_numeric_column_type(column_type) {
+        if let Some(Value::String(value)) = value {
+            if let Some(number) = safe_excel_number(value) {
+                let reference = cell_ref(row_index, col_index);
+                let style_attr = style.map_or(String::new(), |style| format!(" s=\"{style}\""));
+                return format!("<c r=\"{reference}\"{style_attr}><v>{number}</v></c>");
+            }
+        }
+    }
+    cell_xml(value, row_index, col_index, style)
+}
+
 fn worksheet_xml(data: &XlsxWorksheetData) -> String {
     let total_rows = data.rows.len() + 1;
     let range = sheet_range(data.columns.len(), total_rows);
@@ -280,7 +494,11 @@ fn worksheet_xml(data: &XlsxWorksheetData) -> String {
                 .columns
                 .iter()
                 .enumerate()
-                .map(|(col_index, _)| cell_xml(row.get(col_index), excel_row - 1, col_index, None))
+                .map(|(col_index, _)| {
+                    let col_type = data.column_types.get(col_index);
+                    let align_style = numeric_column_style(col_type, data.numeric_column_right_align);
+                    typed_cell_xml(row.get(col_index), col_type, excel_row - 1, col_index, align_style, None)
+                })
                 .collect::<String>();
             format!("<row r=\"{excel_row}\">{cells}</row>")
         })
@@ -303,10 +521,6 @@ fn worksheet_xml(data: &XlsxWorksheetData) -> String {
         header_xml = header_xml,
         body_xml = body_xml,
     )
-}
-
-fn content_types_xml() -> String {
-    content_types_xml_for_sheet_count(1)
 }
 
 fn content_types_xml_for_sheet_count(sheet_count: usize) -> String {
@@ -341,10 +555,6 @@ fn root_rels_xml() -> &'static str {
     )
 }
 
-fn workbook_xml(sheet_name: &str) -> String {
-    workbook_xml_for_sheets(&[sheet_name.to_string()])
-}
-
 fn workbook_xml_for_sheets(sheet_names: &[String]) -> String {
     let sheets = sheet_names
         .iter()
@@ -363,10 +573,6 @@ fn workbook_xml_for_sheets(sheet_names: &[String]) -> String {
         ),
         sheets
     )
-}
-
-fn workbook_rels_xml() -> String {
-    workbook_rels_xml_for_sheet_count(1)
 }
 
 fn workbook_rels_xml_for_sheet_count(sheet_count: usize) -> String {
@@ -390,17 +596,96 @@ fn workbook_rels_xml_for_sheet_count(sheet_count: usize) -> String {
     )
 }
 
-fn styles_xml() -> &'static str {
-    concat!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
-        "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
-        "<fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>",
-        "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>",
-        "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>",
-        "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>",
-        "<cellXfs count=\"2\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/></cellXfs>",
-        "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>",
-        "</styleSheet>"
+fn dayjs_to_excel_number_format(pattern: &str) -> Option<(String, bool, bool)> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() || pattern.len() > 100 || pattern.contains('%') {
+        return None;
+    }
+    let tokens = [
+        ("YYYY", "yyyy", true, false),
+        ("SSS", "000", false, true),
+        ("ZZ", "", false, true),
+        ("MM", "mm", true, false),
+        ("DD", "dd", true, false),
+        ("HH", "hh", false, true),
+        ("mm", "mm", false, true),
+        ("ss", "ss", false, true),
+        ("M", "m", true, false),
+        ("D", "d", true, false),
+        ("H", "h", false, true),
+        ("m", "m", false, true),
+        ("s", "s", false, true),
+        ("Z", "", false, true),
+    ];
+    let mut output = String::with_capacity(pattern.len());
+    let mut has_date = false;
+    let mut has_time = false;
+    let mut index = 0;
+    while index < pattern.len() {
+        let remaining = &pattern[index..];
+        if remaining.starts_with('[') {
+            let close = remaining.find(']')?;
+            let literal = &remaining[1..close];
+            output.push('"');
+            output.push_str(&literal.replace('"', "\"\""));
+            output.push('"');
+            index += close + 1;
+            continue;
+        }
+        if let Some((token, replacement, is_date, is_time)) =
+            tokens.iter().find(|(token, ..)| remaining.starts_with(token))
+        {
+            if replacement.is_empty() {
+                return None;
+            }
+            output.push_str(replacement);
+            has_date |= *is_date;
+            has_time |= *is_time;
+            index += token.len();
+            continue;
+        }
+        let character = remaining.chars().next()?;
+        if character.is_ascii_alphabetic() {
+            // Keep the accepted Day.js token set aligned with temporal_format.rs;
+            // unsupported tokens must not silently alter the exported display.
+            return None;
+        }
+        output.push(character);
+        index += character.len_utf8();
+    }
+    (has_date && !output.is_empty()).then_some((output, has_date, has_time))
+}
+
+fn styles_xml(date_time_format: Option<&str>) -> String {
+    let default_date = "yyyy-mm-dd".to_string();
+    let default_datetime = "yyyy-mm-dd hh:mm:ss".to_string();
+    let (date_format, datetime_format) = date_time_format
+        .and_then(dayjs_to_excel_number_format)
+        .map(|(format, has_date, has_time)| {
+            if has_time {
+                (default_date.clone(), format)
+            } else if has_date {
+                (format.clone(), format)
+            } else {
+                (default_date.clone(), default_datetime.clone())
+            }
+        })
+        .unwrap_or((default_date, default_datetime));
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+            "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
+            "<numFmts count=\"2\"><numFmt numFmtId=\"164\" formatCode=\"{}\"/><numFmt numFmtId=\"165\" formatCode=\"{}\"/></numFmts>",
+            "<fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>",
+            "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>",
+            "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>",
+            "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>",
+            "<cellXfs count=\"6\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"right\"/></xf><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"left\"/></xf></cellXfs>",
+            "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>",
+            "</styleSheet>"
+        ),
+        escape_xml(&date_format),
+        escape_xml(&datetime_format)
     )
 }
 
@@ -435,7 +720,7 @@ pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>
         ("_rels/.rels", root_rels_xml().to_string()),
         ("xl/workbook.xml", workbook_xml_for_sheets(&sheet_names)),
         ("xl/_rels/workbook.xml.rels", workbook_rels_xml_for_sheet_count(sheets.len())),
-        ("xl/styles.xml", styles_xml().to_string()),
+        ("xl/styles.xml", styles_xml(None)),
     ];
 
     let cursor = Cursor::new(Vec::<u8>::new());
@@ -457,9 +742,13 @@ pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>
 
 #[cfg(test)]
 mod tests {
-    use super::{build_xlsx_workbook, build_xlsx_workbook_multi, start_streaming_xlsx_workbook, XlsxWorksheetData};
+    use super::{
+        build_xlsx_workbook, build_xlsx_workbook_multi, is_numeric_column_type, start_streaming_xlsx_workbook,
+        start_streaming_xlsx_workbook_with_options, start_streaming_xlsx_workbook_with_trailing_sheets,
+        XlsxWorksheetData,
+    };
     use calamine::{open_workbook_auto, Reader};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::fs;
     use std::io::Read;
 
@@ -492,7 +781,9 @@ mod tests {
         let workbook = build_xlsx_workbook(&XlsxWorksheetData {
             sheet_name: Some("Users".to_string()),
             columns: vec!["id".to_string(), "name".to_string(), "active".to_string()],
+            column_types: vec![],
             rows: vec![vec![json!(1), json!("Ada & Bob"), json!(true)], vec![json!(2), json!(null), json!(false)]],
+            numeric_column_right_align: false,
         })
         .expect("build workbook");
 
@@ -511,11 +802,143 @@ mod tests {
     }
 
     #[test]
+    fn writes_safe_numeric_strings_as_numbers_for_numeric_columns() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Amounts".to_string()),
+            columns: vec!["quantity".to_string(), "amount".to_string(), "code".to_string()],
+            column_types: vec!["decimal(10,5)".to_string(), "numeric".to_string(), "varchar".to_string()],
+            rows: vec![vec![json!("1.00000"), json!("2800.000000"), json!("00123")]],
+            numeric_column_right_align: false,
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"5\"><v>1.00000</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"5\"><v>2800.000000</v></c>"));
+        assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>00123</t></is></c>"));
+    }
+
+    #[test]
+    fn writes_temporal_columns_as_excel_dates_without_retyping_other_values() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Typed values".to_string()),
+            columns: vec![
+                "day".to_string(),
+                "created_at".to_string(),
+                "label".to_string(),
+                "invalid_day".to_string(),
+                "amount".to_string(),
+                "zoned_at".to_string(),
+            ],
+            column_types: vec![
+                "date".to_string(),
+                "timestamp without time zone".to_string(),
+                "text".to_string(),
+                "date".to_string(),
+                "numeric".to_string(),
+                "timestamp with time zone".to_string(),
+            ],
+            rows: vec![vec![
+                json!("2024-02-25"),
+                json!("2024-02-25 13:02:15"),
+                json!("2024-02-25"),
+                json!("not-a-date"),
+                json!("2800.000000"),
+                json!("2024-02-25T13:02:15+08:00"),
+            ]],
+            numeric_column_right_align: false,
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        let styles = read_zip_entry(&workbook, "xl/styles.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"2\"><v>45347</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"3\"><v>45347.543229166666</v></c>"));
+        assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>2024-02-25</t></is></c>"));
+        assert!(sheet.contains("<c r=\"D2\" t=\"inlineStr\"><is><t>not-a-date</t></is></c>"));
+        assert!(sheet.contains("<c r=\"E2\" s=\"5\"><v>2800.000000</v></c>"));
+        assert!(sheet.contains("<c r=\"F2\" t=\"inlineStr\"><is><t>2024-02-25T13:02:15+08:00</t></is></c>"));
+        assert!(styles.contains("numFmtId=\"164\" formatCode=\"yyyy-mm-dd\""));
+        assert!(styles.contains("numFmtId=\"165\" formatCode=\"yyyy-mm-dd hh:mm:ss\""));
+    }
+
+    #[test]
+    fn writes_mysql_57_numeric_strings_as_numeric_cells() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("MySQL 5.7".to_string()),
+            columns: vec![
+                "id".to_string(),
+                "nullable_int".to_string(),
+                "tinyint_value".to_string(),
+                "unsigned_int_value".to_string(),
+                "bigint_safe".to_string(),
+                "float_value".to_string(),
+                "double_value".to_string(),
+                "decimal_value".to_string(),
+            ],
+            column_types: vec![
+                "bigint".to_string(),
+                "int(11)".to_string(),
+                "tinyint(4)".to_string(),
+                "int(10) unsigned".to_string(),
+                "bigint(20)".to_string(),
+                "float".to_string(),
+                "double".to_string(),
+                "decimal(18,6)".to_string(),
+            ],
+            rows: vec![vec![
+                json!("2"),
+                json!("42"),
+                json!("-7"),
+                json!("4000000000"),
+                json!("123456789012345"),
+                json!("123.5"),
+                json!("987654.321"),
+                json!("2800.000000"),
+            ]],
+            numeric_column_right_align: false,
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        for (reference, value) in [
+            ("A2", "2"),
+            ("B2", "42"),
+            ("C2", "-7"),
+            ("D2", "4000000000"),
+            ("E2", "123456789012345"),
+            ("F2", "123.5"),
+            ("G2", "987654.321"),
+            ("H2", "2800.000000"),
+        ] {
+            assert!(sheet.contains(&format!("<c r=\"{reference}\" s=\"5\"><v>{value}</v></c>")), "sheet={sheet}");
+        }
+    }
+
+    #[test]
+    fn preserves_high_precision_numeric_strings_as_text() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Precision".to_string()),
+            columns: vec!["large_id".to_string(), "precise_amount".to_string()],
+            column_types: vec!["bigint".to_string(), "decimal(30,10)".to_string()],
+            rows: vec![vec![json!("9223372036854775807"), json!("123456789012345.6789000000")]],
+            numeric_column_right_align: false,
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("t=\"inlineStr\"") && sheet.contains("9223372036854775807"));
+        assert!(sheet.contains("123456789012345.6789000000"));
+    }
+
+    #[test]
     fn sanitizes_invalid_sheet_name() {
         let workbook = build_xlsx_workbook(&XlsxWorksheetData {
             sheet_name: Some("bad/name:with*chars?and-a-very-long-tail".to_string()),
             columns: vec!["value".to_string()],
+            column_types: vec![],
             rows: vec![vec![json!("ok")]],
+            numeric_column_right_align: false,
         })
         .expect("build workbook");
         let workbook_xml = read_zip_entry(&workbook, "xl/workbook.xml");
@@ -529,12 +952,16 @@ mod tests {
             XlsxWorksheetData {
                 sheet_name: Some("Result 1".to_string()),
                 columns: vec!["id".to_string()],
+                column_types: vec![],
                 rows: vec![vec![json!(1)]],
+                numeric_column_right_align: false,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Result 2".to_string()),
                 columns: vec!["name".to_string()],
+                column_types: vec![],
                 rows: vec![vec![json!("Ada")]],
+                numeric_column_right_align: false,
             },
         ])
         .expect("build multi-sheet workbook");
@@ -556,7 +983,7 @@ mod tests {
         {
             let file = fs::File::create(&path).expect("create temp xlsx");
             let mut writer =
-                start_streaming_xlsx_workbook(file, Some("Streamed"), &["id".to_string(), "name".to_string()])
+                start_streaming_xlsx_workbook(file, Some("Streamed"), &["id".to_string(), "name".to_string()], &[])
                     .expect("start workbook");
             writer.write_row(&[json!(1), json!("Ada")]).expect("write row");
             writer.write_row(&[json!(2), json!("Bob")]).expect("write row");
@@ -569,5 +996,179 @@ mod tests {
         assert_eq!(range.get_value((1, 0)).expect("row1"), &calamine::Data::Float(1.0));
         assert_eq!(range.get_value((2, 1)).expect("row2"), &calamine::Data::String("Bob".to_string()));
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn streams_mysql_numeric_strings_as_numeric_cells() {
+        let path = std::env::temp_dir().join(format!("dbx-mysql-stream-test-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let columns = ["nullable_int".to_string(), "float_value".to_string(), "decimal_value".to_string()];
+            let column_types = ["int(11)".to_string(), "float".to_string(), "decimal(18,6)".to_string()];
+            let mut writer = start_streaming_xlsx_workbook(file, Some("MySQL Stream"), &columns, &column_types)
+                .expect("start workbook");
+            writer.write_row(&[json!("42"), json!("123.5"), json!("2800.000000")]).expect("write row");
+            drop(writer.finish().expect("finish workbook"));
+        }
+
+        let bytes = fs::read(&path).expect("read workbook");
+        let sheet = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"5\"><v>42</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"5\"><v>123.5</v></c>"));
+        assert!(sheet.contains("<c r=\"C2\" s=\"5\"><v>2800.000000</v></c>"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn streaming_temporal_cells_keep_the_configured_excel_display_format() {
+        let path = std::env::temp_dir().join(format!("dbx-temporal-stream-test-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let columns = ["created_at".to_string()];
+            let column_types = ["timestamp without time zone".to_string()];
+            let mut writer = start_streaming_xlsx_workbook_with_options(
+                file,
+                Some("Temporal"),
+                &columns,
+                &column_types,
+                &[],
+                Some("YYYY/MM/DD HH:mm:ss.SSS"),
+                false,
+            )
+            .expect("start workbook");
+            writer.write_row(&[json!("2024/02/25 13:02:15.125")]).expect("write temporal row");
+            drop(writer.finish().expect("finish workbook"));
+        }
+
+        let bytes = fs::read(&path).expect("read workbook");
+        let sheet = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
+        let styles = read_zip_entry(&bytes, "xl/styles.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"3\"><v>"), "sheet={sheet}");
+        assert!(styles.contains("numFmtId=\"165\" formatCode=\"yyyy/mm/dd hh:mm:ss.000\""));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn streams_xlsx_rows_with_a_trailing_sql_worksheet() {
+        let path = std::env::temp_dir().join(format!("dbx-stream-sql-test-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let sql_sheet = XlsxWorksheetData {
+                sheet_name: Some("SQL".to_string()),
+                columns: vec!["SQL".to_string()],
+                column_types: vec![],
+                rows: vec![vec![json!("SELECT id, name FROM users")]],
+                numeric_column_right_align: false,
+            };
+            let mut writer = start_streaming_xlsx_workbook_with_trailing_sheets(
+                file,
+                Some("Result"),
+                &["id".to_string(), "name".to_string()],
+                &[],
+                &[sql_sheet],
+            )
+            .expect("start workbook");
+            writer.write_row(&[json!(1), json!("Ada")]).expect("write row");
+            drop(writer.finish().expect("finish workbook"));
+        }
+
+        let mut workbook = open_workbook_auto(&path).expect("open workbook");
+        assert_eq!(workbook.sheet_names(), &["Result".to_string(), "SQL".to_string()]);
+        let result = workbook.worksheet_range("Result").expect("read result worksheet");
+        let sql = workbook.worksheet_range("SQL").expect("read sql worksheet");
+        assert_eq!(result.get_value((1, 0)), Some(&calamine::Data::Float(1.0)));
+        assert_eq!(sql.get_value((1, 0)), Some(&calamine::Data::String("SELECT id, name FROM users".to_string())));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn numeric_right_align_enabled_applies_style_4() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Aligned".to_string()),
+            columns: vec!["amount".to_string(), "label".to_string()],
+            column_types: vec!["decimal(10,2)".to_string(), "varchar(50)".to_string()],
+            rows: vec![vec![json!(1.5), json!("row")]],
+            numeric_column_right_align: true,
+        })
+        .expect("build workbook");
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains(r#"<c r="A2" s="4"><v>1.5</v></c>"#), "sheet={sheet}");
+        // Text column B should NOT have right-align style s="4"
+        assert!(!sheet.contains(r#"<c r="B2" s="4""#));
+    }
+
+    #[test]
+    fn numeric_right_align_disabled_applies_left_align_style_5() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Disabled".to_string()),
+            columns: vec!["amount".to_string(), "label".to_string()],
+            column_types: vec!["decimal(10,2)".to_string(), "varchar(50)".to_string()],
+            rows: vec![vec![json!(1.5), json!("row")]],
+            numeric_column_right_align: false,
+        })
+        .expect("build workbook");
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        // Numeric column A should have left-align style (s="5"), not right-align (s="4"),
+        // to override Excel's default right alignment for number cells.
+        assert!(sheet.contains(r#"<c r="A2" s="5"><v>1.5</v></c>"#), "sheet={sheet}");
+        assert!(!sheet.contains(r#"s="4""#));
+    }
+
+    #[test]
+    fn numeric_right_align_applies_across_database_numeric_types() {
+        // Ensures the Rust classifier covers the same cross-database numeric
+        // types as the frontend isNumericColumnType (ClickHouse wide integers,
+        // Oracle/Dameng binary floats, SQL Server internal type names, etc.).
+        let column_types = vec![
+            "Int16".to_string(),
+            "Int32".to_string(),
+            "Int64".to_string(),
+            "Int128".to_string(),
+            "UInt256".to_string(),
+            "Decimal128(18, 2)".to_string(),
+            "Float16".to_string(),
+            "BINARY_FLOAT".to_string(),
+            "BINARY_DOUBLE".to_string(),
+            "decimaln".to_string(),
+            "numericn".to_string(),
+            "intn".to_string(),
+            "floatn".to_string(),
+            "moneyn".to_string(),
+            "smallmoneyn".to_string(),
+            "varchar(50)".to_string(),
+        ];
+        let row: Vec<Value> = column_types.iter().map(|_| json!(1)).collect::<Vec<_>>();
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("CrossDb".to_string()),
+            columns: column_types.iter().map(|t| t.to_lowercase()).collect(),
+            column_types: column_types.clone(),
+            rows: vec![row],
+            numeric_column_right_align: true,
+        })
+        .expect("build workbook");
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        for (index, column_type) in column_types.iter().take(column_types.len() - 1).enumerate() {
+            let col_letter = (b'A' + index as u8) as char;
+            let cell = format!(r#"<c r="{col_letter}2" s="4"><v>1</v></c>"#);
+            assert!(sheet.contains(&cell), "missing right-align style for {column_type} (cell={cell})");
+        }
+        // Text column (last) must not receive the numeric right-align style.
+        let last_letter = (b'A' + column_types.len() as u8 - 1) as char;
+        assert!(!sheet.contains(&format!(r#"<c r="{last_letter}2" s="4""#)));
+    }
+
+    #[test]
+    fn numeric_type_classifier_matches_shared_backend_fixtures() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/data-grid-numeric-column-types.json"))
+                .expect("parse numeric column type fixtures");
+        for fixture in fixtures["numeric"].as_array().expect("numeric fixtures") {
+            let column_type = fixture["type"].as_str().expect("numeric fixture type").to_string();
+            assert!(is_numeric_column_type(Some(&column_type)), "expected numeric backend type: {column_type}");
+        }
+        for fixture in fixtures["nonNumeric"].as_array().expect("non-numeric fixtures") {
+            let column_type = fixture["type"].as_str().expect("non-numeric fixture type").to_string();
+            assert!(!is_numeric_column_type(Some(&column_type)), "expected non-numeric backend type: {column_type}");
+        }
     }
 }

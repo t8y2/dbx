@@ -2,7 +2,7 @@ package com.dbx.agent.databend;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
@@ -294,6 +294,6 @@ public final class DatabendAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new DatabendAgent()).run();
+        new MultiSessionJsonRpcServer(DatabendAgent::new).run();
     }
 }

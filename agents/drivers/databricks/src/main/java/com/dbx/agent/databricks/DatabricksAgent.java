@@ -3,7 +3,7 @@ package com.dbx.agent.databricks;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 
 public final class DatabricksAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile DATABRICKS_PROFILE = new DatabricksProfile();
@@ -13,7 +13,7 @@ public final class DatabricksAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new DatabricksAgent()).run();
+        new MultiSessionJsonRpcServer(DatabricksAgent::new).run();
     }
 
     private static final class DatabricksProfile extends JdbcAgentProfile {

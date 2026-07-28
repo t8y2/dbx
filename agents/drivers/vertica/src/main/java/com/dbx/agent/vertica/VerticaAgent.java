@@ -2,7 +2,7 @@ package com.dbx.agent.vertica;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 
 public final class VerticaAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile VERTICA_PROFILE = new JdbcAgentProfile(
@@ -16,6 +16,6 @@ public final class VerticaAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new VerticaAgent()).run();
+        new MultiSessionJsonRpcServer(VerticaAgent::new).run();
     }
 }

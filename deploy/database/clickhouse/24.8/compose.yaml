@@ -1,0 +1,21 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39
+    container_name: dbx-clickhouse-24.8
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-8124}:8123"
+    environment:
+      CLICKHOUSE_DB: dbx
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: "${DB_PASSWORD:-123456}"
+    volumes:
+      - data:/var/lib/clickhouse
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user default --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1' | grep 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+volumes:
+  data:

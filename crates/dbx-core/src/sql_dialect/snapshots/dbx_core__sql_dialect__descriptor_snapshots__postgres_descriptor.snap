@@ -1,0 +1,30 @@
+---
+source: crates/dbx-core/src/sql_dialect/descriptor_snapshots.rs
+assertion_line: 13
+expression: desc
+---
+{
+  "dialect": "postgres",
+  "flags": 3221225455,
+  "max_identifier_length": 63,
+  "supports_schemas": true,
+  "supports_catalogs": false,
+  "max_columns_per_table": 1600,
+  "max_indexes_per_table": 100,
+  "max_query_size_bytes": 268435456,
+  "supports_full_text_index": true,
+  "supports_spatial_index": true,
+  "supports_partitioning": true,
+  "supports_table_sampling": true,
+  "max_foreign_key_name_length": 63,
+  "supports_on_update_cascade": true,
+  "supports_on_delete_set_null": true,
+  "supports_deferrable_constraints": true,
+  "supports_array_type": true,
+  "supports_json_type": true,
+  "supports_enum_type": true,
+  "supports_uuid_type": true,
+  "supports_identity_columns": true,
+  "supports_auto_increment": false,
+  "supports_sequences": true
+}

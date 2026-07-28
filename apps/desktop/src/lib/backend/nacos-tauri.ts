@@ -1,5 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  NacosBatchPreview,
+  NacosBatchReport,
+  NacosConfigSelector,
+  NacosConfigTransferRequest,
+  NacosConflictPolicy,
+  NacosContentSearchRequest,
+  NacosContentSearchResult,
   NacosConfigHistoryKey,
   NacosConfigHistoryList,
   NacosConfigHistoryQuery,
@@ -10,6 +17,9 @@ import type {
   NacosConfigRollbackRequest,
   NacosConfigUpsert,
   NacosConnectionInfo,
+  NacosDashboardQuery,
+  NacosDashboardSnapshot,
+  NacosRNacosConsoleCaptcha,
   NacosInstanceInfo,
   NacosInstanceQuery,
   NacosInstanceUpdate,
@@ -20,6 +30,7 @@ import type {
   NacosRawResponse,
   NacosServiceList,
   NacosServiceQuery,
+  NacosSearchProgress,
 } from "@/types/nacos";
 
 export async function nacosTestConnection(connectionId: string): Promise<NacosConnectionInfo> {
@@ -54,6 +65,38 @@ export async function nacosDeleteConfig(connectionId: string, key: NacosConfigKe
   return invoke("nacos_delete_config", { connectionId, key });
 }
 
+export async function nacosSearchConfigContent(connectionId: string, req: NacosContentSearchRequest, onProgress?: (progress: NacosSearchProgress) => void): Promise<NacosContentSearchResult> {
+  const channel = new Channel<NacosSearchProgress>();
+  channel.onmessage = (progress) => onProgress?.(progress);
+  return invoke("nacos_search_config_content", { connectionId, req, onProgress: channel });
+}
+
+export async function nacosCancelConfigContentSearch(operationId: string): Promise<boolean> {
+  return invoke("nacos_cancel_operation", { operationId });
+}
+
+export async function nacosExportConfigs(connectionId: string, selector: NacosConfigSelector, destination: string, _fileName?: string): Promise<void> {
+  return invoke("nacos_export_configs", { connectionId, selector, destination });
+}
+
+export async function nacosPreviewConfigImport(connectionId: string, targetNamespace: string, archivePath: string | File): Promise<NacosBatchPreview> {
+  if (typeof archivePath !== "string") throw new Error("Desktop Nacos ZIP import requires a local file path");
+  return invoke("nacos_preview_config_import", { connectionId, targetNamespace, archivePath });
+}
+
+export async function nacosApplyConfigImport(connectionId: string, operationId: string, targetNamespace: string, archivePath: string | File, planHash: string, conflictPolicy: NacosConflictPolicy, _archiveToken?: string): Promise<NacosBatchReport> {
+  if (typeof archivePath !== "string") throw new Error("Desktop Nacos ZIP import requires a local file path");
+  return invoke("nacos_apply_config_import", { connectionId, operationId, targetNamespace, archivePath, planHash, conflictPolicy });
+}
+
+export async function nacosPreviewConfigTransfer(req: NacosConfigTransferRequest): Promise<NacosBatchPreview> {
+  return invoke("nacos_preview_config_transfer", { req });
+}
+
+export async function nacosApplyConfigTransfer(req: NacosConfigTransferRequest, planHash: string): Promise<NacosBatchReport> {
+  return invoke("nacos_apply_config_transfer", { req, planHash });
+}
+
 export async function nacosListConfigHistory(connectionId: string, query: NacosConfigHistoryQuery): Promise<NacosConfigHistoryList> {
   return invoke("nacos_list_config_history", { connectionId, query });
 }
@@ -66,6 +109,14 @@ export async function nacosRollbackConfig(connectionId: string, req: NacosConfig
   return invoke("nacos_rollback_config", { connectionId, req });
 }
 
+export async function nacosGetRNacosConsoleCaptcha(connectionId: string): Promise<NacosRNacosConsoleCaptcha> {
+  return invoke("nacos_get_rnacos_console_captcha", { connectionId });
+}
+
+export async function nacosLoginRNacosConsole(connectionId: string, captcha?: string): Promise<void> {
+  return invoke("nacos_login_rnacos_console", { connectionId, captcha });
+}
+
 export async function nacosListServices(connectionId: string, query: NacosServiceQuery): Promise<NacosServiceList> {
   return invoke("nacos_list_services", { connectionId, query });
 }
@@ -76,6 +127,10 @@ export async function nacosListInstances(connectionId: string, query: NacosInsta
 
 export async function nacosUpdateInstance(connectionId: string, req: NacosInstanceUpdate): Promise<void> {
   return invoke("nacos_update_instance", { connectionId, req });
+}
+
+export async function nacosGetDashboard(connectionId: string, query: NacosDashboardQuery): Promise<NacosDashboardSnapshot> {
+  return invoke("nacos_get_dashboard", { connectionId, query });
 }
 
 export async function nacosRawRequest(connectionId: string, req: NacosRawRequest): Promise<NacosRawResponse> {

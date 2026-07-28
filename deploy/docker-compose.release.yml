@@ -1,0 +1,14 @@
+services:
+  dbx:
+    image: t8y2/dbx:latest
+    # For faster pulls in China, use the CNB image instead:
+    # image: docker.cnb.cool/dbxio.com/dbx:latest
+    pull_policy: always
+    ports:
+      - "4224:4224"
+    volumes:
+      - dbx-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  dbx-data:

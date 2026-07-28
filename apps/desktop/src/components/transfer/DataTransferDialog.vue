@@ -8,13 +8,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import type { TransferMode, TransferTableNameCase } from "@/lib/backend/api";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { ArrowRightLeft, ArrowLeftRight, Loader2, Square, CheckSquare } from "@lucide/vue";
 
@@ -55,6 +56,11 @@ const transferMode = ref<TransferMode>("append");
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
 const batchSize = ref(1000);
 const isSubmitting = ref(false);
+const ownershipDialogOpen = ref(false);
+const ownershipMissingOwners = ref<string[]>([]);
+const ownershipTargetOwner = ref("");
+const pendingOwnershipRequest = ref<api.TransferRequest | null>(null);
+const pendingOwnershipRefresh = ref<{ targetConnection: string; targetDatabase: string; targetSchema: string; shouldRefreshTargetTree: boolean } | null>(null);
 
 const filteredTables = computed(() => {
   const q = tableSearch.value.toLowerCase();
@@ -93,8 +99,9 @@ async function loadDatabases(connectionId: string, target: "source" | "target") 
   if (!connectionId) return;
   try {
     await store.ensureConnected(connectionId);
-    const rawNames = isMongoConnection(connectionId) ? await api.mongoListDatabases(connectionId) : (await api.listDatabases(connectionId)).map((d) => d.name);
-    const names = databaseOptionsForConnection(rawNames, store.getConfig(connectionId));
+    const config = store.getConfig(connectionId);
+    if (!config) return;
+    const names = isMongoConnection(connectionId) ? databaseOptionsForConnection(await api.mongoListDatabases(connectionId), config) : await fetchNamespaceOptionsForConnection(connectionId, config);
     if (target === "source") {
       sourceDatabases.value = names;
       sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -182,7 +189,12 @@ watch(sourceConnectionId, (id) => {
 watch(sourceDatabase, async (db) => {
   if (db) {
     const config = store.getConfig(sourceConnectionId.value);
-    if (isSchemaAware(config?.db_type)) {
+    if (namespaceOptionsAreSchemas(config)) {
+      // Dameng has no selectable catalog, so the top-level namespace option is
+      // also the schema used for metadata lookup and qualified transfer SQL.
+      sourceSchemas.value = [];
+      sourceSchema.value = db;
+    } else if (isSchemaAware(config?.db_type)) {
       await loadSchemas(sourceConnectionId.value, db, "source");
     } else {
       sourceSchema.value = db;
@@ -202,7 +214,10 @@ watch(targetConnectionId, (id) => {
 watch(targetDatabase, async (db) => {
   if (db) {
     const config = store.getConfig(targetConnectionId.value);
-    if (isSchemaAware(config?.db_type)) {
+    if (namespaceOptionsAreSchemas(config)) {
+      targetSchemas.value = [];
+      targetSchema.value = db;
+    } else if (isSchemaAware(config?.db_type)) {
       await loadSchemas(targetConnectionId.value, db, "target");
     } else {
       targetSchema.value = db;
@@ -247,6 +262,11 @@ function resetState() {
   targetTableNameCase.value = "preserve";
   batchSize.value = 1000;
   isSubmitting.value = false;
+  ownershipDialogOpen.value = false;
+  ownershipMissingOwners.value = [];
+  ownershipTargetOwner.value = "";
+  pendingOwnershipRequest.value = null;
+  pendingOwnershipRefresh.value = null;
 }
 
 async function startTransfer() {
@@ -272,10 +292,39 @@ async function startTransfer() {
     createTable: createTable.value,
     mode: transferMode.value,
     targetTableNameCase: targetTableNameCase.value,
+    ownershipPolicy: "preserve",
     batchSize: batchSize.value,
   };
 
-  startDataTransferTask(request, `${sourceDatabaseName} → ${targetDatabaseName}`, {
+  if (createTable.value) {
+    try {
+      const preview = await api.previewTransferOwnership(request);
+      if (preview.missingOwners.length > 0) {
+        ownershipMissingOwners.value = preview.missingOwners;
+        ownershipTargetOwner.value = preview.targetOwner;
+        pendingOwnershipRequest.value = request;
+        pendingOwnershipRefresh.value = {
+          targetConnection,
+          targetDatabase: targetDatabaseName,
+          targetSchema: effectiveTargetSchema,
+          shouldRefreshTargetTree,
+        };
+        ownershipDialogOpen.value = true;
+        isSubmitting.value = false;
+        return;
+      }
+    } catch {
+      isSubmitting.value = false;
+      return;
+    }
+  }
+
+  runTransfer(request, targetConnection, targetDatabaseName, effectiveTargetSchema, shouldRefreshTargetTree);
+}
+
+function runTransfer(request: api.TransferRequest, targetConnection: string, targetDatabaseName: string, effectiveTargetSchema: string, shouldRefreshTargetTree: boolean) {
+  isSubmitting.value = true;
+  startDataTransferTask(request, `${request.sourceDatabase} → ${targetDatabaseName}`, {
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
@@ -287,6 +336,21 @@ async function startTransfer() {
   resetState();
 }
 
+function resolveOwnershipDecision(policy: api.TransferOwnershipPolicy | null) {
+  const request = pendingOwnershipRequest.value;
+  const refresh = pendingOwnershipRefresh.value;
+  pendingOwnershipRequest.value = null;
+  pendingOwnershipRefresh.value = null;
+  ownershipDialogOpen.value = false;
+  ownershipMissingOwners.value = [];
+  ownershipTargetOwner.value = "";
+  if (!policy || !request || !refresh) {
+    isSubmitting.value = false;
+    return;
+  }
+  runTransfer({ ...request, ownershipPolicy: policy }, refresh.targetConnection, refresh.targetDatabase, refresh.targetSchema, refresh.shouldRefreshTargetTree);
+}
+
 function getConnectionName(id: string) {
   return store.connections.find((c) => c.id === id)?.name ?? id;
 }
@@ -295,15 +359,15 @@ function getConnectionName(id: string) {
 <template>
   <Dialog v-model:open="open">
     <DialogContent class="sm:max-w-[780px] max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
-      <DialogHeader>
+      <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <ArrowRightLeft class="w-4 h-4" />
           {{ t("transfer.title") }}
         </DialogTitle>
       </DialogHeader>
 
-      <div class="flex-1 min-h-0 overflow-auto">
-        <div class="grid gap-4 py-3">
+      <div class="min-h-0 flex-1 overflow-hidden">
+        <div class="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-4 py-3">
           <!-- Source / Target Side by Side -->
           <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
             <!-- Source Section -->
@@ -326,9 +390,10 @@ function getConnectionName(id: string) {
                   content-class="w-[var(--reka-popover-trigger-width)]"
                 >
                   <template #option-label="{ option, label }">
-                    <div class="flex items-center gap-1.5">
-                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="w-3.5 h-3.5" />
-                      {{ label }}
+                    <div class="flex min-w-0 items-center gap-1.5">
+                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="h-3.5 w-3.5 shrink-0" />
+                      <ConnectionGroupBadge :connection-id="option" />
+                      <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                     </div>
                   </template>
                 </SearchableSelect>
@@ -389,9 +454,10 @@ function getConnectionName(id: string) {
                   content-class="w-[var(--reka-popover-trigger-width)]"
                 >
                   <template #option-label="{ option, label }">
-                    <div class="flex items-center gap-1.5">
-                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="w-3.5 h-3.5" />
-                      {{ label }}
+                    <div class="flex min-w-0 items-center gap-1.5">
+                      <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.db_type ?? 'mysql'" class="h-3.5 w-3.5 shrink-0" />
+                      <ConnectionGroupBadge :connection-id="option" />
+                      <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                     </div>
                   </template>
                 </SearchableSelect>
@@ -429,7 +495,7 @@ function getConnectionName(id: string) {
           </div>
 
           <!-- Tables Section -->
-          <div class="space-y-2">
+          <div class="flex min-h-0 flex-col gap-2">
             <div class="flex items-center justify-between">
               <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 {{ t("transfer.tables") }}
@@ -452,7 +518,7 @@ function getConnectionName(id: string) {
             <div v-else-if="sourceTables.length === 0" class="text-xs text-muted-foreground py-4 text-center">
               {{ t("transfer.noTables") }}
             </div>
-            <div v-else class="border rounded-md max-h-[200px] overflow-y-auto">
+            <div v-else class="min-h-0 max-h-[200px] overflow-y-auto rounded-md border">
               <div v-for="table in filteredTables" :key="table" class="flex items-center gap-2 px-2.5 py-1.5 hover:bg-muted/50 cursor-pointer text-xs" @click="toggleTable(table)">
                 <CheckSquare v-if="selectedTables.has(table)" class="w-3.5 h-3.5 text-primary shrink-0" />
                 <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
@@ -502,7 +568,7 @@ function getConnectionName(id: string) {
         </div>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="shrink-0">
         <Button variant="outline" size="sm" @click="open = false">
           {{ t("transfer.cancel") }}
         </Button>
@@ -510,6 +576,36 @@ function getConnectionName(id: string) {
           <Loader2 v-if="isSubmitting" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
           <ArrowRightLeft v-else class="w-3.5 h-3.5 mr-1.5" />
           {{ t("transfer.start") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="ownershipDialogOpen">
+    <DialogContent class="sm:max-w-[520px]" @interact-outside.prevent>
+      <DialogHeader>
+        <DialogTitle>{{ t("transfer.ownershipTitle") }}</DialogTitle>
+      </DialogHeader>
+      <div class="space-y-3 text-sm">
+        <p class="text-muted-foreground">
+          {{ t("transfer.ownershipMessage", { owners: ownershipMissingOwners.join(", ") }) }}
+        </p>
+        <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          {{ t("transfer.ownershipSkipDetails") }}
+        </div>
+        <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          {{ t("transfer.ownershipTargetOwner", { owner: ownershipTargetOwner }) }}
+        </div>
+      </div>
+      <DialogFooter class="gap-2">
+        <Button variant="outline" size="sm" @click="resolveOwnershipDecision(null)">
+          {{ t("transfer.cancel") }}
+        </Button>
+        <Button variant="secondary" size="sm" @click="resolveOwnershipDecision('skip')">
+          {{ t("transfer.ownershipSkip") }}
+        </Button>
+        <Button size="sm" @click="resolveOwnershipDecision('reassignMissing')">
+          {{ t("transfer.ownershipConfirm") }}
         </Button>
       </DialogFooter>
     </DialogContent>

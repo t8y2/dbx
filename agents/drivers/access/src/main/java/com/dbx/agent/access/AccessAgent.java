@@ -8,7 +8,7 @@ import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 
 public final class AccessAgent extends BaseDatabaseAgent {
+    private static final String ENCRYPTED_ACCESS_OPENER = EncryptedAccessOpener.class.getName();
     private Connection connection;
     private String databaseFile = "";
 
@@ -216,7 +217,7 @@ public final class AccessAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
-        return JdbcExecutor.INSTANCE.execute(
+        return JdbcExecutor.current().execute(
             requireConnected(),
             sql,
             schema,
@@ -224,7 +225,7 @@ public final class AccessAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            JdbcExecutor.INSTANCE::defaultResultValue
+            JdbcExecutor.current()::defaultResultValue
         );
     }
 
@@ -284,6 +285,11 @@ public final class AccessAgent extends BaseDatabaseAgent {
             rawUrl = "jdbc:ucanaccess://" + databasePath(params);
         }
         rawUrl = appendUCanAccessParams(rawUrl, params.getUrl_params());
+
+        // The codec opener is safe for regular files and enables encrypted Access files when a password is supplied.
+        if (!containsIgnoreCase(rawUrl, "jackcessOpener=")) {
+            rawUrl += (rawUrl.endsWith(";") ? "" : ";") + "jackcessOpener=" + ENCRYPTED_ACCESS_OPENER;
+        }
 
         if (!createIfMissing || Files.exists(Path.of(databasePath(params)))) {
             return rawUrl;
@@ -361,6 +367,6 @@ public final class AccessAgent extends BaseDatabaseAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new AccessAgent()).run();
+        new MultiSessionJsonRpcServer(AccessAgent::new).run();
     }
 }

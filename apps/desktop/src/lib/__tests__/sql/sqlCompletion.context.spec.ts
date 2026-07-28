@@ -1,5 +1,76 @@
 import { describe, expect, it } from "vitest";
-import { buildSqlCompletionItems, getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { buildSqlCompletionItems, getSqlCompletionContext, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
+
+describe("sqlCompletion keyword snippets", () => {
+  it("auto-opens and suggests SELECT when typing sel", () => {
+    const sql = "sel";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(shouldAutoOpenSqlCompletion(sql, sql.length)).toBe(true);
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "select *", type: "snippet" }), expect.objectContaining({ label: "SELECT", type: "keyword" })]));
+  });
+});
+
+describe("sqlCompletion database functions", () => {
+  it("suggests MySQL Unix timestamp functions with function snippets", () => {
+    const fromUnixSql = "SELECT from_unix";
+    const fromUnixItems = buildSqlCompletionItems(fromUnixSql, fromUnixSql.length, {
+      databaseType: "mysql",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const fromUnixTime = fromUnixItems.find((item) => item.label === "FROM_UNIXTIME");
+
+    expect(fromUnixItems[0]).toBe(fromUnixTime);
+    expect(fromUnixTime).toEqual(
+      expect.objectContaining({
+        type: "function",
+        apply: "FROM_UNIXTIME(${unix_timestamp})",
+      }),
+    );
+
+    const unixTimestampSql = "SELECT unix_time";
+    const unixTimestampItems = buildSqlCompletionItems(unixTimestampSql, unixTimestampSql.length, {
+      databaseType: "mysql",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(unixTimestampItems[0]).toEqual(
+      expect.objectContaining({
+        label: "UNIX_TIMESTAMP",
+        type: "function",
+        apply: "UNIX_TIMESTAMP()",
+      }),
+    );
+  });
+
+  it("ranks MySQL function prefixes ahead of ordinary keyword prefixes", () => {
+    const sql = "SELECT uni";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "mysql",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.type === "keyword")).toBe(true);
+    expect(items[0]).toEqual(expect.objectContaining({ label: "UNIX_TIMESTAMP", type: "function" }));
+  });
+
+  it("does not expose MySQL-only functions to other databases", () => {
+    const sql = "SELECT from_unix";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === "FROM_UNIXTIME")).toBe(false);
+  });
+});
 
 describe("sqlCompletion quoted schema qualifiers", () => {
   it("parses quoted PostgreSQL schema names before a dot", () => {
@@ -28,7 +99,59 @@ describe("sqlCompletion quoted schema qualifiers", () => {
   });
 });
 
+describe("sqlCompletion table targets", () => {
+  it("suggests tables after a database qualifier in an EXISTS table list", () => {
+    const sql = "SELECT * FROM aa.tb t WHERE EXISTS (SELECT 1 FROM aa.tb1 t1, aa.";
+    const context = getSqlCompletionContext(sql, sql.length);
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "mysql",
+      tables: [{ name: "tb2", schema: "aa", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(context.qualifier).toBe("aa");
+    expect(context.suggestTables).toBe(true);
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "tb2", type: "table" })]));
+  });
+
+  it("does not suggest aliases while completing an empty FROM target before LIMIT", () => {
+    const sql = "SELECT *\nFROM \nLIMIT 100;";
+    const cursor = "SELECT *\nFROM ".length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.type === "snippet" && item.detail === "alias for LIMIT")).toBe(false);
+    expect(items.some((item) => item.type === "table" && item.label === "users")).toBe(true);
+  });
+});
+
 describe("sqlCompletion table aliases", () => {
+  it("uses initials from all words for generated aliases", () => {
+    const sql = "SELECT * FROM mat";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "materials_order_item", type: "table" }],
+      columnsByTable: new Map(),
+      autoAliasTables: true,
+    });
+
+    const table = items.find((item) => item.label === "materials_order_item" && item.type === "table");
+    expect(table?.apply).toBe("materials_order_item AS moi");
+  });
+
+  it("uses every word initial for longer multi-word names", () => {
+    const sql = "SELECT * FROM sup";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "super_long_customer_order_history_archive_snapshot_daily_replica", type: "table" }],
+      columnsByTable: new Map(),
+      autoAliasTables: true,
+    });
+
+    const table = items.find((item) => item.label === "super_long_customer_order_history_archive_snapshot_daily_replica" && item.type === "table");
+    expect(table?.apply).toBe("super_long_customer_order_history_archive_snapshot_daily_replica AS slcohasdr");
+  });
+
   it("applies generated aliases to table completions when enabled", () => {
     const sql = "SELECT * FROM ord";
     const items = buildSqlCompletionItems(sql, sql.length, {
@@ -134,6 +257,64 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.suggestColumns).toBe(true);
   });
 
+  it("keeps alias-qualified column context after select-list subqueries", () => {
+    const sql = `
+      SELECT
+        p.id,
+        p.create_user_name 'creator',
+        (SELECT t.\`code\` FROM sys_user t WHERE t.user_id = p.apply_user_id) 'creator_code',
+        p.
+      FROM sys_process p
+      LIMIT 10
+    `;
+    const cursor = sql.indexOf("p.\n      FROM");
+    const context = getSqlCompletionContext(sql, cursor + 2);
+
+    expect(context.contextKind).toBe("alias_column");
+    expect(context.qualifier).toBe("p");
+    expect(context.suggestTables).toBe(false);
+    expect(context.exclusiveTableSuggestions).toBe(false);
+    expect(context.suggestColumns).toBe(true);
+  });
+
+  it("suggests alias columns after select-list subqueries instead of tables", () => {
+    const sql = `
+      SELECT
+        p.id,
+        p.create_user_name 'creator',
+        (SELECT t.\`code\` FROM sys_user t WHERE t.user_id = p.apply_user_id) 'creator_code',
+        p.
+      FROM sys_process p
+      LIMIT 10
+    `;
+    const cursor = sql.indexOf("p.\n      FROM") + 2;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      dialect: "mysql",
+      tables: [
+        { name: "act_evt_log", type: "table" },
+        { name: "sys_process", type: "table" },
+        { name: "sys_user", type: "table" },
+      ],
+      columnsByTable: new Map([
+        [
+          "sys_process",
+          [
+            { name: "id", table: "sys_process" },
+            { name: "create_user_name", table: "sys_process" },
+            { name: "apply_user_id", table: "sys_process" },
+          ],
+        ],
+        ["sys_user", [{ name: "code", table: "sys_user" }]],
+      ]),
+    });
+
+    const columnLabels = items.filter((item) => item.type === "column").map((item) => item.label);
+    expect(columnLabels).toEqual(expect.arrayContaining(["id", "create_user_name", "apply_user_id"]));
+    expect(items[0]?.type).toBe("column");
+    expect(items.some((item) => item.type === "table")).toBe(false);
+    expect(items.some((item) => item.type === "keyword")).toBe(false);
+  });
+
   it("classifies unqualified WHERE field input as column context", () => {
     const sql = "SELECT * FROM A1User WHERE userc";
     const context = getSqlCompletionContext(sql, sql.length);
@@ -142,7 +323,19 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.prefix).toBe("userc");
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "A1User" })]));
     expect(context.suggestColumns).toBe(true);
-    expect(context.suggestRoutines).toBe(false);
+    expect(context.suggestRoutines).toBe(true);
+  });
+
+  it("auto-opens column completion after WHERE whitespace before LIMIT", () => {
+    const sql = "SELECT *\nFROM t_0001 AS t0 WHERE \nLIMIT 100;";
+    const cursor = "SELECT *\nFROM t_0001 AS t0 WHERE ".length;
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(context.contextKind).toBe("column");
+    expect(context.prefix).toBe("");
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "t_0001", alias: "t0" })]));
+    expect(context.suggestColumns).toBe(true);
+    expect(shouldAutoOpenSqlCompletion(sql, cursor)).toBe(true);
   });
 
   it("classifies CALL routine contexts", () => {
@@ -160,7 +353,7 @@ describe("sqlCompletion scoped context classification", () => {
 
     expect(context.contextKind).toBe("column");
     expect(context.insertSchema).toBe("dbo");
-    expect(context.insertTable).toBe("users");
+    expect(context.insertTable).toBe("Users");
     expect(context.exclusiveColumnSuggestions).toBe(true);
   });
 
@@ -204,6 +397,30 @@ describe("sqlCompletion scoped context classification", () => {
 
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "sq", alias: "sq", columns: ["id", "user_name"] })]));
   });
+
+  it("suggests columns for cross-database qualified table references", () => {
+    const sql = "SELECT * FROM current_orders WHERE reporting.orders.";
+    const context = getSqlCompletionContext(sql, sql.length);
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map([
+        [
+          "reporting.orders",
+          [
+            { name: "id", table: "orders", schema: "reporting", dataType: "int" },
+            { name: "status", table: "orders", schema: "reporting", dataType: "varchar" },
+          ],
+        ],
+        ["archive.orders", [{ name: "archived_at", table: "orders", schema: "archive", dataType: "datetime" }]],
+      ]),
+    });
+
+    expect(context.qualifier).toBe("reporting.orders");
+    expect(context.qualifierParts).toEqual(["reporting", "orders"]);
+    expect(context.suggestColumns).toBe(true);
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "id", type: "column" }), expect.objectContaining({ label: "status", type: "column" })]));
+    expect(items.some((item) => item.label === "archived_at")).toBe(false);
+  });
 });
 
 describe("sqlCompletion scoped metadata ranking", () => {
@@ -231,5 +448,66 @@ describe("sqlCompletion scoped metadata ranking", () => {
 
     expect(items.length).toBeLessThanOrEqual(200);
     expect(items[0]?.label).toBe("TempTable_000");
+  });
+
+  it("ranks real Oracle tables before built-in table functions in FROM contexts", () => {
+    const sql = "SELECT * FROM ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "oracle",
+      tables: [{ name: "ORDERS_10K", schema: "DBX_TEST", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.findIndex((item) => item.label === "ORDERS_10K")).toBeLessThan(items.findIndex((item) => item.label === "TABLE"));
+  });
+
+  it("qualifies same-name PostgreSQL tables from different schemas", () => {
+    const sql = "SELECT * FROM shared";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      dialect: "postgres",
+      tables: [
+        { name: "shared", schema: "public", type: "table" },
+        { name: "shared", schema: "reporting", type: "table" },
+      ],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.apply).sort()).toEqual(["public.shared", "reporting.shared"]);
+  });
+
+  it("qualifies same-name tables for generic metadata providers", () => {
+    const sql = "SELECT * FROM orders";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [
+        { name: "orders", schema: "archive", type: "table" },
+        { name: "orders", schema: "sales", type: "table" },
+      ],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(items.map((item) => item.apply).sort()).toEqual(["archive.orders", "sales.orders"]);
+  });
+
+  it("preserves Oracle current-schema and SQL Server unique-table insertion", () => {
+    const oracleItems = buildSqlCompletionItems("SELECT * FROM ORDERS", "SELECT * FROM ORDERS".length, {
+      databaseType: "oracle",
+      tables: [
+        { name: "ORDERS", schema: "APP", type: "table" },
+        { name: "ORDERS", schema: "REPORTING", type: "table" },
+      ],
+      columnsByTable: new Map(),
+      currentSchema: "APP",
+    }).filter((item) => item.type === "table");
+    const sqlServerItems = buildSqlCompletionItems("SELECT * FROM Orders", "SELECT * FROM Orders".length, {
+      databaseType: "sqlserver",
+      dialect: "sqlserver",
+      tables: [{ name: "Orders", schema: "dbo", type: "table" }],
+      columnsByTable: new Map(),
+    }).filter((item) => item.type === "table");
+
+    expect(oracleItems.map((item) => item.apply).sort()).toEqual(["ORDERS", "REPORTING.ORDERS"]);
+    expect(sqlServerItems).toEqual([expect.objectContaining({ label: "Orders", apply: "Orders" })]);
   });
 });

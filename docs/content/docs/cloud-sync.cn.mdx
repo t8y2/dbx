@@ -1,0 +1,122 @@
+---
+title: 云同步与备份
+description: 使用 WebDAV、GitHub Gist 或 Gitee 代码片段同步 DBX 连接、设置和 SQL 库。
+---
+
+<Callout type="info">
+DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照，上传到 WebDAV 或私有代码片段，并在另一台设备恢复。
+</Callout>
+
+在 **设置 → 同步** 中选择同步方式：
+
+- **WebDAV**：适合已有 NAS、Nextcloud、坚果云或其他 WebDAV 服务的用户，支持定时自动上传。
+- **GitHub / Gitee 代码片段**：不需要自己维护服务器，通过私有 Gist 或私有代码片段保存快照。目前需要手动上传和下载。
+
+## 同步哪些内容
+
+| 项目 | 默认行为 |
+| --- | --- |
+| 数据库连接及普通连接参数 | 同步 |
+| 侧边栏布局、固定节点 | 同步 |
+| 保存的 SQL 库 | 同步 |
+| 桌面和编辑器设置 | 同步 |
+| 数据库密码、SSH 密码、代理密码、HTTP 隧道 Token、连接串、AI API Key | 默认不同步；可以选择加密后同步 |
+| JDBC 驱动、插件和本地文件 | 不同步 |
+
+<Callout type="warn">
+下载会用远端快照替换本地连接元信息和保存的 SQL。恢复前请确认代码片段 ID 或 WebDAV 路径正确。
+</Callout>
+
+## GitHub Gist
+
+### 创建访问令牌
+
+推荐使用 GitHub **Fine-grained personal access token**：
+
+[打开 GitHub Fine-grained token 创建页面](https://github.com/settings/personal-access-tokens/new)
+
+<Steps>
+  <Step>### 打开令牌设置 登录 GitHub，进入 **Settings → Developer settings → Personal access tokens → Fine-grained tokens**。</Step>
+  <Step>### 创建令牌 点击 **Generate new token**，设置名称和有效期。</Step>
+  <Step>### 设置权限 在 **Account permissions** 中找到 **Gists**，选择 **Read and write**。不需要授予仓库权限。</Step>
+  <Step>### 保存令牌 创建后立即复制令牌。GitHub 只会完整显示一次。</Step>
+</Steps>
+
+也可以使用 Classic token，但只应勾选 `gist` scope，不要授予无关权限。
+
+### 首次上传
+
+<Steps>
+  <Step>### 选择平台 打开 **设置 → 同步 → GitHub / Gitee**，平台选择 **GitHub Gist**。</Step>
+  <Step>### 填写令牌 将访问令牌粘贴到 **访问令牌**。建议勾选 **加密保存在本机**。</Step>
+  <Step>### 创建 Gist 将 **代码片段 ID** 留空，点击 **上传**。DBX 会创建私有 Gist，并自动保存返回的 ID。</Step>
+</Steps>
+
+DBX 会在 Gist 中保存一个 `dbx-sync.json` 文件。后续上传会更新同一个 Gist，GitHub 会保留 Gist 的修改历史。
+
+### 在另一台设备恢复
+
+1. 打开该私有 Gist，从地址栏复制 ID。地址通常类似 `https://gist.github.com/<实际用户名>/<gist-id>`，最后一段就是 ID。也可以直接访问 `https://gist.github.com/<gist-id>`，GitHub 会跳转到包含实际用户名的地址。
+2. 在新设备填写相同的 GitHub 令牌和 Gist ID。
+3. 点击 **测试**，确认令牌和 ID 可访问。
+4. 点击 **下载** 并确认恢复。
+
+## Gitee 代码片段
+
+### 创建私人令牌
+
+[打开 Gitee 私人令牌页面](https://gitee.com/profile/personal_access_tokens)
+
+<Steps>
+  <Step>### 打开私人令牌页面 登录 Gitee，进入 **设置 → 私人令牌**。</Step>
+  <Step>### 生成新令牌 点击 **生成新令牌**，填写描述。</Step>
+  <Step>### 设置权限 只勾选代码片段（`gists`）相关权限。如果界面只提供合并权限，选择能够读写代码片段的最小权限。</Step>
+  <Step>### 保存令牌 生成后立即复制令牌，并存放在密码管理器中。</Step>
+</Steps>
+
+### 上传与恢复
+
+1. 在 **设置 → 同步 → GitHub / Gitee** 中选择 **Gitee 代码片段**。
+2. 输入私人令牌。首次上传时将代码片段 ID 留空，DBX 会创建私有代码片段并保存 ID。
+3. 在其他设备恢复时，填写同一个代码片段 ID，然后点击 **下载**。
+
+Gitee 代码片段中同样使用 `dbx-sync.json` 文件。
+
+## 同步敏感信息
+
+默认快照不会包含数据库密码等密钥。如果需要在新设备直接恢复密码：
+
+1. 开启 **同步加密后的敏感信息**。
+2. 输入单独的 **同步密码**。
+3. 上传快照。
+4. 在另一台设备下载时输入相同的同步密码。
+
+敏感信息使用 **Argon2id** 派生密钥，并使用 **AES-256-GCM** 加密。访问令牌只会使用设备密钥加密保存在本机，永远不会写入 `dbx-sync.json`。
+
+<Callout type="warn">
+同步密码无法找回。丢失同步密码后，仍可恢复普通连接信息和 SQL，但无法解密远端敏感信息。
+</Callout>
+
+## WebDAV
+
+填写 WebDAV 服务地址、用户名、应用密码和远端快照路径。默认路径为 `DBX/sync/snapshot.json`。
+
+WebDAV 支持定时自动上传。自动上传只在 DBX 运行期间执行；下载始终需要手动确认，避免远端快照意外覆盖本地数据。
+
+## 常见问题
+
+### HTTP 401 或 403
+
+令牌无效、已过期，或没有代码片段读写权限。重新创建最小权限令牌后再测试。
+
+### HTTP 404
+
+代码片段 ID 不正确，或者当前令牌无权访问该私有代码片段。
+
+### 首次上传后在哪里找 ID
+
+DBX 会自动保存 ID。也可以在 GitHub Gist 或 Gitee 代码片段页面的地址栏中查看。
+
+### 多台设备可以同时自动同步吗
+
+代码片段同步目前只支持手动上传和下载，不会自动合并两台设备上的修改。上传前建议先下载最新快照，避免覆盖另一台设备刚上传的版本。

@@ -1,3 +1,5 @@
+import type { SchemaDiffCompareOptions } from "@/types/schemaDiff";
+
 const MYSQL_LARGE_SCHEMA_DIFF_METADATA_CONCURRENCY = 2;
 const MYSQL_SMALL_SCHEMA_DIFF_METADATA_CONCURRENCY = 4;
 const MYSQL_SMALL_SCHEMA_TABLE_LIMIT = 30;
@@ -16,6 +18,10 @@ export function schemaDiffMetadataConcurrency(dbType: string | null | undefined,
     return MYSQL_LARGE_SCHEMA_DIFF_METADATA_CONCURRENCY;
   }
   return DEFAULT_SCHEMA_DIFF_METADATA_CONCURRENCY;
+}
+
+export function shouldFetchSchemaDiffDdl(isView: boolean, options: Pick<SchemaDiffCompareOptions, "tables" | "views">): boolean {
+  return isView ? options.views : options.tables;
 }
 
 export async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {

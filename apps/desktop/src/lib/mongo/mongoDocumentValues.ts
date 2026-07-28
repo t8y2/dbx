@@ -1,8 +1,13 @@
 export type MongoInputValue = string | number | boolean | null;
 
 const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
-const LEGACY_MONGO_DATE_DISPLAY_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?$/;
+const MONGO_SHELL_NUMBER_LONG_PATTERN = /^NumberLong\(\s*(["'])(-?\d+)\1\s*\)$/;
 const MONGO_OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
+const MONGO_INTEGER_PATTERN = /^-?\d+$/;
+const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_BSON_INT64 = -9223372036854775808n;
+const MAX_BSON_INT64 = 9223372036854775807n;
+const MONGO_EXTENDED_JSON_VALUE_KEYS = new Set(["$binary", "$code", "$date", "$dbPointer", "$maxKey", "$minKey", "$numberDecimal", "$numberDouble", "$numberInt", "$numberLong", "$oid", "$regularExpression", "$symbol", "$timestamp", "$undefined", "$uuid"]);
 
 export function mongoShellDateToExtendedJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -20,25 +25,51 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
 
   const shellDate = mongoShellDateToExtendedJson(trimmed);
   if (shellDate !== trimmed) return shellDate;
+  const shellNumberLong = mongoShellNumberLongToExtendedJson(trimmed);
+  if (shellNumberLong !== trimmed) return shellNumberLong;
 
-  const legacyDate = legacyMongoDateDisplayToExtendedJson(trimmed);
-  if (legacyDate) return legacyDate;
-
-  if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed);
+  if (MONGO_INTEGER_PATTERN.test(trimmed)) {
+    const integer = BigInt(trimmed);
+    if (integer > MAX_SAFE_BIGINT || integer < -MAX_SAFE_BIGINT) {
+      return integer >= MIN_BSON_INT64 && integer <= MAX_BSON_INT64 ? { $numberLong: trimmed } : trimmed;
+    }
+    return Number(trimmed);
+  }
+  if (/^-?\d+\.\d+$/.test(trimmed)) return Number(trimmed);
   if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"')) {
     return mongoShellDateToExtendedJson(JSON.parse(trimmed));
   }
   return raw;
 }
 
-function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } | null {
-  const match = value.match(LEGACY_MONGO_DATE_DISPLAY_PATTERN);
-  if (!match) return null;
-  const [, date, time, millis = "000"] = match;
-  return { $date: `${date}T${time}.${millis.padEnd(3, "0")}Z` };
+export function mongoDocumentDisplayValue(value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const object = value as Record<string, unknown>;
+    if (Object.keys(object).length === 1 && typeof object.$numberLong === "string") return `NumberLong(${JSON.stringify(object.$numberLong)})`;
+  }
+  return value;
 }
 
-export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[]): Record<string, unknown> {
+function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, originalValue: unknown): unknown {
+  // Objects and arrays are serialized into grid text too, so the raw document
+  // is the only reliable way to distinguish them from JSON-shaped BSON strings.
+  if (typeof originalValue === "string") {
+    return typeof raw === "string" ? raw : String(raw);
+  }
+  return parseMongoDocumentInputValue(raw);
+}
+
+function mongoDocumentFieldValue(document: unknown, field: string): unknown {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return undefined;
+  return (document as Record<string, unknown>)[field];
+}
+
+function mongoShellNumberLongToExtendedJson(value: string): unknown {
+  const match = value.match(MONGO_SHELL_NUMBER_LONG_PATTERN);
+  return match ? { $numberLong: match[2] } : value;
+}
+
+export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[], originalDocument?: unknown): Record<string, unknown> {
   const setFields: Record<string, unknown> = {};
   const unsetFields: Record<string, unknown> = {};
   for (const [colIdx, newVal] of changes) {
@@ -47,13 +78,82 @@ export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, 
     if (newVal === null) {
       unsetFields[col] = "";
     } else {
-      setFields[col] = parseMongoDocumentInputValue(newVal);
+      setFields[col] = parseMongoExistingFieldInputValue(newVal, mongoDocumentFieldValue(originalDocument, col));
     }
   }
   const doc: Record<string, unknown> = {};
   if (Object.keys(setFields).length > 0) doc.$set = setFields;
   if (Object.keys(unsetFields).length > 0) doc.$unset = unsetFields;
   return doc;
+}
+
+export function buildMongoCopyUpdateDocument(row: MongoInputValue[], columns: string[], dirtyColumns: boolean[], originalDocument?: unknown, idColumn = "_id"): Record<string, unknown> | null {
+  if (!originalDocument || typeof originalDocument !== "object" || Array.isArray(originalDocument)) return null;
+
+  const source = originalDocument as Record<string, unknown>;
+  const setFields: Record<string, unknown> = {};
+  const unsetFields: Record<string, unknown> = {};
+  for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+    const column = columns[columnIndex];
+    if (!column || column === idColumn) continue;
+
+    const value = row[columnIndex] ?? null;
+    if (dirtyColumns[columnIndex]) {
+      if (value === null) {
+        unsetFields[column] = "";
+      } else {
+        setFields[column] = parseMongoExistingFieldInputValue(value, source[column]);
+      }
+      continue;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(source, column)) {
+      setFields[column] = source[column];
+    } else {
+      unsetFields[column] = "";
+    }
+  }
+
+  const update: Record<string, unknown> = {};
+  if (Object.keys(setFields).length > 0) update.$set = setFields;
+  if (Object.keys(unsetFields).length > 0) update.$unset = unsetFields;
+  return Object.keys(update).length > 0 ? update : null;
+}
+
+export function applyMongoGridChangesToDocument(document: unknown, changes: Map<number, MongoInputValue>, columns: string[]): unknown {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return document;
+
+  const updated = { ...(document as Record<string, unknown>) };
+  for (const [colIdx, newVal] of changes) {
+    const column = columns[colIdx];
+    if (!column || column === "_id") continue;
+    if (newVal === null) {
+      delete updated[column];
+    } else {
+      updated[column] = parseMongoExistingFieldInputValue(newVal, updated[column]);
+    }
+  }
+  return updated;
+}
+
+function mongoDocumentIdentityKey(document: unknown): string | undefined {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return undefined;
+  const object = document as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(object, "_id")) return undefined;
+  return JSON.stringify(object._id);
+}
+
+export function applyMongoGridChangesToDocumentBaseline(baselineDocuments: unknown[], currentDocuments: unknown[], dirtyRows: Map<number, Map<number, MongoInputValue>>, columns: string[]): unknown[] {
+  const changesByDocumentId = new Map<string, Map<number, MongoInputValue>>();
+  for (const [rowIndex, changes] of dirtyRows) {
+    const identityKey = mongoDocumentIdentityKey(currentDocuments[rowIndex]);
+    if (identityKey !== undefined) changesByDocumentId.set(identityKey, changes);
+  }
+  return baselineDocuments.map((document) => {
+    const identityKey = mongoDocumentIdentityKey(document);
+    const changes = identityKey === undefined ? undefined : changesByDocumentId.get(identityKey);
+    return changes ? applyMongoGridChangesToDocument(document, changes, columns) : document;
+  });
 }
 
 export function buildMongoInsertDocument(row: MongoInputValue[], columns: string[]): Record<string, unknown> {
@@ -84,6 +184,26 @@ export function buildMongoCopyInsertDocument(row: MongoInputValue[], columns: st
   return doc;
 }
 
+export function buildMongoCopyDocumentFromOriginal(original: unknown, row: MongoInputValue[], columns: string[], dirtyColumns: boolean[], options: { excludePrimaryKeys?: boolean } = {}): Record<string, unknown> | null {
+  if (!original || typeof original !== "object" || Array.isArray(original)) return null;
+
+  const source = original as Record<string, unknown>;
+  const document: Record<string, unknown> = {};
+  for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+    const column = columns[columnIndex];
+    if (!column || (options.excludePrimaryKeys && column === "_id")) continue;
+
+    // Display strings are ambiguous, so only explicitly edited cells may replace original BSON values.
+    if (dirtyColumns[columnIndex]) {
+      const value = row[columnIndex];
+      if (value !== null) document[column] = parseMongoDocumentInputValue(value);
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(source, column)) document[column] = source[column];
+  }
+  return document;
+}
+
 export function formatMongoShellLiteral(value: unknown): string {
   if (value === null || value === undefined) return "null";
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -101,7 +221,29 @@ export function formatMongoShellLiteral(value: unknown): string {
     if (keys.length === 1 && typeof object.$numberLong === "string") {
       return `NumberLong(${JSON.stringify(object.$numberLong)})`;
     }
+    if ((keys.length === 1 && MONGO_EXTENDED_JSON_VALUE_KEYS.has(keys[0] ?? "")) || (keys.length === 2 && keys.includes("$code") && keys.includes("$scope"))) {
+      return `EJSON.deserialize(${JSON.stringify(object)})`;
+    }
     return `{${keys.map((key) => `${JSON.stringify(key)}:${formatMongoShellLiteral(object[key])}`).join(",")}}`;
   }
   return JSON.stringify(String(value));
+}
+
+export function serializeMongoDocumentId(value: unknown): string {
+  if (typeof value === "string") return `__dbx_mongo_string_id__${JSON.stringify(value)}`;
+  if (isMongoExtendedJsonId(value)) return JSON.stringify(value);
+  return String(value);
+}
+
+export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {
+  if (isMongoExtendedJsonId(value)) return String(value.$numberLong ?? value.$oid);
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  return JSON.stringify(value);
+}
+
+function isMongoExtendedJsonId(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const object = value as Record<string, unknown>;
+  const keys = Object.keys(object);
+  return keys.length === 1 && (typeof object.$numberLong === "string" || typeof object.$oid === "string");
 }

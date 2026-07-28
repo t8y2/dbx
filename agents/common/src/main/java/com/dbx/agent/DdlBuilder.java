@@ -1,10 +1,18 @@
 package com.dbx.agent;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class DdlBuilder {
+    private static final Pattern SQLSERVER_IDENTITY = Pattern.compile(
+        "^\\s*identity\\s*\\(\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\)\\s*$",
+        Pattern.CASE_INSENSITIVE
+    );
+
     private DdlBuilder() {
     }
 
@@ -15,7 +23,7 @@ public final class DdlBuilder {
         List<IndexInfo> indexes,
         List<ForeignKeyInfo> foreignKeys
     ) {
-        return buildTableDdl(schema, table, columns, indexes, foreignKeys, false, false);
+        return buildTableDdl(schema, table, columns, indexes, foreignKeys, Collections.emptyList(), false, false, null);
     }
 
     public static String buildTableDdl(
@@ -26,7 +34,7 @@ public final class DdlBuilder {
         List<ForeignKeyInfo> foreignKeys,
         boolean useBacktick
     ) {
-        return buildTableDdl(schema, table, columns, indexes, foreignKeys, useBacktick, false);
+        return buildTableDdl(schema, table, columns, indexes, foreignKeys, Collections.emptyList(), useBacktick, false, null);
     }
 
     public static String buildTableDdl(
@@ -38,6 +46,43 @@ public final class DdlBuilder {
         boolean useBacktick,
         boolean includeColumnComments
     ) {
+        return buildTableDdl(
+            schema,
+            table,
+            columns,
+            indexes,
+            foreignKeys,
+            Collections.emptyList(),
+            useBacktick,
+            includeColumnComments,
+            null
+        );
+    }
+
+    public static String buildTableDdl(
+        String schema,
+        String table,
+        List<ColumnInfo> columns,
+        List<IndexInfo> indexes,
+        List<ForeignKeyInfo> foreignKeys,
+        List<CheckConstraintInfo> checkConstraints,
+        boolean useBacktick,
+        boolean includeColumnComments
+    ) {
+        return buildTableDdl(schema, table, columns, indexes, foreignKeys, checkConstraints, useBacktick, includeColumnComments, null);
+    }
+
+    public static String buildTableDdl(
+        String schema,
+        String table,
+        List<ColumnInfo> columns,
+        List<IndexInfo> indexes,
+        List<ForeignKeyInfo> foreignKeys,
+        List<CheckConstraintInfo> checkConstraints,
+        boolean useBacktick,
+        boolean includeColumnComments,
+        String tableComment
+    ) {
         String tableRef = qualifiedName(schema, table, useBacktick);
         List<String> columnLines = new ArrayList<>();
         for (ColumnInfo column : columns) {
@@ -46,6 +91,10 @@ public final class DdlBuilder {
             line.append(quoteIdent(column.getName(), useBacktick));
             line.append(" ");
             line.append(columnTypeSql(column));
+            String identityClause = sqlServerIdentityClause(column.getExtra());
+            if (identityClause != null) {
+                line.append(" ").append(identityClause);
+            }
             if (!column.getIs_nullable()) {
                 line.append(" NOT NULL");
             }
@@ -74,12 +123,30 @@ public final class DdlBuilder {
             );
         }
 
+        for (CheckConstraintInfo constraint : checkConstraints) {
+            if (!notBlank(constraint.getDefinition())) {
+                continue;
+            }
+            String name = notBlank(constraint.getName())
+                ? "CONSTRAINT " + quoteIdent(constraint.getName(), useBacktick) + " "
+                : "";
+            columnLines.add("  " + name + constraint.getDefinition());
+        }
+
         StringBuilder ddl = new StringBuilder();
         ddl.append("CREATE TABLE ");
         ddl.append(tableRef);
         ddl.append(" (\n");
         ddl.append(join(columnLines, ",\n"));
         ddl.append("\n);\n");
+
+        if (notBlank(tableComment)) {
+            ddl.append("\nCOMMENT ON TABLE ");
+            ddl.append(tableRef);
+            ddl.append(" IS '");
+            ddl.append(sqlStringBody(tableComment));
+            ddl.append("';");
+        }
 
         if (includeColumnComments) {
             for (ColumnInfo column : columns) {
@@ -151,8 +218,9 @@ public final class DdlBuilder {
     private static String columnTypeSql(ColumnInfo column) {
         String type = column.getData_type();
         String normalized = type.toLowerCase(Locale.ROOT);
-        if (isCharacterType(normalized) && column.getCharacter_maximum_length() != null) {
-            return type + "(" + column.getCharacter_maximum_length() + ")";
+        Integer characterLength = column.getCharacter_maximum_length();
+        if (isCharacterType(normalized) && characterLength != null && characterLength > 0) {
+            return type + "(" + characterLength + ")";
         }
         if (isNumericType(normalized) && column.getNumeric_precision() != null) {
             if (column.getNumeric_scale() != null) {
@@ -172,6 +240,14 @@ public final class DdlBuilder {
 
     private static boolean isNumericType(String normalized) {
         return "numeric".equals(normalized) || "decimal".equals(normalized);
+    }
+
+    private static String sqlServerIdentityClause(String extra) {
+        if (extra == null) {
+            return null;
+        }
+        Matcher matcher = SQLSERVER_IDENTITY.matcher(extra);
+        return matcher.matches() ? "IDENTITY(" + matcher.group(1) + "," + matcher.group(2) + ")" : null;
     }
 
     private static boolean notBlank(String value) {

@@ -2,7 +2,7 @@ package com.dbx.agent.exasol;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 
 public final class ExasolAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile EXASOL_PROFILE = new JdbcAgentProfile(
@@ -17,6 +17,6 @@ public final class ExasolAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new ExasolAgent()).run();
+        new MultiSessionJsonRpcServer(ExasolAgent::new).run();
     }
 }

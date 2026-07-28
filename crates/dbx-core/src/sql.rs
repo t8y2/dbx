@@ -69,6 +69,8 @@ pub struct SqlFilePreview {
     pub size_bytes: u64,
     pub preview: String,
     pub can_execute_without_selected_database: bool,
+    #[serde(default)]
+    pub establishes_database_context: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +111,10 @@ struct SqlDialectProfile {
     supports_oracle_plsql_blocks: bool,
     supports_slash_line_block_delimiter: bool,
     supports_custom_delimiter_commands: bool,
+    supports_mysql_routine_blocks: bool,
     supports_dollar_quoted_strings: bool,
+    supports_postgres_dollar_quoted_routines: bool,
+    supports_hana_do_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
 }
@@ -121,7 +126,10 @@ impl Default for SqlDialectProfile {
             supports_oracle_plsql_blocks: false,
             supports_slash_line_block_delimiter: false,
             supports_custom_delimiter_commands: true,
+            supports_mysql_routine_blocks: false,
             supports_dollar_quoted_strings: true,
+            supports_postgres_dollar_quoted_routines: false,
+            supports_hana_do_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
         }
@@ -130,6 +138,10 @@ impl Default for SqlDialectProfile {
 
 impl SqlDialectProfile {
     fn for_database_type(db_type: DatabaseType) -> Self {
+        if matches!(db_type, DatabaseType::Gaussdb) {
+            return Self::gaussdb();
+        }
+
         if Self::is_oracle_like_database(db_type) {
             return Self::oracle_like();
         }
@@ -142,19 +154,31 @@ impl SqlDialectProfile {
             return Self::mysql_compatible();
         }
 
+        if matches!(db_type, DatabaseType::SapHana) {
+            return Self::sap_hana();
+        }
+
         Self::default()
     }
 
     fn mysql_compatible() -> Self {
-        Self { supports_hash_line_comments: true, ..Self::default() }
+        Self { supports_hash_line_comments: true, supports_mysql_routine_blocks: true, ..Self::default() }
     }
 
     fn oracle_like() -> Self {
         Self { supports_oracle_plsql_blocks: true, supports_slash_line_block_delimiter: true, ..Self::default() }
     }
 
+    fn gaussdb() -> Self {
+        Self { supports_postgres_dollar_quoted_routines: true, ..Self::oracle_like() }
+    }
+
     fn sql_server() -> Self {
         Self { supports_go_batch_separator: true, keeps_sqlserver_module_batch_at_cursor: true, ..Self::default() }
+    }
+
+    fn sap_hana() -> Self {
+        Self { supports_hana_do_blocks: true, ..Self::default() }
     }
 
     fn is_mysql_compatible_database(db_type: DatabaseType) -> bool {
@@ -177,6 +201,7 @@ impl SqlDialectProfile {
                 | DatabaseType::Yashandb
                 | DatabaseType::Oscar
                 | DatabaseType::OceanbaseOracle
+                | DatabaseType::Xugu
         )
     }
 }
@@ -256,6 +281,7 @@ pub struct SqlStatementSplitter {
     in_line_comment: bool,
     in_block_comment: bool,
     dollar_quote_tag: Option<String>,
+    postgres_dollar_quoted_routine: bool,
     previous: Option<char>,
     custom_delimiter: Option<String>,
     options: SqlParsingOptions,
@@ -358,6 +384,11 @@ impl SqlStatementSplitter {
                     .flatten()
                 {
                     if self.custom_delimiter.is_none() && !self.on_delimiter_line() {
+                        if self.options.profile.supports_postgres_dollar_quoted_routines
+                            && starts_with_postgres_dollar_quoted_routine_prefix(&self.buffer)
+                        {
+                            self.postgres_dollar_quoted_routine = true;
+                        }
                         for tag_ch in tag.chars() {
                             self.buffer.push(tag_ch);
                             self.previous = Some(tag_ch);
@@ -370,11 +401,11 @@ impl SqlStatementSplitter {
             }
 
             match ch {
-                '\'' if !self.in_double_quote && !self.in_backtick && self.previous != Some('\\') => {
+                '\'' if !self.in_double_quote && !self.in_backtick && !has_odd_trailing_backslashes(&self.buffer) => {
                     self.in_single_quote = !self.in_single_quote;
                     self.buffer.push(ch);
                 }
-                '"' if !self.in_single_quote && !self.in_backtick && self.previous != Some('\\') => {
+                '"' if !self.in_single_quote && !self.in_backtick && !has_odd_trailing_backslashes(&self.buffer) => {
                     self.in_double_quote = !self.in_double_quote;
                     self.buffer.push(ch);
                 }
@@ -383,15 +414,34 @@ impl SqlStatementSplitter {
                     self.buffer.push(ch);
                 }
                 ';' if !self.in_single_quote && !self.in_double_quote && !self.in_backtick => {
-                    if self.options.profile.supports_custom_delimiter_commands && self.on_delimiter_line() {
+                    if (self.options.profile.supports_custom_delimiter_commands && self.on_delimiter_line())
+                        || self.custom_delimiter.is_some()
+                    {
                         self.buffer.push(ch);
-                    } else if self.custom_delimiter.is_some() {
-                        self.buffer.push(ch);
+                    } else if self.options.profile.supports_mysql_routine_blocks
+                        && starts_with_mysql_routine_block(&self.buffer)
+                    {
+                        let mut candidate = self.buffer.clone();
+                        candidate.push(ch);
+                        if mysql_routine_block_is_complete(&candidate) {
+                            // The final semicolon is the client-side statement delimiter.
+                            // Keep semicolons inside BEGIN...END, but do not send the
+                            // delimiter after END to the MySQL server.
+                            self.push_current_statement(&mut statements);
+                        } else {
+                            self.buffer.push(ch);
+                        }
                     } else if self.options.profile.supports_oracle_plsql_blocks
+                        && !self.postgres_dollar_quoted_routine
                         && starts_with_oracle_plsql_block(&self.buffer)
                     {
                         self.buffer.push(ch);
                         if oracle_plsql_block_is_complete(&self.buffer) {
+                            self.push_current_statement(&mut statements);
+                        }
+                    } else if self.options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&self.buffer) {
+                        self.buffer.push(ch);
+                        if hana_do_block_is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
                     } else {
@@ -412,6 +462,7 @@ impl SqlStatementSplitter {
                             statements.push(before.to_string());
                         }
                         self.buffer.clear();
+                        self.postgres_dollar_quoted_routine = false;
                         self.previous = None;
                         i += 1;
                         continue;
@@ -431,6 +482,7 @@ impl SqlStatementSplitter {
                             }
                         }
                         self.buffer.clear();
+                        self.postgres_dollar_quoted_routine = false;
                         self.previous = None;
                         i += 1;
                         continue;
@@ -482,6 +534,7 @@ impl SqlStatementSplitter {
             statements.push(statement.to_string());
         }
         self.buffer.clear();
+        self.postgres_dollar_quoted_routine = false;
         self.previous = None;
     }
 
@@ -490,6 +543,10 @@ impl SqlStatementSplitter {
         let line = self.buffer[start..].trim_start().as_bytes();
         line.len() >= 9 && line[..9].eq_ignore_ascii_case(b"delimiter")
     }
+}
+
+fn has_odd_trailing_backslashes(sql: &str) -> bool {
+    sql.as_bytes().iter().rev().take_while(|byte| **byte == b'\\').count() % 2 == 1
 }
 
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
@@ -608,6 +665,9 @@ fn split_statement_range_at_blank_lines(
     if options.profile.supports_oracle_plsql_blocks && starts_with_oracle_plsql_block(&statement.text) {
         return vec![statement.clone()];
     }
+    if options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&statement.text) {
+        return vec![statement.clone()];
+    }
 
     let mut ranges = Vec::new();
     let mut scanner = SqlScanner::with_profile(options.profile);
@@ -655,6 +715,10 @@ fn split_statement_range_at_blank_lines(
 }
 
 fn starts_with_soft_statement_keyword(sql: &str, options: SqlParsingOptions) -> bool {
+    if options.profile.supports_hana_do_blocks && starts_with_executable_sql_keyword_with_options(sql, &["DO"], options)
+    {
+        return true;
+    }
     starts_with_executable_sql_keyword_with_options(
         sql,
         &[
@@ -682,6 +746,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
     let mut in_block_comment = false;
     let mut dollar_quote_tag: Option<String> = None;
     let mut custom_delimiter: Option<String> = None;
+    let mut postgres_dollar_quoted_routine = false;
 
     while i < sql.len() {
         if let Some(tag) = &dollar_quote_tag {
@@ -735,6 +800,11 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 options.profile.supports_dollar_quoted_strings.then(|| dollar_quote_tag_at_str(sql, i)).flatten()
             {
                 if custom_delimiter.is_none() && !is_on_delimiter_line(sql, start, i) {
+                    if options.profile.supports_postgres_dollar_quoted_routines
+                        && starts_with_postgres_dollar_quoted_routine_prefix(&sql[start..i])
+                    {
+                        postgres_dollar_quoted_routine = true;
+                    }
                     i += tag.len();
                     dollar_quote_tag = Some(tag);
                     continue;
@@ -746,6 +816,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 if options.profile.supports_slash_line_block_delimiter && line == "/" {
                     push_statement_range(&mut ranges, sql, start, line_start, options);
                     start = i + ch.len_utf8();
+                    postgres_dollar_quoted_routine = false;
                     i = start;
                     continue;
                 }
@@ -758,6 +829,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                     }
                     custom_delimiter = if new_delimiter == ";" { None } else { Some(new_delimiter.to_string()) };
                     start = i + ch.len_utf8();
+                    postgres_dollar_quoted_routine = false;
                     i = start;
                     continue;
                 }
@@ -777,25 +849,43 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 in_backtick = !in_backtick;
                 i += ch.len_utf8();
             }
-            ';' if !in_single_quote
-                && !in_double_quote
-                && !in_backtick
-                && custom_delimiter.is_none()
-                && !(options.profile.supports_custom_delimiter_commands && is_on_delimiter_line(sql, start, i)) =>
+            ';' if !(in_single_quote
+                || in_double_quote
+                || in_backtick
+                || custom_delimiter.is_some()
+                || (options.profile.supports_custom_delimiter_commands && is_on_delimiter_line(sql, start, i))) =>
             {
-                let is_oracle_plsql =
-                    options.profile.supports_oracle_plsql_blocks && starts_with_oracle_plsql_block(&sql[start..i]);
-                if is_oracle_plsql {
-                    if !oracle_plsql_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                let is_mysql_routine =
+                    options.profile.supports_mysql_routine_blocks && starts_with_mysql_routine_block(&sql[start..i]);
+                if is_mysql_routine {
+                    if !mysql_routine_block_is_complete(&sql[start..i + ch.len_utf8()]) {
                         i += ch.len_utf8();
                         continue;
                     }
-                    push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
-                } else {
                     push_statement_range(&mut ranges, sql, start, i, options);
+                } else {
+                    let is_oracle_plsql = options.profile.supports_oracle_plsql_blocks
+                        && !postgres_dollar_quoted_routine
+                        && starts_with_oracle_plsql_block(&sql[start..i]);
+                    if is_oracle_plsql {
+                        if !oracle_plsql_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                            i += ch.len_utf8();
+                            continue;
+                        }
+                        push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
+                    } else if options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&sql[start..i]) {
+                        if !hana_do_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                            i += ch.len_utf8();
+                            continue;
+                        }
+                        push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
+                    } else {
+                        push_statement_range(&mut ranges, sql, start, i, options);
+                    }
                 }
                 i += ch.len_utf8();
                 start = i;
+                postgres_dollar_quoted_routine = false;
             }
             _ => {
                 i += ch.len_utf8();
@@ -805,6 +895,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                             let end = i - delimiter.len();
                             push_statement_range(&mut ranges, sql, start, end, options);
                             start = i;
+                            postgres_dollar_quoted_routine = false;
                         }
                     }
                 }
@@ -921,6 +1012,7 @@ fn split_sql_batch_ranges(sql: &str, profile: SqlDialectProfile) -> Vec<SqlState
     let mut current_start = 0;
     let lines: Vec<&str> = sql.split('\n').collect();
     let mut offset = 0;
+    let mut scanner = SqlScanner::with_profile(profile);
 
     for line in &lines {
         let line_start = offset;
@@ -928,15 +1020,23 @@ fn split_sql_batch_ranges(sql: &str, profile: SqlDialectProfile) -> Vec<SqlState
         offset = line_end + 1; // +1 for the '\n'
 
         let trimmed = line.trim();
-        if profile.supports_go_batch_separator
+        let is_batch_separator = profile.supports_go_batch_separator
+            && !scanner.is_masked()
             && (trimmed.eq_ignore_ascii_case("go")
-                || trimmed.to_ascii_lowercase().starts_with("go ") && trimmed[2..].trim().is_empty())
-        {
+                || trimmed.to_ascii_lowercase().starts_with("go ") && trimmed[2..].trim().is_empty());
+        if is_batch_separator {
             push_batch_range(&mut batches, sql, current_start, line_start);
             current_start = line_end.min(sql.len());
             if current_start < sql.len() && sql.as_bytes()[current_start] == b'\n' {
                 current_start += 1;
             }
+        } else {
+            for (relative_idx, ch) in line.char_indices() {
+                scanner.step(sql, line_start + relative_idx, ch);
+            }
+        }
+        if line_end < sql.len() {
+            scanner.step(sql, line_end, '\n');
         }
     }
 
@@ -1007,6 +1107,217 @@ fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
 
 fn is_sqlserver_module_keyword(token: &str) -> bool {
     ["FUNCTION", "PROC", "PROCEDURE", "TRIGGER", "VIEW"].iter().any(|keyword| token.eq_ignore_ascii_case(keyword))
+}
+
+fn starts_with_mysql_routine_block(sql: &str) -> bool {
+    is_mysql_routine_ddl_start(sql) && mysql_routine_tokens(sql).iter().any(|token| token.eq_ignore_ascii_case("BEGIN"))
+}
+
+fn is_mysql_routine_ddl_start(sql: &str) -> bool {
+    let executable = leading_executable_sql_with_options(sql, SqlParsingOptions::mysql_compatible());
+    let tokens = first_sql_tokens(executable, 16);
+    if tokens.first().is_none_or(|token| !token.eq_ignore_ascii_case("CREATE")) {
+        return false;
+    }
+
+    for token in tokens.iter().skip(1) {
+        if ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"].iter().any(|keyword| token.eq_ignore_ascii_case(keyword)) {
+            return true;
+        }
+        if [
+            "DATABASE",
+            "INDEX",
+            "LOGFILE",
+            "ROLE",
+            "SCHEMA",
+            "SERVER",
+            "SPATIAL",
+            "TABLE",
+            "TEMPORARY",
+            "UNIQUE",
+            "USER",
+            "VIEW",
+        ]
+        .iter()
+        .any(|keyword| token.eq_ignore_ascii_case(keyword))
+        {
+            return false;
+        }
+    }
+
+    false
+}
+
+fn mysql_routine_block_is_complete(sql: &str) -> bool {
+    if !starts_with_mysql_routine_block(sql) {
+        return false;
+    }
+
+    let tokens = mysql_routine_tokens(sql);
+    let mut begin_depth = 0usize;
+    let mut saw_begin = false;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token == ";" {
+            continue;
+        }
+        if token.eq_ignore_ascii_case("BEGIN") {
+            if previous_mysql_routine_word(&tokens, index).is_some_and(|previous| previous.eq_ignore_ascii_case("END"))
+            {
+                continue;
+            }
+            saw_begin = true;
+            begin_depth += 1;
+            continue;
+        }
+        if token.eq_ignore_ascii_case("END") && saw_begin {
+            if next_mysql_routine_word(&tokens, index).is_some_and(is_mysql_control_block_suffix) {
+                continue;
+            }
+            begin_depth = begin_depth.saturating_sub(1);
+        }
+    }
+
+    saw_begin && begin_depth == 0 && tokens.last().is_some_and(|token| token == ";")
+}
+
+fn is_mysql_control_block_suffix(token: &str) -> bool {
+    ["IF", "LOOP", "CASE", "REPEAT", "WHILE"].iter().any(|keyword| token.eq_ignore_ascii_case(keyword))
+}
+
+fn previous_mysql_routine_word(tokens: &[String], index: usize) -> Option<&str> {
+    tokens[..index].iter().rev().find(|token| token.as_str() != ";").map(String::as_str)
+}
+
+fn next_mysql_routine_word(tokens: &[String], index: usize) -> Option<&str> {
+    tokens.get(index + 1..)?.iter().find(|token| token.as_str() != ";").map(String::as_str)
+}
+
+fn mysql_routine_tokens(sql: &str) -> Vec<String> {
+    let chars = sql.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut in_backtick = false;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        let next = chars.get(i + 1).copied();
+
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if ch == '*' && next == Some('/') {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if in_single_quote {
+            if ch == '\\' && next.is_some() {
+                i += 2;
+                continue;
+            }
+            if ch == '\'' {
+                if next == Some('\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double_quote {
+            if ch == '\\' && next.is_some() {
+                i += 2;
+                continue;
+            }
+            if ch == '"' {
+                if next == Some('"') {
+                    i += 2;
+                    continue;
+                }
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_backtick {
+            if ch == '`' {
+                if next == Some('`') {
+                    i += 2;
+                    continue;
+                }
+                in_backtick = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if ch == '-' && next == Some('-') {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+        if ch == '#' {
+            in_line_comment = true;
+            i += 1;
+            continue;
+        }
+        if ch == '/' && next == Some('*') {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if ch == '\'' {
+            in_single_quote = true;
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_double_quote = true;
+            i += 1;
+            continue;
+        }
+        if ch == '`' {
+            in_backtick = true;
+            i += 1;
+            continue;
+        }
+        if ch == ';' {
+            tokens.push(";".to_string());
+            i += 1;
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = i;
+            i += 1;
+            while i < chars.len() && is_sql_ident_char(chars[i]) {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect::<String>().to_ascii_uppercase());
+            continue;
+        }
+
+        i += 1;
+    }
+
+    tokens
 }
 
 fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
@@ -1294,6 +1605,7 @@ fn parse_insert_values_tail(tail: &str) -> Option<String> {
     }
 }
 
+#[derive(Default)]
 struct SqlScanner {
     profile: SqlDialectProfile,
     in_single_quote: bool,
@@ -1336,9 +1648,7 @@ impl SqlScanner {
         }
 
         if !self.in_single_quote && !self.in_double_quote && !self.in_backtick {
-            if ch == '-' && next == Some('-') {
-                self.in_line_comment = true;
-            } else if self.profile.supports_hash_line_comments && ch == '#' {
+            if (ch == '-' && next == Some('-')) || (self.profile.supports_hash_line_comments && ch == '#') {
                 self.in_line_comment = true;
             } else if ch == '/' && next == Some('*') {
                 self.in_block_comment = true;
@@ -1371,21 +1681,6 @@ impl SqlScanner {
             || self.in_line_comment
             || self.in_block_comment
             || self.dollar_quote_tag.is_some()
-    }
-}
-
-impl Default for SqlScanner {
-    fn default() -> Self {
-        Self {
-            profile: SqlDialectProfile::default(),
-            in_single_quote: false,
-            in_double_quote: false,
-            in_backtick: false,
-            in_line_comment: false,
-            in_block_comment: false,
-            dollar_quote_tag: None,
-            previous: None,
-        }
     }
 }
 
@@ -1627,6 +1922,10 @@ fn leading_executable_sql_with_options(sql: &str, options: SqlParsingOptions) ->
             i += 1;
         }
 
+        if i >= bytes.len() {
+            break;
+        }
+
         if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
             i += 2;
             while i < bytes.len() && bytes[i] != b'\n' {
@@ -1668,6 +1967,10 @@ fn first_executable_sql_token_with_options(sql: &str, options: SqlParsingOptions
     while i < bytes.len() {
         while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'(') {
             i += 1;
+        }
+
+        if i >= bytes.len() {
+            break;
         }
 
         if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
@@ -1718,8 +2021,83 @@ fn starts_with_oracle_plsql_block(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).starts_block()
 }
 
+fn starts_with_postgres_dollar_quoted_routine_prefix(sql: &str) -> bool {
+    let block = OraclePlSqlBlock::parse(sql);
+    let Some(first) = block.tokens.first() else {
+        return false;
+    };
+    if !first.is_word("CREATE") {
+        return false;
+    }
+    let tokens = OraclePlSqlBlock::skip_create_modifiers(&block.tokens[1..]);
+    tokens.first().is_some_and(|token| token.is_any_word(&["FUNCTION", "PROCEDURE"]))
+        && block.tokens.iter().rev().find_map(OraclePlSqlToken::as_word) == Some("AS")
+}
+
 fn oracle_plsql_block_is_complete(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).is_complete()
+}
+
+fn starts_with_hana_do_block(sql: &str) -> bool {
+    HanaDoBlock::parse(sql).starts_block()
+}
+
+fn hana_do_block_is_complete(sql: &str) -> bool {
+    HanaDoBlock::parse(sql).is_complete()
+}
+
+struct HanaDoBlock {
+    tokens: Vec<OraclePlSqlToken>,
+}
+
+impl HanaDoBlock {
+    fn parse(sql: &str) -> Self {
+        Self { tokens: oracle_plsql_tokens(sql) }
+    }
+
+    fn starts_block(&self) -> bool {
+        self.tokens.first().is_some_and(|token| token.is_word("DO"))
+    }
+
+    fn is_complete(&self) -> bool {
+        if !self.starts_block() {
+            return false;
+        }
+
+        let mut stack: Vec<String> = Vec::new();
+        let mut saw_begin = false;
+
+        for (index, token) in self.tokens.iter().enumerate() {
+            if token.is_word("BEGIN") {
+                if previous_word_token(&self.tokens, index).is_some_and(|previous| previous == "END") {
+                    continue;
+                }
+                stack.push("BLOCK".to_string());
+                saw_begin = true;
+                continue;
+            }
+            if token.is_any_word(&["IF", "FOR", "WHILE", "CASE"]) {
+                if previous_word_token(&self.tokens, index).is_none_or(|previous| previous != "END") {
+                    stack.push(token.as_word().unwrap_or("BLOCK").to_string());
+                }
+                continue;
+            }
+            if token.is_word("END") {
+                let next = next_word_token(&self.tokens, index);
+                let top = stack.last().map(|value| value.as_str());
+                let target = match next {
+                    Some(keyword @ ("IF" | "FOR" | "WHILE")) => keyword,
+                    _ if top == Some("CASE") => "CASE",
+                    _ => "BLOCK",
+                };
+                if top == Some(target) {
+                    stack.pop();
+                }
+            }
+        }
+
+        saw_begin && stack.is_empty() && self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon)
+    }
 }
 
 struct OraclePlSqlBlock {
@@ -1751,56 +2129,117 @@ impl OraclePlSqlBlock {
             return false;
         }
 
-        let mut depth = 0usize;
+        // Package/type specifications have declarations and an outer END with
+        // no BEGIN. Bodies also own an outer END beyond nested routine END
+        // pairs so an inner END cannot finish the object.
+        let object_kind = self.create_object_kind();
+        let mut scopes = match object_kind {
+            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => {
+                vec![OraclePlSqlScope::Object]
+            }
+            None => Vec::new(),
+        };
         let mut saw_begin = false;
         let mut complete = false;
-        let mut pending_end: Option<bool> = None;
 
-        for token in &self.tokens {
+        for (index, token) in self.tokens.iter().enumerate() {
             if token.is_semicolon() {
-                if let Some(is_block_end) = pending_end.take() {
-                    if is_block_end && depth > 0 {
-                        depth -= 1;
-                        complete = depth == 0;
-                    }
-                }
-                continue;
-            }
-
-            if let Some(is_block_end) = pending_end.as_mut() {
-                if token.is_any_word(&["IF", "LOOP", "CASE"]) {
-                    *is_block_end = false;
-                }
                 continue;
             }
 
             if token.is_word("BEGIN") {
-                depth += 1;
+                scopes.push(OraclePlSqlScope::Block);
                 saw_begin = true;
                 complete = false;
+            } else if token.is_word("CASE") {
+                // Both CASE expressions and CASE statements own an END.
+                // The CASE token that follows END CASE is a suffix, not a scope start.
+                if previous_word_token(&self.tokens, index) != Some("END") {
+                    scopes.push(OraclePlSqlScope::Case);
+                }
             } else if token.is_word("END") {
-                pending_end = Some(true);
+                let next = self.tokens.get(index + 1).and_then(OraclePlSqlToken::as_word);
+                if matches!(next, Some("IF" | "LOOP")) {
+                    continue;
+                }
+                if matches!(next, Some("CASE")) && !matches!(scopes.last(), Some(OraclePlSqlScope::Case)) {
+                    continue;
+                }
+                if scopes.pop().is_some() {
+                    complete = scopes.is_empty();
+                }
             }
         }
 
-        saw_begin && complete
+        match object_kind {
+            // Specs complete on outer END [name]; without requiring BEGIN.
+            Some(OraclePlSqlCreateObjectKind::Spec) => complete,
+            _ => saw_begin && complete,
+        }
     }
 
     fn starts_create_plsql_object(tokens: &[OraclePlSqlToken]) -> bool {
-        let tokens = Self::skip_or_replace(tokens);
-        tokens.first().is_some_and(|token| token.is_any_word(&["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE", "TYPE"]))
+        let tokens = Self::skip_create_modifiers(tokens);
+        match tokens {
+            // PACKAGE BODY / TYPE BODY are programmable blocks with an outer END.
+            [object, body, ..] if object.is_any_word(&["PACKAGE", "TYPE"]) && body.is_word("BODY") => true,
+            // Plain CREATE TYPE ... AS OBJECT (...); ends with ");" — not a PL/SQL block.
+            [object, ..] if object.is_word("TYPE") => false,
+            [object, ..] if object.is_any_word(&["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE"]) => true,
+            _ => false,
+        }
     }
 
-    fn skip_or_replace(tokens: &[OraclePlSqlToken]) -> &[OraclePlSqlToken] {
-        match tokens {
-            [or, replace, rest @ ..] if or.is_word("OR") && replace.is_word("REPLACE") => rest,
-            _ => tokens,
+    fn create_object_kind(&self) -> Option<OraclePlSqlCreateObjectKind> {
+        if self.tokens.first().is_none_or(|token| !token.is_word("CREATE")) {
+            return None;
         }
+        let tokens = Self::skip_create_modifiers(&self.tokens[1..]);
+        match tokens {
+            [object, body, ..] if object.is_any_word(&["PACKAGE", "TYPE"]) && body.is_word("BODY") => {
+                Some(OraclePlSqlCreateObjectKind::Body)
+            }
+            // Only PACKAGE specs lack BEGIN; plain TYPE objects are ordinary SQL.
+            [object, ..] if object.is_word("PACKAGE") => Some(OraclePlSqlCreateObjectKind::Spec),
+            _ => None,
+        }
+    }
+
+    /// Skip OR REPLACE / FORCE / NOFORCE / EDITIONABLE modifiers after CREATE.
+    fn skip_create_modifiers(tokens: &[OraclePlSqlToken]) -> &[OraclePlSqlToken] {
+        let mut rest = tokens;
+        loop {
+            match rest {
+                [or, replace, tail @ ..] if or.is_word("OR") && replace.is_word("REPLACE") => {
+                    rest = tail;
+                }
+                [modifier, tail @ ..]
+                    if modifier.is_any_word(&["FORCE", "NOFORCE", "EDITIONABLE", "NONEDITIONABLE"]) =>
+                {
+                    rest = tail;
+                }
+                _ => break,
+            }
+        }
+        rest
     }
 
     fn is_transaction_begin_tail(token: &OraclePlSqlToken) -> bool {
         token.is_semicolon() || token.is_any_word(&["TRANSACTION", "WORK"])
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OraclePlSqlCreateObjectKind {
+    Spec,
+    Body,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OraclePlSqlScope {
+    Object,
+    Block,
+    Case,
 }
 
 impl OraclePlSqlToken {
@@ -1820,6 +2259,13 @@ impl OraclePlSqlToken {
         matches!(self, Self::Word(value) if value == expected)
     }
 
+    fn as_word(&self) -> Option<&str> {
+        match self {
+            Self::Word(value) => Some(value),
+            Self::Semicolon => None,
+        }
+    }
+
     fn is_any_word(&self, expected: &[&str]) -> bool {
         expected.iter().any(|word| self.is_word(word))
     }
@@ -1827,6 +2273,14 @@ impl OraclePlSqlToken {
     fn is_semicolon(&self) -> bool {
         matches!(self, Self::Semicolon)
     }
+}
+
+fn previous_word_token(tokens: &[OraclePlSqlToken], index: usize) -> Option<&str> {
+    tokens[..index].iter().rev().find_map(OraclePlSqlToken::as_word)
+}
+
+fn next_word_token(tokens: &[OraclePlSqlToken], index: usize) -> Option<&str> {
+    tokens[index + 1..].iter().find_map(OraclePlSqlToken::as_word)
 }
 
 fn oracle_plsql_tokens(sql: &str) -> Vec<OraclePlSqlToken> {
@@ -2082,6 +2536,21 @@ mod tests {
     }
 
     #[test]
+    fn mysql_split_skips_comment_only_statement() {
+        assert!(split_sql_statements_for_database("-- DBX SQL preview crash reproducer\n\n;", DatabaseType::Mysql)
+            .is_empty());
+    }
+
+    #[test]
+    fn mysql_keyword_detection_skips_comment_only_input() {
+        assert!(!starts_with_executable_sql_keyword_for_database(
+            "-- DBX SQL preview crash reproducer\n\n",
+            &["SELECT"],
+            DatabaseType::Mysql,
+        ));
+    }
+
+    #[test]
     fn decodes_utf8_bom_sql_file_bytes_without_bom_statement_prefix() {
         let sql = decode_sql_file_bytes(b"\xEF\xBB\xBFCREATE TABLE t(id int);").unwrap();
 
@@ -2121,6 +2590,39 @@ mod tests {
                 "-- comment ; ignored\n/* block ; ignored */\nSELECT 1",
             ]
         );
+    }
+
+    #[test]
+    fn closes_mysql_string_after_even_trailing_backslashes() {
+        let sql = r#"CREATE TABLE paths (value varchar(100) COMMENT 'Windows path\\'); DROP TABLE paths;"#;
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Mysql),
+            vec![r#"CREATE TABLE paths (value varchar(100) COMMENT 'Windows path\\')"#, "DROP TABLE paths"]
+        );
+    }
+
+    #[test]
+    fn keeps_mysql_string_open_after_odd_trailing_backslashes() {
+        let sql = r#"INSERT INTO notes VALUES ('it\'s; still one value'); SELECT 1;"#;
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Mysql),
+            vec![r#"INSERT INTO notes VALUES ('it\'s; still one value')"#, "SELECT 1"]
+        );
+    }
+
+    #[test]
+    fn closes_mysql_string_after_even_trailing_backslashes_across_chunks() {
+        let mut splitter =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Mysql));
+
+        assert!(splitter.push_chunk("CREATE TABLE paths (value varchar(100) COMMENT 'Windows path\\").is_empty());
+        assert_eq!(
+            splitter.push_chunk("\\'); DROP TABLE paths;"),
+            vec![r#"CREATE TABLE paths (value varchar(100) COMMENT 'Windows path\\')"#, "DROP TABLE paths"]
+        );
+        assert!(splitter.finish().is_empty());
     }
 
     #[test]
@@ -2400,6 +2902,22 @@ mod tests {
         assert_eq!(super::split_sql_batches("SELECT 1\nGO"), vec!["SELECT 1"]);
     }
 
+    #[test]
+    fn split_batches_keeps_go_inside_multiline_string() {
+        assert_eq!(
+            super::split_sql_batches("SELECT 'first line\nGO\nlast line';\nGO\nSELECT 2"),
+            vec!["SELECT 'first line\nGO\nlast line';", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn split_batches_keeps_go_inside_block_comment() {
+        assert_eq!(
+            super::split_sql_batches("SELECT 1;\n/*\nGO\n*/\nSELECT 2;\nGO\nSELECT 3;"),
+            vec!["SELECT 1;\n/*\nGO\n*/\nSELECT 2;", "SELECT 3;"]
+        );
+    }
+
     // --- DELIMITER support ---
 
     #[test]
@@ -2512,13 +3030,76 @@ DELIMITER ;";
     }
 
     #[test]
+    fn mysql_routine_without_delimiter_keeps_body_together() {
+        let sql = "\
+CREATE PROCEDURE p()
+BEGIN
+  SELECT 1;
+  SELECT 2;
+END;
+SELECT 3;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Mysql),
+            vec!["CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "SELECT 3"]
+        );
+    }
+
+    #[test]
+    fn mysql_routine_without_delimiter_handles_nested_end_suffixes() {
+        let sql = "\
+CREATE PROCEDURE p()
+BEGIN
+  IF 1 = 1 THEN
+    SELECT 'ok';
+  END IF;
+END;
+SELECT 2;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Mysql),
+            vec!["CREATE PROCEDURE p()\nBEGIN\n  IF 1 = 1 THEN\n    SELECT 'ok';\n  END IF;\nEND", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn mysql_routine_without_delimiter_handles_loop_end_suffixes() {
+        let sql = "\
+CREATE PROCEDURE p_loop()
+BEGIN
+  WHILE 1 = 0 DO
+    SELECT 'while; still body';
+  END WHILE;
+  REPEAT
+    SELECT 'repeat; still body';
+  UNTIL 1 = 1 END REPEAT;
+END;
+SELECT 2;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Mysql),
+            vec![
+                "CREATE PROCEDURE p_loop()\nBEGIN\n  WHILE 1 = 0 DO\n    SELECT 'while; still body';\n  END WHILE;\n  REPEAT\n    SELECT 'repeat; still body';\n  UNTIL 1 = 1 END REPEAT;\nEND",
+                "SELECT 2",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_regular_begin_transaction_still_splits_without_delimiter() {
+        assert_eq!(
+            split_sql_statements_for_database("BEGIN; INSERT INTO t VALUES (1); COMMIT;", DatabaseType::Mysql),
+            vec!["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]
+        );
+    }
+
+    #[test]
     fn sql_dialect_profiles_map_database_types_to_parser_capabilities() {
         let default = SqlDialectProfile::for_database_type(DatabaseType::Postgres);
         assert_eq!(default, SqlDialectProfile::default());
         assert!(default.supports_custom_delimiter_commands);
         assert!(default.supports_dollar_quoted_strings);
         assert!(!default.supports_hash_line_comments);
+        assert!(!default.supports_mysql_routine_blocks);
         assert!(!default.supports_oracle_plsql_blocks);
+        assert!(!default.supports_hana_do_blocks);
         assert!(!default.supports_slash_line_block_delimiter);
         assert!(!default.supports_go_batch_separator);
         assert!(!default.keeps_sqlserver_module_batch_at_cursor);
@@ -2526,6 +3107,7 @@ DELIMITER ;";
         let mysql = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
         assert_eq!(mysql, SqlDialectProfile::mysql_compatible());
         assert!(mysql.supports_hash_line_comments);
+        assert!(mysql.supports_mysql_routine_blocks);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::Doris).supports_hash_line_comments);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::StarRocks).supports_hash_line_comments);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::ManticoreSearch).supports_hash_line_comments);
@@ -2534,7 +3116,6 @@ DELIMITER ;";
         for db_type in [
             DatabaseType::Oracle,
             DatabaseType::Dameng,
-            DatabaseType::Gaussdb,
             DatabaseType::Yashandb,
             DatabaseType::Oscar,
             DatabaseType::OceanbaseOracle,
@@ -2543,12 +3124,56 @@ DELIMITER ;";
             assert_eq!(profile, SqlDialectProfile::oracle_like());
             assert!(profile.supports_oracle_plsql_blocks);
             assert!(profile.supports_slash_line_block_delimiter);
+            assert!(!profile.supports_postgres_dollar_quoted_routines);
         }
+
+        let gaussdb = SqlDialectProfile::for_database_type(DatabaseType::Gaussdb);
+        assert_eq!(gaussdb, SqlDialectProfile::gaussdb());
+        assert!(gaussdb.supports_oracle_plsql_blocks);
+        assert!(gaussdb.supports_slash_line_block_delimiter);
+        assert!(gaussdb.supports_postgres_dollar_quoted_routines);
 
         let sql_server = SqlDialectProfile::for_database_type(DatabaseType::SqlServer);
         assert_eq!(sql_server, SqlDialectProfile::sql_server());
         assert!(sql_server.supports_go_batch_separator);
         assert!(sql_server.keeps_sqlserver_module_batch_at_cursor);
+
+        let sap_hana = SqlDialectProfile::for_database_type(DatabaseType::SapHana);
+        assert_eq!(sap_hana, SqlDialectProfile::sap_hana());
+        assert!(sap_hana.supports_hana_do_blocks);
+    }
+
+    #[test]
+    fn sap_hana_split_keeps_do_block_together() {
+        let sql = "\
+DO
+BEGIN
+  SELECT 1 AS \"Result\" FROM DUMMY;
+END;
+SELECT 2 FROM DUMMY;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SapHana),
+            vec!["DO\nBEGIN\n  SELECT 1 AS \"Result\" FROM DUMMY;\nEND;", "SELECT 2 FROM DUMMY"]
+        );
+    }
+
+    #[test]
+    fn sap_hana_cursor_statement_keeps_nested_do_block_together() {
+        let sql = "\
+DO
+BEGIN
+  IF 1 = 1 THEN
+    SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END AS \"Result\" FROM DUMMY;
+  END IF;
+END;
+SELECT 2 FROM DUMMY;";
+        let cursor = sql.find("Result").unwrap();
+
+        assert_eq!(
+            find_statement_at_cursor_for_database(sql, cursor, DatabaseType::SapHana),
+            "DO\nBEGIN\n  IF 1 = 1 THEN\n    SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END AS \"Result\" FROM DUMMY;\n  END IF;\nEND;"
+        );
     }
 
     #[test]
@@ -2570,6 +3195,103 @@ END;";
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Oracle), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Dameng), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Gaussdb), vec![sql.to_string()]);
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Xugu), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn gaussdb_split_separates_dollar_quoted_function_from_following_statements() {
+        let sql = "\
+DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid;
+
+CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid (v_str IN TEXT) RETURNS varchar(36) LANGUAGE PLPGSQL IMMUTABLE AS $function$
+DECLARE
+    str1 TEXT;
+BEGIN
+    str1 := md5(v_str);
+    RETURN CAST(str1 AS varchar(36));
+END$function$;
+
+DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Gaussdb);
+        assert_eq!(statements.len(), 3);
+        assert_eq!(statements[0], "DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid");
+        assert!(statements[1].starts_with("CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid"));
+        assert!(statements[1].ends_with("END$function$"));
+        assert_eq!(statements[2], "DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing");
+    }
+
+    #[test]
+    fn gaussdb_split_separates_issue_4573_procedure_from_following_statements() {
+        let sql = "\
+CREATE OR REPLACE PROCEDURE createIndex (
+  dbName IN VARCHAR(32),
+  tableName IN VARCHAR(64),
+  indexInfo IN VARCHAR(64),
+  indexColumns IN VARCHAR(128)
+) AS
+DECLARE STMT TEXT;
+
+DECLARE flag int;
+
+BEGIN
+SELECT
+  count(*) INTO flag
+FROM
+  PG_CATALOG.PG_INDEXES
+WHERE
+  schemaname = dbName
+  AND TABLENAME = tableName
+  AND INDEXNAME = indexInfo;
+
+IF flag = 0 THEN STMT := 'CREATE INDEX ' || indexInfo || ' ON ' || dbName || '.' || tableName || '(' || indexColumns || ')';
+
+EXECUTE STMT;
+
+END IF;
+
+END;
+
+SELECT 1 AS after_procedure;
+SELECT 2 AS final_statement;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Gaussdb);
+        assert_eq!(statements.len(), 3);
+        assert!(statements[0].starts_with("CREATE OR REPLACE PROCEDURE createIndex"));
+        assert!(statements[0].ends_with("END;"));
+        assert_eq!(statements[1], "SELECT 1 AS after_procedure");
+        assert_eq!(statements[2], "SELECT 2 AS final_statement");
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_issue_2405_anonymous_plsql_block_together() {
+        let sql = "\
+DECLARE
+   PRE_TRD_DATE   INTEGER ;
+BEGIN
+   SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
+END;";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Oracle), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn oracle_like_current_statement_keeps_issue_2405_anonymous_plsql_block_together() {
+        let sql = "\
+DECLARE
+   PRE_TRD_DATE   INTEGER ;
+BEGIN
+   SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
+END;";
+        let cursors = [
+            sql[..sql.find("PRE_TRD_DATE").unwrap()].encode_utf16().count(),
+            sql[..sql.find("SELECT 1 + 2").unwrap()].encode_utf16().count(),
+            sql[..sql.find("END;").unwrap()].encode_utf16().count(),
+        ];
+
+        for cursor in cursors {
+            assert_eq!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Oracle), sql);
+        }
     }
 
     #[test]
@@ -2686,6 +3408,10 @@ SELECT 1;";
             vec!["CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))\nRETURN VARCHAR(20)\nAS\n    res VARCHAR(20);\nBEGIN\n    RETURN '一';\nEND;", "SELECT 1"]
         );
         assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec!["CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))\nRETURN VARCHAR(20)\nAS\n    res VARCHAR(20);\nBEGIN\n    RETURN '一';\nEND;", "SELECT 1"]
+        );
+        assert_eq!(
             split_sql_statements_for_database(sql, DatabaseType::Dameng),
             vec!["CREATE OR REPLACE FUNCTION number_tochar(nums VARCHAR(20))\nRETURN VARCHAR(20)\nAS\n    res VARCHAR(20);\nBEGIN\n    RETURN '一';\nEND;", "SELECT 1"]
         );
@@ -2710,6 +3436,13 @@ SELECT 1;";
                 "SELECT 1"
             ]
         );
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE PROCEDURE update_salary(p_id NUMBER, p_amount NUMBER)\nAS\nBEGIN\n    UPDATE employees SET salary = salary + p_amount WHERE id = p_id;\n    COMMIT;\nEND;",
+                "SELECT 1"
+            ]
+        );
     }
 
     #[test]
@@ -2726,6 +3459,13 @@ SELECT 1;";
 
         assert_eq!(
             split_sql_statements_for_database(sql, DatabaseType::Oracle),
+            vec![
+                "CREATE TRIGGER trg_audit\nBEFORE INSERT ON employees\nFOR EACH ROW\nBEGIN\n    INSERT INTO audit_log VALUES (:NEW.id, 'INSERT');\nEND;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
             vec![
                 "CREATE TRIGGER trg_audit\nBEFORE INSERT ON employees\nFOR EACH ROW\nBEGIN\n    INSERT INTO audit_log VALUES (:NEW.id, 'INSERT');\nEND;",
                 "SELECT 1"
@@ -2773,6 +3513,206 @@ SELECT 1;";
                 "SELECT 1"
             ]
         );
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_keeps_create_package_body_together() {
+        let sql = "\
+CREATE OR REPLACE PACKAGE BODY dbx_pkg AS
+    PROCEDURE ping AS
+    BEGIN
+        NULL;
+    END ping;
+END dbx_pkg;
+/
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE PACKAGE BODY dbx_pkg AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_keeps_routines_without_or_replace_together() {
+        let cases = [
+            "CREATE PROCEDURE dbx_proc_without_replace AS BEGIN NULL; END;",
+            "CREATE FUNCTION dbx_func_without_replace RETURN INTEGER AS BEGIN RETURN 1; END;",
+            "CREATE TRIGGER dbx_trigger_without_replace BEFORE INSERT ON dbx_events FOR EACH ROW BEGIN NULL; END;",
+        ];
+
+        for statement in cases {
+            assert_eq!(
+                split_sql_statements_for_database(&format!("{statement}\nSELECT 1;"), DatabaseType::Xugu),
+                vec![statement.to_owned(), "SELECT 1".to_owned()],
+                "failed for {statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn xugu_split_keeps_force_package_body_together() {
+        let sql = "\
+CREATE OR REPLACE FORCE PACKAGE BODY dbx_pkg AS
+    PROCEDURE ping AS
+    BEGIN
+        NULL;
+    END ping;
+END dbx_pkg;
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE FORCE PACKAGE BODY dbx_pkg AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE OR REPLACE NOFORCE PACKAGE BODY dbx_pkg AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE OR REPLACE NOFORCE PACKAGE BODY dbx_pkg AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE PACKAGE BODY dbx_pkg_without_replace AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg_without_replace;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE PACKAGE BODY dbx_pkg_without_replace AS\n    PROCEDURE ping AS\n    BEGIN\n        NULL;\n    END ping;\nEND dbx_pkg_without_replace;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_package_spec_without_slash_does_not_consume_following_sql() {
+        let sql = "\
+CREATE OR REPLACE PACKAGE pkg_utils AS
+    FUNCTION get_version RETURN VARCHAR2;
+    PROCEDURE log_message(msg VARCHAR2);
+END pkg_utils;
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;\n/\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE OR REPLACE FORCE PACKAGE pkg_utils AS\n    PROCEDURE ping;\nEND pkg_utils;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec!["CREATE OR REPLACE FORCE PACKAGE pkg_utils AS\n    PROCEDURE ping;\nEND pkg_utils;", "SELECT 1"]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE PACKAGE pkg_utils_without_replace AS\n    PROCEDURE ping;\nEND pkg_utils_without_replace;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE PACKAGE pkg_utils_without_replace AS\n    PROCEDURE ping;\nEND pkg_utils_without_replace;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_keeps_create_type_body_together() {
+        let sql = "\
+CREATE OR REPLACE TYPE BODY obj_t AS
+    MEMBER PROCEDURE ping IS
+    BEGIN
+        NULL;
+    END;
+END;
+SELECT 1;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec![
+                "CREATE OR REPLACE TYPE BODY obj_t AS\n    MEMBER PROCEDURE ping IS\n    BEGIN\n        NULL;\n    END;\nEND;",
+                "SELECT 1"
+            ]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE TYPE BODY obj_t_without_replace AS\n    MEMBER PROCEDURE ping IS\n    BEGIN\n        NULL;\n    END;\nEND;\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec![
+                "CREATE TYPE BODY obj_t_without_replace AS\n    MEMBER PROCEDURE ping IS\n    BEGIN\n        NULL;\n    END;\nEND;",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn xugu_split_plain_create_type_object_on_semicolon() {
+        // Plain CREATE TYPE ends with ");" and must not wait for a nonexistent outer END.
+        let sql = "CREATE OR REPLACE TYPE address_t AS OBJECT (id INT);\nSELECT 1;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Xugu),
+            vec!["CREATE OR REPLACE TYPE address_t AS OBJECT (id INT)", "SELECT 1"]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                "CREATE TYPE address_t_without_replace AS OBJECT (id INT);\nSELECT 1;",
+                DatabaseType::Xugu
+            ),
+            vec!["CREATE TYPE address_t_without_replace AS OBJECT (id INT)", "SELECT 1"]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_keeps_case_expressions_inside_routines() {
+        let function = "CREATE OR REPLACE FUNCTION dbx_case_expr RETURN NUMBER AS\nBEGIN\n  RETURN CASE WHEN 1 = 1 THEN CASE WHEN 2 = 2 THEN 1 ELSE 2 END ELSE 0 END;\nEND;\nSELECT 1;";
+        let procedure = "CREATE OR REPLACE PROCEDURE dbx_case_statement AS\nBEGIN\n  CASE WHEN 1 = 1 THEN NULL; ELSE NULL; END CASE;\nEND;\nSELECT 1;";
+
+        for database in [DatabaseType::Xugu, DatabaseType::Oracle] {
+            assert_eq!(
+                split_sql_statements_for_database(function, database),
+                vec![
+                    "CREATE OR REPLACE FUNCTION dbx_case_expr RETURN NUMBER AS\nBEGIN\n  RETURN CASE WHEN 1 = 1 THEN CASE WHEN 2 = 2 THEN 1 ELSE 2 END ELSE 0 END;\nEND;",
+                    "SELECT 1"
+                ]
+            );
+            assert_eq!(
+                split_sql_statements_for_database(procedure, database),
+                vec![
+                    "CREATE OR REPLACE PROCEDURE dbx_case_statement AS\nBEGIN\n  CASE WHEN 1 = 1 THEN NULL; ELSE NULL; END CASE;\nEND;",
+                    "SELECT 1"
+                ]
+            );
+        }
     }
 
     #[test]

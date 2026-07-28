@@ -1,0 +1,79 @@
+---
+source: crates/dbx-core/src/sql_dialect/descriptor_snapshots.rs
+assertion_line: 61
+expression: "&matrix.rules"
+---
+[
+  {
+    "source_type": "SMALLINT",
+    "target_type": "SMALLINT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "INTEGER",
+    "target_type": "INT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "BIGINT",
+    "target_type": "BIGINT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "REAL",
+    "target_type": "FLOAT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "DOUBLE PRECISION",
+    "target_type": "DOUBLE",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "TEXT",
+    "target_type": "LONGTEXT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "BYTEA",
+    "target_type": "BLOB",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "BOOLEAN",
+    "target_type": "TINYINT(1)",
+    "precision_loss": false,
+    "requires_cast": true
+  },
+  {
+    "source_type": "TIMESTAMP",
+    "target_type": "DATETIME",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "TIMESTAMPTZ",
+    "target_type": "DATETIME",
+    "precision_loss": true,
+    "requires_cast": true
+  },
+  {
+    "source_type": "UUID",
+    "target_type": "CHAR(36)",
+    "precision_loss": false,
+    "requires_cast": true
+  },
+  {
+    "source_type": "JSONB",
+    "target_type": "JSON",
+    "precision_loss": false,
+    "requires_cast": false
+  }
+]

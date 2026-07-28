@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
@@ -15,6 +16,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, Square } from "@lucide/vue";
 
@@ -713,30 +715,40 @@ async function copySql() {
 
 async function executeSql() {
   if (!syncPlan.value.syncSql.trim() || syncPlan.value.syncStatements.length === 0 || executing.value) return;
-  executing.value = true;
-  syncErrors.value = [];
-  executeTotal.value = syncPlan.value.syncStatements.length;
-  executedCount.value = 0;
+  const targetConnection = store.getConfig(targetConnectionId.value);
   try {
-    await store.ensureConnected(targetConnectionId.value);
-    const statements = syncPlan.value.syncStatements;
-    for (let index = 0; index < statements.length; index += SYNC_EXECUTE_BATCH_SIZE) {
-      const batch = statements.slice(index, index + SYNC_EXECUTE_BATCH_SIZE);
-      try {
-        await api.executeBatch(targetConnectionId.value, targetDatabase.value, batch, targetSchema.value);
-        executedCount.value += batch.length;
-      } catch (e: any) {
-        for (const stmt of batch) {
+    const failed = await executeWithProductionSqlGuard({
+      connection: targetConnection,
+      database: targetDatabase.value,
+      sql: syncPlan.value.syncSql,
+      source: t("production.sourceDataCompare"),
+      execute: async () => {
+        executing.value = true;
+        syncErrors.value = [];
+        executeTotal.value = syncPlan.value.syncStatements.length;
+        executedCount.value = 0;
+        await store.ensureConnected(targetConnectionId.value);
+        const statements = syncPlan.value.syncStatements;
+        for (let index = 0; index < statements.length; index += SYNC_EXECUTE_BATCH_SIZE) {
+          const batch = statements.slice(index, index + SYNC_EXECUTE_BATCH_SIZE);
           try {
-            await api.executeBatch(targetConnectionId.value, targetDatabase.value, [stmt], targetSchema.value);
-          } catch (singleError: any) {
-            syncErrors.value.push({ sql: stmt, error: singleError?.message || String(singleError) });
+            await api.executeBatch(targetConnectionId.value, targetDatabase.value, batch, targetSchema.value);
+            executedCount.value += batch.length;
+          } catch (e: any) {
+            for (const stmt of batch) {
+              try {
+                await api.executeBatch(targetConnectionId.value, targetDatabase.value, [stmt], targetSchema.value);
+              } catch (singleError: any) {
+                syncErrors.value.push({ sql: stmt, error: singleError?.message || String(singleError) });
+              }
+              executedCount.value++;
+            }
           }
-          executedCount.value++;
         }
-      }
-    }
-    const failed = syncErrors.value.length;
+        return syncErrors.value.length;
+      },
+    });
+    if (failed === undefined) return;
     if (failed === 0) {
       toast(t("dataCompare.syncSuccess"), 2000);
     } else {
@@ -902,9 +914,10 @@ watch(
               content-class="w-[var(--reka-popover-trigger-width)]"
             >
               <template #option-label="{ option, label }">
-                <div class="flex items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(option)" class="w-3.5 h-3.5" />
-                  {{ label }}
+                <div class="flex min-w-0 items-center gap-2">
+                  <DatabaseIcon :db-type="connectionIconType(option)" class="h-3.5 w-3.5 shrink-0" />
+                  <ConnectionGroupBadge :connection-id="option" />
+                  <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                 </div>
               </template>
             </SearchableSelect>
@@ -988,9 +1001,10 @@ watch(
               content-class="w-[var(--reka-popover-trigger-width)]"
             >
               <template #option-label="{ option, label }">
-                <div class="flex items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(option)" class="w-3.5 h-3.5" />
-                  {{ label }}
+                <div class="flex min-w-0 items-center gap-2">
+                  <DatabaseIcon :db-type="connectionIconType(option)" class="h-3.5 w-3.5 shrink-0" />
+                  <ConnectionGroupBadge :connection-id="option" />
+                  <span class="min-w-0 flex-1 truncate">{{ label }}</span>
                 </div>
               </template>
             </SearchableSelect>

@@ -171,6 +171,44 @@ pub(crate) async fn list_collections_with_db(
     }
 }
 
+/// List databases for a vector connection.
+/// Milvus supports multiple databases; other vector stores expose a single "default" namespace.
+pub async fn list_databases(client: &VectorClient) -> Result<Vec<String>, String> {
+    match client.kind {
+        VectorDbKind::Milvus => list_milvus_databases(client).await,
+        _ => Ok(vec!["default".to_string()]),
+    }
+}
+
+async fn list_milvus_databases(client: &VectorClient) -> Result<Vec<String>, String> {
+    // Older Milvus versions (pre-2.2) do not expose the databases endpoint; fall back to "default"
+    // so the connection stays browsable instead of failing the whole tree load.
+    //
+    // The endpoint rejects a bodyless POST with `{"code":1801,...}` (HTTP 200, no `data` field),
+    // so send an empty JSON object like every other Milvus v2 endpoint.
+    let body = match send_json(client.post("/v2/vectordb/databases/list").json(&serde_json::json!({})), "Milvus").await
+    {
+        Ok(body) => body,
+        Err(_) => return Ok(vec!["default".to_string()]),
+    };
+    let mut names: Vec<String> = match body.get("data") {
+        Some(Value::Array(items)) => items.iter().filter_map(milvus_database_name_from_item).collect(),
+        _ => Vec::new(),
+    };
+    if !names.iter().any(|name| name == "default") {
+        names.push("default".to_string());
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn milvus_database_name_from_item(item: &Value) -> Option<String> {
+    item.as_str()
+        .map(str::to_string)
+        .or_else(|| item.get("dbName").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| item.get("name").and_then(Value::as_str).map(str::to_string))
+}
+
 async fn list_qdrant_collections(client: &VectorClient) -> Result<Vec<CollectionInfo>, String> {
     let body = send_json(client.get("/collections"), "Qdrant").await?;
     let mut infos: Vec<CollectionInfo> = body
@@ -264,18 +302,25 @@ pub async fn get_collection_detail(
     match client.kind {
         VectorDbKind::Qdrant => get_qdrant_collection_detail(client, collection).await,
         VectorDbKind::Milvus => get_milvus_collection_detail(client, database, collection).await,
-        VectorDbKind::Weaviate => {
-            // Weaviate REST API does not expose vector dimension
-            Ok(CollectionInfo {
-                name: collection.to_string(),
-                id: collection.to_string(),
-                dimension: None,
-                kind: None,
-                bucket_name: None,
-            })
-        }
+        VectorDbKind::Weaviate => get_weaviate_collection_detail(client, collection).await,
         VectorDbKind::ChromaDb => get_chroma_collection_detail(client, collection).await,
     }
+}
+
+async fn get_weaviate_collection_detail(client: &VectorClient, collection: &str) -> Result<CollectionInfo, String> {
+    let query = format!("{{ Get {{ {collection}(limit: 1) {{ _additional {{ vector }} }} }} }}");
+    let dimension =
+        match send_json(client.post("/v1/graphql").json(&serde_json::json!({ "query": query })), "Weaviate").await {
+            Ok(body) => weaviate_vector_dimension_from_graphql(&body, collection),
+            Err(_) => None,
+        };
+    Ok(CollectionInfo {
+        name: collection.to_string(),
+        id: collection.to_string(),
+        dimension,
+        kind: None,
+        bucket_name: None,
+    })
 }
 
 async fn get_qdrant_collection_detail(client: &VectorClient, collection: &str) -> Result<CollectionInfo, String> {
@@ -430,6 +475,18 @@ fn weaviate_graphql_to_rows(body: &Value) -> Option<Vec<Value>> {
     )
 }
 
+fn weaviate_vector_dimension_from_graphql(body: &Value, collection: &str) -> Option<u32> {
+    let vector = body
+        .get("data")?
+        .get("Get")?
+        .get(collection)?
+        .as_array()?
+        .first()?
+        .pointer("/_additional/vector")?
+        .as_array()?;
+    u32::try_from(vector.len()).ok().filter(|dimension| *dimension > 0)
+}
+
 fn weaviate_collection_names_from_schema(body: &Value) -> Vec<String> {
     body.get("classes")
         .and_then(Value::as_array)
@@ -441,10 +498,11 @@ fn weaviate_collection_names_from_schema(body: &Value) -> Vec<String> {
 
 pub async fn find_documents(
     client: &VectorClient,
+    database: &str,
     collection: &str,
     skip: u64,
     limit: i64,
-) -> Result<crate::db::mongo_driver::MongoDocumentResult, String> {
+) -> Result<crate::db::document_result::DocumentQueryResult, String> {
     if client.kind == VectorDbKind::ChromaDb {
         let start = std::time::Instant::now();
         let url = format!(
@@ -481,7 +539,13 @@ pub async fn find_documents(
                 Value::Object(map)
             })
             .collect();
-        return Ok(crate::db::mongo_driver::MongoDocumentResult { documents, total: result.affected_rows });
+        return Ok(crate::db::document_result::DocumentQueryResult {
+            documents,
+            raw_documents: None,
+            extended_documents: None,
+            total: result.affected_rows,
+            total_is_exact: true,
+        });
     }
 
     let query = match client.kind {
@@ -498,7 +562,7 @@ pub async fn find_documents(
         VectorDbKind::Milvus => format!(
             "POST /v2/vectordb/entities/query\n{}",
             serde_json::json!({
-                "dbName": "default",
+                "dbName": if database.is_empty() { "default" } else { database },
                 "collectionName": collection,
                 "filter": "",
                 "limit": limit.max(1) as u64,
@@ -523,7 +587,13 @@ pub async fn find_documents(
             Value::Object(map)
         })
         .collect();
-    Ok(crate::db::mongo_driver::MongoDocumentResult { documents, total: result.affected_rows })
+    Ok(crate::db::document_result::DocumentQueryResult {
+        documents,
+        raw_documents: None,
+        extended_documents: None,
+        total: result.affected_rows,
+        total_is_exact: true,
+    })
 }
 
 pub async fn execute_rest_query(client: &VectorClient, input: &str) -> Result<QueryResult, String> {
@@ -656,6 +726,7 @@ fn json_to_query_result(status: u16, body: Value, start: Instant) -> QueryResult
         truncated: false,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 
@@ -686,6 +757,7 @@ fn values_to_query_result(items: Vec<Value>, start: Instant) -> QueryResult {
         truncated: false,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 
@@ -729,7 +801,8 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
 mod tests {
     use super::{
         chroma_get_response_to_rows, starts_with_http_method, values_to_query_result, vector_auth,
-        weaviate_collection_names_from_schema, CollectionInfo, VectorAuth, VectorDbKind,
+        weaviate_collection_names_from_schema, weaviate_vector_dimension_from_graphql, CollectionInfo, VectorAuth,
+        VectorDbKind,
     };
     use serde_json::json;
     use std::time::Instant;
@@ -759,6 +832,25 @@ mod tests {
             ]
         }));
         assert_eq!(names, vec!["Article".to_string(), "Product".to_string()]);
+    }
+
+    #[test]
+    fn extracts_weaviate_vector_dimension_from_first_object() {
+        let vector = vec![0.0; 1024];
+        let body = json!({
+            "data": {
+                "Get": {
+                    "Article": [{ "_additional": { "vector": vector } }]
+                }
+            }
+        });
+        assert_eq!(weaviate_vector_dimension_from_graphql(&body, "Article"), Some(1024));
+    }
+
+    #[test]
+    fn leaves_weaviate_dimension_unknown_for_empty_collections() {
+        let body = json!({ "data": { "Get": { "Article": [] } } });
+        assert_eq!(weaviate_vector_dimension_from_graphql(&body, "Article"), None);
     }
 
     #[test]

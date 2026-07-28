@@ -8,7 +8,7 @@ import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TransactionExecutor;
@@ -279,7 +279,7 @@ public class Neo4jAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
-        return JdbcExecutor.INSTANCE.execute(
+        return JdbcExecutor.current().execute(
             requireConnected(),
             sql,
             schema,
@@ -345,6 +345,6 @@ public class Neo4jAgent extends BaseDatabaseAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new Neo4jAgent()).run();
+        new MultiSessionJsonRpcServer(Neo4jAgent::new).run();
     }
 }

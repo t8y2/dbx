@@ -196,7 +196,7 @@ export function buildRedisSyntaxDiagnostics(source: string): SqlSemanticDiagnost
     } else if (spec.safety === "confirm") {
       diagnostics.push({
         span: lineSpan(lineNo, commandToken.startColumn, commandToken.endColumn),
-        message: `Write command '${argv[0].value}' — will modify data`,
+        message: `Dangerous command '${argv[0].value}' — confirmation recommended`,
         severity: "warning",
       });
     }

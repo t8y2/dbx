@@ -161,7 +161,7 @@ impl MessageQueueAdmin for PulsarAdmin {
 
     async fn list_tenants(&self) -> Result<Vec<TenantInfo>, String> {
         let names: Vec<String> = self.get_json(&self.profile.tenants_path()).await?;
-        stream::iter(names.into_iter())
+        stream::iter(names)
             .map(|name| async move {
                 match self.get_tenant(&name).await {
                     Ok(tenant) => Ok(tenant),
@@ -214,7 +214,7 @@ impl MessageQueueAdmin for PulsarAdmin {
     async fn list_namespaces(&self, tenant: &str) -> Result<Vec<NamespaceInfo>, String> {
         // Returns fully-qualified `tenant/namespace` strings.
         let names: Vec<String> = self.get_json(&self.profile.namespaces_path(tenant)).await?;
-        stream::iter(names.into_iter())
+        stream::iter(names)
             .map(|full| async move {
                 let namespace = full.rsplit('/').next().unwrap_or(&full).to_string();
                 let admin_roles = match self.namespace_admin_roles(tenant, &namespace).await {
@@ -282,7 +282,7 @@ impl MessageQueueAdmin for PulsarAdmin {
             };
             let partitioned_set: std::collections::HashSet<String> = partitioned.iter().cloned().collect();
             let domain = if persistent { "persistent" } else { "non-persistent" };
-            let partitioned_topics = stream::iter(partitioned.into_iter())
+            let partitioned_topics = stream::iter(partitioned)
                 .map(|full| async move {
                     let partitions = self.partition_count_for_topic(domain, &full).await?;
                     Ok::<_, String>(TopicInfo {
@@ -291,6 +291,9 @@ impl MessageQueueAdmin for PulsarAdmin {
                         partitioned: true,
                         partitions,
                         persistent,
+                        internal: false,
+                        message_type: None,
+                        namespace: None,
                     })
                 })
                 .buffered(PARTITION_METADATA_CONCURRENCY)
@@ -314,6 +317,9 @@ impl MessageQueueAdmin for PulsarAdmin {
                     partitioned: false,
                     partitions: None,
                     persistent,
+                    internal: false,
+                    message_type: None,
+                    namespace: None,
                 });
             }
         }
@@ -507,7 +513,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_publish_rate_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -527,7 +533,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_dispatch_rate_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -560,7 +566,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_backlog_quota_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -585,7 +591,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_retention_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -608,7 +614,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 let namespace_policies = self
                     .get_value(&self.profile.namespace_policies_path(&topic_ref.tenant, &topic_ref.namespace))
@@ -654,7 +660,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_permission_role_path(topic_ref.domain(), &topic_ref.path(), role)
             }
@@ -674,7 +680,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_permission_role_path(topic_ref.domain(), &topic_ref.path(), role)
             }
@@ -691,7 +697,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     namespace: namespace.clone(),
                     topic: topic.clone(),
                     persistent: *persistent,
-                    partitioned: None,
+                    ..Default::default()
                 };
                 self.profile.topic_permissions_path(topic_ref.domain(), &topic_ref.path())
             }
@@ -1422,6 +1428,7 @@ mod tests {
             topic: "orders".to_string(),
             persistent: true,
             partitioned: Some(true),
+            ..Default::default()
         };
         admin.create_topic(&topic, Some(3)).await.expect("create_topic should succeed");
         admin

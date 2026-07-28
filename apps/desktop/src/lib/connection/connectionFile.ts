@@ -70,7 +70,7 @@ export function defaultSqliteBackupFileName(config: Pick<ConnectionConfig, "host
 
 function sanitizeFileName(fileName: string): string {
   return fileName
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[<>:"/\\|?*\p{Cc}]/gu, "_")
     .trim()
     .replace(/[. ]+$/g, "");
 }

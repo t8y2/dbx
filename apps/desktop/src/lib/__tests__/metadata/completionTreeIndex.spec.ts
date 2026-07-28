@@ -42,6 +42,22 @@ describe("completionTreeIndex", () => {
                         database: "hive",
                         schema: "sales_analytics",
                       },
+                      {
+                        id: "conn:hive:sales_analytics:__tables:daily_revenue_view",
+                        label: "daily_revenue_view",
+                        type: "view",
+                        connectionId: "conn",
+                        database: "hive",
+                        schema: "sales_analytics",
+                      },
+                      {
+                        id: "conn:hive:sales_analytics:__tables:daily_revenue_mv",
+                        label: "daily_revenue_mv",
+                        type: "materialized_view",
+                        connectionId: "conn",
+                        database: "hive",
+                        schema: "sales_analytics",
+                      },
                     ],
                   },
                 ],
@@ -53,7 +69,35 @@ describe("completionTreeIndex", () => {
     ];
 
     expect(completionSchemasFromTree(tree, "conn", "hive")).toEqual(["sales_analytics"]);
-    expect(completionTablesFromTree(tree, "conn", "hive", "sales_analytics")).toEqual([{ name: "daily_revenue", schema: "sales_analytics", type: "table" }]);
-    expect(completionTablesFromTree(tree, "conn", "hive")).toEqual([{ name: "daily_revenue", schema: "sales_analytics", type: "table" }]);
+    const expected = [
+      { name: "daily_revenue", schema: "sales_analytics", type: "table" },
+      { name: "daily_revenue_view", schema: "sales_analytics", type: "view" },
+      { name: "daily_revenue_mv", schema: "sales_analytics", type: "materialized_view" },
+    ];
+    expect(completionTablesFromTree(tree, "conn", "hive", "sales_analytics")).toEqual(expected);
+    expect(completionTablesFromTree(tree, "conn", "hive")).toEqual(expected);
+  });
+
+  it("isolates Doris internal and external catalog tables with the same database name", () => {
+    const tree: TreeNode[] = [
+      {
+        id: "internal-orders",
+        label: "orders",
+        type: "table",
+        connectionId: "doris",
+        database: "sales",
+      },
+      {
+        id: "hive-orders",
+        label: "orders",
+        type: "table",
+        connectionId: "doris",
+        catalog: "hive_catalog",
+        database: "sales",
+      },
+    ];
+
+    expect(completionTablesFromTree(tree, "doris", "sales")).toEqual([{ name: "orders", schema: undefined, type: "table" }]);
+    expect(completionTablesFromTree(tree, "doris", "sales", undefined, "hive_catalog")).toEqual([{ name: "orders", catalog: "hive_catalog", schema: undefined, type: "table" }]);
   });
 });

@@ -5,6 +5,12 @@ pub struct DatabaseInfo {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseStorageInfo {
+    pub name: String,
+    pub size_bytes: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaInfo {
     pub name: String,
@@ -17,6 +23,34 @@ pub struct LinkedServerInfo {
     pub product: Option<String>,
     pub provider: Option<String>,
     pub data_source: Option<String>,
+}
+
+/// A catalog exposed by a multi-catalog engine (e.g. Doris / StarRocks).
+/// `internal` is the engine's native catalog; other entries are external
+/// catalogs (iceberg, hive, jdbc, ...) federated through the same connection.
+///
+/// Note: the built-in catalog is named `internal` in Doris (Type=`internal`)
+/// but `default_catalog` in StarRocks (Type=`Internal`). The `catalog_type`
+/// column is the cross-engine signal, so `is_internal()` matches it
+/// case-insensitively and falls back to the canonical Doris name when the
+/// column is absent (very old / proxied deployments).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogInfo {
+    pub name: String,
+    pub catalog_type: String,
+    pub is_current: bool,
+    pub comment: Option<String>,
+}
+
+impl CatalogInfo {
+    /// Whether this is the engine's built-in (non-federated) catalog.
+    pub fn is_internal(&self) -> bool {
+        if !self.catalog_type.trim().is_empty() {
+            self.catalog_type.eq_ignore_ascii_case("internal")
+        } else {
+            self.name == "internal"
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,12 +68,22 @@ pub struct ObjectInfo {
     pub object_type: String,
     pub schema: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     pub comment: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub parent_schema: Option<String>,
     pub parent_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionInfo {
+    pub name: String,
+    pub version: String,
+    pub comment: Option<String>,
+    pub schema: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,9 +101,12 @@ pub enum ObjectSourceKind {
     MaterializedView,
     Procedure,
     Function,
+    Trigger,
     Sequence,
     Package,
     PackageBody,
+    Type,
+    TypeBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,9 +115,11 @@ pub struct ObjectSource {
     pub object_type: ObjectSourceKind,
     pub schema: Option<String>,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
@@ -82,6 +131,12 @@ pub struct ColumnInfo {
     pub numeric_precision: Option<i32>,
     pub numeric_scale: Option<i32>,
     pub character_maximum_length: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_set: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +215,7 @@ pub struct CompletionAssistantCandidate {
     pub parent_name: Option<String>,
     pub comment: Option<String>,
     pub data_type: Option<String>,
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +246,11 @@ pub struct QueryResult {
     pub session_id: Option<String>,
     #[serde(default)]
     pub has_more: bool,
+    /// For Elasticsearch REST search results parsed into a table from _source,
+    /// this carries the raw HTTP response body so the UI can offer a toggle
+    /// between the tabular view and the original JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elasticsearch_raw_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +286,59 @@ pub struct TriggerInfo {
     pub timing: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub constraint_type: String,
+    pub definition: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_table: Option<String>,
+    #[serde(default)]
+    pub ref_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
+    #[serde(default)]
+    pub deferrable: bool,
+    #[serde(default)]
+    pub initially_deferred: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionInfo {
+    pub name: String,
+    pub position: i32,
+    pub value: String,
+    pub partition_type: String,
+    pub partition_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_partition_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_partition_span: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubpartitionInfo {
+    pub name: String,
+    pub position: i32,
+    pub value: String,
+    pub partition_type: String,
+    pub partition_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,4 +379,19 @@ pub struct OwnerInfo {
     pub object_name: String,
     pub object_type: String,
     pub owner: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ObjectInfo;
+
+    #[test]
+    fn list_objects_payload_preserves_optional_validity() {
+        let objects: Vec<ObjectInfo> =
+            serde_json::from_str(r#"[{"name":"TRG_AUDIT","object_type":"TRIGGER","schema":"APP","valid":false}]"#)
+                .unwrap();
+
+        assert_eq!(objects[0].valid, Some(false));
+        assert_eq!(objects[0].object_type, "TRIGGER");
+    }
 }

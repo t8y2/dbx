@@ -28,6 +28,14 @@ describe("quickConnectionOpenTarget", () => {
     expect(quickConnectionOpenTarget(connection("nacos"))).toEqual({ kind: "nacos-admin" });
   });
 
+  it("opens Etcd connections in the key browser", () => {
+    expect(quickConnectionOpenTarget(connection("etcd"))).toEqual({ kind: "etcd" });
+  });
+
+  it("opens ZooKeeper connections in the key browser", () => {
+    expect(quickConnectionOpenTarget(connection("zookeeper"))).toEqual({ kind: "zookeeper" });
+  });
+
   it("opens regular connections in a query tab", () => {
     expect(quickConnectionOpenTarget({ ...connection("postgresql"), database: "app" })).toEqual({
       kind: "query",

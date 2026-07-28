@@ -61,6 +61,10 @@ public final class MetadataListConstraints {
     }
 
     public String fuzzyLikePattern() {
+        return fuzzyLikePattern('\\');
+    }
+
+    public String fuzzyLikePattern(char escapeCharacter) {
         if (filter.isEmpty()) {
             return "%%";
         }
@@ -68,8 +72,8 @@ public final class MetadataListConstraints {
         builder.append('%');
         for (int i = 0; i < filter.length(); i++) {
             char ch = filter.charAt(i);
-            if (ch == '\\' || ch == '%' || ch == '_') {
-                builder.append('\\');
+            if (ch == escapeCharacter || ch == '%' || ch == '_') {
+                builder.append(escapeCharacter);
             }
             builder.append(ch);
             builder.append('%');
@@ -102,13 +106,21 @@ public final class MetadataListConstraints {
     }
 
     public boolean nameMatches(String name) {
+        return textMatches(name);
+    }
+
+    public boolean nameOrCommentMatches(String name, String comment) {
+        return textMatches(name) || textMatches(comment);
+    }
+
+    private boolean textMatches(String text) {
         if (filter.isEmpty()) {
             return true;
         }
-        if (name == null) {
+        if (text == null) {
             return false;
         }
-        String candidate = name.toLowerCase(Locale.ROOT);
+        String candidate = text.toLowerCase(Locale.ROOT);
         return candidate.contains(filter) || (filter.length() >= 2 && fuzzySubsequenceMatches(candidate, filter));
     }
 
@@ -118,7 +130,8 @@ public final class MetadataListConstraints {
         int max = limit == null ? Integer.MAX_VALUE : limit;
         int start = offset == null ? 0 : offset;
         for (TableInfo table : tables) {
-            if (!nameMatches(table.getName()) || !tableTypeAllowed(table.getTable_type())) {
+            if (!nameOrCommentMatches(table.getName(), table.getComment())
+                || !tableTypeAllowed(table.getTable_type())) {
                 continue;
             }
             if (skipped++ < start) {
@@ -138,7 +151,8 @@ public final class MetadataListConstraints {
         int max = limit == null ? Integer.MAX_VALUE : limit;
         int start = offset == null ? 0 : offset;
         for (ObjectInfo object : objects) {
-            if (!nameMatches(object.getName()) || !objectTypeAllowed(object.getObject_type())) {
+            if (!nameOrCommentMatches(object.getName(), object.getComment())
+                || !objectTypeAllowed(object.getObject_type())) {
                 continue;
             }
             if (skipped++ < start) {
@@ -187,7 +201,7 @@ public final class MetadataListConstraints {
         if (upper.contains("MATERIALIZED") && upper.contains("VIEW")) {
             return "MATERIALIZED_VIEW";
         }
-        if (upper.equals("BASE_TABLE") || upper.contains("TABLE")) {
+        if (upper.equals("STABLE") || upper.equals("BASE_TABLE") || upper.contains("TABLE")) {
             return "TABLE";
         }
         if (upper.contains("VIEW")) {

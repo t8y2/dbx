@@ -1,3 +1,5 @@
+import type { DatabaseType } from "@/types/database";
+
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
 export interface SqlParameterInput {
@@ -5,31 +7,67 @@ export interface SqlParameterInput {
   value: string;
 }
 
-interface ParameterOccurrence {
+export type SqlParameterSyntax = "positional" | "named" | "shell" | "mybatis" | "sqlserver";
+
+export interface SqlParameterDescriptor {
+  key: string;
   name: string;
+  syntax: SqlParameterSyntax;
+  token: string;
+}
+
+interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
+  replacement?: "string-fragment";
+}
+
+type ComplexTypeDeclarationKind = "struct" | "variant";
+type TriggerPseudoRecordName = "new" | "old" | "parent" | "eventinfo";
+
+export interface SqlParameterOptions {
+  databaseType?: DatabaseType;
+  // Which placeholder syntaxes are recognized. Undefined enables all of them.
+  enabledSyntaxes?: readonly SqlParameterSyntax[];
 }
 
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
+const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
+const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
+const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
 
-export function extractSqlParameters(sql: string): string[] {
-  const names = new Set<string>();
-  for (const occurrence of findSqlParameterOccurrences(sql)) {
-    names.add(occurrence.name);
-  }
-  return [...names];
+export function extractSqlParameters(sql: string, options?: SqlParameterOptions): string[] {
+  return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
 }
 
-export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>): string {
-  const occurrences = findSqlParameterOccurrences(sql);
+export function extractSqlParameterDescriptors(sql: string, options?: SqlParameterOptions): SqlParameterDescriptor[] {
+  const names = new Set<string>();
+  const descriptors: SqlParameterDescriptor[] = [];
+  for (const occurrence of findSqlParameterOccurrences(sql, options)) {
+    if (names.has(occurrence.key)) continue;
+    names.add(occurrence.key);
+    descriptors.push({
+      key: occurrence.key,
+      name: occurrence.name,
+      syntax: occurrence.syntax,
+      token: occurrence.token,
+    });
+  }
+  return descriptors;
+}
+
+export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
+  const occurrences = findSqlParameterOccurrences(sql, options);
   if (!occurrences.length) return sql;
 
   let result = "";
   let cursor = 0;
   for (const occurrence of occurrences) {
     result += sql.slice(cursor, occurrence.start);
-    result += sqlParameterLiteral(values[occurrence.name] ?? { kind: "string", value: "" });
+    const input = values[occurrence.key] ?? { kind: "string", value: "" };
+    // Embedded placeholders stay inside the surrounding SQL string, so their value
+    // must be escaped as text instead of being wrapped in a second SQL literal.
+    result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : sqlParameterLiteral(input);
     cursor = occurrence.end;
   }
   result += sql.slice(cursor);
@@ -45,10 +83,17 @@ export function sqlParameterLiteral(input: SqlParameterInput): string {
   return quoteSqlString(raw);
 }
 
-function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
+function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions): ParameterOccurrence[] {
   const occurrences: ParameterOccurrence[] = [];
+  const nativeSqlServerParameters = collectNativeSqlServerParameters(sql);
+  const supportsNamedParameters = options?.databaseType !== "saphana";
+  const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
+  const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
+  const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql) : new Set<number>();
+  const triggerPseudoRecordFieldStarts = supportsNamedParameters && isSyntaxEnabled("named") ? collectTriggerPseudoRecordFieldStarts(sql, options?.databaseType) : new Set<number>();
   let i = 0;
   let dollarQuoteEnd = "";
+  let positionalIndex = 0;
 
   while (i < sql.length) {
     if (dollarQuoteEnd) {
@@ -62,7 +107,25 @@ function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
     const ch = sql[i];
     const next = sql[i + 1];
 
-    if (ch === "'" || ch === '"' || ch === "`") {
+    if (ch === "'" || ch === '"') {
+      // Exact quoted placeholders use SQL-literal replacement; embedded placeholders
+      // in ordinary single-quoted values use escaped text replacement below.
+      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch as "'" | '"', isSyntaxEnabled);
+      if (quoted) {
+        occurrences.push(quoted);
+        i = quoted.end;
+        continue;
+      }
+      const quotedEnd = skipQuoted(sql, i, ch);
+      // Double quotes can delimit identifiers, so only ordinary single-quoted
+      // values opt into embedded interpolation.
+      if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
+        occurrences.push(...collectEmbeddedQuotedBracedPlaceholders(sql, i + 1, quotedEnd, isSyntaxEnabled));
+      }
+      i = quotedEnd;
+      continue;
+    }
+    if (ch === "`") {
       i = skipQuoted(sql, i, ch);
       continue;
     }
@@ -74,23 +137,71 @@ function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
       i = skipLine(sql, i + 2);
       continue;
     }
-    if (ch === "#") {
-      i = skipLine(sql, i + 1);
-      continue;
-    }
     if (ch === "/" && next === "*") {
       i = skipBlockComment(sql, i + 2);
       continue;
     }
-    if (ch === "$" && next === "{") {
+    if (ch === "?" && isSyntaxEnabled("positional")) {
+      positionalIndex += 1;
+      const key = `?${positionalIndex}`;
+      occurrences.push({ key, name: key, syntax: "positional", token: "?", start: i, end: i + 1 });
+      i += 1;
+      continue;
+    }
+    if (ch === ":" && supportsNamedParameters && isSyntaxEnabled("named")) {
+      const name = readParameterName(sql, i + 1);
+      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i) && !triggerPseudoRecordFieldStarts.has(i)) {
+        occurrences.push({
+          key: name,
+          name,
+          syntax: "named",
+          token: sql.slice(i, i + 1 + name.length),
+          start: i,
+          end: i + 1 + name.length,
+        });
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    if (ch === "$" && next === "{" && isSyntaxEnabled("shell")) {
       const end = sql.indexOf("}", i + 2);
       if (end !== -1) {
         const name = sql.slice(i + 2, end).trim();
         if (PARAMETER_NAME_RE.test(name)) {
-          occurrences.push({ name, start: i, end: end + 1 });
+          occurrences.push({ key: name, name, syntax: "shell", token: sql.slice(i, end + 1), start: i, end: end + 1 });
           i = end + 1;
           continue;
         }
+      }
+    }
+    if (ch === "#" && next === "{" && isSyntaxEnabled("mybatis")) {
+      const end = sql.indexOf("}", i + 2);
+      if (end !== -1) {
+        const name = sql.slice(i + 2, end).trim();
+        if (PARAMETER_NAME_RE.test(name)) {
+          occurrences.push({ key: name, name, syntax: "mybatis", token: sql.slice(i, end + 1), start: i, end: end + 1 });
+          i = end + 1;
+          continue;
+        }
+      }
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@" && isSyntaxEnabled("sqlserver")) {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@" && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
+        occurrences.push({
+          key: name,
+          name,
+          syntax: "sqlserver",
+          token: sql.slice(i, i + 1 + name.length),
+          start: i,
+          end: i + 1 + name.length,
+        });
+        i += 1 + name.length;
+        continue;
       }
     }
     if (ch === "$") {
@@ -105,6 +216,785 @@ function findSqlParameterOccurrences(sql: string): ParameterOccurrence[] {
   }
 
   return occurrences;
+}
+
+// Oracle and Dameng expose trigger rows through colon-prefixed pseudo-records,
+// unlike PostgreSQL's unprefixed NEW/OLD records. Keep ordinary :name binds enabled.
+function collectTriggerPseudoRecordFieldStarts(sql: string, databaseType?: DatabaseType): Set<number> {
+  const starts = new Set<number>();
+  const defaults = triggerPseudoRecordDefaults(databaseType);
+  if (!defaults) return starts;
+
+  let aliases: Set<string> | null = null;
+  let i = 0;
+  let dollarQuoteEnd = "";
+
+  while (i < sql.length) {
+    if (dollarQuoteEnd) {
+      const end = sql.indexOf(dollarQuoteEnd, i);
+      if (end === -1) break;
+      i = end + dollarQuoteEnd.length;
+      dollarQuoteEnd = "";
+      continue;
+    }
+
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "$") {
+      const marker = readDollarQuoteMarker(sql, i);
+      if (marker) {
+        dollarQuoteEnd = marker;
+        i += marker.length;
+        continue;
+      }
+    }
+
+    if (aliases && ch === "/" && isStandaloneSlashDelimiter(sql, i)) {
+      aliases = null;
+      i += 1;
+      continue;
+    }
+    if (!aliases && matchesWord(sql, i, "create")) {
+      const triggerStart = readCreateTriggerEnd(sql, i);
+      if (triggerStart !== null) {
+        aliases = new Set(defaults);
+        i = triggerStart;
+        continue;
+      }
+    }
+    if (aliases && matchesWord(sql, i, "referencing")) {
+      i = collectTriggerReferencingAliases(sql, i + "referencing".length, aliases, defaults);
+      continue;
+    }
+    if (aliases && ch === ":") {
+      const name = readParameterName(sql, i + 1);
+      if (name && aliases.has(name.toLowerCase()) && isTriggerPseudoRecordFieldReference(sql, i + 1 + name.length)) {
+        starts.add(i);
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+
+  return starts;
+}
+
+function triggerPseudoRecordDefaults(databaseType?: DatabaseType): readonly TriggerPseudoRecordName[] | null {
+  if (databaseType === "oracle") return ["new", "old", "parent"];
+  if (databaseType === "dameng") return ["new", "old", "eventinfo"];
+  return null;
+}
+
+function readCreateTriggerEnd(sql: string, start: number): number | null {
+  let keyword = readNextKeyword(sql, start + "create".length);
+  if (!keyword) return null;
+  if (keyword.word === "or") {
+    keyword = readNextKeyword(sql, keyword.end);
+    if (keyword?.word !== "replace") return null;
+    keyword = readNextKeyword(sql, keyword.end);
+  }
+  return keyword?.word === "trigger" ? keyword.end : null;
+}
+
+function collectTriggerReferencingAliases(sql: string, start: number, aliases: Set<string>, defaults: readonly TriggerPseudoRecordName[]): number {
+  const supported = new Set<string>(defaults);
+  let i = start;
+
+  while (i < sql.length) {
+    const source = readNextKeyword(sql, i);
+    if (!source || isTriggerReferencingBoundary(source.word)) return i;
+    if (!supported.has(source.word)) {
+      i = source.end;
+      continue;
+    }
+
+    let alias = readNextKeyword(sql, source.end);
+    if (alias?.word === "row") alias = readNextKeyword(sql, alias.end);
+    if (alias?.word === "as") alias = readNextKeyword(sql, alias.end);
+    if (!alias || supported.has(alias.word) || isTriggerReferencingBoundary(alias.word)) {
+      i = source.end;
+      continue;
+    }
+
+    aliases.add(alias.word);
+    i = alias.end;
+  }
+
+  return i;
+}
+
+function isTriggerReferencingBoundary(word: string): boolean {
+  return ["before", "after", "instead", "for", "when", "begin", "declare", "call", "enable", "disable"].includes(word);
+}
+
+function isTriggerPseudoRecordFieldReference(sql: string, nameEnd: number): boolean {
+  if (sql[nameEnd] !== ".") return false;
+  const fieldStart = nameEnd + 1;
+  return PARAMETER_NAME_START_RE.test(sql[fieldStart] ?? "") || sql[fieldStart] === '"';
+}
+
+function isStandaloneSlashDelimiter(sql: string, start: number): boolean {
+  let before = start - 1;
+  while (before >= 0 && (sql[before] === " " || sql[before] === "\t" || sql[before] === "\r")) before -= 1;
+  if (before >= 0 && sql[before] !== "\n") return false;
+
+  let after = start + 1;
+  while (after < sql.length && (sql[after] === " " || sql[after] === "\t" || sql[after] === "\r")) after += 1;
+  return after === sql.length || sql[after] === "\n";
+}
+
+// JDBCX MCP commands accept npm scoped packages in their unquoted args value,
+// for example `args=-y @modelcontextprotocol/server-everything`. The `@scope`
+// prefix is command data, not a SQL Server-style template parameter.
+function isJdbcxMcpScopedPackage(sql: string, start: number, nameEnd: number): boolean {
+  if (sql[nameEnd] !== "/" || !/[\p{L}\p{N}_.-]/u.test(sql[nameEnd + 1] ?? "")) return false;
+
+  const blockStart = sql.lastIndexOf("{{", start);
+  if (blockStart === -1 || sql.lastIndexOf("}}", start) > blockStart) return false;
+
+  const extensionPrefix = sql.slice(blockStart + 2, start);
+  return /^\s*mcp\s*\(/i.test(extensionPrefix) && /(?:^|[,\s])args\s*=[^,]*$/i.test(extensionPrefix);
+}
+
+// Doris-style complex types use colons between field names and types; those are not bind parameters.
+function collectComplexTypeFieldSeparators(sql: string): Set<number> {
+  const separators = new Set<number>();
+  let i = 0;
+  let dollarQuoteEnd = "";
+
+  while (i < sql.length) {
+    if (dollarQuoteEnd) {
+      const end = sql.indexOf(dollarQuoteEnd, i);
+      if (end === -1) break;
+      i = end + dollarQuoteEnd.length;
+      dollarQuoteEnd = "";
+      continue;
+    }
+
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "$") {
+      const marker = readDollarQuoteMarker(sql, i);
+      if (marker) {
+        dollarQuoteEnd = marker;
+        i += marker.length;
+        continue;
+      }
+    }
+    const declaration = readComplexTypeDeclaration(sql, i);
+    if (declaration) {
+      i = collectComplexTypeFieldSeparatorsInDeclaration(sql, declaration.openingBracket + 1, declaration.kind, separators) + 1;
+      continue;
+    }
+    i += 1;
+  }
+
+  return separators;
+}
+
+function collectComplexTypeFieldSeparatorsInDeclaration(sql: string, start: number, kind: ComplexTypeDeclarationKind, separators: Set<number>): number {
+  let i = start;
+  let genericDepth = 0;
+  let parenthesisDepth = 0;
+  let expectsFieldName = true;
+
+  while (i < sql.length) {
+    if (expectsFieldName && genericDepth === 0 && parenthesisDepth === 0) {
+      const fieldStart = skipSqlWhitespaceAndComments(sql, i);
+      if (fieldStart !== i) {
+        i = fieldStart;
+        continue;
+      }
+      if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+      const fieldNameEnd = readComplexTypeFieldNameEnd(sql, i, kind);
+      if (fieldNameEnd > i) {
+        const separator = skipSqlWhitespaceAndComments(sql, fieldNameEnd);
+        if (sql[separator] === ":") {
+          separators.add(separator);
+          i = separator + 1;
+          expectsFieldName = false;
+          continue;
+        }
+        i = fieldNameEnd;
+        expectsFieldName = false;
+        continue;
+      }
+    }
+
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    const declaration = readComplexTypeDeclaration(sql, i);
+    if (declaration) {
+      i = collectComplexTypeFieldSeparatorsInDeclaration(sql, declaration.openingBracket + 1, declaration.kind, separators) + 1;
+      continue;
+    }
+    if (ch === ";" && genericDepth === 0 && parenthesisDepth === 0) return i;
+    if (ch === "<") {
+      genericDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ">") {
+      if (genericDepth === 0 && parenthesisDepth === 0) return i;
+      if (genericDepth > 0) genericDepth -= 1;
+      i += 1;
+      continue;
+    }
+    if (ch === "(") {
+      parenthesisDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ")") {
+      if (parenthesisDepth > 0) parenthesisDepth -= 1;
+      i += 1;
+      continue;
+    }
+    if (ch === "," && genericDepth === 0 && parenthesisDepth === 0) {
+      expectsFieldName = true;
+    }
+    i += 1;
+  }
+
+  return sql.length;
+}
+
+function readComplexTypeDeclaration(sql: string, start: number): { kind: ComplexTypeDeclarationKind; openingBracket: number } | null {
+  const kind: ComplexTypeDeclarationKind | null = matchesWord(sql, start, "struct") ? "struct" : matchesWord(sql, start, "variant") ? "variant" : null;
+  if (!kind) return null;
+
+  const openingBracket = skipSqlWhitespaceAndComments(sql, start + kind.length);
+  return sql[openingBracket] === "<" ? { kind, openingBracket } : null;
+}
+
+function readComplexTypeFieldNameEnd(sql: string, start: number, kind: ComplexTypeDeclarationKind): number {
+  if (kind === "variant") return readVariantFieldNameEnd(sql, start);
+
+  const ch = sql[start];
+  if (ch === '"' || ch === "`") return skipQuoted(sql, start, ch);
+  if (ch === "[") return skipBracketIdentifier(sql, start);
+  if (!PARAMETER_NAME_START_RE.test(ch ?? "")) return start;
+
+  let i = start + 1;
+  while (i < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[i])) i += 1;
+  return i;
+}
+
+function readVariantFieldNameEnd(sql: string, start: number): number {
+  let i = start;
+  const modifier = matchesWord(sql, i, "match_name") ? "match_name" : matchesWord(sql, i, "match_name_glob") ? "match_name_glob" : "";
+  if (modifier) i = skipSqlWhitespaceAndComments(sql, i + modifier.length);
+  return sql[i] === "'" ? skipQuoted(sql, i, "'") : start;
+}
+
+function skipSqlWhitespaceAndComments(sql: string, start: number): number {
+  let i = start;
+  while (i < sql.length) {
+    while (i < sql.length && /\s/.test(sql[i])) i += 1;
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function collectNativeSqlServerParameters(sql: string): { declared: Set<string>; ignoredStarts: Set<number> } {
+  const declared = new Set<string>();
+  const ignoredStarts = new Set<number>();
+  let i = 0;
+  let dollarQuoteEnd = "";
+
+  while (i < sql.length) {
+    if (dollarQuoteEnd) {
+      const end = sql.indexOf(dollarQuoteEnd, i);
+      if (end === -1) break;
+      i = end + dollarQuoteEnd.length;
+      dollarQuoteEnd = "";
+      continue;
+    }
+
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (ch === "$") {
+      const marker = readDollarQuoteMarker(sql, i);
+      if (marker) {
+        dollarQuoteEnd = marker;
+        i += marker.length;
+        continue;
+      }
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (matchesWord(sql, i, "declare")) {
+      i = collectDeclareStatementVariables(sql, i + "declare".length, declared);
+      continue;
+    }
+    if (matchesWord(sql, i, "set")) {
+      i = collectSetStatementVariables(sql, i + "set".length, declared);
+      continue;
+    }
+    if (matchesWord(sql, i, "select")) {
+      i = collectSelectAssignmentVariables(sql, i + "select".length, declared);
+      continue;
+    }
+    if ((matchesWord(sql, i, "create") || matchesWord(sql, i, "alter")) && isRoutineDefinitionStart(sql, i)) {
+      i = collectRoutineDefinitionVariables(sql, i, declared);
+      continue;
+    }
+    if (matchesWord(sql, i, "exec") || matchesWord(sql, i, "execute")) {
+      i = collectExecNamedArgumentStarts(sql, i + (matchesWord(sql, i, "exec") ? "exec".length : "execute".length), ignoredStarts);
+      continue;
+    }
+    i += 1;
+  }
+
+  return { declared, ignoredStarts };
+}
+
+function collectDeclareStatementVariables(sql: string, start: number, declared: Set<string>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@") {
+        declared.add(name.toLowerCase());
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function collectSetStatementVariables(sql: string, start: number, declared: Set<string>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@" && isSetAssignmentTarget(sql, i + 1 + name.length)) {
+        declared.add(name.toLowerCase());
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function collectSelectAssignmentVariables(sql: string, start: number, declared: Set<string>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (matchesWord(sql, i, "from")) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@" && isSetAssignmentTarget(sql, i + 1 + name.length)) {
+        declared.add(name.toLowerCase());
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function collectRoutineDefinitionVariables(sql: string, start: number, declared: Set<string>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (matchesWord(sql, i, "as") || matchesWord(sql, i, "returns")) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@") {
+        declared.add(name.toLowerCase());
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function collectExecNamedArgumentStarts(sql: string, start: number, ignoredStarts: Set<number>): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === ";") return i + 1;
+    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "@") {
+      const name = readParameterName(sql, i + 1);
+      if (name && next !== "@" && sql[i - 1] !== "@" && isSetAssignmentTarget(sql, i + 1 + name.length)) {
+        ignoredStarts.add(i);
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return i;
+}
+
+function isRoutineDefinitionStart(sql: string, start: number): boolean {
+  const keyword = matchesWord(sql, start, "create") ? "create" : matchesWord(sql, start, "alter") ? "alter" : "";
+  if (!keyword) return false;
+
+  let next = readNextKeyword(sql, start + keyword.length);
+  if (!next) return false;
+  if (keyword === "create" && next.word === "or") {
+    const afterOr = readNextKeyword(sql, next.end);
+    if (!afterOr || (afterOr.word !== "alter" && afterOr.word !== "replace")) return false;
+    next = readNextKeyword(sql, afterOr.end);
+    if (!next) return false;
+  }
+  return next.word === "procedure" || next.word === "proc" || next.word === "function";
+}
+
+function readNextKeyword(sql: string, start: number): { word: string; end: number } | null {
+  let i = start;
+  while (i < sql.length) {
+    while (i < sql.length && /\s/.test(sql[i])) i += 1;
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    break;
+  }
+  if (!PARAMETER_NAME_START_RE.test(sql[i] ?? "")) return null;
+  let end = i + 1;
+  while (end < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[end])) end += 1;
+  return { word: sql.slice(i, end).toLowerCase(), end };
+}
+
+function isSetAssignmentTarget(sql: string, start: number): boolean {
+  let i = start;
+  while (i < sql.length && /\s/.test(sql[i])) i += 1;
+  return sql[i] === "=" || (sql[i] === ":" && sql[i + 1] === "=");
+}
+
+function isLineStatementStart(sql: string, start: number): boolean {
+  let i = start - 1;
+  while (i >= 0 && (sql[i] === " " || sql[i] === "\t" || sql[i] === "\r")) i -= 1;
+  return i >= 0 && sql[i] === "\n";
+}
+
+function isSqlStatementKeyword(sql: string, start: number): boolean {
+  return ["select", "with", "insert", "update", "delete", "merge", "exec", "execute", "set", "if", "while", "begin", "create", "alter", "drop", "truncate"].some((keyword) => matchesWord(sql, start, keyword));
+}
+
+function matchesWord(sql: string, start: number, word: string): boolean {
+  const value = sql.slice(start, start + word.length);
+  if (value.toLowerCase() !== word) return false;
+  return !PARAMETER_NAME_CHAR_RE.test(sql[start - 1] ?? "") && !PARAMETER_NAME_CHAR_RE.test(sql[start + word.length] ?? "");
+}
+
+function readParameterName(sql: string, start: number): string {
+  if (!PARAMETER_NAME_START_RE.test(sql[start] ?? "")) return "";
+  let i = start + 1;
+  while (i < sql.length && PARAMETER_NAME_CHAR_RE.test(sql[i])) i += 1;
+  return sql.slice(start, i);
+}
+
+/** Match only unprefixed quote + exact `${name}`/`#{name}` + same quote. Leaves skipQuoted unchanged. */
+function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" | '"', isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence | null {
+  if (sql[start] !== quote) return null;
+  // Reject E'...', U&'...', B'...', X'...', N'...' — replacing the quoted span would leave the
+  // prefix attached to a typed literal (e.g. E'${path}' → E'C:\new', B'${flag}' → BTRUE).
+  if (hasSqlStringLiteralPrefix(sql, start)) return null;
+
+  const open = sql.slice(start + 1, start + 3);
+  let syntax: SqlParameterSyntax | null = null;
+  if (open === "${") syntax = "shell";
+  else if (open === "#{") syntax = "mybatis";
+  else return null;
+  if (!isSyntaxEnabled(syntax)) return null;
+
+  const nameStart = start + 3;
+  const closeBrace = sql.indexOf("}", nameStart);
+  if (closeBrace === -1 || sql[closeBrace + 1] !== quote) return null;
+
+  const name = sql.slice(nameStart, closeBrace).trim();
+  if (!PARAMETER_NAME_RE.test(name)) return null;
+
+  const end = closeBrace + 2;
+  // The closing quote must be a real string terminator under the same rules as skipQuoted
+  // (doubled quotes / backslash escapes). Otherwise '${value}''suffix' would match '${value}'.
+  if (skipQuoted(sql, start, quote) !== end) return null;
+
+  return {
+    key: name,
+    name,
+    syntax,
+    token: sql.slice(start, end),
+    start,
+    end,
+  };
+}
+
+function collectEmbeddedQuotedBracedPlaceholders(sql: string, contentStart: number, quotedEnd: number, isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence[] {
+  const occurrences: ParameterOccurrence[] = [];
+  const contentEnd = sql[quotedEnd - 1] === "'" ? quotedEnd - 1 : quotedEnd;
+  let i = contentStart;
+
+  while (i < contentEnd) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    let syntax: SqlParameterSyntax | null = null;
+    if (ch === "$" && next === "{") syntax = "shell";
+    else if (ch === "#" && next === "{") syntax = "mybatis";
+    if (!syntax || !isSyntaxEnabled(syntax)) {
+      i += 1;
+      continue;
+    }
+
+    const closeBrace = sql.indexOf("}", i + 2);
+    if (closeBrace === -1 || closeBrace >= contentEnd) {
+      i += 1;
+      continue;
+    }
+    const name = sql.slice(i + 2, closeBrace).trim();
+    if (!PARAMETER_NAME_RE.test(name)) {
+      i += 1;
+      continue;
+    }
+
+    occurrences.push({
+      key: name,
+      name,
+      syntax,
+      token: sql.slice(i, closeBrace + 1),
+      start: i,
+      end: closeBrace + 1,
+      replacement: "string-fragment",
+    });
+    i = closeBrace + 1;
+  }
+
+  return occurrences;
+}
+
+/** True when `quoteStart` opens a prefixed literal such as E'...', U&'...', or MySQL _charset'...'. */
+function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
+  if (quoteStart <= 0) return false;
+
+  if (quoteStart >= 2 && sql[quoteStart - 1] === "&" && (sql[quoteStart - 2] === "U" || sql[quoteStart - 2] === "u") && !PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 3] ?? "")) {
+    return true;
+  }
+
+  // SQL dialects attach word-like introducers directly to the quote. Reject the
+  // whole category so typed replacement cannot leave invalid prefixes such as
+  // `_utf8mb4TRUE`, and so future introducers do not require another allowlist.
+  return PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 1]);
 }
 
 function skipQuoted(sql: string, start: number, quote: string): number {
@@ -151,6 +1041,31 @@ function skipBlockComment(sql: string, start: number): number {
   return end === -1 ? sql.length : end + 2;
 }
 
+function isHashLineComment(sql: string, start: number): boolean {
+  if (sql[start] !== "#" || sql[start + 1] === "{") return false;
+  // Keep SQL Server #temp table names parseable while treating other # tokens as MySQL-style comments.
+  return !isSqlServerTempTableReference(sql, start);
+}
+
+function isSqlServerTempTableReference(sql: string, start: number): boolean {
+  let nameStart = start + 1;
+  if (sql[nameStart] === "#") nameStart += 1;
+  if (!PARAMETER_NAME_START_RE.test(sql[nameStart] ?? "")) return false;
+
+  const previous = previousKeyword(sql, start);
+  return !!previous && SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS.has(previous);
+}
+
+function previousKeyword(sql: string, start: number): string {
+  let end = start - 1;
+  while (end >= 0 && /\s/.test(sql[end])) end -= 1;
+  let begin = end;
+  while (begin >= 0 && PARAMETER_NAME_CHAR_RE.test(sql[begin])) begin -= 1;
+  begin += 1;
+  if (begin > end || !PARAMETER_NAME_START_RE.test(sql[begin] ?? "")) return "";
+  return sql.slice(begin, end + 1).toLowerCase();
+}
+
 function readDollarQuoteMarker(sql: string, start: number): string {
   const match = sql.slice(start).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/);
   return match?.[0] ?? "";
@@ -158,6 +1073,10 @@ function readDollarQuoteMarker(sql: string, start: number): string {
 
 function quoteSqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sqlParameterStringFragment(input: SqlParameterInput): string {
+  return input.value.replace(/'/g, "''");
 }
 
 function normalizeBooleanLiteral(value: string): string {

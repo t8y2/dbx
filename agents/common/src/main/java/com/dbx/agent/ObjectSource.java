@@ -7,20 +7,26 @@ public final class ObjectSource {
     private String object_type;
     private String schema;
     private String source;
+    private boolean editable;
 
     public ObjectSource() {
-        this("", "", null, "");
+        this("", "", null, "", true);
     }
 
     public ObjectSource(String name, String object_type, String source) {
-        this(name, object_type, null, source);
+        this(name, object_type, null, source, true);
     }
 
     public ObjectSource(String name, String object_type, String schema, String source) {
+        this(name, object_type, schema, source, true);
+    }
+
+    public ObjectSource(String name, String object_type, String schema, String source, boolean editable) {
         this.name = name;
         this.object_type = object_type;
         this.schema = schema;
         this.source = source;
+        this.editable = editable;
     }
 
     public String getName() {
@@ -39,6 +45,10 @@ public final class ObjectSource {
         return source;
     }
 
+    public boolean isEditable() {
+        return editable;
+    }
+
     public void setName(String name) {
         this.name = name;
     }
@@ -55,6 +65,10 @@ public final class ObjectSource {
         this.source = source;
     }
 
+    public void setEditable(boolean editable) {
+        this.editable = editable;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -63,12 +77,13 @@ public final class ObjectSource {
         return Objects.equals(name, that.name)
             && Objects.equals(object_type, that.object_type)
             && Objects.equals(schema, that.schema)
-            && Objects.equals(source, that.source);
+            && Objects.equals(source, that.source)
+            && editable == that.editable;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, object_type, schema, source);
+        return Objects.hash(name, object_type, schema, source, editable);
     }
 
     @Override
@@ -77,6 +92,7 @@ public final class ObjectSource {
             + ", object_type=" + object_type
             + ", schema=" + schema
             + ", source=" + source
+            + ", editable=" + editable
             + ")";
     }
 }

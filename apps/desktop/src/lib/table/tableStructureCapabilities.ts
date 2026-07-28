@@ -1,9 +1,11 @@
 import type { DatabaseType } from "@/types/database";
 
 export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "informix" | "influxdb" | "unsupported";
+export type TableStructureAlterStrategy = "none" | "direct" | "sqlite-rebuild";
 
 export interface TableStructureCapabilities {
   dialect: TableStructureDialect;
+  alterStrategy: TableStructureAlterStrategy;
   createTable: boolean;
   addColumn: boolean;
   dropColumn: boolean;
@@ -27,6 +29,7 @@ export interface TableStructureCapabilities {
 
 const unsupportedCapabilities: TableStructureCapabilities = {
   dialect: "unsupported",
+  alterStrategy: "none",
   createTable: false,
   addColumn: false,
   dropColumn: false,
@@ -49,7 +52,11 @@ const unsupportedCapabilities: TableStructureCapabilities = {
 };
 
 function capabilities(overrides: Partial<TableStructureCapabilities>): TableStructureCapabilities {
-  return { ...unsupportedCapabilities, ...overrides };
+  const resolved = { ...unsupportedCapabilities, ...overrides };
+  if (overrides.alterStrategy === undefined && resolved.alterExistingColumn) {
+    resolved.alterStrategy = "direct";
+  }
+  return resolved;
 }
 
 const mysqlCapabilities = capabilities({
@@ -128,6 +135,13 @@ const sqliteCapabilities = capabilities({
   indexFilter: true,
 });
 
+const nativeSqliteCapabilities = capabilities({
+  ...sqliteCapabilities,
+  alterStrategy: "sqlite-rebuild",
+  alterExistingColumn: true,
+  alterType: true,
+});
+
 const duckdbCapabilities = capabilities({
   dialect: "duckdb",
   createTable: true,
@@ -174,6 +188,12 @@ const oracleCapabilities = capabilities({
   dropIndex: true,
   rebuildIndex: true,
   indexType: true,
+});
+
+const irisCapabilities = capabilities({
+  ...oracleCapabilities,
+  // IRIS exposes %DESCRIPTION at definition time but cannot alter persisted descriptions.
+  comment: false,
 });
 
 const h2Capabilities = capabilities({
@@ -293,6 +313,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   redshift: redshiftCapabilities,
   vertica: redshiftCapabilities,
   highgo: postgresCapabilities,
+  uxdb: postgresCapabilities,
   vastbase: postgresCapabilities,
   kingbase: postgresCapabilities,
   firebird: firebirdCapabilities,
@@ -304,7 +325,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   oracle: oracleCapabilities,
   dameng: oracleCapabilities,
   "oceanbase-oracle": oracleCapabilities,
-  iris: oracleCapabilities,
+  iris: irisCapabilities,
   yashandb: oracleCapabilities,
   xugu: oracleCapabilities,
   h2: h2Capabilities,
@@ -315,13 +336,31 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   manticoresearch: manticoreSearchCapabilities,
 };
 
-export function getTableStructureCapabilities(dbType?: DatabaseType): TableStructureCapabilities {
+export function getTableStructureCapabilities(dbType?: DatabaseType, connectionDbType?: DatabaseType): TableStructureCapabilities {
+  if (dbType === "sqlite" && connectionDbType === "sqlite") return nativeSqliteCapabilities;
   return dbType ? (capabilityByType[dbType] ?? unsupportedCapabilities) : unsupportedCapabilities;
 }
 
 export function canEditTableStructure(dbType?: DatabaseType): boolean {
   const caps = getTableStructureCapabilities(dbType);
   return caps.createTable || caps.addColumn || caps.alterExistingColumn || caps.createIndex || caps.dropIndex;
+}
+
+export function supportsLocalTableColumnReorder(dbType?: DatabaseType, connectionDbType?: DatabaseType): boolean {
+  const caps = getTableStructureCapabilities(dbType, connectionDbType);
+  return canEditTableStructure(dbType) && !caps.reorderColumn;
+}
+
+export function isPhysicalTableColumnOrderChange(dbType: DatabaseType | undefined, connectionDbType: DatabaseType | undefined, originalPosition: number | undefined, currentPosition: number): boolean {
+  return getTableStructureCapabilities(dbType, connectionDbType).reorderColumn && originalPosition !== currentPosition;
+}
+
+export function hasLocalTableColumnOrderChange(columns: readonly { originalPosition?: number; original?: unknown; markedForDrop?: boolean }[]): boolean {
+  const activeColumns = columns.filter((column) => !column.markedForDrop);
+  // Databases without physical reorder support keep existing columns in ordinal order
+  // and append newly added columns, so compare against that post-save layout.
+  const databaseOrder = [...activeColumns.filter((column) => column.original).sort((left, right) => (left.originalPosition ?? Number.MAX_SAFE_INTEGER) - (right.originalPosition ?? Number.MAX_SAFE_INTEGER)), ...activeColumns.filter((column) => !column.original)];
+  return activeColumns.some((column, index) => column !== databaseOrder[index]);
 }
 
 export function canAddTableStructureColumn(dbType: DatabaseType | undefined, isCreateMode: boolean): boolean {

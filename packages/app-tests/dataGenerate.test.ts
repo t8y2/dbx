@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { defaultGeneratorParams, displayGeneratedValue, generateTableData, generateValue } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
+import { defaultGeneratorParams, displayGeneratedValue, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
 
 test("enables default values for columns with schema defaults", () => {
   const params = defaultGeneratorParams(
@@ -97,4 +97,147 @@ test("includeDefault without a schema default no longer emits NULL", () => {
 
   assert.notEqual(value, null);
   assert.notEqual(value, undefined);
+});
+
+test("generates Oracle-compatible single-row inserts with explicit temporal literals", () => {
+  const result = generateTableData(
+    {
+      tableName: "DBX_GENERATE_TEST",
+      schema: "APP",
+      database: "XE",
+      rowCount: 2,
+      columns: [
+        {
+          columnName: "ID",
+          dataType: "NUMBER",
+          rowCount: 2,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 1, increment: 1 },
+        },
+        {
+          columnName: "CREATED_ON",
+          dataType: "DATE",
+          rowCount: 2,
+          generatorKey: "date",
+        },
+        {
+          columnName: "CREATED_AT",
+          dataType: "TIMESTAMP(6)",
+          rowCount: 2,
+          generatorKey: "datetime",
+        },
+      ],
+    },
+    "oracle",
+  );
+
+  assert.equal(supportsGeneratedMultiRowValues("oracle"), false);
+  assert.equal(result.statements.length, 1);
+  assert.match(result.statements[0], /^INSERT ALL\n/);
+  assert.equal(result.statements[0].match(/\n  INTO /g)?.length, 2);
+  assert.match(result.statements[0], /SELECT 1 FROM DUAL;$/);
+  assert.ok(result.statements.every((sql) => /TO_DATE\('[^']+', 'YYYY-MM-DD'\)/.test(sql)));
+  assert.ok(result.statements.every((sql) => /TO_TIMESTAMP\('[^']+', 'YYYY-MM-DD HH24:MI:SS'\)/.test(sql)));
+  assert.doesNotMatch(result.sql, /VALUES\s*\([^;]+\),\s*\(/s);
+});
+
+test("batches large Oracle data generation statements", () => {
+  const result = generateTableData(
+    {
+      tableName: "DBX_GENERATE_TEST",
+      schema: "APP",
+      database: "XE",
+      rowCount: 101,
+      columns: [
+        {
+          columnName: "ID",
+          dataType: "NUMBER",
+          rowCount: 101,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 1, increment: 1 },
+        },
+      ],
+    },
+    "oracle",
+  );
+
+  assert.equal(result.statements.length, 2);
+  assert.equal(result.statements[0].match(/\n  INTO /g)?.length, 100);
+  assert.equal(result.statements[1].match(/\n  INTO /g)?.length, 1);
+});
+
+test("generates TDengine stable rows with one child table identity and stable tag values", () => {
+  const result = generateTableData(
+    {
+      tableName: "sensor_data",
+      tableType: "STABLE",
+      schema: "dbx_issue4512",
+      database: "dbx_issue4512",
+      rowCount: 2,
+      columns: [
+        {
+          columnName: "ts",
+          dataType: "TIMESTAMP",
+          rowCount: 2,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 1, increment: 1 },
+        },
+        {
+          columnName: "temperature",
+          dataType: "FLOAT",
+          rowCount: 2,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 20, increment: 1 },
+        },
+        {
+          columnName: "device_id",
+          dataType: "BINARY(64)",
+          rowCount: 2,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 100, increment: 1 },
+          isTag: true,
+        },
+      ],
+    },
+    "tdengine",
+  );
+
+  assert.deepEqual(result.columns, ["tbname", "ts", "temperature", "device_id"]);
+  assert.match(String(result.rows[0][0]), /^dbx_gen_[a-z0-9]+_[a-z0-9]+$/);
+  assert.equal(result.rows[1][0], result.rows[0][0]);
+  assert.deepEqual(
+    result.rows.map((row) => row.slice(1)),
+    [
+      [1, 20, 100],
+      [2, 21, 100],
+    ],
+  );
+  assert.match(result.sql, /^INSERT INTO `sensor_data` \(`tbname`, `ts`, `temperature`, `device_id`\) VALUES\n/);
+  assert.equal(result.sql.match(/'dbx_gen_[a-z0-9]+_[a-z0-9]+'/g)?.length, 2);
+});
+
+test("keeps ordinary TDengine table generation unchanged", () => {
+  const result = generateTableData(
+    {
+      tableName: "sensor_data_001",
+      tableType: "TABLE",
+      schema: "dbx_issue4512",
+      database: "dbx_issue4512",
+      rowCount: 1,
+      columns: [
+        {
+          columnName: "ts",
+          dataType: "TIMESTAMP",
+          rowCount: 1,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 1, increment: 1 },
+        },
+      ],
+    },
+    "tdengine",
+  );
+
+  assert.deepEqual(result.columns, ["ts"]);
+  assert.deepEqual(result.rows, [[1]]);
+  assert.doesNotMatch(result.sql, /tbname/);
 });

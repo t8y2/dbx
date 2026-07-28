@@ -12,8 +12,6 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 const PLUGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub const SUPPORTED_PLUGIN_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,6 +336,15 @@ impl PluginDriverSession {
         let process = self.process.lock().await;
         process.child.id()
     }
+
+    #[cfg(test)]
+    pub(crate) async fn start_for_test(
+        plugin: InstalledPlugin,
+        driver_id: String,
+        env: PluginRuntimeEnv,
+    ) -> Result<Self, String> {
+        Self::start(plugin, driver_id, env).await
+    }
 }
 
 async fn invoke_plugin<T>(
@@ -412,7 +419,7 @@ fn spawn_plugin_child(plugin: &InstalledPlugin, env: &PluginRuntimeEnv) -> Resul
         .ok_or_else(|| format!("Plugin '{}' does not declare an executable", plugin.manifest.id))?;
     let executable_path = resolve_plugin_executable(&plugin.path, executable);
 
-    let mut command = Command::new(&executable_path);
+    let mut command = crate::process::new_tokio_command(&executable_path);
     command
         .current_dir(&plugin.path)
         .stdin(Stdio::piped())
@@ -420,13 +427,6 @@ fn spawn_plugin_child(plugin: &InstalledPlugin, env: &PluginRuntimeEnv) -> Resul
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     env.apply_to(&mut command);
-
-    #[cfg(windows)]
-    {
-        #[allow(unused_imports)]
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
 
     command.spawn().map_err(|err| format!("Failed to start plugin '{}': {err}", plugin.manifest.id))
 }

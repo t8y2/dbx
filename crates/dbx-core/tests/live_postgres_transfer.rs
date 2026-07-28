@@ -4,7 +4,7 @@ use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::storage::Storage;
 use dbx_core::transfer::{
     get_db_type, transfer_postgres_schema_dependencies, transfer_postgres_schema_objects, transfer_table, TransferMode,
-    TransferRequest, TransferTableNameCase,
+    TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
 };
 use serde_json::json;
 
@@ -12,10 +12,12 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
     ConnectionConfig {
         id: id.to_string(),
         name: id.to_string(),
+        note: String::new(),
         db_type: DatabaseType::Postgres,
         driver_profile: None,
         driver_label: None,
         url_params: None,
+        agent_java_options: Vec::new(),
         host: "127.0.0.1".to_string(),
         port: 5432,
         username: "postgres".to_string(),
@@ -24,6 +26,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         visible_databases: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
+        init_script: None,
         color: None,
         transport_layers: Vec::new(),
         connect_timeout_secs: 5,
@@ -54,6 +57,10 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         jdbc_driver_paths: Vec::new(),
         one_time: false,
         read_only: false,
+        is_production: false,
+        production_databases: vec![],
+        show_system_schemas: false,
+        database_info: None,
     }
 }
 
@@ -210,6 +217,7 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
         create_table: true,
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };
 
@@ -490,6 +498,7 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
         create_table: true,
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };
 

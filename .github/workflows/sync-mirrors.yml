@@ -9,6 +9,12 @@ on:
   delete:
   workflow_dispatch:
 
+# Mirror providers reject concurrent forced updates to the same ref. Serialize all
+# branch, tag, and delete events so rapid GitHub pushes cannot race each other.
+concurrency:
+  group: sync-mirrors
+  cancel-in-progress: false
+
 jobs:
   sync-cnb:
     name: Sync to CNB

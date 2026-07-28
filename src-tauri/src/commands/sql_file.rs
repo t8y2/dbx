@@ -8,9 +8,12 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
-use dbx_core::sql_file_import::{execute_sql_file_content, sql_file_error_progress, sql_file_progress};
+use dbx_core::sql_file_import::{
+    execute_sql_file_paths, mysql_like_sql_file_bootstrap_analysis, read_sql_file_preview, sql_file_progress,
+    SqlFileProgressEmitter,
+};
 
-pub use dbx_core::sql::{decode_sql_file_bytes, SqlFilePreview, SqlFileRequest, SqlFileStatus};
+pub use dbx_core::sql::{SqlFilePreview, SqlFileRequest, SqlFileStatus};
 
 static SQL_FILE_EXECUTIONS: OnceLock<RwLock<HashMap<String, CancellationToken>>> = OnceLock::new();
 
@@ -31,17 +34,17 @@ struct SqlFileSummary {
 pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, String> {
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
-    let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-    let content = decode_sql_file_bytes(&bytes)?;
-    let preview = content.chars().take(20_000).collect();
+    let prefix = read_sql_file_preview(&path, 1_000_000).await?;
+    let bootstrap_analysis = mysql_like_sql_file_bootstrap_analysis(&prefix);
+    let preview = prefix.chars().take(20_000).collect();
 
     Ok(SqlFilePreview {
         file_name: path.file_name().and_then(|name| name.to_str()).unwrap_or("script.sql").to_string(),
         file_path,
         size_bytes: metadata.len(),
         preview,
-        can_execute_without_selected_database:
-            dbx_core::sql_file_import::mysql_like_sql_file_can_execute_without_selected_database(&content),
+        can_execute_without_selected_database: bootstrap_analysis.can_execute_without_selected_database,
+        establishes_database_context: bootstrap_analysis.establishes_database_context,
     })
 }
 
@@ -51,8 +54,21 @@ pub async fn execute_sql_file(
     state: State<'_, Arc<AppState>>,
     request: SqlFileRequest,
 ) -> Result<(), String> {
+    execute_sql_files(app, state, request.clone(), vec![request.file_path.clone()]).await
+}
+
+#[tauri::command]
+pub async fn execute_sql_files(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    request: SqlFileRequest,
+    file_paths: Vec<String>,
+) -> Result<(), String> {
     // Fast-fail: reject early if the connection is read-only (individual statements are also checked in do_execute)
     ensure_connection_writable(&state, &request.connection_id, "SQL file execution").await?;
+    if file_paths.is_empty() {
+        return Err("No SQL files selected".to_string());
+    }
     let token = CancellationToken::new();
     {
         let mut executions = sql_file_executions().write().await;
@@ -60,9 +76,7 @@ pub async fn execute_sql_file(
     }
 
     let started_at = Instant::now();
-    emit_progress(&app, &request.execution_id, SqlFileStatus::Started, 0, 0, 0, 0, started_at, "", None);
-
-    let result = execute_sql_file_inner(&app, &state, &request, token, started_at).await;
+    let result = execute_sql_files_inner(&app, &state, &request, &file_paths, token, started_at).await;
     {
         let mut executions = sql_file_executions().write().await;
         remove_sql_file_execution(&mut executions, &request.execution_id);
@@ -81,31 +95,32 @@ pub async fn cancel_sql_file_execution(execution_id: String) -> Result<bool, Str
     }
 }
 
-async fn execute_sql_file_inner(
+async fn execute_sql_files_inner(
     app: &AppHandle,
     state: &State<'_, Arc<AppState>>,
     request: &SqlFileRequest,
+    file_paths: &[String],
     token: CancellationToken,
     started_at: Instant,
 ) -> Result<(), String> {
-    let file_bytes = match tokio::fs::read(&request.file_path).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            let error = error.to_string();
-            emit_file_io_error_progress(app, &request.execution_id, started_at, error.clone());
-            return Err(error);
-        }
-    };
-    let file_content = match decode_sql_file_bytes(&file_bytes) {
-        Ok(content) => content,
-        Err(error) => {
-            emit_file_io_error_progress(app, &request.execution_id, started_at, error.clone());
-            return Err(error);
-        }
-    };
-
-    execute_sql_file_content(state.inner().as_ref(), request, &file_content, token, started_at, |progress| {
+    let mut progress_emitter = SqlFileProgressEmitter::new(|progress| {
         let _ = app.emit("sql-file-progress", progress);
+    });
+    progress_emitter.emit(sql_file_progress(
+        &request.execution_id,
+        SqlFileStatus::Started,
+        0,
+        0,
+        0,
+        0,
+        started_at,
+        "",
+        None,
+    ));
+    let paths: Vec<PathBuf> = file_paths.iter().map(PathBuf::from).collect();
+    let path_refs: Vec<&std::path::Path> = paths.iter().map(PathBuf::as_path).collect();
+    execute_sql_file_paths(state.inner().as_ref(), request, &path_refs, token, started_at, |progress| {
+        progress_emitter.emit(progress);
     })
     .await
 }
@@ -125,39 +140,6 @@ fn register_sql_file_execution(
 
 fn remove_sql_file_execution(executions: &mut HashMap<String, CancellationToken>, execution_id: &str) {
     executions.remove(execution_id);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_progress(
-    app: &AppHandle,
-    execution_id: &str,
-    status: SqlFileStatus,
-    statement_index: usize,
-    success_count: usize,
-    failure_count: usize,
-    affected_rows: u64,
-    started_at: Instant,
-    statement_summary: &str,
-    error: Option<String>,
-) {
-    let _ = app.emit(
-        "sql-file-progress",
-        sql_file_progress(
-            execution_id,
-            status,
-            statement_index,
-            success_count,
-            failure_count,
-            affected_rows,
-            started_at,
-            statement_summary,
-            error,
-        ),
-    );
-}
-
-fn emit_file_io_error_progress(app: &AppHandle, execution_id: &str, started_at: Instant, error: String) {
-    let _ = app.emit("sql-file-progress", sql_file_error_progress(execution_id, started_at, error));
 }
 
 #[cfg(test)]
@@ -247,20 +229,6 @@ mod execution_tests {
 
         assert_eq!(summary.success_count, 1);
         assert_eq!(summary.status, SqlFileStatus::Cancelled);
-    }
-
-    #[test]
-    fn file_io_errors_build_terminal_error_progress() {
-        let progress = sql_file_error_progress("exec-1", Instant::now(), "read failed".to_string());
-
-        assert_eq!(progress.execution_id, "exec-1");
-        assert_eq!(progress.status, SqlFileStatus::Error);
-        assert_eq!(progress.statement_index, 0);
-        assert_eq!(progress.success_count, 0);
-        assert_eq!(progress.failure_count, 0);
-        assert_eq!(progress.affected_rows, 0);
-        assert_eq!(progress.statement_summary, "");
-        assert_eq!(progress.error, Some("read failed".to_string()));
     }
 
     #[test]

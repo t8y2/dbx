@@ -3,10 +3,77 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentifierCase {
+    Lower,
+    Upper,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseConnectionInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_charset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_collation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unquoted_identifier_case: Option<IdentifierCase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted_identifier_case: Option<IdentifierCase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jdbc_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionTestResult {
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_info: Option<DatabaseConnectionInfo>,
+}
+
+impl ConnectionTestResult {
+    pub fn success(message: impl Into<String>) -> Self {
+        Self { message: message.into(), database_info: None }
+    }
+
+    pub fn with_database_info(mut self, database_info: Option<DatabaseConnectionInfo>) -> Self {
+        self.database_info = database_info;
+        self
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseInfoEnvelope {
+    #[serde(default)]
+    database_info: Option<DatabaseConnectionInfo>,
+}
+
+pub fn database_info_from_protocol_value(value: &Value) -> Option<DatabaseConnectionInfo> {
+    serde_json::from_value::<DatabaseInfoEnvelope>(value.clone()).ok()?.database_info
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -14,6 +81,8 @@ pub struct ConnectionConfig {
     pub driver_label: Option<String>,
     #[serde(default)]
     pub url_params: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_java_options: Vec<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -23,8 +92,14 @@ pub struct ConnectionConfig {
     pub visible_databases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_system_schemas: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
+    /// SQL statements executed right after the connection is established
+    /// (DuckDB only for now): INSTALL/LOAD, SET, CREATE SECRET, ATTACH, ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_script: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -88,6 +163,15 @@ pub struct ConnectionConfig {
     pub one_time: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
+    /// Explicitly marks every database reachable through this connection as production.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_production: bool,
+    /// Database-level production markers for multi-database connections.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub production_databases: Vec<String>,
+    /// Metadata captured from the latest successful connection test for this saved config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_info: Option<DatabaseConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,11 +184,70 @@ pub enum TransportLayerConfig {
 }
 
 impl TransportLayerConfig {
+    pub fn same_type_as(&self, other: &TransportLayerConfig) -> bool {
+        matches!(
+            (self, other),
+            (TransportLayerConfig::Ssh(_), TransportLayerConfig::Ssh(_))
+                | (TransportLayerConfig::Proxy(_), TransportLayerConfig::Proxy(_))
+                | (TransportLayerConfig::HttpTunnel(_), TransportLayerConfig::HttpTunnel(_))
+        )
+    }
+
     pub fn id(&self) -> &str {
         match self {
             TransportLayerConfig::Ssh(layer) => &layer.id,
             TransportLayerConfig::Proxy(layer) => &layer.id,
             TransportLayerConfig::HttpTunnel(layer) => &layer.id,
+        }
+    }
+
+    pub fn profile_id(&self) -> &str {
+        match self {
+            TransportLayerConfig::Ssh(layer) => &layer.profile_id,
+            TransportLayerConfig::Proxy(layer) => &layer.profile_id,
+            TransportLayerConfig::HttpTunnel(layer) => &layer.profile_id,
+        }
+    }
+
+    /// Builds the concrete layer used at connect time for a layer that
+    /// references a shared tunnel profile: the profile supplies the whole
+    /// configuration while the referencing layer keeps its own identity,
+    /// enabled flag, and profile reference.
+    pub fn resolved_from_profile(&self, profile: &TransportLayerConfig) -> TransportLayerConfig {
+        let mut resolved = profile.clone();
+        let (id, enabled, profile_id) = (self.id().to_string(), self.enabled(), self.profile_id().to_string());
+        match &mut resolved {
+            TransportLayerConfig::Ssh(layer) => {
+                layer.id = id;
+                layer.enabled = enabled;
+                layer.profile_id = profile_id;
+            }
+            TransportLayerConfig::Proxy(layer) => {
+                layer.id = id;
+                layer.enabled = enabled;
+                layer.profile_id = profile_id;
+            }
+            TransportLayerConfig::HttpTunnel(layer) => {
+                layer.id = id;
+                layer.enabled = enabled;
+                layer.profile_id = profile_id;
+            }
+        }
+        resolved
+    }
+
+    pub fn scrub_secrets(&mut self) {
+        match self {
+            TransportLayerConfig::Ssh(layer) => {
+                layer.password = String::new();
+                layer.key_passphrase = String::new();
+            }
+            TransportLayerConfig::Proxy(layer) => {
+                layer.password = String::new();
+            }
+            TransportLayerConfig::HttpTunnel(layer) => {
+                layer.token = String::new();
+            }
         }
     }
 
@@ -166,6 +309,21 @@ pub struct SshTunnelConfig {
     /// the `SSH_AUTH_SOCK` environment variable.
     #[serde(default)]
     pub ssh_agent_sock_path: String,
+    /// Login method: `"password"`, `"key"`, `"key+password"`, `"agent"`, or `"none"`.
+    /// Empty string means an older saved connection predating this field —
+    /// the backend falls back to probing key > password > agent based on
+    /// which fields are non-empty. When set to a specific method the backend
+    /// only tries that method (after the standard `none` probe).
+    /// `"key+password"` tries private key auth first and falls back to
+    /// password auth if the key is rejected.
+    #[serde(default)]
+    pub auth_method: String,
+    /// When non-empty, this layer references a shared tunnel profile
+    /// (Settings > Tunnels). The profile's configuration replaces this
+    /// layer's own fields at connect time; only `id` and `enabled` are
+    /// kept from the referencing layer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,6 +344,14 @@ pub struct ProxyTunnelConfig {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    /// Optional target for tunnel profile testing. When set, the test connects
+    /// to this `host:port`; when empty, the test performs an endpoint-only
+    /// liveness probe that requires no external destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_target: Option<String>,
+    /// See [`SshTunnelConfig::profile_id`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,6 +368,9 @@ pub struct HttpTunnelConfig {
     pub token: String,
     #[serde(default = "default_http_tunnel_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
+    /// See [`SshTunnelConfig::profile_id`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -231,7 +400,7 @@ pub fn default_connect_timeout_secs() -> u64 {
 }
 
 pub fn default_query_timeout_secs() -> u64 {
-    30
+    60
 }
 
 pub fn default_idle_timeout_secs() -> u64 {
@@ -268,6 +437,7 @@ pub enum ProxyType {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
     Mysql,
@@ -287,6 +457,7 @@ pub enum DatabaseType {
     Oracle,
     #[serde(rename = "elasticsearch")]
     Elasticsearch,
+    Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
     #[serde(rename = "milvus")]
@@ -305,6 +476,7 @@ pub enum DatabaseType {
     Dameng,
     Kingbase,
     Highgo,
+    Uxdb,
     Vastbase,
     Goldendb,
     Gaussdb,
@@ -330,6 +502,7 @@ pub enum DatabaseType {
     #[serde(rename = "prestosql")]
     PrestoSql,
     Hive,
+    Spark,
     #[serde(rename = "db2")]
     Db2,
     Informix,
@@ -352,6 +525,8 @@ pub enum DatabaseType {
     Iris,
     #[serde(rename = "turso")]
     Turso,
+    #[serde(rename = "cloudflare-d1")]
+    CloudflareD1,
     #[serde(rename = "influxdb")]
     InfluxDb,
     #[serde(rename = "questdb")]
@@ -367,6 +542,8 @@ pub enum DatabaseType {
 struct ConnectionConfigData {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -374,6 +551,8 @@ struct ConnectionConfigData {
     pub driver_label: Option<String>,
     #[serde(default)]
     pub url_params: Option<String>,
+    #[serde(default)]
+    pub agent_java_options: Vec<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -384,7 +563,11 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
+    pub show_system_schemas: bool,
+    #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
+    #[serde(default)]
+    pub init_script: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
@@ -445,6 +628,12 @@ struct ConnectionConfigData {
     pub one_time: bool,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default)]
+    pub is_production: bool,
+    #[serde(default)]
+    pub production_databases: Vec<String>,
+    #[serde(default)]
+    pub database_info: Option<DatabaseConnectionInfo>,
 }
 
 impl From<ConnectionConfigData> for ConnectionConfig {
@@ -452,10 +641,12 @@ impl From<ConnectionConfigData> for ConnectionConfig {
         Self {
             id: data.id,
             name: data.name,
+            note: data.note,
             db_type: data.db_type,
             driver_profile: data.driver_profile,
             driver_label: data.driver_label,
             url_params: data.url_params,
+            agent_java_options: data.agent_java_options,
             host: data.host,
             port: data.port,
             username: data.username,
@@ -463,7 +654,9 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             database: data.database,
             visible_databases: data.visible_databases,
             visible_schemas: data.visible_schemas,
+            show_system_schemas: data.show_system_schemas,
             attached_databases: data.attached_databases,
+            init_script: data.init_script,
             color: data.color,
             transport_layers: data.transport_layers,
             connect_timeout_secs: data.connect_timeout_secs,
@@ -494,6 +687,9 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             jdbc_driver_paths: data.jdbc_driver_paths,
             one_time: data.one_time,
             read_only: data.read_only,
+            is_production: data.is_production,
+            production_databases: data.production_databases,
+            database_info: data.database_info,
         }
     }
 }
@@ -629,6 +825,11 @@ impl ConnectionConfig {
         !self.effective_transport_layers().is_empty()
     }
 
+    pub fn uses_oracle_tns(&self) -> bool {
+        self.db_type == DatabaseType::Oracle
+            && self.oracle_connection_type.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("tns"))
+    }
+
     pub fn has_effective_ssh_tunnels(&self) -> bool {
         self.effective_transport_layers().iter().any(|layer| matches!(layer, TransportLayerConfig::Ssh(_)))
     }
@@ -650,11 +851,7 @@ impl ConnectionConfig {
     }
 
     pub fn effective_database(&self) -> Option<&str> {
-        self.database
-            .as_deref()
-            .map(str::trim)
-            .filter(|database| !database.is_empty())
-            .or_else(|| self.default_database())
+        self.database.as_deref().filter(|database| !database.trim().is_empty()).or_else(|| self.default_database())
     }
 
     fn default_database(&self) -> Option<&'static str> {
@@ -665,11 +862,12 @@ impl ConnectionConfig {
             },
             DatabaseType::Redshift => Some("dev"),
             DatabaseType::ClickHouse => Some("default"),
-            DatabaseType::Rqlite | DatabaseType::Turso => Some("main"),
+            DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => Some("main"),
             DatabaseType::Gaussdb | DatabaseType::OpenGauss => Some("postgres"),
             DatabaseType::Kwdb => Some("defaultdb"),
-            DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
+            DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
+            DatabaseType::Uxdb => Some("uxdb"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Oscar => Some("osrdb"),
             DatabaseType::Firebird => Some("employee"),
@@ -708,6 +906,13 @@ impl ConnectionConfig {
 
     pub fn canonicalized(&self) -> Self {
         let mut config = self.clone();
+        if config.db_type == DatabaseType::SqlServer
+            && sqlserver_legacy_compatibility_param(config.url_params.as_deref())
+        {
+            config.driver_profile = Some("sqlserver-legacy".to_string());
+            config.driver_label = Some("SQL Server legacy compatibility component".to_string());
+            config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
+        }
         if config.db_type == DatabaseType::Mysql
             && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("tdengine"))
         {
@@ -749,7 +954,7 @@ impl ConnectionConfig {
         let raw_host = host;
         let host = bracket_ipv6(host);
         let db_part = self.effective_database().map(|d| format!("/{}", encode_url_part(d))).unwrap_or_default();
-        let params = self.normalized_url_params();
+        let params = self.redacted_url_params();
 
         match self.db_type {
             DatabaseType::Sqlite | DatabaseType::DuckDb => {
@@ -776,6 +981,7 @@ impl ConnectionConfig {
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
             DatabaseType::Turso => turso_http_url(self, raw_host, port),
+            DatabaseType::CloudflareD1 => cloudflare_d1_api_url(self),
             DatabaseType::SqlServer => {
                 format!("server=tcp:{host},{port};database={}", self.database.as_deref().unwrap_or("master"))
             }
@@ -801,6 +1007,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -811,6 +1018,7 @@ impl ConnectionConfig {
             DatabaseType::Dameng => format!("dm://{host}:{port}{db_part}"),
             DatabaseType::Kingbase => format!("kingbase://{host}:{port}{db_part}"),
             DatabaseType::Highgo => format!("highgo://{host}:{port}{db_part}"),
+            DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => format!("gaussdb://{host}:{port}{db_part}"),
@@ -838,6 +1046,7 @@ impl ConnectionConfig {
             DatabaseType::Trino => format!("trino://{host}:{port}{db_part}"),
             DatabaseType::PrestoSql => format!("prestosql://{host}:{port}{db_part}"),
             DatabaseType::Hive => format!("hive://{host}:{port}{db_part}"),
+            DatabaseType::Spark => format!("spark://{host}:{port}{db_part}"),
             DatabaseType::Db2 => format!("db2://{host}:{port}{db_part}"),
             DatabaseType::Informix => format!("informix://{host}:{port}{db_part}"),
             DatabaseType::Neo4j => format!("neo4j://{host}:{port}{db_part}"),
@@ -912,6 +1121,7 @@ impl ConnectionConfig {
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
             DatabaseType::Turso => turso_http_url(self, raw_host, port),
+            DatabaseType::CloudflareD1 => cloudflare_d1_api_url(self),
             DatabaseType::SqlServer => format!(
                 "server=tcp:{host},{port};user={};password={};database={}",
                 self.username,
@@ -946,6 +1156,7 @@ impl ConnectionConfig {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -961,6 +1172,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Highgo => {
                 format!("highgo://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Uxdb => {
+                format!("uxdb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Vastbase => {
                 format!("vastbase://{}:{}@{host}:{port}{db_part}", username, password)
@@ -1026,6 +1240,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Hive => {
                 format!("hive://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Spark => {
+                format!("spark://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Db2 => {
                 format!("db2://{}:{}@{host}:{port}{db_part}", username, password)
@@ -1094,6 +1311,17 @@ impl ConnectionConfig {
         }
     }
 
+    pub fn sqlserver_port_explicit(&self) -> bool {
+        if self.db_type != DatabaseType::SqlServer {
+            return false;
+        }
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("portExplicit").or_else(|| value.get("port_explicit")))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
     fn message_queue_admin_url(&self) -> String {
         self.external_config
             .as_ref()
@@ -1145,6 +1373,23 @@ impl ConnectionConfig {
         }
     }
 
+    fn redacted_url_params(&self) -> String {
+        let params = self.normalized_url_params();
+        if matches!(self.db_type, DatabaseType::Postgres | DatabaseType::Redshift) {
+            redact_postgres_url_params(&params)
+        } else {
+            params
+        }
+    }
+
+    pub(crate) fn validate_native_url_params(&self) -> Result<(), String> {
+        if matches!(self.db_type, DatabaseType::Postgres | DatabaseType::Redshift) {
+            validate_postgres_url_params(self.url_params.as_deref().unwrap_or(""))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn clickhouse_uses_tls(&self) -> bool {
         self.ssl || url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
     }
@@ -1177,6 +1422,68 @@ fn redis_url_params_enable_insecure(params: Option<&str>) -> bool {
         matches!(key.to_ascii_lowercase().as_str(), "insecure" | "tls_insecure" | "accept_invalid_certs")
             && matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "insecure")
     })
+}
+
+fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> {
+    let source = params.unwrap_or("").trim().trim_start_matches('?');
+    let mut parts = Vec::new();
+    let mut separator = None;
+    let mut start = 0;
+    let mut in_braces = false;
+    let mut chars = source.char_indices().peekable();
+
+    // SQL Server JDBC values use braces to contain separators and `}}` to escape a closing brace.
+    while let Some((index, char)) = chars.next() {
+        if in_braces {
+            if char == '}' && chars.peek().is_some_and(|(_, next)| *next == '}') {
+                chars.next();
+            } else if char == '}' {
+                in_braces = false;
+            }
+        } else if char == '{' {
+            in_braces = true;
+        } else if matches!(char, '&' | ';') {
+            parts.push((separator, &source[start..index]));
+            separator = Some(char);
+            start = index + char.len_utf8();
+        }
+    }
+
+    parts.push((separator, &source[start..]));
+    parts
+}
+
+fn sqlserver_legacy_compatibility_part(part: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    let disabled =
+        matches!(value.trim().to_ascii_lowercase().as_str(), "disabled" | "disable" | "false" | "0" | "off" | "no");
+    key.trim().eq_ignore_ascii_case("sqlserverEncryption") && disabled
+}
+
+fn sqlserver_legacy_compatibility_param(params: Option<&str>) -> bool {
+    sqlserver_url_param_parts(params).into_iter().any(|(_, part)| sqlserver_legacy_compatibility_part(part))
+}
+
+fn without_sqlserver_legacy_compatibility_param(params: Option<&str>) -> Option<String> {
+    let retained = sqlserver_url_param_parts(params)
+        .into_iter()
+        .filter(|(_, part)| !part.trim().is_empty())
+        .filter(|(_, part)| !sqlserver_legacy_compatibility_part(part))
+        .collect::<Vec<_>>();
+    if retained.is_empty() {
+        return None;
+    }
+
+    let mut output = String::new();
+    for (index, (separator, part)) in retained.into_iter().enumerate() {
+        if index > 0 {
+            output.extend(separator);
+        }
+        output.push_str(part);
+    }
+    Some(output)
 }
 
 fn url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
@@ -1287,7 +1594,9 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
     } else if !parts.iter().any(|part| {
         url_param_key_is(part, "ssl-mode") || url_param_key_is(part, "sslmode") || url_param_key_is(part, "require_ssl")
     }) {
-        parts.insert(0, "ssl-mode=preferred".to_string());
+        // Default MySQL connections keep TLS off unless the user explicitly
+        // enables a TLS mode.
+        parts.insert(0, "ssl-mode=disabled".to_string());
     }
 
     if !parts.iter().any(|part| url_param_key_is(part, "charset")) {
@@ -1482,12 +1791,17 @@ fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
                 "verify-full" | "verify-identity" => parts.push("sslmode=verify-full".to_string()),
                 _ => {}
             }
+        } else if key.eq_ignore_ascii_case("host")
+            || key.eq_ignore_ascii_case("hostaddr")
+            || key.eq_ignore_ascii_case("port")
+            || key.eq_ignore_ascii_case("stringtype")
+        {
         } else if key.eq_ignore_ascii_case("charset")
             || key.eq_ignore_ascii_case("require_ssl")
             || key.eq_ignore_ascii_case("verify_ca")
             || key.eq_ignore_ascii_case("verify_identity")
         {
-            // These MySQL-style parameters may be present in older/imported
+            // Driver-specific parameters may be present in older/imported
             // saved connections. tokio-postgres rejects unknown URL keys.
         } else {
             parts.push(part.to_string());
@@ -1503,8 +1817,10 @@ fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
     }
 
     if connection_options.is_empty() {
-        if force_tls && !parts.iter().any(|part| url_param_key_is(part, "sslmode")) {
-            parts.insert(0, "sslmode=require".to_string());
+        if !parts.iter().any(|part| url_param_key_is(part, "sslmode")) {
+            // Match libpq/JDBC: absent mode prefers TLS and falls back to plaintext.
+            // Explicit ssl toggle still forces require; users can opt into disable.
+            parts.insert(0, if force_tls { "sslmode=require" } else { "sslmode=prefer" }.to_string());
         }
         return parts.join("&");
     }
@@ -1531,11 +1847,40 @@ fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
         parts.push(format!("options={}", encode_url_part(&combined)));
     }
 
-    if force_tls && !parts.iter().any(|part| url_param_key_is(part, "sslmode")) {
-        parts.insert(0, "sslmode=require".to_string());
+    if !parts.iter().any(|part| url_param_key_is(part, "sslmode")) {
+        parts.insert(0, if force_tls { "sslmode=require" } else { "sslmode=prefer" }.to_string());
     }
 
     parts.join("&")
+}
+
+fn redact_postgres_url_params(value: &str) -> String {
+    value
+        .split('&')
+        .filter(|part| !part.is_empty() && !url_param_key_is(part, "password"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn validate_postgres_url_params(value: &str) -> Result<(), String> {
+    for part in value.trim().trim_start_matches('?').split('&').filter(|part| !part.is_empty()) {
+        let (raw_key, raw_value) = part.split_once('=').unwrap_or((part, ""));
+        if !percent_decode_str(raw_key).decode_utf8_lossy().eq_ignore_ascii_case("stringtype") {
+            continue;
+        }
+
+        let string_type = percent_decode_str(raw_value).decode_utf8_lossy();
+        if string_type.eq_ignore_ascii_case("unspecified") || string_type.eq_ignore_ascii_case("varchar") {
+            continue;
+        }
+
+        let value = if string_type.is_empty() { "<empty>" } else { string_type.as_ref() };
+        return Err(format!(
+            "Unsupported value for PostgreSQL stringtype parameter: {value}. Expected 'unspecified' or 'varchar'."
+        ));
+    }
+
+    Ok(())
 }
 
 fn url_param_key_is(part: &str, expected: &str) -> bool {
@@ -1591,6 +1936,12 @@ fn turso_http_url(config: &ConnectionConfig, host: &str, port: u16) -> String {
     // Default: bare hostname -> prefer HTTPS for Turso (default port 443)
     let scheme = if port == 443 || config.ssl { "https" } else { "http" };
     format!("{scheme}://{}:{port}", bracket_ipv6(trimmed))
+}
+
+fn cloudflare_d1_api_url(config: &ConnectionConfig) -> String {
+    let account_id = config.host.trim();
+    let database_id = config.database.as_deref().unwrap_or_default().trim();
+    format!("https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}")
 }
 
 fn trim_http_host_port(value: &str, default_port: u16) -> String {
@@ -1664,7 +2015,7 @@ fn rewrite_mongo_uri_host(uri: &str, new_host: &str, new_port: u16) -> String {
 }
 
 pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
-    let rest = url.strip_prefix("jdbc:")?;
+    let rest = jdbc_transport_rest(url)?;
 
     // jdbc:oracle:thin:@host:port:SID  or  jdbc:oracle:thin:@//host:port/service
     if let Some(after) = rest.strip_prefix("oracle:") {
@@ -1706,11 +2057,35 @@ pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
     }
 }
 
+fn jdbc_transport_rest(url: &str) -> Option<&str> {
+    if let Some(rest) = url.strip_prefix("jdbc:").or_else(|| url.strip_prefix("JDBC:")) {
+        return Some(rest);
+    }
+
+    let rest = url.strip_prefix("jdbcx:").or_else(|| url.strip_prefix("JDBCX:"))?;
+    if let Some(scheme_end) = rest.find("://") {
+        let scheme = &rest[..scheme_end];
+        return Some(match scheme.rfind(':') {
+            Some(extension_end) => &rest[extension_end + 1..],
+            None => rest,
+        });
+    }
+
+    // Oracle's descriptor and thin URL forms do not contain `://`. In an
+    // extended JDBCX URL the vendor transport follows the first colon.
+    let tail = rest.split_once(':').map(|(_, tail)| tail);
+    match tail {
+        Some(tail) if tail.get(.."oracle:".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("oracle:")) => {
+            Some(tail)
+        }
+        _ => Some(rest),
+    }
+}
+
 pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> String {
     let normalized_url = url.to_ascii_uppercase();
-    if normalized_url.starts_with("JDBC:ORACLE:")
-        && normalized_url.contains("(HOST=")
-        && normalized_url.contains("(PORT=")
+    let normalized_rest = jdbc_transport_rest(url).map(str::to_ascii_uppercase).unwrap_or_default();
+    if normalized_rest.starts_with("ORACLE:") && normalized_url.contains("(HOST=") && normalized_url.contains("(PORT=")
     {
         return rewrite_oracle_descriptor_host(url, new_host, new_port);
     }
@@ -1763,19 +2138,63 @@ fn bracket_ipv6(host: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_query_timeout_secs, default_redis_key_separator, default_ssh_connect_timeout_secs, ConnectionConfig,
-        DatabaseType, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
+        default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
+        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo,
+        DatabaseType, IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
     use std::str::FromStr;
+
+    #[test]
+    fn default_query_timeout_is_sixty_seconds() {
+        assert_eq!(default_query_timeout_secs(), 60);
+    }
+
+    #[test]
+    fn connection_test_result_uses_camel_case_and_omits_missing_details() {
+        let result =
+            ConnectionTestResult::success("Connection successful").with_database_info(Some(DatabaseConnectionInfo {
+                product_name: Some("H2".to_string()),
+                unquoted_identifier_case: Some(IdentifierCase::Upper),
+                ..DatabaseConnectionInfo::default()
+            }));
+
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["message"], "Connection successful");
+        assert_eq!(value["databaseInfo"]["productName"], "H2");
+        assert_eq!(value["databaseInfo"]["unquotedIdentifierCase"], "upper");
+        assert!(value["databaseInfo"].get("driverName").is_none());
+    }
+
+    #[test]
+    fn protocol_database_info_parser_accepts_details_and_legacy_responses() {
+        let parsed = database_info_from_protocol_value(&serde_json::json!({
+            "ok": true,
+            "databaseInfo": {
+                "productName": "H2",
+                "currentDatabase": "app",
+                "serverCharset": "utf8mb4",
+                "jdbcVersion": "4.2"
+            }
+        }))
+        .unwrap();
+        assert_eq!(parsed.product_name.as_deref(), Some("H2"));
+        assert_eq!(parsed.current_database.as_deref(), Some("app"));
+        assert_eq!(parsed.server_charset.as_deref(), Some("utf8mb4"));
+        assert_eq!(parsed.jdbc_version.as_deref(), Some("4.2"));
+        assert_eq!(database_info_from_protocol_value(&serde_json::json!({ "ok": true })), None);
+    }
 
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "10.1.2.3".to_string(),
             port: 2883,
             username: username.to_string(),
@@ -1783,7 +2202,9 @@ mod tests {
             database: database.map(str::to_string),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),
@@ -1814,7 +2235,66 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
         }
+    }
+
+    #[test]
+    fn legacy_mcp_access_is_ignored_and_not_serialized() {
+        let legacy: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "name": "Legacy",
+            "db_type": "mysql",
+            "host": "127.0.0.1",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "mcp_access": "read_only"
+        }))
+        .unwrap();
+        assert!(serde_json::to_value(&legacy).unwrap().get("mcp_access").is_none());
+        assert!(!legacy.read_only);
+    }
+
+    #[test]
+    fn connection_note_is_optional_and_round_trips_when_present() {
+        let config = mysql_config("root", "secret", Some("app"));
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("note").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note.is_empty());
+
+        let mut config = config;
+        config.note = "Production reporting".to_string();
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["note"], "Production reporting");
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note, config.note);
+    }
+
+    #[test]
+    fn database_identifier_whitespace_is_preserved_and_percent_encoded() {
+        let mut config = mysql_config("root", "secret", Some(" analytics "));
+
+        assert_eq!(config.effective_database(), Some(" analytics "));
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/%20analytics%20?ssl-mode=disabled&charset=utf8mb4"
+        );
+
+        config.db_type = DatabaseType::Postgres;
+        assert_eq!(config.effective_database(), Some(" analytics "));
+        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/%20analytics%20?sslmode=prefer");
+    }
+
+    #[test]
+    fn whitespace_only_database_uses_database_type_default() {
+        let mut config = mysql_config("root", "secret", Some("   "));
+        assert_eq!(config.effective_database(), None);
+
+        config.db_type = DatabaseType::Postgres;
+        assert_eq!(config.effective_database(), Some("postgres"));
     }
 
     fn mongodb_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
@@ -1828,6 +2308,58 @@ mod tests {
     fn zookeeper_database_type_uses_stable_wire_name() {
         assert_eq!(serde_json::to_string(&DatabaseType::ZooKeeper).unwrap(), "\"zookeeper\"");
         assert_eq!(serde_json::from_str::<DatabaseType>("\"zookeeper\"").unwrap(), DatabaseType::ZooKeeper);
+    }
+
+    #[test]
+    fn cloudflare_d1_database_type_and_api_url_are_stable() {
+        assert_eq!(serde_json::to_string(&DatabaseType::CloudflareD1).unwrap(), "\"cloudflare-d1\"");
+        assert_eq!(serde_json::from_str::<DatabaseType>("\"cloudflare-d1\"").unwrap(), DatabaseType::CloudflareD1);
+
+        let mut config = mysql_config("", "secret-token", Some("database-id"));
+        config.db_type = DatabaseType::CloudflareD1;
+        config.host = "account-id".to_string();
+        config.port = 443;
+        assert_eq!(
+            config.connection_url(),
+            "https://api.cloudflare.com/client/v4/accounts/account-id/d1/database/database-id"
+        );
+        assert!(!config.connection_url().contains("secret-token"));
+    }
+
+    #[test]
+    fn connection_config_defaults_missing_agent_java_options_to_empty() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "Hive",
+            "db_type": "hive",
+            "host": "hive.local",
+            "port": 10000,
+            "username": "",
+            "password": "",
+            "database": "default"
+        }))
+        .unwrap();
+
+        assert!(config.agent_java_options.is_empty());
+        assert_eq!(config.database_info, None);
+    }
+
+    #[test]
+    fn connection_config_database_info_survives_json_round_trip() {
+        let mut config = mysql_config("root", "secret", Some("app"));
+        config.database_info = Some(DatabaseConnectionInfo {
+            product_name: Some("MySQL".to_string()),
+            product_version: Some("8.4.0".to_string()),
+            current_database: Some("app".to_string()),
+            server_charset: Some("utf8mb4".to_string()),
+            ..DatabaseConnectionInfo::default()
+        });
+
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["database_info"]["productVersion"], "8.4.0");
+
+        let restored: ConnectionConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.database_info, config.database_info);
     }
 
     #[test]
@@ -1977,6 +2509,7 @@ mod tests {
     fn serialized_connection_config_omits_legacy_transport_fields() {
         let mut config = mysql_config("root", "", None);
         config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
             id: "proxy".to_string(),
             name: String::new(),
             enabled: true,
@@ -1985,6 +2518,7 @@ mod tests {
             port: 1080,
             username: String::new(),
             password: String::new(),
+            test_target: None,
         })];
 
         let saved = serde_json::to_value(config).unwrap();
@@ -2012,12 +2546,22 @@ mod tests {
     }
 
     #[test]
+    fn mysql_url_encodes_proxy_style_username_with_colons_and_at() {
+        let config = mysql_config("1234:xxx@xx.xx:abc123", "p@ss:word", None);
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://1234%3Axxx%40xx%2Exx%3Aabc123:p%40ss%3Aword@10.1.2.3:2883?ssl-mode=disabled&charset=utf8mb4"
+        );
+    }
+
+    #[test]
     fn mysql_url_encodes_oceanbase_username() {
         let config = mysql_config("user@tenant#cluster", "secret", None);
 
         assert_eq!(
             config.connection_url(),
-            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=preferred&charset=utf8mb4"
+            "mysql://user%40tenant%23cluster:secret@10.1.2.3:2883?ssl-mode=disabled&charset=utf8mb4"
         );
     }
 
@@ -2101,6 +2645,49 @@ mod tests {
     }
 
     #[test]
+    fn historical_sqlserver_legacy_setting_is_canonicalized_to_driver_profile() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_string());
+        config.driver_label = Some("SQL Server".to_string());
+        config.url_params =
+            Some("applicationName={DBX; Client};password=50%;sqlserverEncryption=disabled;encrypt=false".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver-legacy"));
+        assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server legacy compatibility component"));
+        assert_eq!(canonical.url_params.as_deref(), Some("applicationName={DBX; Client};password=50%;encrypt=false"));
+        assert_eq!(without_sqlserver_legacy_compatibility_param(Some("sqlserverEncryption=disabled")), None);
+    }
+
+    #[test]
+    fn sqlserver_legacy_migration_respects_escaped_braces() {
+        let params = "applicationName={DBX}}; Client};sqlserverEncryption=disabled;encrypt=false";
+
+        assert!(sqlserver_legacy_compatibility_param(Some(params)));
+        assert_eq!(
+            without_sqlserver_legacy_compatibility_param(Some(params)).as_deref(),
+            Some("applicationName={DBX}}; Client};encrypt=false")
+        );
+    }
+
+    #[test]
+    fn sqlserver_auto_profile_without_historical_setting_stays_native() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_string());
+        config.driver_label = Some("SQL Server".to_string());
+        config.url_params = Some("applicationName=dbx&encrypt=false".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver"));
+        assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server"));
+        assert_eq!(canonical.url_params.as_deref(), Some("applicationName=dbx&encrypt=false"));
+    }
+
+    #[test]
     fn informix_empty_database_uses_sysmaster_for_connection() {
         let mut config = mysql_config("informix", "in4mix", None);
         config.db_type = DatabaseType::Informix;
@@ -2140,6 +2727,35 @@ mod tests {
     }
 
     #[test]
+    fn kingbase_empty_database_has_no_default() {
+        let mut config = mysql_config("SYSTEM", "secret", None);
+        config.db_type = DatabaseType::Kingbase;
+        config.port = 54321;
+
+        assert_eq!(config.effective_database(), None);
+        assert_eq!(config.connection_url(), "kingbase://SYSTEM:secret@10.1.2.3:54321");
+    }
+
+    #[test]
+    fn vastbase_empty_database_uses_postgres_for_connection() {
+        let mut config = mysql_config("vastbase", "secret", None);
+        config.db_type = DatabaseType::Vastbase;
+        config.port = 5432;
+
+        assert_eq!(config.effective_database(), Some("postgres"));
+        assert_eq!(config.connection_url(), "vastbase://vastbase:secret@10.1.2.3:5432/postgres");
+    }
+
+    #[test]
+    fn uxdb_connection_url_uses_uxdb_scheme() {
+        let mut config = mysql_config("uxdb", "secret", Some("warehouse"));
+        config.db_type = DatabaseType::Uxdb;
+        config.port = 52025;
+
+        assert_eq!(config.connection_url(), "uxdb://uxdb:secret@10.1.2.3:52025/warehouse");
+    }
+
+    #[test]
     fn clickhouse_tls_uses_https_from_ssl_or_secure_param() {
         let mut config = mysql_config("default", "", None);
         config.db_type = DatabaseType::ClickHouse;
@@ -2153,6 +2769,20 @@ mod tests {
         config.ssl = false;
         config.url_params = Some("secure=true".to_string());
         assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+    }
+
+    #[test]
+    fn hbase_rest_url_uses_http_or_https_without_embedding_credentials() {
+        let mut config = mysql_config("hbase-user", "secret", None);
+        config.db_type = DatabaseType::Hbase;
+        config.port = 8080;
+
+        assert_eq!(config.connection_url(), "http://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "http://10.1.2.3:8080");
+
+        config.ssl = true;
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "https://10.1.2.3:8080");
     }
 
     #[test]
@@ -2171,7 +2801,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=preferred&charset=utf8mb4"
+            "mysql://root:p%40ss%3Aword%231@10.1.2.3:2883/db%2Fname?ssl-mode=disabled&charset=utf8mb4"
         );
     }
 
@@ -2180,10 +2810,7 @@ mod tests {
         let mut config = mysql_config("root", "secret", Some("test"));
         config.url_params = Some("charset=utf8mb4".to_string());
 
-        assert_eq!(
-            config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
-        );
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
     }
 
     #[test]
@@ -2193,7 +2820,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2204,7 +2831,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2216,7 +2843,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4&enable_cleartext_plugin=true"
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -2225,10 +2852,7 @@ mod tests {
         let mut config = mysql_config("root", "secret", Some("test"));
         config.url_params = Some("allowCleartextPasswords=false&enable_cleartext_plugin=&charset=utf8mb4".to_string());
 
-        assert_eq!(
-            config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
-        );
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
     }
 
     #[test]
@@ -2239,6 +2863,17 @@ mod tests {
         assert_eq!(
             config.connection_url(),
             "mysql://root:secret@10.1.2.3:2883/test?require_ssl=true&verify_ca=false&verify_identity=false&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn mysql_explicit_preferred_tls_mode_is_preserved() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("ssl-mode=preferred".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
         );
     }
 
@@ -2277,6 +2912,14 @@ mod tests {
     }
 
     #[test]
+    fn postgres_url_prefers_tls_by_default() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+
+        assert_eq!(config.connection_url(), "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer");
+    }
+
+    #[test]
     fn postgres_tls_switch_adds_require_sslmode() {
         let mut config = mysql_config("postgres", "secret", Some("test"));
         config.db_type = DatabaseType::Postgres;
@@ -2307,7 +2950,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "postgres://postgres:secret@10.1.2.3:2883/test?options=%2Dc%20search%5Fpath%3Dpublic"
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=%2Dc%20search%5Fpath%3Dpublic"
         );
         let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
         assert_eq!(pg_config.get_options(), Some("-c search_path=public"));
@@ -2321,10 +2964,108 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "postgres://postgres:secret@10.1.2.3:2883/test?options=%2Dc%20search%5Fpath%3Dapp"
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=%2Dc%20search%5Fpath%3Dapp"
         );
         let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
         assert_eq!(pg_config.get_options(), Some("-c search_path=app"));
+    }
+
+    #[test]
+    fn postgres_url_ignores_jdbc_stringtype_param() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("currentSchema=public&stringtype=unspecified".to_string());
+
+        assert_eq!(config.validate_native_url_params(), Ok(()));
+        assert_eq!(
+            config.connection_url(),
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=%2Dc%20search%5Fpath%3Dpublic"
+        );
+        let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
+        assert_eq!(pg_config.get_options(), Some("-c search_path=public"));
+    }
+
+    #[test]
+    fn postgres_url_accepts_encoded_jdbc_varchar_stringtype_param() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("currentSchema=app&%73tringtype=%76aRcHaR".to_string());
+
+        assert_eq!(config.validate_native_url_params(), Ok(()));
+        assert_eq!(
+            config.connection_url(),
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=%2Dc%20search%5Fpath%3Dapp"
+        );
+        let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
+        assert_eq!(pg_config.get_options(), Some("-c search_path=app"));
+    }
+
+    #[test]
+    fn postgres_url_rejects_invalid_or_empty_jdbc_stringtype_param() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+
+        config.url_params = Some("stringtype=invalid".to_string());
+        assert_eq!(
+            config.validate_native_url_params().unwrap_err(),
+            "Unsupported value for PostgreSQL stringtype parameter: invalid. Expected 'unspecified' or 'varchar'."
+        );
+
+        config.url_params = Some("  ?%73tringtype=  ".to_string());
+        assert_eq!(
+            config.validate_native_url_params().unwrap_err(),
+            "Unsupported value for PostgreSQL stringtype parameter: <empty>. Expected 'unspecified' or 'varchar'."
+        );
+    }
+
+    #[test]
+    fn postgres_url_uses_only_the_structured_endpoint() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some(
+            "HOST=origin.example.com&%68ostaddr=203.0.113.10&%70ort=6432&currentSchema=app&application_name=dbx"
+                .to_string(),
+        );
+
+        let url = config.connection_url_with_host("127.0.0.1", 6543);
+
+        assert_eq!(
+            url,
+            "postgres://postgres:secret@127.0.0.1:6543/test?sslmode=prefer&application_name=dbx&options=%2Dc%20search%5Fpath%3Dapp"
+        );
+        let pg_config = tokio_postgres::Config::from_str(&url).unwrap();
+        assert_eq!(pg_config.get_hosts().len(), 1);
+        assert_eq!(pg_config.get_ports(), &[6543]);
+        assert!(pg_config.get_hostaddrs().is_empty());
+        assert_eq!(pg_config.get_options(), Some("-c search_path=app"));
+    }
+
+    #[test]
+    fn postgres_url_query_password_keeps_priority_but_is_redacted() {
+        let mut config = mysql_config("postgres", "field-secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("%70assword=query-secret&application_name=dbx".to_string());
+
+        let url = config.connection_url();
+        let pg_config = tokio_postgres::Config::from_str(&url).unwrap();
+        assert_eq!(pg_config.get_password(), Some(b"query-secret".as_slice()));
+        assert_eq!(
+            config.redacted_connection_url(),
+            "postgres://10.1.2.3:2883/test?sslmode=prefer&application_name=dbx"
+        );
+    }
+
+    #[test]
+    fn postgres_url_redacts_case_insensitive_and_encoded_password_keys() {
+        let mut config = mysql_config("postgres", "field-secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("PASSWORD=upper-secret&%70assword=encoded-secret&application_name=dbx".to_string());
+
+        let url = config.redacted_connection_url();
+
+        assert_eq!(url, "postgres://10.1.2.3:2883/test?sslmode=prefer&application_name=dbx");
+        assert!(!url.contains("upper-secret"));
+        assert!(!url.contains("encoded-secret"));
     }
 
     #[test]
@@ -2355,7 +3096,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "postgres://postgres:secret@10.1.2.3:2883/test?options=%2Dc%20statement%5Ftimeout%3D5000%20%2Dc%20TimeZone%3DUTC"
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=%2Dc%20statement%5Ftimeout%3D5000%20%2Dc%20TimeZone%3DUTC"
         );
     }
 
@@ -2367,7 +3108,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "postgres://postgres:secret@10.1.2.3:2883/test?options=-c%20TimeZone%3DUTC"
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=-c%20TimeZone%3DUTC"
         );
     }
 
@@ -2376,7 +3117,7 @@ mod tests {
         let mut config = mysql_config("root", "secret", None);
         config.db_type = DatabaseType::Postgres;
 
-        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/postgres");
+        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/postgres?sslmode=prefer");
     }
 
     #[test]
@@ -2384,7 +3125,7 @@ mod tests {
         let mut config = mysql_config("root", "secret", Some(""));
         config.db_type = DatabaseType::Postgres;
 
-        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/postgres");
+        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/postgres?sslmode=prefer");
     }
 
     #[test]
@@ -2392,7 +3133,7 @@ mod tests {
         let mut config = mysql_config("awsuser", "secret", Some(""));
         config.db_type = DatabaseType::Redshift;
 
-        assert_eq!(config.connection_url(), "postgres://awsuser:secret@10.1.2.3:2883/dev");
+        assert_eq!(config.connection_url(), "postgres://awsuser:secret@10.1.2.3:2883/dev?sslmode=prefer");
     }
 
     #[test]
@@ -2401,7 +3142,7 @@ mod tests {
         config.db_type = DatabaseType::Postgres;
         config.driver_profile = Some("cockroachdb".to_string());
 
-        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/defaultdb");
+        assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/defaultdb?sslmode=prefer");
     }
 
     #[test]
@@ -2490,7 +3231,7 @@ mod tests {
 
         let url = config.redacted_connection_url();
 
-        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=preferred&charset=utf8mb4");
+        assert_eq!(url, "mysql://10.1.2.3:2883/db%2Fname?ssl-mode=disabled&charset=utf8mb4");
         assert!(!url.contains("user"));
         assert!(!url.contains("p%40ss"));
         assert!(!url.contains("p@ss"));
@@ -2781,6 +3522,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_jdbcx_host_port_with_and_without_extension() {
+        assert_eq!(
+            super::parse_jdbc_host_port("jdbcx:mysql://db.example.com:3306/app"),
+            Some(("db.example.com".to_string(), 3306))
+        );
+        assert_eq!(
+            super::parse_jdbc_host_port("jdbcx:prql:postgresql://pg.example.com:5432/app"),
+            Some(("pg.example.com".to_string(), 5432))
+        );
+        assert_eq!(
+            super::parse_jdbc_host_port("jdbcx:query:sqlserver://sql.example.com:1433;databaseName=app"),
+            Some(("sql.example.com".to_string(), 1433))
+        );
+    }
+
+    #[test]
     fn parse_jdbc_host_port_with_userinfo() {
         let (h, p) = super::parse_jdbc_host_port("jdbc:postgresql://user:pass@pghost:5433/db").unwrap();
         assert_eq!(h, "pghost");
@@ -2851,6 +3608,27 @@ mod tests {
         let url = "jdbc:postgresql://myhost:5432/mydb";
         let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
         assert_eq!(rewritten, "jdbc:postgresql://127.0.0.1:54321/mydb");
+    }
+
+    #[test]
+    fn rewrite_jdbcx_url_preserves_extension() {
+        let url = "jdbcx:script:mysql://db.example.com:3306/app";
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 13306);
+        assert_eq!(rewritten, "jdbcx:script:mysql://127.0.0.1:13306/app");
+
+        let sqlserver = "jdbcx:query:sqlserver://sql.example.com:1433;databaseName=app";
+        let rewritten = super::rewrite_jdbc_url_host(sqlserver, "127.0.0.1", 11433);
+        assert_eq!(rewritten, "jdbcx:query:sqlserver://127.0.0.1:11433;databaseName=app");
+    }
+
+    #[test]
+    fn rewrite_jdbcx_oracle_descriptor() {
+        let url = "jdbcx:web:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orahost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521);
+        assert_eq!(
+            rewritten,
+            "jdbcx:web:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=127.0.0.1)(PORT=11521))(CONNECT_DATA=(SERVICE_NAME=orcl)))"
+        );
     }
 
     #[test]

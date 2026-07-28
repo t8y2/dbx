@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS dbx_smoke (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  note VARCHAR(255) NOT NULL,
+  nullable_value VARCHAR(64) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_dbx_smoke_note (note)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+INSERT INTO dbx_smoke (note, nullable_value) VALUES ('DBX smoke 中文 🚀', NULL);

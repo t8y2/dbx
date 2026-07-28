@@ -1,13 +1,32 @@
-import { test } from "vitest";
+import { beforeEach, test, vi } from "vitest";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createPinia, setActivePinia } from "pinia";
 import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sql/sqlFormatterConfig.ts";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
-import { DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
 import { tableOpenPageLimit } from "../../apps/desktop/src/lib/table/tableOpenPageLimit.ts";
-import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
+import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
+
+const saveEditorSettingsMock = vi.hoisted(() => vi.fn());
+vi.mock("../../apps/desktop/src/lib/backend/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../apps/desktop/src/lib/backend/api")>();
+  // Wrap the real saveEditorSettings so existing localStorage-based tests
+  // keep working, while allowing new tests to assert on the persisted payload.
+  saveEditorSettingsMock.mockImplementation(async (settings: unknown) => {
+    await actual.saveEditorSettings(settings);
+  });
+  return {
+    ...actual,
+    saveEditorSettings: saveEditorSettingsMock,
+  };
+});
 
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
+
+beforeEach(() => {
+  saveEditorSettingsMock.mockClear();
+});
 
 async function withMockLocalStorage(initial: Record<string, string>, run: () => void | Promise<void>) {
   const previousDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -48,10 +67,86 @@ test("normalizes saved query result page size", () => {
   assert.equal(normalizeEditorSettings({ pageSize: 0 }).pageSize, 100);
 });
 
-test("uses saved rows-per-page for table opens", () => {
+test("normalizes the dedicated default row limit for table opens", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.tableOpenPageSize, 100);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 1000 }).tableOpenPageSize, 1000);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 200000 }).tableOpenPageSize, 100000);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 0 }).tableOpenPageSize, 100);
   assert.equal(tableOpenPageLimit(), 100);
-  assert.equal(tableOpenPageLimit(500), 500);
+  assert.equal(tableOpenPageLimit(1000), 1000);
   assert.equal(tableOpenPageLimit(0), 100);
+});
+
+test("numericColumnRightAlign defaults to true and round-trips through normalizeEditorSettings", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign, true);
+  assert.equal(normalizeEditorSettings({}).numericColumnRightAlign, true);
+  assert.equal(normalizeEditorSettings({ numericColumnRightAlign: false }).numericColumnRightAlign, false);
+  assert.equal(normalizeEditorSettings({ numericColumnRightAlign: true }).numericColumnRightAlign, true);
+  // Non-boolean values fall back to the default.
+  assert.equal(normalizeEditorSettings({ numericColumnRightAlign: undefined }).numericColumnRightAlign, true);
+  assert.equal(normalizeEditorSettings({ numericColumnRightAlign: "false" as unknown as boolean }).numericColumnRightAlign, true);
+});
+
+test("updateEditorSettings persists numericColumnRightAlign toggles", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    assert.equal(store.editorSettings.numericColumnRightAlign, true);
+
+    store.updateEditorSettings({ numericColumnRightAlign: false });
+    assert.equal(store.editorSettings.numericColumnRightAlign, false);
+    // updateEditorSettings schedules a background save via api.saveEditorSettings
+    // with a snapshot of the current settings.
+    await vi.waitFor(() => {
+      const lastCall = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { numericColumnRightAlign?: boolean } | undefined;
+      assert.equal(lastCall?.numericColumnRightAlign, false);
+    });
+
+    store.updateEditorSettings({ numericColumnRightAlign: true });
+    assert.equal(store.editorSettings.numericColumnRightAlign, true);
+    await vi.waitFor(() => {
+      const lastCall = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { numericColumnRightAlign?: boolean } | undefined;
+      assert.equal(lastCall?.numericColumnRightAlign, true);
+    });
+  });
+});
+
+test("migrates legacy execute-all settings to current once and preserves later explicit choices", async () => {
+  await withMockLocalStorage({ "dbx-app-state:editor_settings": JSON.stringify({ executeMode: "all" }) }, async () => {
+    setActivePinia(createPinia());
+    const migratedStore = useSettingsStore();
+    await migratedStore.initEditorSettings();
+
+    assert.equal(migratedStore.editorSettings.executeMode, "current");
+    let saved = JSON.parse(localStorage.getItem("dbx-app-state:editor_settings") || "{}");
+    assert.equal(saved.executeMode, "current");
+    assert.equal(saved.executeModeDefaultVersion, EXECUTE_MODE_CURRENT_DEFAULT_VERSION);
+
+    migratedStore.updateEditorSettings({ executeMode: "all" });
+    assert.equal(migratedStore.editorSettings.executeMode, "all");
+    await vi.waitFor(() => {
+      saved = JSON.parse(localStorage.getItem("dbx-app-state:editor_settings") || "{}");
+      assert.equal(saved.executeMode, "all");
+    });
+    assert.equal(saved.executeModeDefaultVersion, EXECUTE_MODE_CURRENT_DEFAULT_VERSION);
+
+    setActivePinia(createPinia());
+    const reloadedStore = useSettingsStore();
+    await reloadedStore.initEditorSettings();
+    assert.equal(reloadedStore.editorSettings.executeMode, "all");
+  });
+});
+
+test("shows the table-open page size control in the Data settings tab", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+  const dataSectionStart = source.indexOf("activeSettingsTab === 'data'");
+  const nextSectionStart = source.indexOf("activeSettingsTab === 'shortcuts'", dataSectionStart);
+  const control = source.indexOf('id="table-open-page-size"');
+
+  assert.ok(dataSectionStart >= 0);
+  assert.ok(nextSectionStart > dataSectionStart);
+  assert.ok(control > dataSectionStart && control < nextSectionStart);
 });
 
 test("defaults export batch size to 2000 rows", () => {
@@ -123,10 +218,42 @@ test("keeps saved UI font family", () => {
   assert.equal(normalizeEditorSettings({ uiFontFamily: SYSTEM_UI_FONT_FAMILY } as any).uiFontFamily, SYSTEM_UI_FONT_FAMILY);
 });
 
+test("defaults result grid font family without changing saved custom fonts", () => {
+  const tableFontFamily = `"IBM Plex Mono", monospace`;
+
+  assert.equal(DEFAULT_EDITOR_SETTINGS.tableFontFamily, DEFAULT_DATA_GRID_FONT_FAMILY);
+  assert.equal(normalizeEditorSettings({}).tableFontFamily, DEFAULT_DATA_GRID_FONT_FAMILY);
+  assert.equal(normalizeEditorSettings({ tableFontFamily: "" as any }).tableFontFamily, DEFAULT_DATA_GRID_FONT_FAMILY);
+  assert.equal(normalizeEditorSettings({ tableFontFamily }).tableFontFamily, tableFontFamily);
+});
+
 test("defaults dangerous SQL confirmation to enabled", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution, true);
   assert.equal(normalizeEditorSettings({}).confirmDangerousSqlExecution, true);
   assert.equal(normalizeEditorSettings({ confirmDangerousSqlExecution: false }).confirmDangerousSqlExecution, false);
+});
+
+test("defaults statement run buttons to enabled and preserves saved booleans", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.showStatementRunButtons, true);
+  assert.equal(normalizeEditorSettings({}).showStatementRunButtons, true);
+  assert.equal(normalizeEditorSettings({ showStatementRunButtons: false }).showStatementRunButtons, false);
+  assert.equal(normalizeEditorSettings({ showStatementRunButtons: "nope" as any }).showStatementRunButtons, true);
+});
+
+test("normalizes SQL snippet enabled state", () => {
+  const settings = normalizeEditorSettings({
+    snippets: [
+      { id: "legacy", label: "legacy", prefix: "leg", body: "SELECT 1;" },
+      { id: "disabled", label: "disabled", prefix: "dis", body: "SELECT 2;", enabled: false },
+      { id: "invalid", label: "invalid", prefix: "inv", body: "SELECT 3;", enabled: "nope" },
+    ],
+  } as any);
+
+  assert.deepEqual(settings.snippets, [
+    { id: "legacy", label: "legacy", prefix: "leg", body: "SELECT 1;", enabled: true },
+    { id: "disabled", label: "disabled", prefix: "dis", body: "SELECT 2;", enabled: false },
+    { id: "invalid", label: "invalid", prefix: "inv", body: "SELECT 3;", enabled: true },
+  ]);
 });
 
 test("defaults unsaved SQL close confirmation to enabled", () => {
@@ -142,10 +269,25 @@ test("defaults Vim mode to off and preserves saved booleans", () => {
   assert.equal(normalizeEditorSettings({ vimModeEnabled: "yes" as any }).vimModeEnabled, false);
 });
 
+test("defaults auto-close brackets to on and preserves saved booleans", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.autoCloseBrackets, true);
+  assert.equal(normalizeEditorSettings({}).autoCloseBrackets, true);
+  assert.equal(normalizeEditorSettings({ autoCloseBrackets: false }).autoCloseBrackets, false);
+  assert.equal(normalizeEditorSettings({ autoCloseBrackets: "nope" as any }).autoCloseBrackets, true);
+});
+
 test("defaults update notifications to enabled", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled, true);
   assert.equal(normalizeEditorSettings({}).updateNotificationsEnabled, true);
   assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).updateNotificationsEnabled, false);
+});
+
+test("defaults sidebar table search to disabled and preserves saved booleans", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled, false);
+  assert.equal(normalizeEditorSettings({}).sidebarTableSearchEnabled, false);
+  assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: true }).sidebarTableSearchEnabled, true);
+  assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: false }).sidebarTableSearchEnabled, false);
+  assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: "yes" as any }).sidebarTableSearchEnabled, false);
 });
 
 test("defaults shortcut settings", () => {
@@ -235,7 +377,7 @@ test("normalizes table font size", () => {
   assert.equal(normalizeEditorSettings({}).tableFontSize, 13);
   assert.equal(normalizeEditorSettings({ tableFontSize: 12 }).tableFontSize, 12);
   assert.equal(normalizeEditorSettings({ tableFontSize: 14.6 }).tableFontSize, 15);
-  assert.equal(normalizeEditorSettings({ tableFontSize: 8 }).tableFontSize, 12);
+  assert.equal(normalizeEditorSettings({ tableFontSize: 8 }).tableFontSize, 8);
   assert.equal(normalizeEditorSettings({ tableFontSize: 20 }).tableFontSize, 16);
   assert.equal(normalizeEditorSettings({ tableFontSize: "large" as any }).tableFontSize, 13);
 });
@@ -265,10 +407,12 @@ test("normalizes table column template fields", () => {
 });
 
 test("normalizes grid drawer widths", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.tableInfoActiveTab, "ddl");
   assert.equal(DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth, 320);
   assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth, 380);
   assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailPanelLayout, "bottom");
   assert.equal(DEFAULT_EDITOR_SETTINGS.cellDetailJsonFormatted, false);
+  assert.equal(normalizeEditorSettings({}).tableInfoActiveTab, "ddl");
   assert.equal(normalizeEditorSettings({}).tableInfoDrawerWidth, 320);
   assert.equal(normalizeEditorSettings({}).cellDetailDrawerWidth, 380);
   assert.equal(normalizeEditorSettings({}).cellDetailPanelLayout, "bottom");
@@ -276,6 +420,8 @@ test("normalizes grid drawer widths", () => {
   assert.equal(normalizeEditorSettings({ tableInfoDrawerWidth: 200 } as any).tableInfoDrawerWidth, 240);
   assert.equal(normalizeEditorSettings({ cellDetailDrawerWidth: 200 } as any).cellDetailDrawerWidth, 260);
   assert.equal(normalizeEditorSettings({ tableInfoDrawerWidth: 1000 } as any).tableInfoDrawerWidth, 900);
+  assert.equal(normalizeEditorSettings({ tableInfoActiveTab: "columns" } as any).tableInfoActiveTab, "columns");
+  assert.equal(normalizeEditorSettings({ tableInfoActiveTab: "invalid" } as any).tableInfoActiveTab, "ddl");
   assert.equal(normalizeEditorSettings({ cellDetailDrawerWidth: 456.7 } as any).cellDetailDrawerWidth, 457);
   assert.equal(normalizeEditorSettings({ cellDetailPanelLayout: "right" } as any).cellDetailPanelLayout, "right");
   assert.equal(normalizeEditorSettings({ cellDetailPanelLayout: "invalid" } as any).cellDetailPanelLayout, "bottom");
@@ -306,6 +452,19 @@ test("defaults column formatters to an empty record", () => {
   assert.deepEqual(normalizeEditorSettings({}).columnFormatters, {});
 });
 
+test("normalizes global datetime display and transfer formats", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat, "");
+  const settings = normalizeEditorSettings({
+    globalDateTimeDisplayFormat: " YYYY/MM/DD HH:mm:ss ",
+    globalDateTimeExportFormat: "YYYY-M-D H:m:s",
+    globalDateTimeImportFormat: 123,
+  } as any);
+
+  assert.equal(settings.globalDateTimeDisplayFormat, "YYYY/MM/DD HH:mm:ss");
+  assert.equal(settings.globalDateTimeExportFormat, "YYYY-M-D H:m:s");
+  assert.equal(settings.globalDateTimeImportFormat, "");
+});
+
 test("keeps only valid saved column formatter configs", () => {
   const settings = normalizeEditorSettings({
     columnFormatters: {
@@ -324,7 +483,7 @@ test("keeps only valid saved column formatter configs", () => {
   } as any);
 
   assert.deepEqual(settings.columnFormatters, {
-    "conn::db::public::users::created_at": { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss" },
+    "conn::db::public::users::created_at": { kind: "datetime", unit: "auto", pattern: "YYYY-MM-DD HH:mm:ss", timezone: undefined },
     "conn::db::public::users::name": { kind: "mask", prefix: 2, suffix: 2 },
     "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
     "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },
@@ -346,6 +505,15 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS.openai.authMethod, "bearer");
   assert.equal(AI_PROVIDER_PRESETS.openai.iconSlug, "openai");
   assert.equal(AI_PROVIDER_PRESETS.deepseek.iconSlug, "deepseek");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].iconSlug, "claudecode");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].iconSlug, "pi");
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].requiresApiKey, false);
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
 });
 
 test("normalizes legacy AI config and fills provider defaults", () => {
@@ -369,6 +537,41 @@ test("normalizes legacy AI config and fills provider defaults", () => {
 
   const claudeToken = normalizeAiConfig({ provider: "claude", apiKey: "token", authMethod: "bearer" } as any);
   assert.equal(claudeToken.authMethod, "bearer");
+
+  const claudeCode = normalizeAiConfig({
+    provider: "claude-code-cli",
+    claudeCodeCliPath: " /opt/homebrew/bin/claude ",
+    claudeCodeCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+    reasoningLevel: "xhigh",
+    models: [
+      {
+        name: "claude-sonnet-4-6",
+        label: "Sonnet 4.6",
+        supportedEffortLevels: ["low", "high", "xhigh"],
+      },
+    ],
+  } as any);
+  assert.equal(claudeCode.claudeCodeCliPath, "/opt/homebrew/bin/claude");
+  assert.deepEqual(claudeCode.claudeCodeCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(claudeCode.reasoningLevel, "xhigh");
+  assert.deepEqual(claudeCode.models, [
+    {
+      name: "claude-sonnet-4-6",
+      label: "Sonnet 4.6",
+      supportedEffortLevels: ["low", "high", "xhigh"],
+    },
+  ]);
+  assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "max" } as any).reasoningLevel, "max");
+  assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "future" } as any).reasoningLevel, "default");
+
+  const piAgent = normalizeAiConfig({
+    provider: "pi-agent-cli",
+    piAgentCliPath: " /opt/homebrew/bin/pi ",
+    piAgentCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+  } as any);
+  assert.equal(piAgent.piAgentCliPath, "/opt/homebrew/bin/pi");
+  assert.deepEqual(piAgent.piAgentCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(piAgent.model, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {
@@ -396,6 +599,12 @@ test("normalizeEditorSettings clamps UI scale into the supported range", () => {
 
 test("normalizeEditorSettings keeps valid UI scales with two-decimal precision", () => {
   assert.equal(normalizeEditorSettings({ uiScale: 1.125 }).uiScale, 1.13);
+});
+
+test("shows persisted UI scales that are not available as presets", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+
+  assert.match(source, /<SelectValue>\{\{ Math\.round\(editUiScale \* 100\) \}\}%<\/SelectValue>/);
 });
 
 test("defaults SQL formatter settings", () => {

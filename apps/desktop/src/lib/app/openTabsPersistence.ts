@@ -20,8 +20,10 @@ export interface SavedOpenTab {
   customTitle?: boolean;
   connectionId: string;
   database: string;
+  catalog?: string;
   schema?: string;
   sql: string;
+  originalSql?: string;
   savedSqlId?: string;
   externalSqlPath?: string;
   lastExecutedSql?: string;
@@ -71,6 +73,10 @@ function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: str
   if (mode !== "query") return undefined;
   if (tab.externalSqlPath) return sql;
   if (tab.savedSqlId) return sql ? "" : undefined;
+  // Prefer the persisted originalSql so a clean prefilled query tab (sql === originalSql)
+  // restores clean instead of being marked dirty. Older saved state without this field
+  // falls through to "" (preserving prior behavior for user-edited scratch tabs).
+  if (tab.originalSql !== undefined) return tab.originalSql;
   return "";
 }
 
@@ -81,8 +87,13 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.customTitle ? { customTitle: true } : {}),
     connectionId: tab.connectionId,
     database: tab.database,
+    ...(tab.catalog !== undefined ? { catalog: tab.catalog } : {}),
     schema: tab.schema,
     sql: shouldPersistTabSql(tab) ? tab.sql : "",
+    // Only round-trip originalSql for plain query tabs (no savedSqlId / externalSqlPath):
+    // saved-SQL and external-file tabs re-derive it on restore, and persisting it here
+    // would duplicate their (potentially large) SQL text in the open-tabs state.
+    ...(tab.originalSql !== undefined && !tab.savedSqlId && !tab.externalSqlPath ? { originalSql: tab.originalSql } : {}),
     savedSqlId: tab.savedSqlId,
     externalSqlPath: tab.externalSqlPath,
     ...(tab.lastExecutedSql !== undefined ? { lastExecutedSql: tab.lastExecutedSql } : {}),

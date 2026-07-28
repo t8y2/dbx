@@ -58,6 +58,7 @@ function normalizeViteBase(value: string | undefined): string {
 const viteBase = normalizeViteBase(configuredBasePath);
 const publicBasePath = viteBase.startsWith("/") ? viteBase.replace(/\/+$/, "") : "";
 const apiProxyPath = publicBasePath ? `${publicBasePath}/api` : "/api";
+const backendUrl = process.env.DBX_BACKEND_URL || "http://localhost:4224";
 
 export default defineConfig(async () => ({
   root: __dirname,
@@ -66,12 +67,16 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Prefer package source during app dev so shell parse changes need no rebuild.
+      "@dbx-app/mongo-shell": path.resolve(__dirname, "../../packages/mongo-shell/src/index.ts"),
     },
   },
   clearScreen: false,
   build: {
     outDir: "../../dist",
     emptyOutDir: true,
+    // Large generated syntax grammars are already isolated and loaded on demand.
+    chunkSizeWarningLimit: 800,
     rollupOptions: {
       output: {
         manualChunks: chunkNameForModule,
@@ -91,7 +96,7 @@ export default defineConfig(async () => ({
       : undefined,
     proxy: {
       [apiProxyPath]: {
-        target: "http://localhost:4224",
+        target: backendUrl,
         changeOrigin: true,
         ws: true,
         rewrite: publicBasePath ? (requestPath) => requestPath.slice(publicBasePath.length) || "/" : undefined,

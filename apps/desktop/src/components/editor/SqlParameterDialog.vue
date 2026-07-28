@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Braces } from "@lucide/vue";
+import { Braces, Copy } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -9,17 +9,23 @@ import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
-import { substituteSqlParameters, type SqlParameterInput, type SqlParameterValueKind } from "@/lib/sql/sqlParameters";
+import { substituteSqlParameters, type SqlParameterDescriptor, type SqlParameterInput, type SqlParameterSyntax, type SqlParameterValueKind } from "@/lib/sql/sqlParameters";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
+import { useToast } from "@/composables/useToast";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const { highlight } = useSqlHighlighter();
+const { toast } = useToast();
 
 const open = defineModel<boolean>("open", { default: false });
 
 const props = defineProps<{
   sql: string;
-  parameters: string[];
+  parameters: SqlParameterDescriptor[];
+  databaseType?: DatabaseType;
+  enabledSyntaxes?: SqlParameterSyntax[];
 }>();
 
 const emit = defineEmits<{
@@ -33,7 +39,15 @@ let closeHistoryTimer: ReturnType<typeof setTimeout> | undefined;
 
 const parameterKinds: SqlParameterValueKind[] = ["string", "number", "boolean", "null", "raw"];
 
-const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value));
+const syntaxLabels: Record<SqlParameterSyntax, string> = {
+  positional: "?",
+  named: ":name",
+  shell: "${name}",
+  mybatis: "#{name}",
+  sqlserver: "@name",
+};
+
+const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value, { databaseType: props.databaseType, enabledSyntaxes: props.enabledSyntaxes }));
 const highlightedSql = computed(() => highlight(resolvedSql.value));
 
 watch(
@@ -42,10 +56,10 @@ watch(
     if (!isOpen) return;
     const next: Record<string, SqlParameterInput> = {};
     const nextHistories: Record<string, SqlParameterInput[]> = {};
-    for (const name of props.parameters) {
-      const history = loadSqlParameterHistory(name);
-      nextHistories[name] = history;
-      next[name] = values.value[name] ?? history[0] ?? { kind: "string", value: "" };
+    for (const parameter of props.parameters) {
+      const history = loadSqlParameterHistory(parameter.key);
+      nextHistories[parameter.key] = history;
+      next[parameter.key] = values.value[parameter.key] ?? history[0] ?? { kind: "string", value: "" };
     }
     values.value = next;
     histories.value = nextHistories;
@@ -95,6 +109,15 @@ function execute() {
   open.value = false;
   emit("execute", resolvedSql.value);
 }
+
+async function copyResolvedSql() {
+  try {
+    await copyToClipboard(resolvedSql.value);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
 </script>
 
 <template>
@@ -111,15 +134,17 @@ function execute() {
         <p class="text-sm text-muted-foreground">{{ t("sqlParameters.description") }}</p>
 
         <div class="relative z-20 max-h-[302px] overflow-auto rounded-md border bg-background">
-          <div class="min-w-[580px]">
-            <div class="sticky top-0 z-10 grid grid-cols-[minmax(140px,1fr)_132px_minmax(180px,1.5fr)] border-b bg-muted px-3 py-2 text-xs font-medium text-muted-foreground">
+          <div class="min-w-[680px]">
+            <div class="sticky top-0 z-10 grid grid-cols-[minmax(140px,1fr)_104px_132px_minmax(180px,1.5fr)] border-b bg-muted px-3 py-2 text-xs font-medium text-muted-foreground">
               <div>{{ t("sqlParameters.name") }}</div>
+              <div>{{ t("sqlParameters.syntax") }}</div>
               <div>{{ t("sqlParameters.type") }}</div>
               <div>{{ t("sqlParameters.value") }}</div>
             </div>
-            <div v-for="name in parameters" :key="name" class="grid grid-cols-[minmax(140px,1fr)_132px_minmax(180px,1.5fr)] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0">
-              <div class="min-w-0 truncate font-mono text-xs">{{ name }}</div>
-              <Select :model-value="values[name]?.kind || 'string'" @update:model-value="(value) => updateKind(name, value as SqlParameterValueKind)">
+            <div v-for="parameter in parameters" :key="parameter.key" class="grid grid-cols-[minmax(140px,1fr)_104px_132px_minmax(180px,1.5fr)] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0">
+              <div class="min-w-0 truncate font-mono text-xs">{{ parameter.name }}</div>
+              <div class="min-w-0 truncate font-mono text-[11px] text-muted-foreground">{{ syntaxLabels[parameter.syntax] }}</div>
+              <Select :model-value="values[parameter.key]?.kind || 'string'" @update:model-value="(value) => updateKind(parameter.key, value as SqlParameterValueKind)">
                 <SelectTrigger class="h-8 bg-background text-xs">
                   <SelectValue />
                 </SelectTrigger>
@@ -130,28 +155,28 @@ function execute() {
                 </SelectContent>
               </Select>
               <div class="relative min-w-0">
-                <Popover :open="activeHistoryName === name && filteredSqlParameterHistory(name).length > 0">
+                <Popover :open="activeHistoryName === parameter.key && filteredSqlParameterHistory(parameter.key).length > 0">
                   <PopoverAnchor as-child>
                     <Input
-                      :model-value="values[name]?.value || ''"
+                      :model-value="values[parameter.key]?.value || ''"
                       class="h-8 bg-background font-mono text-xs"
-                      :disabled="values[name]?.kind === 'null'"
+                      :disabled="values[parameter.key]?.kind === 'null'"
                       autocomplete="off"
                       data-lpignore="true"
                       data-form-type="other"
                       :placeholder="t('sqlParameters.valuePlaceholder')"
-                      @focus="focusParameterInput(name, $event)"
-                      @blur="closeParameterHistory(name)"
-                      @update:model-value="(value) => updateValue(name, String(value))"
+                      @focus="focusParameterInput(parameter.key, $event)"
+                      @blur="closeParameterHistory(parameter.key)"
+                      @update:model-value="(value) => updateValue(parameter.key, String(value))"
                     />
                   </PopoverAnchor>
                   <PopoverContent align="start" side="bottom" class="z-[80] w-[var(--reka-popover-trigger-width)] max-h-40 gap-0 overflow-auto p-1" @open-auto-focus.prevent>
                     <button
-                      v-for="entry in filteredSqlParameterHistory(name)"
+                      v-for="entry in filteredSqlParameterHistory(parameter.key)"
                       :key="`${entry.kind}:${entry.value}`"
                       type="button"
                       class="flex w-full min-w-0 items-center justify-between gap-2 rounded px-2 py-1 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                      @mousedown.prevent="selectHistoryEntry(name, entry)"
+                      @mousedown.prevent="selectHistoryEntry(parameter.key, entry)"
                     >
                       <TruncatedTextTooltip :text="entry.value" class="min-w-0 flex-1 font-mono" side="top" :delay="150" />
                       <span class="shrink-0 text-[10px] uppercase text-muted-foreground">{{ t(`sqlParameters.kind.${entry.kind}`) }}</span>
@@ -171,6 +196,10 @@ function execute() {
 
       <DialogFooter>
         <Button variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button variant="outline" @click="copyResolvedSql">
+          <Copy class="mr-1.5 h-4 w-4" />
+          {{ t("grid.copy") }}
+        </Button>
         <Button @click="execute">{{ t("sqlParameters.execute") }}</Button>
       </DialogFooter>
     </DialogContent>

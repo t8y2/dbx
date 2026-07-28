@@ -3,12 +3,16 @@ import { filterDatabaseNamesForVisiblePicker, normalizeVisibleDatabaseSelection 
 
 const DRAFT_VISIBLE_DATABASES_PREFIX = "__visible_draft_";
 
-const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper"]);
+// Turso and Cloudflare D1 connections target one fixed SQLite-compatible `main` namespace;
+// listing account-level databases requires separate platform credentials, not the database connection.
+const UNSUPPORTED_VISIBLE_DATABASE_TYPES = new Set<DatabaseType>(["turso", "cloudflare-d1", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper"]);
 
 type VisibleDatabaseConnectionFields = Pick<
   ConnectionConfig,
   "db_type" | "driver_profile" | "host" | "port" | "username" | "database" | "connection_string" | "url_params" | "redis_connection_mode" | "redis_sentinel_master" | "redis_sentinel_nodes" | "redis_cluster_nodes" | "etcd_endpoints" | "jdbc_driver_class"
 >;
+
+type VisibleObjectFilterConnectionFields = VisibleDatabaseConnectionFields & Pick<ConnectionConfig, "visible_databases" | "visible_schemas">;
 
 export function buildDraftVisibleDatabasesConnectionId(seed: string): string {
   return `${DRAFT_VISIBLE_DATABASES_PREFIX}${seed}`;
@@ -25,8 +29,21 @@ export function initialVisibleDatabaseSelection(databaseNames: string[], visible
   return filterDatabaseNamesForVisiblePicker(databaseNames, connection);
 }
 
+export function appendVisibleDatabaseSelection(visibleDatabases: string[] | undefined, databaseName: string): string[] | undefined {
+  if (!Array.isArray(visibleDatabases)) return undefined;
+  const name = databaseName.trim();
+  if (!name || visibleDatabases.includes(name)) return visibleDatabases;
+  return [...visibleDatabases, name];
+}
+
 export function visibleDatabaseSelectionIsStale(previous: VisibleDatabaseConnectionFields, current: VisibleDatabaseConnectionFields): boolean {
   return visibleDatabaseFingerprint(previous) !== visibleDatabaseFingerprint(current);
+}
+
+export function visibleObjectFiltersNeedReset(previous: VisibleObjectFilterConnectionFields, current: VisibleObjectFilterConnectionFields): boolean {
+  const hasVisibleDatabaseFilter = Array.isArray(current.visible_databases);
+  const hasVisibleSchemaFilter = !!current.visible_schemas && Object.keys(current.visible_schemas).length > 0;
+  return (hasVisibleDatabaseFilter || hasVisibleSchemaFilter) && visibleDatabaseSelectionIsStale(previous, current);
 }
 
 function visibleDatabaseFingerprint(connection: VisibleDatabaseConnectionFields): string {

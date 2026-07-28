@@ -1,4 +1,5 @@
 import * as api from "@/lib/backend/api";
+import { mongoCommandRangeAtCursor } from "@/lib/sql/sqlStatementRanges";
 import type { DatabaseType } from "@/types/database";
 
 export type ExecuteMode = "all" | "current";
@@ -7,6 +8,8 @@ export interface SqlExecutionSnapshot {
   fullSql: string;
   selectedSql: string;
   cursorPos: number;
+  selectionFrom: number;
+  selectionTo: number;
 }
 
 export type SqlExecutionOverride = string | SqlExecutionSnapshot;
@@ -34,7 +37,7 @@ export interface SqlExecutionChoiceRequest {
 }
 
 export function isSqlExecutionSnapshot(value: SqlExecutionOverride | undefined): value is SqlExecutionSnapshot {
-  return typeof value === "object" && value !== null && typeof value.fullSql === "string" && typeof value.selectedSql === "string" && typeof value.cursorPos === "number";
+  return typeof value === "object" && value !== null && typeof value.fullSql === "string" && typeof value.selectedSql === "string" && typeof value.cursorPos === "number" && typeof value.selectionFrom === "number" && typeof value.selectionTo === "number";
 }
 
 export function resolveExecutableSql(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number }): string {
@@ -52,10 +55,12 @@ export async function resolveExecutableSqlWithBackend(fullSql: string, selectedS
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;
 
-  // MongoDB uses dedicated per-command gutter actions for "current command";
-  // the main editor execute action keeps its long-standing "run all text"
-  // behavior when nothing is selected.
-  if (options?.databaseType === "mongodb") return fullSql;
+  if (options?.databaseType === "mongodb") {
+    if (options.mode === "current" && options.cursorPos !== undefined) {
+      return mongoCommandRangeAtCursor(fullSql, options.cursorPos)?.sql ?? fullSql;
+    }
+    return fullSql;
+  }
 
   if (options?.mode === "current" && options.cursorPos !== undefined) {
     return await api.findStatementAtCursor(fullSql, options.cursorPos, options.databaseType);

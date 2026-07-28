@@ -8,7 +8,7 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
@@ -28,7 +28,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-public final class H2Agent extends AbstractJdbcAgent {
+public class H2Agent extends AbstractJdbcAgent {
     private String databaseName = "";
 
     @Override
@@ -414,7 +414,7 @@ public final class H2Agent extends AbstractJdbcAgent {
 
     @Override
     protected Object resultValue(ResultSet rs, int index, int sqlType) {
-        return unchecked(() -> JdbcExecutor.INSTANCE.defaultResultValue(rs, index, sqlType));
+        return unchecked(() -> JdbcExecutor.current().defaultResultValue(rs, index, sqlType));
     }
 
     @Override
@@ -511,6 +511,6 @@ public final class H2Agent extends AbstractJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new H2Agent()).run();
+        new MultiSessionJsonRpcServer(H2Agent::new).run();
     }
 }

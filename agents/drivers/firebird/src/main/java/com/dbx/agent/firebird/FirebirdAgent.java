@@ -2,7 +2,7 @@ package com.dbx.agent.firebird;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 
 public final class FirebirdAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile FIREBIRD_PROFILE = new JdbcAgentProfile(
@@ -17,6 +17,6 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new FirebirdAgent()).run();
+        new MultiSessionJsonRpcServer(FirebirdAgent::new).run();
     }
 }

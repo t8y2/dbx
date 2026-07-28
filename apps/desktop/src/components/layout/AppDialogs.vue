@@ -15,12 +15,17 @@ const TableImportDialog = defineAsyncComponent(() => import("@/components/import
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
+const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/ssh/SshHostKeyPromptDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
+import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
+import type { DatabaseType } from "@/types/database";
 
 const props = defineProps<{
   showConnectionDialog: boolean;
@@ -29,9 +34,12 @@ const props = defineProps<{
   showDangerDialog: boolean;
   dangerSql: string;
   suppressDangerConfirm: boolean;
+  activeDatabaseType?: DatabaseType;
   showSqlParameterDialog: boolean;
   sqlParameterSourceSql: string;
-  sqlParameterNames: string[];
+  sqlParameterNames: SqlParameterDescriptor[];
+  sqlParameterDatabaseType?: DatabaseType;
+  sqlParameterEnabledSyntaxes?: SqlParameterSyntax[];
 }>();
 
 const emit = defineEmits<{
@@ -44,7 +52,8 @@ const emit = defineEmits<{
   connectStarted: [name: string];
   connectSucceeded: [name: string];
   connectFailed: [message: string];
-  openDriverStore: [];
+  openDriverStore: [focus?: DriverStoreFocus];
+  openTunnelProfileSettings: [];
   openLineageTarget: [
     target: {
       connectionId: string;
@@ -65,11 +74,30 @@ const emit = defineEmits<{
       whereInput?: string;
     },
   ];
+  openDiagramTarget: [
+    target: {
+      connectionId: string;
+      database: string;
+      schema?: string;
+      tableName: string;
+      tableType?: string;
+    },
+  ];
 }>();
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const productionSafetyStore = useProductionSafetyStore();
 const dialogs = useDialogSources();
+const productionConfirmationDetails = computed(() => {
+  const request = productionSafetyStore.pending;
+  if (!request) return "";
+  return t("production.confirmDetails", {
+    connection: request.connectionName || "-",
+    database: request.productionDatabases?.join(", ") || request.database || "-",
+    source: request.source || "-",
+  });
+});
 
 const editConfig = computed(() => {
   const id = connectionStore.editingConnectionId;
@@ -111,19 +139,41 @@ watch(
     @connect-started="emit('connectStarted', $event)"
     @connect-succeeded="emit('connectSucceeded', $event)"
     @connect-failed="emit('connectFailed', $event)"
-    @open-driver-store="emit('openDriverStore')"
+    @open-driver-store="emit('openDriverStore', $event)"
+    @open-tunnel-profile-settings="emit('openTunnelProfileSettings')"
   />
   <DangerConfirmDialog
     v-if="showDangerDialog"
     :open="showDangerDialog"
     :sql="dangerSql"
-    :show-suppress-toggle="true"
+    :show-suppress-toggle="activeDatabaseType !== 'redis'"
     :suppress-future-prompts="suppressDangerConfirm"
     @update:open="emit('update:showDangerDialog', $event)"
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"
     @confirm="emit('dangerConfirm')"
   />
-  <SqlParameterDialog v-if="showSqlParameterDialog" :open="showSqlParameterDialog" :sql="sqlParameterSourceSql" :parameters="sqlParameterNames" @update:open="emit('update:showSqlParameterDialog', $event)" @execute="emit('sqlParametersConfirm', $event)" />
+  <DangerConfirmDialog
+    v-if="productionSafetyStore.pending"
+    :open="true"
+    :title="t('production.confirmTitle')"
+    :message="t('production.confirmMessage')"
+    :details-text="productionConfirmationDetails"
+    :sql="productionSafetyStore.pending.sql"
+    :confirm-label="t('production.confirmAction')"
+    :close-on-confirm="false"
+    @update:open="(open) => !open && productionSafetyStore.cancel()"
+    @confirm="productionSafetyStore.confirm()"
+  />
+  <SqlParameterDialog
+    v-if="showSqlParameterDialog"
+    :open="showSqlParameterDialog"
+    :sql="sqlParameterSourceSql"
+    :parameters="sqlParameterNames"
+    :database-type="sqlParameterDatabaseType"
+    :enabled-syntaxes="sqlParameterEnabledSyntaxes"
+    @update:open="emit('update:showSqlParameterDialog', $event)"
+    @execute="emit('sqlParametersConfirm', $event)"
+  />
   <DataTransferDialog v-model:open="dialogs.showTransferDialog.value" :prefill-connection-id="dialogs.transferPrefillConnectionId.value" :prefill-database="dialogs.transferPrefillDatabase.value" />
   <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
   <DataCompareDialog
@@ -134,7 +184,7 @@ watch(
     :prefill-schema="dialogs.dataComparePrefillSchema.value"
     :prefill-table="dialogs.dataComparePrefillTable.value"
   />
-  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" />
+  <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" :prefill-file-path="dialogs.sqlFilePrefillFilePath.value" />
   <SchemaDiagramDialog
     v-if="dialogs.showDiagramDialog.value"
     v-model:open="dialogs.showDiagramDialog.value"
@@ -142,6 +192,7 @@ watch(
     :prefill-database="dialogs.diagramPrefillDatabase.value"
     :prefill-schema="dialogs.diagramPrefillSchema.value"
     :focus-table-name="dialogs.diagramFocusTableName.value"
+    @open-target="emit('openDiagramTarget', $event)"
   />
   <TableImportDialog
     v-if="dialogs.showTableImportDialog.value"
@@ -212,4 +263,5 @@ watch(
       </DialogFooter>
     </DialogContent>
   </Dialog>
+  <SshHostKeyPromptDialog />
 </template>

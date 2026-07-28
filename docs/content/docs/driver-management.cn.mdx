@@ -1,18 +1,19 @@
 ---
 title: 驱动管理
-description: 管理内置和 Agent 驱动的 JDBC 驱动，配置 JRE 版本，处理驱动更新。
+description: 管理内置驱动、原生 Agent 和 JDBC Agent，配置 JRE 版本并处理驱动更新。
 ---
 
-DBX 使用混合驱动架构：常用数据库使用内置原生驱动，需要供应商特定 JDBC 驱动的数据库使用 JDBC Agent 系统。
+DBX 使用混合驱动架构：内置 Rust 驱动、独立原生 Agent，以及 Java/JDBC Agent。
 
 ## 驱动架构
 
-| 驱动类型     | 工作方式               | 适用场景                                                                                                                                                                  |
-| ------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 原生（内置） | Rust 驱动编译进 DBX    | MySQL、PostgreSQL、SQLite、SQL Server、Oracle、Redis、MongoDB、DuckDB、ClickHouse 等                                                                                      |
-| JDBC Agent   | DBX 管理的 Java 子进程 | 提供 JDBC 驱动的数据库：GaussDB、openGauss、DM、KingBase、HighGo、Vastbase、Trino、Hive、DB2、Informix、Neo4j、TDengine、虚谷 XuguDB、YashanDB、GoldenDB、Kylin、SunDB 等 |
+| 驱动类型     | 工作方式                    | 适用场景                                                                                                                                    |
+| ------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| 原生（内置） | Rust 驱动编译进 DBX         | MySQL、PostgreSQL、SQLite、SQL Server、Redis、MongoDB、DuckDB、ClickHouse 等                                                               |
+| 原生 Agent   | DBX 管理的 Go/Rust 独立进程 | Oracle、KingBase、虚谷 XuguDB，以及存在成熟原生驱动的数据库                                                                                |
+| JDBC Agent   | DBX 管理的 Java 子进程      | 需要 JDBC 的数据库：GaussDB、openGauss、DM、HighGo、Vastbase、UXDB、Trino、Hive、DB2、Informix、Neo4j、TDengine、YashanDB、GoldenDB、Kylin、SunDB 等 |
 
-<Callout type="info">原生驱动安装后立即可用。Agent 驱动需要一次性下载 JDBC 驱动和 JRE 设置，首次创建连接时 DBX 会自动处理。</Callout>
+<Callout type="info">内置驱动可直接使用；原生 Agent 只需对应平台的可执行文件，JDBC Agent 还需要 JRE。首次创建连接时 DBX 会自动安装匹配的组件。</Callout>
 
 ## 驱动商店
 
@@ -27,10 +28,26 @@ DBX 使用混合驱动架构：常用数据库使用内置原生驱动，需要�
 ## 安装驱动
 
 <Steps>
-  <Step>### 打开驱动商店 导航到**设置 → 驱动**或点击连接对话框中的驱动安装提示。</Step>
-  <Step>### 选择驱动 找到所需的数据库驱动。每个条目显示支持的数据库和驱动版本。</Step>
-  <Step>### 点击安装 DBX 会下载 JDBC 驱动 JAR 及所需的依赖项。下载过程中显示进度。</Step>
-  <Step>### 创建连接 返回连接对话框。驱动此时即可使用。</Step>
+  <Step>
+    ### 打开驱动商店
+
+    导航到**设置 → 驱动**或点击连接对话框中的驱动安装提示。
+  </Step>
+  <Step>
+    ### 选择驱动
+
+    找到所需的数据库驱动。每个条目显示支持的数据库和驱动版本。
+  </Step>
+  <Step>
+    ### 点击安装
+
+    DBX 会下载原生 Agent 可执行文件或 JDBC Agent JAR，以及所需运行时。下载过程中显示进度。
+  </Step>
+  <Step>
+    ### 创建连接
+
+    返回连接对话框。驱动此时即可使用。
+  </Step>
 </Steps>
 
 ## JRE 管理
@@ -54,11 +71,21 @@ DBX 会定期检查驱动更新：
 
 对于无法访问互联网的环境，DBX 支持离线驱动安装：
 
-1. 从另一台机器下载 JDBC 驱动 ZIP 包
+1. 从另一台机器下载与目标操作系统和 CPU 架构匹配的 DBX 离线驱动 ZIP 包
 2. 将其传输到离线机器
 3. 在驱动商店中使用**从 ZIP 导入**安装驱动包
 
 这适用于气隙网络、严格防火墙环境或企业中预先批准的驱动版本。
+
+所有 Agent 都提供单驱动 ZIP，可直接使用**导入离线包**安装。Java Agent 的单驱动包跨平台，但不重复携带 JRE；Kingbase、Oracle、Xugu 等原生 Agent 的单驱动包按操作系统和 CPU 架构区分。
+
+如果目标机器尚未安装 Java Agent 所需的托管 JRE，请另外导入一次对应平台的 JRE，或者直接使用包含全部驱动和 JRE 的完整离线包。
+
+### Windows 导入 Kingbase
+
+Windows x64 下载 `dbx-agent-kingbase-<version>-windows-x64.zip`，Windows ARM64 下载 `dbx-agent-kingbase-<version>-windows-aarch64.zip`，然后在驱动管理中选择**导入离线包**。请勿导入 Linux 或 macOS 包。
+
+ZIP 内包含版本信息和对应平台的原生 Agent。DBX 会将其安装为 `%USERPROFILE%\.dbx\agents\drivers\kingbase\agent.exe`，不需要手动解除浏览器下载文件的阻止状态或复制文件。
 
 ## 插件更新
 

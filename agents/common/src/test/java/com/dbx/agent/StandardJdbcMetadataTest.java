@@ -109,6 +109,30 @@ class StandardJdbcMetadataTest {
     }
 
     @Test
+    void listsProceduresAndFunctionsFromJdbcRoutineMetadata() {
+        Connection conn = routineConnection(
+            rows(
+                row("PROCEDURE_NAME", "PROCESS_ORDER", "REMARKS", "processes an order"),
+                row("PROCEDURE_NAME", "SHARED_ROUTINE", "REMARKS", null)
+            ),
+            rows(
+                row("FUNCTION_NAME", "CALCULATE_TOTAL", "REMARKS", "calculates a total"),
+                row("FUNCTION_NAME", "SHARED_ROUTINE", "REMARKS", null)
+            )
+        );
+        MetadataListConstraints constraints =
+            new MetadataListConstraints(null, null, null, Collections.singletonList("PROCEDURE"));
+
+        List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(conn, profile, "", "APP", constraints);
+
+        assertEquals(2, objects.size());
+        assertEquals("PROCESS_ORDER", objects.get(0).getName());
+        assertEquals("PROCEDURE", objects.get(0).getObject_type());
+        assertEquals("SHARED_ROUTINE", objects.get(1).getName());
+        assertEquals("PROCEDURE", objects.get(1).getObject_type());
+    }
+
+    @Test
     void listsDataTypesFromJdbcTypeInfo() {
         Connection conn = connection(
             rows(),
@@ -195,6 +219,101 @@ class StandardJdbcMetadataTest {
     }
 
     @Test
+    void listTablesEscapesUnderscoreInHanaSysSchema() {
+        // HANA 的 _SYS_RT 等 schema 名含下划线，JDBC schemaPattern 把 _ 当作通配符，
+        // 若不转义会误匹配 _xSYSxRT 等其他 schema。HANA 驱动 getSearchStringEscape() 返回 "\\"。
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "RT_OBJECTS", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, profile, "", "_SYS_RT");
+
+        assertEquals(1, tables.size());
+        assertEquals("RT_OBJECTS", tables.get(0).getName());
+        // schema 第二个参数应转义为 _\_S\_Y\_S\_R\_T（HANA 转义符为反斜杠）
+        assertEquals("\\_SYS\\_RT", capturedArgs.get()[1]);
+    }
+
+    @Test
+    void listTablesEscapesPercentInQuotedSchema() {
+        // 被引号引用、含 % 的 schema（如 "SALES%2024"），% 是通配符，必须转义。
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "ORDERS_2024", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, profile, "", "SALES%2024");
+
+        assertEquals(1, tables.size());
+        assertEquals("ORDERS_2024", tables.get(0).getName());
+        assertEquals("SALES\\%2024", capturedArgs.get()[1]);
+    }
+
+    @Test
+    void listTablesLeavesPlainSchemaUntouched() {
+        // 普通 schema（无 _ 和 %）不应被转义，且仍作为 schemaPattern 传入。
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "ORDERS", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, profile, "", "SALES");
+
+        assertEquals(1, tables.size());
+        assertEquals("ORDERS", tables.get(0).getName());
+        assertEquals("SALES", capturedArgs.get()[1]);
+    }
+
+    @Test
+    void listTablesFallsBackWhenSearchEscapeUnavailable() {
+        // 驱动不支持 getSearchStringEscape() 时，schema 原样返回（不做转义），不抛异常。
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection(null, rows(
+            row("TABLE_NAME", "ORDERS", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, profile, "", "SALES");
+
+        assertEquals(1, tables.size());
+        assertEquals("SALES", capturedArgs.get()[1]);
+    }
+
+    private static Connection schemaEscapeConnection(String searchEscape, ResultSet tables, AtomicReference<Object[]> capturedArgs) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("getTables".equals(name)) {
+                    if (capturedArgs != null) {
+                        capturedArgs.set(args);
+                    }
+                    return tables;
+                }
+                if ("getTableTypes".equals(name)) {
+                    return rows(row("TABLE_TYPE", "TABLE"));
+                }
+                if ("getSearchStringEscape".equals(name)) {
+                    if (searchEscape == null) {
+                        throw new UnsupportedOperationException("escape unavailable");
+                    }
+                    return searchEscape;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    @Test
     void mapsColumnsWithPrimaryKeysAndLengths() {
         Connection conn = connection(
             rows(),
@@ -228,6 +347,64 @@ class StandardJdbcMetadataTest {
         assertFalse(columns.get(0).getIs_nullable());
         assertEquals("NAME", columns.get(1).getName());
         assertEquals(Integer.valueOf(64), columns.get(1).getCharacter_maximum_length());
+    }
+
+    @Test
+    void marksPrimaryKeysFromConfiguredCatalogWhenColumnsAlreadyLoaded() {
+        Connection conn = catalogPrimaryKeyFallbackConnection(
+            "TENANTDB",
+            rows(),
+            rows(row("COLUMN_NAME", "ID")),
+            orderColumns()
+        );
+
+        List<ColumnInfo> columns = StandardJdbcMetadata.INSTANCE.getColumns(conn, profile, "TENANTDB", "APP", "ORDERS");
+
+        assertEquals("ID", columns.get(0).getName());
+        assertTrue(columns.get(0).getIs_primary_key());
+        assertFalse(columns.get(0).getIs_nullable());
+        assertEquals("NAME", columns.get(1).getName());
+        assertFalse(columns.get(1).getIs_primary_key());
+        assertEquals(Integer.valueOf(64), columns.get(1).getCharacter_maximum_length());
+    }
+
+    @Test
+    void doesNotMarkPrimaryKeysFromConfiguredCatalogWhenFallbackUnavailable() {
+        JdbcAgentProfile fallbackDisabledProfile = new JdbcAgentProfile(
+            "example.Driver",
+            "jdbc:example://{host}:{port}/{database}",
+            0,
+            false,
+            Collections.emptySet(),
+            Collections.singletonList("TABLE"),
+            "\"",
+            "SET SCHEMA",
+            false,
+            false,
+            false,
+            false
+        );
+        Connection disabledConn = catalogPrimaryKeyFallbackConnection(
+            "TENANTDB",
+            rows(),
+            rows(row("COLUMN_NAME", "ID")),
+            orderColumns()
+        );
+
+        List<ColumnInfo> disabledColumns = StandardJdbcMetadata.INSTANCE.getColumns(disabledConn, fallbackDisabledProfile, "TENANTDB", "APP", "ORDERS");
+
+        assertFalse(disabledColumns.get(0).getIs_primary_key());
+
+        Connection emptyCatalogConn = catalogPrimaryKeyFallbackConnection(
+            "TENANTDB",
+            rows(),
+            rows(row("COLUMN_NAME", "ID")),
+            orderColumns()
+        );
+
+        List<ColumnInfo> emptyCatalogColumns = StandardJdbcMetadata.INSTANCE.getColumns(emptyCatalogConn, profile, " ", "APP", "ORDERS");
+
+        assertFalse(emptyCatalogColumns.get(0).getIs_primary_key());
     }
 
     @Test
@@ -488,6 +665,87 @@ class StandardJdbcMetadataTest {
                 return defaultValue(method.getReturnType());
             }
         });
+    }
+
+    private static Connection catalogPrimaryKeyFallbackConnection(
+        String fallbackCatalog,
+        ResultSet defaultPrimaryKeys,
+        ResultSet fallbackPrimaryKeys,
+        ResultSet columns
+    ) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("getPrimaryKeys".equals(name)) {
+                    return fallbackCatalog.equals(args[0]) ? fallbackPrimaryKeys : defaultPrimaryKeys;
+                }
+                if ("getColumns".equals(name)) {
+                    return columns;
+                }
+                if ("getCatalogs".equals(name)) {
+                    return rows();
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static Connection routineConnection(ResultSet procedures, ResultSet functions) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("getTables".equals(name) || "getTableTypes".equals(name)) {
+                    return rows();
+                }
+                if ("getProcedures".equals(name)) {
+                    return procedures;
+                }
+                if ("getFunctions".equals(name)) {
+                    return functions;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    private static ResultSet orderColumns() {
+        return rows(row(
+            "COLUMN_NAME", "ID",
+            "TYPE_NAME", "INTEGER",
+            "NULLABLE", DatabaseMetaData.columnNoNulls,
+            "COLUMN_DEF", null,
+            "REMARKS", "identifier",
+            "COLUMN_SIZE", 10,
+            "DECIMAL_DIGITS", 0
+        ), row(
+            "COLUMN_NAME", "NAME",
+            "TYPE_NAME", "VARCHAR",
+            "NULLABLE", DatabaseMetaData.columnNullable,
+            "COLUMN_DEF", null,
+            "REMARKS", null,
+            "COLUMN_SIZE", 64,
+            "DECIMAL_DIGITS", 0
+        ));
     }
 
     private static ResultSet rows(Map<String, Object>... rows) {

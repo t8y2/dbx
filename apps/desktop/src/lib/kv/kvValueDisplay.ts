@@ -1,5 +1,7 @@
 import type { KvKeyMetadata } from "@/lib/backend/api";
 
+import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
+
 export interface PrettyPrintJsonResult {
   ok: boolean;
   value?: string;
@@ -20,13 +22,13 @@ export interface ZooKeeperSummaryLabels {
 
 export function prettyPrintJsonText(text: string): PrettyPrintJsonResult {
   try {
-    return { ok: true, value: JSON.stringify(JSON.parse(text), null, 2) };
+    return { ok: true, value: safeJsonFormat(text, 2) };
   } catch {
     return { ok: false, error: "invalid_json" };
   }
 }
 
-function valueLabel(value: number | null | undefined): string {
+function valueLabel(value: string | number | null | undefined): string {
   return value == null ? "-" : String(value);
 }
 

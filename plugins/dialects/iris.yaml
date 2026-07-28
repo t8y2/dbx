@@ -1,0 +1,107 @@
+dialect:
+  name: "Iris"
+  display_name: "InterSystems IRIS"
+  versions:
+    - version: "2024"
+      status: "RECOMMENDED"
+
+types:
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT"]
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "TINYINT"
+    category: "INTEGER"
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "DOUBLE"
+    category: "FLOAT"
+    aliases: ["DOUBLE PRECISION"]
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["NUMERIC"]
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIME"
+    category: "TIME"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+  - name: "POSIXTIME"
+    category: "DATETIME"
+    semantic_fidelity_base: 0.7
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  comment: true
+  create_index: true
+  drop_index: true
+  foreign_key: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_trigger: true
+  drop_trigger: true
+  create_function: true
+  drop_function: true
+  grant_revoke: true
+  if_not_exists: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} ALTER COLUMN {column} {type}"
+    create_table: "CREATE TABLE {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 1000
+  max_indexes_per_table: 100
+  max_query_size_bytes: 268435456
+  max_foreign_key_name_length: 128
+  supports_partitioning: true
+  supports_json_type: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: true
+  max_length: 128
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_TYPE = 'BASE TABLE'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT TABLE_NAME, REFERENCED_TABLE_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = '{schema}' AND REFERENCED_TABLE_NAME IS NOT NULL"
+    depth_support: 2
+    performance_profile: "HEAVY"

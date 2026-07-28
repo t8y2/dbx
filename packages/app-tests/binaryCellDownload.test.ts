@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
-import { binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, isBinaryCellColumnType, parseBinaryCellBytes, parseBinaryCellHexValue } from "../../apps/desktop/src/lib/dataGrid/binaryCellDownload.ts";
+import { binaryCellDisplayText, binaryCellDownloadFileName, binaryCellDownloadPayload, canDownloadBinaryCellValue, isBinaryCellColumnType, parseBinaryCellBytes, parseBinaryCellHexValue, retainBinaryCellDownloadMenuForHover } from "../../apps/desktop/src/lib/dataGrid/binaryCellDownload.ts";
 
 test("parseBinaryCellHexValue accepts 0x and \\x prefixed hex values", () => {
   assert.deepEqual(Array.from(parseBinaryCellHexValue("0X48656c6c6f") ?? []), [72, 101, 108, 108, 111]);
@@ -26,6 +27,21 @@ test("binary cell download detects common blob column types", () => {
   assert.equal(isBinaryCellColumnType("RAW(2000)"), true);
   assert.equal(isBinaryCellColumnType("long raw"), true);
   assert.equal(isBinaryCellColumnType("varchar"), false);
+});
+
+test("binary cell download menu closes when hover moves to another cell", () => {
+  const openCell = { rowIndex: 2, col: 4 };
+
+  assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 3, col: 4 }), null);
+  assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 2, col: 5 }), null);
+  assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 2, col: 4 }), openCell);
+});
+
+test("transpose cell hover also clears a different binary download menu", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const handler = source.match(/function onTransposeCellMouseenter\([^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(handler, /retainBinaryCellDownloadMenuForHover\(quickDownloadMenuCell\.value, \{ rowIndex, col: actualColIdx \}\)/);
 });
 
 test("canDownloadBinaryCellValue allows displayed binary hex strings", () => {

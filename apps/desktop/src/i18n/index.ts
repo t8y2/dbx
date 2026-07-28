@@ -1,6 +1,7 @@
 import { createI18n } from "vue-i18n";
 import en from "./locales/en";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 export type Locale = "en" | "es" | "it" | "ja" | "pt-BR" | "zh-CN" | "zh-TW";
 type LocaleMessages = Record<string, unknown>;
@@ -87,14 +88,26 @@ export async function loadLocaleMessages(locale: Locale) {
   loadedLocales.add(locale);
 }
 
+async function syncLocaleToBackend(locale: Locale) {
+  if (!isTauriRuntime()) return;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("set_app_locale", { locale });
+  } catch (error) {
+    console.warn("[DBX][i18n] failed to sync locale to backend", error);
+  }
+}
+
 export async function loadSavedLocale() {
   await loadLocaleMessages(initialLocale);
+  void syncLocaleToBackend(initialLocale);
 }
 
 export async function setLocale(locale: Locale) {
   await loadLocaleMessages(locale);
   i18nGlobal.locale.value = locale;
   safeLocalStorageSet("dbx-locale", locale);
+  void syncLocaleToBackend(locale);
 }
 
 export function currentLocale(): Locale {

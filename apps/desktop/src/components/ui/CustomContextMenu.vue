@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount, nextTick, type Component } from "vue";
+import { ref, watch, onBeforeUnmount, onMounted, nextTick, type Component } from "vue";
 import { ChevronRight } from "@lucide/vue";
 import { shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
+import { registerGlobalContextMenu, type ContextMenuRegistration } from "@/components/ui/customContextMenuRegistry";
 
 export interface ContextMenuItem {
   label: string;
   action?: () => void;
-  disabled?: boolean;
+  disabled?: boolean | (() => boolean);
   separator?: boolean;
   icon?: Component;
   iconClass?: string;
@@ -17,11 +18,13 @@ export interface ContextMenuItem {
   children?: ContextMenuItem[];
 }
 
+type ContextMenuItemsSource = ContextMenuItem[] | (() => ContextMenuItem[]);
+
 const props = defineProps<{
-  items: ContextMenuItem[];
+  items: ContextMenuItemsSource;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   close: [];
 }>();
 
@@ -29,28 +32,11 @@ defineSlots<{
   default(props: { onContextMenu: (event: MouseEvent) => void }): any;
 }>();
 
-// ---- module-level singleton state ----
-const openMenus = new Set<() => void>();
-let globalSetup = false;
-
-function ensureGlobalListeners() {
-  if (globalSetup) return;
-  globalSetup = true;
-  const closeAll = () => {
-    for (const c of openMenus) c();
-    openMenus.clear();
-  };
-  document.addEventListener("contextmenu", closeAll, true);
-  document.addEventListener("scroll", closeAll, true);
-  window.addEventListener("resize", closeAll);
-}
-ensureGlobalListeners();
-// -------------------------------------
-
 const show = ref(false);
 const x = ref(0);
 const y = ref(0);
 const menuRef = ref<HTMLElement>();
+const activeItems = ref<ContextMenuItem[]>([]);
 
 // Submenu state
 const activeSubIndex = ref<number | null>(null);
@@ -59,12 +45,17 @@ const subX = ref(0);
 const subY = ref(0);
 let subCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let subAnchorRect: { left: number; right: number; top: number; bottom: number } | null = null;
+let contextMenuRegistration: ContextMenuRegistration | null = null;
 
 function close() {
   activeSubIndex.value = null;
   subAnchorRect = null;
+  activeItems.value = [];
   show.value = false;
+  emit("close");
 }
+
+defineExpose({ close, menuRef, subRef });
 
 function onPointerDownOutside(e: PointerEvent) {
   // Only respond to primary (left) button presses. This avoids a macOS
@@ -80,7 +71,16 @@ function onPointerDownOutside(e: PointerEvent) {
   }
 }
 
-function onScroll() {
+function isScrollInsideMenu(e: Event): boolean {
+  const target = e.target;
+  if (!(target instanceof Node)) return false;
+  return !!(menuRef.value?.contains(target) || subRef.value?.contains(target));
+}
+
+function onScroll(e: Event) {
+  // Submenus (and tall main menus) are scrollable; ignore their own scroll
+  // so wheel/trackpad scrolling does not dismiss the menu.
+  if (isScrollInsideMenu(e)) return;
   close();
 }
 
@@ -93,14 +93,13 @@ function onResize() {
 }
 
 watch(show, (val) => {
+  contextMenuRegistration?.setOpen(val);
   if (val) {
-    openMenus.add(close);
     document.addEventListener("pointerdown", onPointerDownOutside, true);
     document.addEventListener("keydown", onKeydown);
     document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onResize);
   } else {
-    openMenus.delete(close);
     document.removeEventListener("pointerdown", onPointerDownOutside, true);
     document.removeEventListener("keydown", onKeydown);
     document.removeEventListener("scroll", onScroll, true);
@@ -108,21 +107,31 @@ watch(show, (val) => {
   }
 });
 
+onMounted(() => {
+  contextMenuRegistration = registerGlobalContextMenu(close);
+});
+
 function handleItemClick(item: ContextMenuItem) {
-  if (item.disabled) return;
+  if (itemIsDisabled(item)) return;
   if (item.children?.length) return; // submenu trigger — do nothing on click
   close();
   item.action?.();
 }
 
 function handleSubItemClick(item: ContextMenuItem) {
-  if (item.disabled) return;
+  if (itemIsDisabled(item)) return;
   close();
   item.action?.();
 }
 
-function onContextMenu(event: MouseEvent) {
-  if (props.items.length === 0) return;
+function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
+  // Some callers build large context menus; resolve them only for actual opens.
+  // Tree-level hosts may replace their items and open in the same event turn.
+  // Accepting the resolved items directly avoids reading the previous prop
+  // value before Vue has flushed the parent-to-child update.
+  const items = itemsOverride ?? (typeof props.items === "function" ? props.items() : props.items);
+  if (items.length === 0) return;
+  activeItems.value = items;
   event.preventDefault();
   event.stopPropagation();
   x.value = event.clientX;
@@ -143,8 +152,8 @@ function onContextMenu(event: MouseEvent) {
 function onItemMouseEnter(index: number, event: MouseEvent) {
   lastMouseX = event.clientX;
   lastMouseY = event.clientY;
-  const item = props.items[index];
-  if (!item?.children?.length || item.disabled) {
+  const item = activeItems.value[index];
+  if (!item?.children?.length || itemIsDisabled(item)) {
     // Moving to an item without children — close submenu immediately, no delay needed
     activeSubIndex.value = null;
     return;
@@ -241,12 +250,17 @@ function itemButtonClass(variant?: "default" | "destructive") {
   ];
 }
 
+function itemIsDisabled(item: ContextMenuItem): boolean {
+  return typeof item.disabled === "function" ? item.disabled() : !!item.disabled;
+}
+
 function shortcutKeys(shortcut?: string): string[] {
   return shortcutDisplayKeys(shortcut);
 }
 
 onBeforeUnmount(() => {
-  openMenus.delete(close);
+  contextMenuRegistration?.dispose();
+  contextMenuRegistration = null;
   document.removeEventListener("pointerdown", onPointerDownOutside, true);
   document.removeEventListener("keydown", onKeydown);
   document.removeEventListener("scroll", onScroll, true);
@@ -258,17 +272,17 @@ onBeforeUnmount(() => {
   <slot :onContextMenu="onContextMenu" />
   <!-- Main menu -->
   <Teleport to="body">
-    <div v-if="show" ref="menuRef" :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }" class="bg-popover text-popover-foreground min-w-40 rounded-[6px] p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg">
-      <template v-for="(item, index) in items" :key="index">
+    <div v-if="show" ref="menuRef" data-dbx-context-menu :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }" class="bg-popover text-popover-foreground min-w-40 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg">
+      <template v-for="(item, index) in activeItems" :key="index">
         <template v-if="item.visible !== false">
           <div v-if="item.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="item.disabled" :class="[...itemButtonClass(item.variant), activeSubIndex === index ? 'bg-accent text-accent-foreground' : '']" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
+          <button v-else :disabled="itemIsDisabled(item)" :class="[...itemButtonClass(item.variant), activeSubIndex === index ? 'bg-accent text-accent-foreground' : '']" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <component :is="item.icon" v-if="item.icon" :class="['size-4', item.iconClass]" />
             </span>
-            <span class="min-w-0 flex-1 truncate">{{ item.label }}</span>
+            <span class="flex-1 whitespace-nowrap">{{ item.label }}</span>
             <span v-if="item.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(item.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>
@@ -281,23 +295,24 @@ onBeforeUnmount(() => {
   <!-- Submenu -->
   <Teleport to="body">
     <div
-      v-if="show && activeSubIndex !== null && items[activeSubIndex]?.children?.length"
+      v-if="show && activeSubIndex !== null && activeItems[activeSubIndex]?.children?.length"
       ref="subRef"
+      data-dbx-context-menu
       :style="{ position: 'fixed', left: subX + 'px', top: subY + 'px', zIndex: 10000, maxHeight: 'min(420px, calc(100vh - 16px))' }"
-      class="bg-popover text-popover-foreground w-56 max-w-[calc(100vw-16px)] rounded-[6px] p-1 overflow-x-hidden overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
+      class="bg-popover text-popover-foreground min-w-56 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
       @mouseenter="onSubMouseEnter"
       @mouseleave="onSubMouseLeave"
     >
-      <template v-for="(child, ci) in items[activeSubIndex]!.children!" :key="ci">
+      <template v-for="(child, ci) in activeItems[activeSubIndex]!.children!" :key="ci">
         <template v-if="child.visible !== false">
           <div v-if="child.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="child.disabled" :class="itemButtonClass(child.variant)" @click="handleSubItemClick(child)">
+          <button v-else :disabled="itemIsDisabled(child)" :class="itemButtonClass(child.variant)" @click="handleSubItemClick(child)">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <component :is="child.icon" v-if="child.icon" :class="['size-4', child.iconClass]" />
             </span>
-            <span class="min-w-0 flex-1 truncate">{{ child.label }}</span>
+            <span class="flex-1 whitespace-nowrap">{{ child.label }}</span>
             <span v-if="child.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(child.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>

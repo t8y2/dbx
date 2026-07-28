@@ -16,27 +16,29 @@ export interface ExplainPlanNode {
 }
 
 export interface ParsedExplainPlan {
-  databaseType: "mysql" | "postgres" | "dameng" | "questdb";
+  databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "oracle" | "sqlserver";
   raw: unknown;
   nodes: ExplainPlanNode[];
 }
 
 export type BuildExplainSqlResult = { ok: true; sql: string } | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb"]);
-export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" | "questdb" {
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "oracle", "sqlserver"]);
+export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" | "questdb" | "oracle" | "sqlserver" {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
-export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string): Promise<BuildExplainSqlResult> {
-  return api.buildExplainSql({ databaseType, sql }) as Promise<BuildExplainSqlResult>;
+export function buildExplainSql(databaseType: DatabaseType | undefined, sql: string, format: "json" | "standard" = "json"): Promise<BuildExplainSqlResult> {
+  return api.buildExplainSql({ databaseType, sql, format }) as Promise<BuildExplainSqlResult>;
 }
 
-export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb", result: QueryResult): ParsedExplainPlan {
+export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "sqlserver", result: QueryResult): ParsedExplainPlan {
   if (databaseType === "dameng") {
     return parseDamengExplain(result);
   } else if (databaseType === "questdb") {
     return parseQuestdbExplain(result);
+  } else if (databaseType === "sqlserver") {
+    return parseSqlServerExplain(result);
   }
   const raw = parseExplainCell(result.rows[0]?.[0]);
   const nodes = databaseType === "postgres" ? parsePostgresExplain(raw) : parseMysqlExplain(raw);
@@ -140,6 +142,124 @@ export function parseDamengExplainText(planText: string): ParsedExplainPlan {
   }
 
   return { databaseType: "dameng", raw: planText, nodes: rootNodes };
+}
+
+export function parseOracleExplainText(planText: string): ParsedExplainPlan {
+  const lines = planText.split("\n");
+  const headerIndex = lines.findIndex((line) => /^\|\s*Id\s*\|/i.test(line) && line.includes("Operation"));
+  if (headerIndex < 0) return { databaseType: "oracle", raw: planText, nodes: [] };
+
+  const headers = splitOraclePlanColumns(lines[headerIndex]).map((header) => header.trim().toLowerCase().replace(/\s+/g, " "));
+  const columnIndex = (name: string) => headers.findIndex((header) => header === name || header.startsWith(`${name} `));
+  const idIndex = columnIndex("id");
+  const operationIndex = columnIndex("operation");
+  const nameIndex = columnIndex("name");
+  const rowsIndex = columnIndex("rows");
+  const bytesIndex = columnIndex("bytes");
+  const costIndex = columnIndex("cost");
+  const timeIndex = columnIndex("time");
+  const predicates = oraclePredicateDetails(lines);
+
+  const parsedRows: Array<{
+    id: string;
+    depth: number;
+    operation: string;
+    name?: string;
+    rows?: string;
+    cost?: string;
+    bytes?: string;
+    time?: string;
+  }> = [];
+  let baseIndent: number | undefined;
+
+  for (const line of lines.slice(headerIndex + 1)) {
+    if (!line.startsWith("|")) continue;
+    const cells = splitOraclePlanColumns(line);
+    const idMatch = cells[idIndex]?.match(/\d+/);
+    const operationCell = cells[operationIndex];
+    if (!idMatch || operationCell == null) continue;
+
+    const indent = operationCell.search(/\S/);
+    if (indent < 0) continue;
+    baseIndent ??= indent;
+    parsedRows.push({
+      id: idMatch[0],
+      depth: Math.max(0, indent - baseIndent),
+      operation: operationCell.trim(),
+      name: cellValue(cells, nameIndex),
+      rows: cellValue(cells, rowsIndex),
+      cost: cellValue(cells, costIndex),
+      bytes: cellValue(cells, bytesIndex),
+      time: cellValue(cells, timeIndex),
+    });
+  }
+
+  const roots: ExplainPlanNode[] = [];
+  const parents: ExplainPlanNode[] = [];
+  for (const row of parsedRows) {
+    const isIndex = /\bINDEX\b/i.test(row.operation) && !/\bTABLE ACCESS\b/i.test(row.operation);
+    const relation = row.name && !isIndex ? row.name : undefined;
+    const index = row.name && isIndex ? row.name : undefined;
+    const details = [row.bytes ? `Bytes: ${row.bytes}` : "", row.time ? `Time: ${row.time}` : "", ...(predicates.get(row.id) ?? []).map((predicate) => `Predicate: ${predicate}`)].filter(Boolean);
+    const node: ExplainPlanNode = {
+      id: row.id,
+      title: row.name ? `${row.operation} on ${row.name}` : row.operation,
+      nodeType: row.operation,
+      relation,
+      index,
+      cost: row.cost,
+      rows: row.rows,
+      details,
+      children: [],
+    };
+
+    while (parents.length > row.depth) parents.pop();
+    const parent = row.depth > 0 ? parents[row.depth - 1] : undefined;
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+    parents[row.depth] = node;
+    parents.length = row.depth + 1;
+  }
+
+  return { databaseType: "oracle", raw: planText, nodes: roots };
+}
+
+function splitOraclePlanColumns(line: string): string[] {
+  const columns = line.split("|");
+  return columns.length >= 3 ? columns.slice(1, -1) : [];
+}
+
+function cellValue(cells: string[], index: number): string | undefined {
+  if (index < 0) return undefined;
+  const value = cells[index]?.trim();
+  return value || undefined;
+}
+
+function oraclePredicateDetails(lines: string[]): Map<string, string[]> {
+  const predicates = new Map<string, string[]>();
+  const start = lines.findIndex((line) => line.trim().toLowerCase().startsWith("predicate information"));
+  if (start < 0) return predicates;
+
+  let currentId = "";
+  for (const rawLine of lines.slice(start + 1)) {
+    const line = rawLine.trim();
+    if (!line || /^-+$/.test(line)) continue;
+    if (/^note\b/i.test(line)) break;
+    const entry = line.match(/^(\d+)\s*-\s*(.+)$/);
+    if (entry) {
+      currentId = entry[1];
+      predicates.set(currentId, [entry[2]]);
+    } else if (currentId) {
+      const details = predicates.get(currentId);
+      if (!details?.length) continue;
+      if (/^(?:access|filter|storage)\s*\(/i.test(line)) {
+        details.push(line);
+      } else {
+        details[details.length - 1] = `${details[details.length - 1]} ${line}`;
+      }
+    }
+  }
+  return predicates;
 }
 
 interface DamengOpInfo {
@@ -253,6 +373,138 @@ export function flattenExplainPlanNodes(nodes: ExplainPlanNode[]): ExplainPlanNo
   }
   nodes.forEach((node) => visit(node));
   return rows;
+}
+
+export function sqlServerExplainResult(results: QueryResult[]): { result?: QueryResult; error?: string } {
+  const errorResult = results.find((result) => result.columns.length === 1 && result.columns[0] === "Error" && result.rows.length > 0);
+  if (errorResult) return { error: String(errorResult.rows[0]?.[0] ?? "") };
+
+  const result = results.find((candidate) => firstSqlServerShowplanXml(candidate) !== undefined);
+  return result ? { result } : { error: "SQL Server did not return ShowPlan XML" };
+}
+
+function parseSqlServerExplain(result: QueryResult): ParsedExplainPlan {
+  const raw = firstSqlServerShowplanXml(result);
+  if (!raw) throw new Error("SQL Server did not return ShowPlan XML");
+  if (typeof DOMParser === "undefined") throw new Error("XML parser is unavailable");
+
+  const parserIssues: string[] = [];
+  type XmlParserConstructor = new (options?: {
+    errorHandler?: {
+      warning: (message: string) => void;
+      error: (message: string) => void;
+      fatalError: (message: string) => void;
+    };
+  }) => DOMParser;
+  const Parser = DOMParser as unknown as XmlParserConstructor;
+  const recordParserIssue = (message: string) => parserIssues.push(message);
+  const document = new Parser({
+    errorHandler: {
+      warning: recordParserIssue,
+      error: recordParserIssue,
+      fatalError: recordParserIssue,
+    },
+  }).parseFromString(raw, "application/xml");
+  if (parserIssues.length > 0 || xmlElements(document, "parsererror").length > 0 || !document.documentElement) {
+    throw new Error("Invalid SQL Server ShowPlan XML");
+  }
+
+  const rootName = document.documentElement.localName || document.documentElement.nodeName.split(":").pop();
+  if (rootName !== "ShowPlanXML") throw new Error("Invalid SQL Server ShowPlan XML root element");
+
+  const relOps = xmlElements(document, "RelOp");
+  if (relOps.length === 0) throw new Error("SQL Server ShowPlan XML contains no RelOp nodes");
+  const roots = relOps.filter((element) => !hasRelOpAncestor(element));
+  if (roots.length === 0) throw new Error("SQL Server ShowPlan XML contains no root RelOp node");
+  return {
+    databaseType: "sqlserver",
+    raw,
+    nodes: roots.map(parseSqlServerRelOp),
+  };
+}
+
+function firstSqlServerShowplanXml(result: QueryResult): string | undefined {
+  for (const row of result.rows) {
+    for (const cell of row) {
+      if (typeof cell === "string" && cell.includes("<ShowPlanXML")) return cell;
+    }
+  }
+  return undefined;
+}
+
+function parseSqlServerRelOp(element: Element): ExplainPlanNode {
+  const nodeType = element.getAttribute("PhysicalOp") || element.getAttribute("LogicalOp") || "Plan";
+  const logicalOp = element.getAttribute("LogicalOp") || undefined;
+  const object = planRegionElements(element, "Object")[0];
+  const schema = sqlServerIdentifier(object?.getAttribute("Schema"));
+  const table = sqlServerIdentifier(object?.getAttribute("Table"));
+  const relation = table ? [schema, table].filter(Boolean).join(".") : undefined;
+  const index = sqlServerIdentifier(object?.getAttribute("Index"));
+  const expressions = [
+    ...new Set(
+      planRegionElements(element, "ScalarOperator")
+        .map((operator) => operator.getAttribute("ScalarString")?.trim())
+        .filter((value): value is string => !!value),
+    ),
+  ];
+  const details = [
+    logicalOp && logicalOp !== nodeType ? `Logical: ${logicalOp}` : "",
+    element.getAttribute("EstimatedRowsRead") ? `Estimated Rows Read: ${element.getAttribute("EstimatedRowsRead")}` : "",
+    element.getAttribute("EstimateIO") ? `Estimated I/O: ${element.getAttribute("EstimateIO")}` : "",
+    element.getAttribute("EstimateCPU") ? `Estimated CPU: ${element.getAttribute("EstimateCPU")}` : "",
+    ...expressions.slice(0, 3).map((expression) => `Expression: ${expression}`),
+  ].filter(Boolean);
+
+  return {
+    id: element.getAttribute("NodeId") || "0",
+    title: relation ? `${nodeType} on ${relation}` : nodeType,
+    nodeType,
+    relation,
+    index,
+    cost: element.getAttribute("EstimatedTotalSubtreeCost") || undefined,
+    rows: element.getAttribute("EstimateRows") || undefined,
+    width: element.getAttribute("AvgRowSize") || undefined,
+    details,
+    children: planRegionElements(element, "RelOp").map(parseSqlServerRelOp),
+  };
+}
+
+function planRegionElements(root: Element, localName: string): Element[] {
+  const matches: Element[] = [];
+  const visit = (element: Element) => {
+    for (const child of elementChildren(element)) {
+      if (child.localName === "RelOp") {
+        if (localName === "RelOp") matches.push(child);
+        continue;
+      }
+      if (child.localName === localName) matches.push(child);
+      visit(child);
+    }
+  };
+  visit(root);
+  return matches;
+}
+
+function xmlElements(root: Document | Element, localName: string): Element[] {
+  return Array.from(root.getElementsByTagNameNS("*", localName));
+}
+
+function hasRelOpAncestor(element: Element): boolean {
+  let parent = element.parentNode;
+  while (parent) {
+    if (parent.nodeType === 1 && (parent as Element).localName === "RelOp") return true;
+    parent = parent.parentNode;
+  }
+  return false;
+}
+
+function elementChildren(element: Element): Element[] {
+  return Array.from(element.childNodes).filter((node): node is Element => node.nodeType === 1);
+}
+
+function sqlServerIdentifier(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1).replaceAll("]]", "]") : value;
 }
 
 function parseExplainCell(value: unknown): unknown {

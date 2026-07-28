@@ -36,7 +36,21 @@ const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
     store_visible: false,
 }];
 
-const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[("kafka", "Apache Kafka")];
+const H2_PROFILES: &[AgentDriverProfile] =
+    &[AgentDriverProfile { profile: "h2-legacy", key: "h2-legacy", label: "H2 2.1 Legacy", store_visible: true }];
+
+const EXTRA_AGENT_LABELS: &[(&str, &str)] = &[
+    ("kafka", "Apache Kafka"),
+    ("rocketmq", "Apache RocketMQ"),
+    ("rabbitmq", "RabbitMQ"),
+    ("sqlserver-legacy", "SQL Server legacy compatibility component"),
+];
+const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[
+    ("kafka", "Apache Kafka"),
+    ("rocketmq", "Apache RocketMQ"),
+    ("rabbitmq", "RabbitMQ"),
+    ("sqlserver-legacy", "SQL Server legacy compatibility component"),
+];
 
 const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
@@ -57,6 +71,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         db_type: DatabaseType::Highgo,
         key: "highgo",
         label: "瀚高 HighGo",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Uxdb,
+        key: "uxdb",
+        label: "优炫 UXDB",
         store_visible: true,
         profiles: &[],
     },
@@ -151,7 +172,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         store_visible: true,
         profiles: ORACLE_PROFILES,
     },
-    AgentCatalogEntry { db_type: DatabaseType::H2, key: "h2", label: "H2", store_visible: true, profiles: &[] },
+    AgentCatalogEntry { db_type: DatabaseType::H2, key: "h2", label: "H2", store_visible: true, profiles: H2_PROFILES },
     AgentCatalogEntry {
         db_type: DatabaseType::Snowflake,
         key: "snowflake",
@@ -170,6 +191,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         db_type: DatabaseType::Hive,
         key: "hive",
         label: "Apache Hive",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Spark,
+        key: "spark",
+        label: "Apache Spark",
         store_visible: true,
         profiles: &[],
     },
@@ -288,7 +316,17 @@ pub fn entries() -> &'static [AgentCatalogEntry] {
 
 pub fn agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<&'static str> {
     if *db_type == DatabaseType::MessageQueue {
-        return (driver_profile == Some("kafka")).then_some("kafka");
+        return match driver_profile {
+            Some("kafka") => Some("kafka"),
+            Some("rocketmq") => Some("rocketmq"),
+            Some("rabbitmq") => Some("rabbitmq"),
+            _ => None,
+        };
+    }
+    if *db_type == DatabaseType::SqlServer {
+        return driver_profile
+            .is_some_and(|profile| profile.eq_ignore_ascii_case("sqlserver-legacy"))
+            .then_some("sqlserver-legacy");
     }
     let entry = entry_for_db_type(db_type)?;
     if let Some(driver_profile) = driver_profile {
@@ -321,7 +359,7 @@ pub fn driver_store_entries() -> impl Iterator<Item = (&'static str, &'static st
 }
 
 pub fn label_for_key(agent_key: &str) -> Option<&'static str> {
-    if let Some((_, label)) = EXTRA_DRIVER_STORE_ENTRIES.iter().find(|(key, _)| *key == agent_key) {
+    if let Some((_, label)) = EXTRA_AGENT_LABELS.iter().find(|(key, _)| *key == agent_key) {
         return Some(label);
     }
     for entry in entries() {
@@ -337,4 +375,17 @@ pub fn label_for_key(agent_key: &str) -> Option<&'static str> {
 
 fn entry_for_db_type(db_type: &DatabaseType) -> Option<&'static AgentCatalogEntry> {
     entries().iter().find(|entry| entry.db_type == *db_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h2_legacy_profile_uses_separate_agent() {
+        assert_eq!(agent_key(&DatabaseType::H2, None), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-legacy")), Some("h2-legacy"));
+        assert!(driver_store_entries().any(|(key, label)| key == "h2-legacy" && label == "H2 2.1 Legacy"));
+    }
 }

@@ -48,6 +48,12 @@ export function parentZooKeeperPath(path: string): string {
   return parent || "/";
 }
 
+export function createZooKeeperChildPathDraft(parentPath: string): string {
+  const normalized = normalizeZooKeeperPath(parentPath);
+  if (normalized === "/") return "";
+  return `${normalized}/`;
+}
+
 export function createLazyKvKeyTreeState(rootPath = "/"): LazyKvKeyTreeState {
   return {
     rootPath: normalizeZooKeeperPath(rootPath),

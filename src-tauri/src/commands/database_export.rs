@@ -3,10 +3,19 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::connection::AppState;
 
-pub use dbx_core::database_export::{DatabaseExportRequest, ExportProgress, ExportStatus};
+pub use dbx_core::database_export::{DatabaseBackupSnapshot, DatabaseExportRequest, ExportProgress, ExportStatus};
 
 fn emit_progress(app: &AppHandle, progress: ExportProgress) {
     let _ = app.emit("database-export-progress", progress);
+}
+
+#[tauri::command]
+pub async fn begin_database_backup_snapshot(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<DatabaseBackupSnapshot, String> {
+    dbx_core::database_export::begin_database_backup_snapshot_core(&state, &connection_id, &database).await
 }
 
 #[tauri::command]
@@ -23,6 +32,10 @@ pub async fn export_database_sql(
             emit_progress(&app, progress)
         })
         .await;
+
+        let client_session_id = dbx_core::database_export::database_export_client_session_id(&export_id);
+        let _ =
+            state.close_client_session_pool(&request.connection_id, Some(&request.database), &client_session_id).await;
 
         if let Err(e) = result {
             emit_progress(

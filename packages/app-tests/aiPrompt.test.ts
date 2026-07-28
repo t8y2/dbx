@@ -34,6 +34,7 @@ const { buildSystemPrompt, isVectorDbType, buildUserPrompt } = await import("../
 
 function context(overrides: Partial<AiContext> = {}): AiContext {
   return {
+    connectionId: "conn-1",
     connectionName: "prod-analytics",
     databaseType: "postgres",
     database: "app",
@@ -52,6 +53,7 @@ function context(overrides: Partial<AiContext> = {}): AiContext {
         foreignKeys: [{ column: "user_id", ref_table: "users", ref_column: "id" }],
       },
     ],
+    sqlFiles: [],
     truncated: false,
     ...overrides,
   };
@@ -99,10 +101,32 @@ test("prompt enforces database dialect and single executable statement safety", 
   assert.match(prompt, /不要在同一个回答里混合 SELECT 和写操作/);
 });
 
+test("prompt includes referenced SQL library files as additional context", () => {
+  const prompt = buildSystemPrompt(
+    "generate",
+    context({
+      sqlFiles: [
+        {
+          id: "sql-1",
+          name: "monthly-orders.sql",
+          sql: "select date_trunc('month', created_at) as month, count(*) from public.orders group by 1",
+        },
+      ],
+    }),
+    "ask",
+  );
+
+  assert.match(prompt, /SQL 库文件是额外上下文/);
+  assert.match(prompt, /Referenced SQL library files:/);
+  assert.match(prompt, /File: monthly-orders\.sql/);
+  assert.match(prompt, /date_trunc\('month', created_at\)/);
+});
+
 // Vector database tests
 
 function vectorContext(overrides: Partial<AiContext> = {}): AiContext {
   return {
+    connectionId: "conn-1",
     connectionName: "my-qdrant",
     databaseType: "qdrant",
     database: "default",
@@ -115,6 +139,7 @@ function vectorContext(overrides: Partial<AiContext> = {}): AiContext {
         columns: [],
       },
     ],
+    sqlFiles: [],
     truncated: false,
     ...overrides,
   };

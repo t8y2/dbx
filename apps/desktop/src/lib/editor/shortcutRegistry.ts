@@ -1,6 +1,10 @@
+import { isMacShortcutPlatform, parseShortcutStrokes, shortcutDisplayParts } from "@/lib/editor/shortcutDisplay";
+
 export type ShortcutActionId =
   | "executeSql"
+  | "executeSqlInNewResultTab"
   | "formatSql"
+  | "toggleLineComment"
   | "saveSql"
   | "acceptCompletion"
   | "indentMore"
@@ -16,11 +20,13 @@ export type ShortcutActionId =
   | "selectAll"
   | "uppercaseSelection"
   | "lowercaseSelection"
+  | "exPasteSqlInCondition"
   | "copyCurrentRow"
   | "deleteCurrentRow"
   | "newQuery"
   | "openSettings"
   | "closeTab"
+  | "closeOtherTabs"
   | "focusSearch"
   | "quickOpen"
   | "switchToPreviousTab"
@@ -45,7 +51,9 @@ export type ShortcutActionId =
   | "toggleSidebar"
   | "copySidebarSelection"
   | "pasteSidebarSelection"
-  | "editSidebarConnection";
+  | "editSidebarConnection"
+  | "openDataInNewTab"
+  | "sendSelectionToAi";
 
 export type ShortcutScope = "global" | "editor" | "grid" | "search" | "sidebar";
 
@@ -54,9 +62,24 @@ export interface ShortcutDefinition {
   labelKey: string;
   scope: ShortcutScope;
   defaultShortcut: string;
+  inputKind?: "keyboard" | "modifier-only";
 }
 
 export type ShortcutSettings = Record<ShortcutActionId, string>;
+
+// closeOtherTabs 的平台相关默认键。Windows/Linux 不用 Alt+Mod（= Ctrl+Alt，
+// 与国际键盘 AltGr 字符输入冲突），也不用 Ctrl+Shift+W（浏览器保留的关窗键，
+// Web 形态不可拦截）；Shift+Alt+W 无浏览器保留冲突（Firefox accesskey
+// 同为 Alt+Shift+字母，属正常应用快捷键区）。
+// 已知取舍：Windows 的 Alt+Shift 布局切换只在单独按下并释放时触发，
+// Alt+Shift+字母会正常送达应用，多语言用户如遇干扰可自定义改键。
+// macOS 的 ⌥⌘W 无上述问题
+export function closeOtherTabsDefaultShortcut(platform = globalThis.navigator?.platform || ""): string {
+  return isMacShortcutPlatform(platform) ? "Alt+Mod+W" : "Shift+Alt+W";
+}
+
+const CLOSE_OTHER_TABS_PLATFORM_DEFAULTS = new Set(["Alt+Mod+W", "Shift+Alt+W"]);
+const LEGACY_CLOSE_TAB_DEFAULT = "Meta+W";
 
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
@@ -66,10 +89,22 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+Enter",
   },
   {
+    id: "executeSqlInNewResultTab",
+    labelKey: "settings.shortcutExecuteSqlInNewResultTab",
+    scope: "editor",
+    defaultShortcut: "Mod+\\",
+  },
+  {
     id: "formatSql",
     labelKey: "settings.shortcutFormatSql",
     scope: "editor",
     defaultShortcut: "Shift+Mod+F",
+  },
+  {
+    id: "toggleLineComment",
+    labelKey: "settings.shortcutToggleLineComment",
+    scope: "editor",
+    defaultShortcut: "Mod+/",
   },
   {
     id: "saveSql",
@@ -162,6 +197,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Shift+Alt+L",
   },
   {
+    id: "exPasteSqlInCondition",
+    labelKey: "settings.shortcutExPasteSqlInCondition",
+    scope: "editor",
+    defaultShortcut: "",
+  },
+  {
     id: "copyCurrentRow",
     labelKey: "settings.shortcutCopyCurrentRow",
     scope: "grid",
@@ -189,7 +230,13 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: "closeTab",
     labelKey: "settings.shortcutCloseTab",
     scope: "global",
-    defaultShortcut: "Meta+W",
+    defaultShortcut: "Mod+W",
+  },
+  {
+    id: "closeOtherTabs",
+    labelKey: "contextMenu.closeOtherTabs",
+    scope: "global",
+    defaultShortcut: closeOtherTabsDefaultShortcut(),
   },
   {
     id: "focusSearch",
@@ -341,28 +388,71 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     scope: "sidebar",
     defaultShortcut: "Mod+E",
   },
+  {
+    id: "openDataInNewTab",
+    labelKey: "settings.shortcutOpenDataInNewTab",
+    scope: "sidebar",
+    defaultShortcut: "Alt",
+    inputKind: "modifier-only",
+  },
+  {
+    id: "sendSelectionToAi",
+    labelKey: "settings.shortcutSendSelectionToAi",
+    scope: "editor",
+    defaultShortcut: "Mod+Shift+A",
+  },
 ];
 
 export const DEFAULT_SHORTCUT_SETTINGS: ShortcutSettings = Object.fromEntries(SHORTCUT_DEFINITIONS.map((definition) => [definition.id, definition.defaultShortcut])) as ShortcutSettings;
 
+const modifierOnlyShortcuts = new Set(["Alt", "Shift", "Mod", "Ctrl", "Meta"]);
+
+export function normalizeModifierOnlyShortcut(shortcut: string, fallback = ""): string {
+  const normalized = shortcut.trim() === "Control" ? "Ctrl" : shortcut.trim();
+  if (normalized === "") return "";
+  return modifierOnlyShortcuts.has(normalized) ? normalized : fallback;
+}
+
 export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>): ShortcutSettings {
-  return Object.fromEntries(SHORTCUT_DEFINITIONS.map((definition) => [definition.id, typeof settings?.[definition.id] === "string" ? settings[definition.id] : definition.defaultShortcut])) as ShortcutSettings;
+  return Object.fromEntries(
+    SHORTCUT_DEFINITIONS.map((definition) => {
+      const configuredValue = settings?.[definition.id];
+      let configured = typeof configuredValue === "string" ? configuredValue : definition.defaultShortcut;
+      // 云同步会把另一平台的默认值当作显式配置带过来（macOS 的 Alt+Mod+W 到
+      // Windows 上会还原成 Ctrl+Alt+W）。凡是平台默认集合内的值都视为"未
+      // 自定义"，按本机平台重新解析；用户真正自定义的其他组合原样保留
+      if (definition.id === "closeOtherTabs" && CLOSE_OTHER_TABS_PLATFORM_DEFAULTS.has(configured)) {
+        configured = definition.defaultShortcut;
+      }
+      // Meta+W was the old macOS-only default. Treat that exact value as a
+      // legacy default so existing Windows/Linux settings adopt Ctrl+W.
+      if (definition.id === "closeTab" && configured === LEGACY_CLOSE_TAB_DEFAULT) {
+        configured = definition.defaultShortcut;
+      }
+      const normalized = definition.inputKind === "modifier-only" ? normalizeModifierOnlyShortcut(configured, definition.defaultShortcut) : configured;
+      return [definition.id, normalized];
+    }),
+  ) as ShortcutSettings;
 }
 
 export function shortcutToCodeMirrorKey(shortcut: string): string {
-  return shortcut
-    .split("+")
-    .map((part) => (part.length === 1 ? part.toLowerCase() : part))
-    .join("-");
+  return parseShortcutStrokes(shortcut)
+    .map((parts) =>
+      parts
+        .map((part) => (part.length === 1 ? part.toLowerCase() : part))
+        .map((part) => (part === "Plus" ? "+" : part))
+        .join("-"),
+    )
+    .join(" ");
 }
 
 export function formatShortcut(shortcut: string, platform = globalThis.navigator?.platform || ""): string {
   const isMac = platform.toLowerCase().includes("mac");
-  return shortcut
-    .split("+")
+  return shortcutDisplayParts(shortcut, platform)
     .map((part) => {
       if (part === "Mod") return isMac ? "Cmd" : "Ctrl";
       if (part === "Meta") return isMac ? "Cmd" : "Meta";
+      if (part === "Plus") return "+";
       return part;
     })
     .join("+");

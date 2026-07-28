@@ -1,5 +1,5 @@
 import type { DatabaseType } from "@/types/database";
-import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 
 export interface GeneratorNode {
   key: string;
@@ -204,11 +204,13 @@ export interface ColumnGenerateConfig {
   generatorCategoryLabel?: string;
   generatorParams?: GeneratorParams;
   isAutoIncrement?: boolean;
+  isTag?: boolean;
   columnDefault?: string | null;
 }
 
 export interface TableGenerateConfig {
   tableName: string;
+  tableType?: string;
   schema: string;
   database: string;
   rowCount: number;
@@ -1168,7 +1170,7 @@ export function findGeneratorKey(columnName: string, dataType: string, isAutoInc
   const isDateTime = type.includes("date") || type.includes("timestamp") || type === "time";
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
   const isBoolType = type === "bool" || type === "boolean" || type === "bit" || type === "tinyint(1)";
-  const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_\-]?/i.test(columnName);
+  const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(columnName);
   if (isNumeric || isDateTime || isBinary) {
     if (type.includes("serial")) return "sequence";
     if (isBoolType || (isNumeric && isBoolName)) return "enum";
@@ -1388,7 +1390,7 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
     const t = attrs.dataType.toLowerCase();
     const isNum = t.includes("int") || t.includes("bool") || t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real";
     const isBoolType = t === "bool" || t === "boolean" || t === "bit" || t === "tinyint(1)";
-    const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_\-]?/i.test(_columnName);
+    const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(_columnName);
     if (isBoolType || (isNum && isBoolName)) {
       params.values = "0\n1";
     } else if (isNum) {
@@ -1722,12 +1724,41 @@ function generateByType(type: string, rowIndex: number): unknown {
   return `value_${rowIndex + 1}`;
 }
 
-export function formatGeneratedValue(value: unknown): string {
+function quoteGeneratedString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function formatOracleTemporalValue(value: string, dataType: string): string | null {
+  const type = dataType.toLowerCase();
+  const dateTimeMatch = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?$/.exec(value);
+  const dateMatch = /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+  if (type.includes("timestamp") && dateTimeMatch) {
+    const mask = dateTimeMatch[3] ? "YYYY-MM-DD HH24:MI:SS.FF" : "YYYY-MM-DD HH24:MI:SS";
+    return `TO_TIMESTAMP(${quoteGeneratedString(value.replace("T", " "))}, '${mask}')`;
+  }
+  if (/^date(?:\b|\()/i.test(type)) {
+    if (dateTimeMatch) {
+      return `TO_DATE(${quoteGeneratedString(value.replace("T", " "))}, 'YYYY-MM-DD HH24:MI:SS')`;
+    }
+    if (dateMatch) {
+      return `TO_DATE(${quoteGeneratedString(value)}, 'YYYY-MM-DD')`;
+    }
+  }
+  return null;
+}
+
+export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType, dataType?: string): string {
   if (isGeneratedSqlExpression(value)) return value.sql;
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "1" : "0";
-  return `'${String(value).replace(/'/g, "''")}'`;
+  const stringValue = String(value);
+  if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && dataType) {
+    const temporalValue = formatOracleTemporalValue(stringValue, dataType);
+    if (temporalValue) return temporalValue;
+  }
+  return quoteGeneratedString(stringValue);
 }
 
 export function displayGeneratedValue(value: unknown): string {
@@ -1740,21 +1771,77 @@ export interface GenerateResult {
   columns: string[];
   rows: unknown[][];
   sql: string;
+  statements: string[];
+}
+
+export function supportsGeneratedMultiRowValues(databaseType?: DatabaseType): boolean {
+  return databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && databaseType !== "iris";
+}
+
+const ORACLE_INSERT_ALL_BATCH_SIZE = 100;
+
+function buildOracleInsertStatements(targetTable: string, columnList: string, valueRows: string[]): string[] {
+  if (valueRows.length === 1) {
+    return [`INSERT INTO ${targetTable} (${columnList}) VALUES ${valueRows[0]};`];
+  }
+
+  const statements: string[] = [];
+  for (let start = 0; start < valueRows.length; start += ORACLE_INSERT_ALL_BATCH_SIZE) {
+    const rows = valueRows.slice(start, start + ORACLE_INSERT_ALL_BATCH_SIZE);
+    statements.push(["INSERT ALL", ...rows.map((values) => `  INTO ${targetTable} (${columnList}) VALUES ${values}`), "SELECT 1 FROM DUAL;"].join("\n"));
+  }
+  return statements;
+}
+
+function isTdengineStableGenerate(config: TableGenerateConfig, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "tdengine") return false;
+  const tableType = config.tableType?.trim().toUpperCase();
+  return tableType === "STABLE" || tableType === "SUPER TABLE" || tableType === "SUPERTABLE" || (!tableType && config.columns.some((column) => column.isTag));
+}
+
+function generateTdengineChildTableName(): string {
+  const randomSuffix = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  return `dbx_gen_${Date.now().toString(36)}_${randomSuffix}`;
 }
 
 export function generateTableData(config: TableGenerateConfig, databaseType?: DatabaseType): GenerateResult {
-  const colNames = config.columns.map((c) => c.columnName);
+  const isTdengineStable = isTdengineStableGenerate(config, databaseType);
+  const hasTbnameColumn = config.columns.some((column) => column.columnName.toLowerCase() === "tbname");
+  const shouldAddTbname = isTdengineStable && !hasTbnameColumn;
+  const tdengineChildTableName = shouldAddTbname ? generateTdengineChildTableName() : null;
+  const tagValues = new Map<string, unknown>();
+  const colNames = shouldAddTbname ? ["tbname", ...config.columns.map((c) => c.columnName)] : config.columns.map((c) => c.columnName);
   const rows: unknown[][] = [];
 
   for (let i = 0; i < config.rowCount; i++) {
-    const row = config.columns.map((col) => generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault));
-    rows.push(row);
+    const row = config.columns.map((col) => {
+      if (isTdengineStable && col.isTag && tagValues.has(col.columnName)) {
+        return tagValues.get(col.columnName);
+      }
+      const value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
+      if (isTdengineStable && col.isTag) {
+        tagValues.set(col.columnName, value);
+      }
+      return value;
+    });
+    rows.push(shouldAddTbname ? [tdengineChildTableName, ...row] : row);
   }
 
-  const valuesSql = rows.map((row) => `(${row.map(formatGeneratedValue).join(", ")})`).join(",\n");
+  const quotedCols = colNames.map((column) => quoteTableIdentifier(databaseType, column));
+  const targetTable = qualifiedTableName({ databaseType, schema: config.schema, tableName: config.tableName, database: config.database });
+  const columnList = quotedCols.join(", ");
+  const insertPrefix = `INSERT INTO ${targetTable} (${columnList}) VALUES`;
+  const valueRows = rows.map(
+    (row) =>
+      `(${row
+        .map((value, index) => {
+          const configIndex = shouldAddTbname ? index - 1 : index;
+          return formatGeneratedValue(value, databaseType, configIndex >= 0 ? config.columns[configIndex]?.dataType : undefined);
+        })
+        .join(", ")})`,
+  );
+  const statements = databaseType === "oracle" ? buildOracleInsertStatements(targetTable, columnList, valueRows) : supportsGeneratedMultiRowValues(databaseType) ? [`${insertPrefix}\n${valueRows.join(",\n")};`] : valueRows.map((values) => `${insertPrefix} ${values};`);
+  const sql = statements.join("\n");
 
-  const quotedCols = config.columns.map((c) => quoteTableIdentifier(databaseType, c.columnName));
-  const sql = `INSERT INTO ${quoteTableIdentifier(databaseType, config.tableName)} (${quotedCols.join(", ")}) VALUES\n${valuesSql};`;
-
-  return { columns: colNames, rows, sql };
+  return { columns: colNames, rows, sql, statements };
 }

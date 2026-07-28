@@ -11,12 +11,14 @@ SOURCE_GLOBS = ("*/src/main/**/*.java", "drivers/*/src/main/**/*.java")
 KOTLIN_FILE_SUFFIXES = (".kt", ".kts")
 KOTLIN_SCAN_EXCLUDED_PARTS = {".git", ".gradle", "build"}
 DEFAULT_AGENT_JRE_KEY = "21"
-NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka"}
+NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "rabbitmq"}
 NATIVE_ONLY_AGENT_MODULES = {
     "oracle": "drivers/oracle-go",
+    "kingbase": "drivers/kingbase-go",
     "xugu": "drivers/xugu",
 }
 JDBC_ARCHITECTURE_ALLOWLIST = {
+    "h2-legacy": "reuses the H2 agent implementation with an isolated legacy driver version",
     "access": "custom Access metadata and URL behavior pending migration",
     "dameng": "custom Dameng metadata and DDL pending migration",
     "db2": "custom DB2 metadata pending migration",
@@ -234,6 +236,22 @@ def validate_release_runtime_keys(root: Path) -> list[str]:
         (
             rf'"{DEFAULT_AGENT_JRE_KEY}":\s*\{{\s*"version":\s*"{DEFAULT_AGENT_JRE_KEY}\.',
             f"registry must publish Java {DEFAULT_AGENT_JRE_KEY} under JRE key {DEFAULT_AGENT_JRE_KEY}",
+        ),
+        (
+            r"jdk\.security\.auth",
+            "release workflow JRE must include jdk.security.auth for Kafka Kerberos LoginModule support",
+        ),
+        (
+            r"jdk\.security\.jgss",
+            "release workflow JRE must include jdk.security.jgss for Kafka GSSAPI SASL support",
+        ),
+        (
+            r"jdk\.crypto\.ec",
+            "release workflow JRE must include jdk.crypto.ec for Kafka EC TLS support",
+        ),
+        (
+            r'\["windows-aarch64"\]\s*=\s*"windows/aarch64"',
+            "release workflow must build the managed JRE for windows-aarch64",
         ),
         (
             r"legacy-placeholder\.jar",

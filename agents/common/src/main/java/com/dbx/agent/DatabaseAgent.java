@@ -4,7 +4,9 @@ import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -12,6 +14,20 @@ public interface DatabaseAgent {
     void connect(ConnectParams params);
 
     boolean testConnection(ConnectParams params);
+
+    default Map<String, Object> testConnectionWithInfo(ConnectParams params) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", testConnection(params));
+        return result;
+    }
+
+    default Map<String, String> getDatabaseInfo() {
+        return Collections.emptyMap();
+    }
+
+    default String getIdentifierQuote() {
+        return "";
+    }
 
     List<DatabaseInfo> listDatabases();
 
@@ -78,7 +94,51 @@ public interface DatabaseAgent {
             foreignKeys = Collections.emptyList();
         }
 
-        return buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys);
+        String tableComment = null;
+        try {
+            tableComment = getTableComment(schema, table);
+        } catch (RuntimeException e) {
+            // Table comment is optional; DDL generation should still succeed without it.
+        }
+
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, Collections.emptyList(), false, false, tableComment);
+    }
+
+    /**
+     * Returns the comment/description for a table, or null if not available.
+     * Default implementation looks up the comment from listTables results.
+     * Subclasses can override for more efficient queries.
+     */
+    default String getTableComment(String schema, String table) {
+        try {
+            String caseInsensitiveComment = null;
+            int caseInsensitiveMatches = 0;
+            for (TableInfo info : listTables(schema)) {
+                if (!info.getName().equalsIgnoreCase(table)) {
+                    continue;
+                }
+                if (info.getName().equals(table)) {
+                    return nonBlankComment(info.getComment());
+                }
+                caseInsensitiveMatches++;
+                caseInsensitiveComment = nonBlankComment(info.getComment());
+            }
+            // Case-insensitive databases may normalize metadata names, but quoted
+            // mixed-case objects must never borrow a sibling table's comment.
+            if (caseInsensitiveMatches == 1) {
+                return caseInsensitiveComment;
+            }
+        } catch (RuntimeException e) {
+            // Ignore; table comment is optional.
+        }
+        return null;
+    }
+
+    static String nonBlankComment(String comment) {
+        if (comment != null && !comment.trim().isEmpty()) {
+            return comment;
+        }
+        return null;
     }
 
     List<IndexInfo> listIndexes(String schema, String table);
@@ -102,22 +162,23 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return JdbcExecutor.INSTANCE.executePage(
+        return AgentExecutionContext.jdbcExecutor().executePage(
             conn,
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
-            JdbcExecutor.INSTANCE::defaultResultValue
+            AgentExecutionContext.jdbcExecutor()::defaultResultValue
         );
     }
 
     default QueryPageResult fetchQueryPage(String sessionId, int pageSize) {
-        return JdbcExecutor.INSTANCE.fetchPage(sessionId, pageSize);
+        return AgentExecutionContext.jdbcExecutor().fetchPage(sessionId, pageSize);
     }
 
     default boolean closeQuerySession(String sessionId) {
-        return JdbcExecutor.INSTANCE.closeQuerySession(sessionId);
+        return AgentExecutionContext.jdbcExecutor().closeQuerySession(sessionId);
     }
 
     default QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
@@ -125,22 +186,23 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return JdbcExecutor.INSTANCE.startTableRead(
+        return AgentExecutionContext.jdbcExecutor().startTableRead(
             conn,
             sql,
             schema,
             this::setSchemaSQL,
+            this::resetSchemaSQL,
             options,
-            JdbcExecutor.INSTANCE::defaultResultValue
+            AgentExecutionContext.jdbcExecutor()::defaultResultValue
         );
     }
 
     default QueryPageResult fetchTableReadPage(String sessionId, int pageSize) {
-        return JdbcExecutor.INSTANCE.fetchTableReadPage(sessionId, pageSize);
+        return AgentExecutionContext.jdbcExecutor().fetchTableReadPage(sessionId, pageSize);
     }
 
     default boolean closeTableReadSession(String sessionId) {
-        return JdbcExecutor.INSTANCE.closeTableReadSession(sessionId);
+        return AgentExecutionContext.jdbcExecutor().closeTableReadSession(sessionId);
     }
 
     /**
@@ -162,7 +224,13 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return TransactionExecutor.executeUpdateStatements(conn, statements, schema, this::setSchemaSQL);
+        return TransactionExecutor.executeUpdateStatements(
+            conn,
+            statements,
+            schema,
+            this::setSchemaSQL,
+            this::resetSchemaSQL
+        );
     }
 
     default QueryResult executeBatch(List<String> statements, String schema) {
@@ -170,11 +238,15 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return BatchExecutor.executeBatchStatements(conn, statements, schema, this::setSchemaSQL);
+        return BatchExecutor.executeBatchStatements(conn, statements, schema, this::setSchemaSQL, this::resetSchemaSQL);
     }
 
     default String setSchemaSQL(String schema) {
         return "SET SCHEMA " + JdbcIdentifiers.INSTANCE.doubleQuote(schema);
+    }
+
+    default String resetSchemaSQL() {
+        return "";
     }
 
     static String buildTableDdl(

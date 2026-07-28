@@ -1,0 +1,22 @@
+{
+  "database": "etcd",
+  "name": "etcd",
+  "version": "3.7.0",
+  "displayVersion": "3.7",
+  "image": "docker.cnb.cool/znb/images/etcd:v3.7.0",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 2379,
+  "connection": { "host": "127.0.0.1", "port": 2380, "username": "root", "password": "123456", "database": "dbx", "peerPort": 2381 },
+  "bootstrap": {
+    "check": { "command": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "--user", "root:${DB_PASSWORD}", "auth", "status"], "expect": "Authentication Status: true" },
+    "steps": [
+      { "name": "create root user", "command": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "user", "add", "root:${DB_PASSWORD}"], "expect": "User root created" },
+      { "name": "create root role", "command": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "role", "add", "root"], "expect": "Role root created" },
+      { "name": "grant root role", "command": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "user", "grant-role", "root", "root"], "expect": "Role root is granted to user root" },
+      { "name": "enable authentication", "command": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "auth", "enable"], "expect": "Authentication Enabled" }
+    ]
+  },
+  "shell": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "--user", "root:${DB_PASSWORD}"],
+  "smoke": { "steps": [{ "name": "write authenticated smoke key", "command": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "--user", "root:${DB_PASSWORD}", "put", "dbx:smoke", "DBX smoke"], "expect": "OK" }, { "name": "read authenticated smoke key", "command": ["/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "--user", "root:${DB_PASSWORD}", "get", "dbx:smoke"], "expect": "DBX smoke" }] }
+}

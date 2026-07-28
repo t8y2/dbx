@@ -1,0 +1,13 @@
+{
+  "database": "mariadb",
+  "name": "MariaDB",
+  "version": "10.11.11",
+  "displayVersion": "10.11",
+  "image": "docker.cnb.cool/znb/images/mariadb:10.11.11",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 3306,
+  "connection": { "host": "127.0.0.1", "port": 3307, "username": "root", "password": "123456", "database": "dbx" },
+  "shell": ["mariadb", "-uroot", "-p${DB_PASSWORD}", "-Ddbx"],
+  "smoke": { "steps": [{ "name": "query initialized row", "command": ["mariadb", "-uroot", "-p${DB_PASSWORD}", "-Ddbx", "-Nse", "SELECT note FROM dbx_smoke WHERE id=1"], "expect": "DBX smoke" }] }
+}

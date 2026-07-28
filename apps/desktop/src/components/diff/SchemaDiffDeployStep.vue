@@ -9,13 +9,15 @@ import { useTheme } from "@/composables/useTheme";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { Splitpanes, Pane } from "splitpanes";
-import type { SchemaDiffObject, DiffOperationType, DiffObjectKind } from "@/lib/schema/schemaDiff";
-import { ArrowLeft, Copy, Download, Play, Loader2, PlusCircle, XCircle, ArrowRightLeft, Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, ListTree, Link2, Zap } from "@lucide/vue";
+import type { SchemaDiffObject, DiffOperationType, DiffObjectKind, CompatibilityWarning, RenameCandidate, MissingRollbackObject, RollbackCompleteness } from "@/lib/schema/schemaDiff";
+import ImpactReportPanel from "@/components/diff/ImpactReportPanel.vue";
+import type { ImpactReport } from "@/types/governance";
+import { ArrowLeft, Copy, Download, Play, Loader2, PlusCircle, XCircle, ArrowRightLeft, Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, ListTree, Link2, Zap, AlertTriangle, ShieldCheck } from "@lucide/vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
-const { isDark, themePalette } = useTheme();
+const { isDark } = useTheme();
 
 const props = defineProps<{
   deploySql: string;
@@ -24,10 +26,19 @@ const props = defineProps<{
   targetDatabase: string;
   targetSchema: string;
   executing: boolean;
+  rollbackSql?: string;
+  deploySqlMode?: "forward" | "rollback";
+  compatibilityWarnings?: CompatibilityWarning[];
+  renameCandidates?: RenameCandidate[];
+  impactReport?: ImpactReport | null;
+  rollbackCompleteness?: RollbackCompleteness;
+  missingRollbackObjects?: MissingRollbackObject[];
+  canExecute?: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:deploySql": [sql: string];
+  "update:deploySqlMode": [mode: "forward" | "rollback"];
   back: [];
   deploy: [];
 }>();
@@ -92,6 +103,24 @@ const operationCounts = computed(() => {
   return counts;
 });
 
+const riskLevel = computed(() => {
+  const count = props.compatibilityWarnings?.length ?? 0;
+  if (count === 0) return "safe";
+  if (count <= 3) return "caution";
+  return "dangerous";
+});
+
+const renameCount = computed(() => props.renameCandidates?.length ?? 0);
+
+const showImpactReport = ref(false);
+
+const effectiveSql = computed(() => {
+  if (props.deploySqlMode === "rollback" && props.rollbackSql) {
+    return props.rollbackSql;
+  }
+  return props.deploySql;
+});
+
 const operationIcons: Record<DiffOperationType, any> = {
   modify: ArrowRightLeft,
   create: PlusCircle,
@@ -120,13 +149,13 @@ async function initEditor() {
   const fontSize = settingsStore.editorSettings.fontSize;
   const fontFamily = settingsStore.editorSettings.fontFamily;
 
-  const themeExt = await loadEditorTheme(editorTheme, appAppearance, undefined, themePalette.value);
+  const themeExt = await loadEditorTheme(editorTheme, appAppearance);
   const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
 
   const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres");
 
   const state = EditorState.create({
-    doc: props.deploySql,
+    doc: effectiveSql.value,
     extensions: [
       basicSetup,
       langSql.sql({ dialect }),
@@ -144,9 +173,9 @@ async function initEditor() {
   isEditorReady.value = true;
 }
 
-// Watch for external deploySql changes
+// Watch for external deploySql changes (including mode switch)
 watch(
-  () => props.deploySql,
+  () => effectiveSql.value,
   (newVal) => {
     if (editorView.value && editorView.value.state.doc.toString() !== newVal) {
       editorView.value.dispatch({
@@ -271,14 +300,38 @@ function getObjectIconColor(kind: DiffObjectKind): string {
         </Button>
         <span class="text-sm font-medium">{{ t("diff.deployReview") }}</span>
         <span class="text-xs text-muted-foreground"> ({{ t("diff.selectedCount", { selected: topLevelObjects.length, total: topLevelObjects.length }) }}) </span>
+        <!-- Risk level badge -->
+        <span v-if="riskLevel !== 'safe'" class="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium" :class="riskLevel === 'dangerous' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'">
+          <AlertTriangle class="w-3 h-3" />
+          {{ riskLevel === "dangerous" ? t("diff.riskLevel.dangerous", { count: compatibilityWarnings?.length ?? 0 }) : t("diff.riskLevel.caution", { count: compatibilityWarnings?.length ?? 0 }) }}
+        </span>
       </div>
       <div class="flex items-center gap-3 text-xs">
         <span class="text-green-500">{{ t("diff.create") }}: {{ operationCounts.create }}</span>
         <span class="text-blue-500">{{ t("diff.modify") }}: {{ operationCounts.modify }}</span>
         <span class="text-red-500">{{ t("diff.delete") }}: {{ operationCounts.delete }}</span>
+        <span v-if="renameCount > 0" class="text-purple-500">{{ t("diff.renameCount", { count: renameCount }) }}</span>
       </div>
     </div>
 
+    <!-- Impact Report toggle -->
+    <div v-if="impactReport" class="border-b shrink-0">
+      <button class="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-accent/50 transition-colors" @click="showImpactReport = !showImpactReport">
+        <ShieldCheck class="w-3.5 h-3.5" :class="impactReport.overallRisk === 'safe' ? 'text-green-500' : impactReport.overallRisk === 'caution' ? 'text-yellow-500' : impactReport.overallRisk === 'dangerous' ? 'text-orange-500' : 'text-red-500'" />
+        <span class="font-medium">{{ t("impact.title") }}</span>
+        <span class="ml-auto text-muted-foreground">{{ showImpactReport ? "▲" : "▼" }}</span>
+      </button>
+      <div v-if="showImpactReport" class="border-t">
+        <ImpactReportPanel :report="impactReport" />
+      </div>
+    </div>
+
+    <div v-if="rollbackCompleteness === 'incomplete' && deploySqlMode === 'rollback'" class="px-3 py-1.5 border-b bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-200 shrink-0">
+      {{ t("diff.rollbackIncompleteBanner") }}
+      <ul v-if="missingRollbackObjects?.length" class="mt-1 list-disc pl-4">
+        <li v-for="(m, i) in missingRollbackObjects" :key="i">{{ m.kind }} {{ m.name }}{{ m.table ? ` @ ${m.table}` : "" }} — {{ m.reason }}</li>
+      </ul>
+    </div>
     <!-- Content -->
     <Splitpanes class="flex-1 min-h-0">
       <Pane size="30" min-size="20">
@@ -305,6 +358,11 @@ function getObjectIconColor(kind: DiffObjectKind): string {
     <!-- Footer -->
     <div class="flex items-center justify-between px-3 py-2 border-t shrink-0 gap-2">
       <div class="flex items-center gap-2">
+        <!-- SQL mode toggle -->
+        <div v-if="props.rollbackSql" class="flex items-center gap-1 mr-2 border rounded">
+          <button class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'forward' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'forward')">{{ t("diff.deployMode") }}</button>
+          <button class="text-xs px-2 py-1 rounded transition-colors" :class="props.deploySqlMode === 'rollback' ? 'bg-destructive text-destructive-foreground' : 'hover:bg-accent'" @click="$emit('update:deploySqlMode', 'rollback')">{{ t("diff.rollbackMode") }}</button>
+        </div>
         <Button variant="outline" size="sm" class="h-7 text-xs gap-1" @click="handleCopy">
           <Copy class="w-3.5 h-3.5" />
           {{ t("diff.copyScript") }}
@@ -322,7 +380,7 @@ function getObjectIconColor(kind: DiffObjectKind): string {
         <Button variant="ghost" size="sm" class="h-7 text-xs" @click="$emit('back')">
           {{ t("diff.cancel") }}
         </Button>
-        <Button size="sm" class="h-7 text-xs gap-1" :disabled="topLevelObjects.length === 0 || executing" @click="handleDeploy">
+        <Button size="sm" class="h-7 text-xs gap-1" :disabled="topLevelObjects.length === 0 || executing || canExecute === false" @click="handleDeploy">
           <Loader2 v-if="executing" class="w-3.5 h-3.5 animate-spin" />
           <Play v-else class="w-3.5 h-3.5" />
           {{ t("diff.deployToServer") }}
@@ -335,10 +393,10 @@ function getObjectIconColor(kind: DiffObjectKind): string {
 <style scoped>
 :deep(.splitpanes--vertical > .splitpanes__splitter) {
   width: 4px;
-  background: hsl(var(--border));
+  background: var(--border);
   cursor: col-resize;
 }
 :deep(.splitpanes--vertical > .splitpanes__splitter:hover) {
-  background: hsl(var(--primary));
+  background: var(--primary);
 }
 </style>

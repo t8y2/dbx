@@ -3,6 +3,7 @@ import { test } from "vitest";
 import { DEFAULT_QUERY_TIMEOUT_SECS, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "../../apps/desktop/src/lib/sql/queryTimeout.ts";
 
 test("queryTimeoutSecsForConnection falls back to the default timeout", () => {
+  assert.equal(DEFAULT_QUERY_TIMEOUT_SECS, 60);
   assert.equal(queryTimeoutSecsForConnection(undefined), DEFAULT_QUERY_TIMEOUT_SECS);
   assert.equal(queryTimeoutSecsForConnection({ query_timeout_secs: -1 }), DEFAULT_QUERY_TIMEOUT_SECS);
   assert.equal(queryTimeoutSecsForConnection({ query_timeout_secs: 0 }), 0);

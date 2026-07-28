@@ -20,6 +20,24 @@ export interface SchemaDiffCompareOptions {
   tableIncludePattern: string;
   tableExcludePattern: string;
   tableFilterPriority: SchemaDiffTableFilterPriority;
+  detectRenames: boolean;
+  renameThreshold: number;
+  detectTableRenames: boolean;
+  enableRollback: boolean;
+  batchPatterns: string;
+  sourceDialect: string;
+  targetDialect: string;
+  compatibilityThreshold: number;
+  fieldMappings: FieldMappingEntry[];
+}
+
+export type FieldMappingParamStrategy = "preserve" | "strip" | "custom";
+
+export interface FieldMappingEntry {
+  sourceType: string;
+  targetType: string;
+  paramStrategy: FieldMappingParamStrategy;
+  customParams?: string;
 }
 
 export interface SchemaDiffConfig {
@@ -69,6 +87,15 @@ export const DEFAULT_POSTGRES_OPTIONS: SchemaDiffCompareOptions = {
   tableIncludePattern: "",
   tableExcludePattern: "",
   tableFilterPriority: "exclude",
+  detectRenames: false,
+  renameThreshold: 0.5,
+  detectTableRenames: false,
+  enableRollback: false,
+  batchPatterns: "",
+  sourceDialect: "",
+  targetDialect: "",
+  compatibilityThreshold: 0.5,
+  fieldMappings: [],
 };
 
 export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
@@ -91,6 +118,15 @@ export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
   tableIncludePattern: "",
   tableExcludePattern: "",
   tableFilterPriority: "exclude",
+  detectRenames: false,
+  renameThreshold: 0.5,
+  detectTableRenames: false,
+  enableRollback: false,
+  batchPatterns: "",
+  sourceDialect: "",
+  targetDialect: "",
+  compatibilityThreshold: 0.5,
+  fieldMappings: [],
 };
 
 export function getDefaultOptionsForDbType(dbType: string): SchemaDiffCompareOptions {

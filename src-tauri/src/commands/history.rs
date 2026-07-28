@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tauri::State;
 
 use super::connection::AppState;
-pub use dbx_core::history::HistoryEntry;
+pub use dbx_core::history::{HistoryConnectionOption, HistoryEntry, HistorySearchRequest, HistorySearchResult};
 
 #[tauri::command]
 pub async fn save_history(state: State<'_, Arc<AppState>>, entry: HistoryEntry) -> Result<(), String> {
@@ -17,6 +17,21 @@ pub async fn load_history(
     activity_kind: Option<String>,
 ) -> Result<Vec<HistoryEntry>, String> {
     state.storage.load_history_entries(limit, offset, activity_kind).await
+}
+
+#[tauri::command]
+pub async fn search_history(
+    state: State<'_, Arc<AppState>>,
+    request: HistorySearchRequest,
+) -> Result<HistorySearchResult, String> {
+    state.storage.search_history_entries(request).await
+}
+
+#[tauri::command]
+pub async fn load_history_connection_options(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<HistoryConnectionOption>, String> {
+    state.storage.load_history_connection_options().await
 }
 
 #[tauri::command]

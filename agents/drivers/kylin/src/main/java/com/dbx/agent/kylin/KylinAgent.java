@@ -6,7 +6,7 @@ import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.sql.ResultSet;
@@ -139,6 +139,6 @@ public final class KylinAgent extends AbstractJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new KylinAgent()).run();
+        new MultiSessionJsonRpcServer(KylinAgent::new).run();
     }
 }

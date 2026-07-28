@@ -4,19 +4,25 @@ import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcAgentProfile;
+import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
+import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -25,6 +31,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
+    private static final long MICROS_PER_SECOND = 1_000_000L;
     private static final String COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion";
     private static final String DEFAULT_COMPATIBLE_OJDBC_VERSION = "compatibleOjdbcVersion=8";
     private static final Set<String> SYSTEM_SCHEMAS = Set.of(
@@ -40,7 +47,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
         "jdbc:oceanbase://{host}:{port}/{database}",
-        2881,
+        2883,
         false,
         SYSTEM_SCHEMAS,
         List.of("TABLE", "VIEW", "BASE TABLE")
@@ -62,6 +69,35 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     static String buildUrl(ConnectParams params) {
         return appendDefaultCompatibilityOption(OCEANBASE_ORACLE_PROFILE.buildUrl(params));
+    }
+
+    @Override
+    protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws SQLException {
+        // Connector/J's Statement timeout does not update OceanBase's stricter
+        // session variable, so synchronize both limits before every execution.
+        try (var stmt = connection.createStatement()) {
+            stmt.execute(queryTimeoutSql(timeoutSecs));
+        }
+    }
+
+    @Override
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
+        switch (sqlType) {
+            case Types.BINARY:
+            case Types.VARBINARY:
+            case Types.LONGVARBINARY:
+            case Types.BLOB:
+                return unchecked(() -> JdbcExecutor.stringResultValue(rs, index, sqlType));
+            default:
+                return super.resultValue(rs, index, sqlType);
+        }
+    }
+
+    static String queryTimeoutSql(int timeoutSecs) {
+        if (timeoutSecs < 0) {
+            throw new IllegalArgumentException("Query timeout cannot be negative: " + timeoutSecs);
+        }
+        return "ALTER SESSION SET ob_query_timeout = " + timeoutSecs * MICROS_PER_SECOND;
     }
 
     @Override
@@ -246,6 +282,114 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return result;
     }
 
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        return unchecked(() -> {
+            String owner = normalizeSchema(schema);
+            String normalizedType = normalizeObjectSourceType(objectType);
+            String source;
+            SQLException metadataError = null;
+            try {
+                source = queryDbmsMetadataSource(owner, name, normalizedType);
+            } catch (SQLException e) {
+                metadataError = e;
+                source = null;
+            }
+
+            if ((source == null || source.trim().isEmpty()) && supportsDictionarySource(normalizedType)) {
+                try {
+                    // OceanBase versions and tenant privileges differ in DBMS_METADATA coverage.
+                    // Oracle-compatible dictionary views keep schema compare and source editing usable.
+                    source = queryDictionarySource(owner, name, normalizedType);
+                } catch (SQLException fallbackError) {
+                    if (metadataError != null) {
+                        metadataError.addSuppressed(fallbackError);
+                        throw metadataError;
+                    }
+                    throw fallbackError;
+                }
+            }
+            if (metadataError != null && (source == null || source.trim().isEmpty())) {
+                throw metadataError;
+            }
+            return new ObjectSource(name, normalizedType, owner, source == null ? "" : source);
+        });
+    }
+
+    private String queryDbmsMetadataSource(String owner, String name, String objectType) throws SQLException {
+        String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+        try (var stmt = requireConnection().prepareStatement(sql)) {
+            stmt.setString(1, objectType);
+            stmt.setString(2, name);
+            stmt.setString(3, owner);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
+    private String queryDictionarySource(String owner, String name, String objectType) throws SQLException {
+        if ("VIEW".equals(objectType)) {
+            String sql = "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?";
+            try (var stmt = requireConnection().prepareStatement(sql)) {
+                stmt.setString(1, owner);
+                stmt.setString(2, name);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    return rs.next() ? rs.getString(1) : null;
+                }
+            }
+        }
+
+        String sourceType = switch (objectType) {
+            case "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE" -> objectType;
+            case "PACKAGE_BODY" -> "PACKAGE BODY";
+            case "TYPE_BODY" -> "TYPE BODY";
+            default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        };
+        String sql = "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? AND TYPE = ? ORDER BY LINE";
+        StringBuilder source = new StringBuilder();
+        try (var stmt = requireConnection().prepareStatement(sql)) {
+            stmt.setString(1, owner);
+            stmt.setString(2, name);
+            stmt.setString(3, sourceType);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String line = rs.getString(1);
+                    if (line != null) {
+                        source.append(line);
+                    }
+                }
+            }
+        }
+        return editableOracleSource(source.toString());
+    }
+
+    private static String normalizeObjectSourceType(String objectType) {
+        String normalized = objectType == null
+            ? ""
+            : objectType.trim().toUpperCase(Locale.ROOT).replace(' ', '_');
+        return switch (normalized) {
+            case "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE",
+                "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> normalized;
+            default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        };
+    }
+
+    private static boolean supportsDictionarySource(String objectType) {
+        return switch (objectType) {
+            case "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> true;
+            default -> false;
+        };
+    }
+
+    private static String editableOracleSource(String source) {
+        String trimmed = source.trim();
+        if (trimmed.isEmpty() || trimmed.regionMatches(true, 0, "CREATE ", 0, "CREATE ".length())) {
+            return trimmed;
+        }
+        return "CREATE OR REPLACE " + trimmed;
+    }
+
     private static String placeholders(int count) {
         return String.join(", ", java.util.Collections.nCopies(count, "?"));
     }
@@ -277,7 +421,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String owner = normalizeSchema(schema);
             String sql = """
                 SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_PRECISION, c.DATA_SCALE,
-                    c.DATA_LENGTH, c.CHAR_LENGTH, cc.COMMENTS,
+                    c.DATA_LENGTH, c.CHAR_LENGTH, c.DATA_DEFAULT, cc.COMMENTS,
                     CASE WHEN pk.COLUMN_NAME IS NULL THEN 0 ELSE 1 END AS IS_PK
                 FROM ALL_TAB_COLUMNS c
                 LEFT JOIN ALL_COL_COMMENTS cc
@@ -301,6 +445,8 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 stmt.setString(4, table);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
+                        // Oracle-compatible DATA_DEFAULT is LONG-like; read it before other metadata fields.
+                        String defaultValue = rs.getString("DATA_DEFAULT");
                         String name = rs.getString("COLUMN_NAME");
                         String baseType = rs.getString("DATA_TYPE");
                         Integer numPrec = intOrNull(rs, "DATA_PRECISION");
@@ -311,7 +457,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                             name,
                             formatDataType(baseType, numPrec, numScale, dataLen, charLen),
                             "Y".equalsIgnoreCase(rs.getString("NULLABLE")),
-                            null,
+                            defaultValue,
                             rs.getInt("IS_PK") == 1,
                             null,
                             rs.getString("COMMENTS"),
@@ -323,6 +469,51 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 }
             }
             return result;
+        });
+    }
+
+    @Override
+    public String getTableDdl(String schema, String table) {
+        List<IndexInfo> indexes;
+        try {
+            indexes = listIndexes(schema, table);
+        } catch (RuntimeException e) {
+            indexes = Collections.emptyList();
+        }
+
+        List<ForeignKeyInfo> foreignKeys;
+        try {
+            foreignKeys = listForeignKeys(schema, table);
+        } catch (RuntimeException e) {
+            foreignKeys = Collections.emptyList();
+        }
+
+        String tableComment = null;
+        try {
+            tableComment = getTableComment(schema, table);
+        } catch (RuntimeException e) {
+            // Table comment is optional; DDL generation should still succeed without it.
+        }
+
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, java.util.Collections.emptyList(), false, true, tableComment);
+    }
+
+    @Override
+    public String getTableComment(String schema, String table) {
+        return unchecked(() -> {
+            String owner = normalizeSchema(schema);
+            String sql = "SELECT COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = ? AND TABLE_NAME = ? AND TABLE_TYPE = 'TABLE'";
+            try (var stmt = requireConnection().prepareStatement(sql)) {
+                stmt.setString(1, owner);
+                stmt.setString(2, table);
+                try (var rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        String comment = rs.getString("COMMENTS");
+                        return (comment != null && !comment.trim().isEmpty()) ? comment : null;
+                    }
+                }
+            }
+            return null;
         });
     }
 
@@ -577,6 +768,6 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new OceanBaseOracleAgent()).run();
+        new MultiSessionJsonRpcServer(OceanBaseOracleAgent::new).run();
     }
 }

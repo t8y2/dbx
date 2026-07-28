@@ -26,6 +26,10 @@ export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">,
     return [...gridFsNodes, ...sortByLabel(collections)];
   }
 
+  if (parent.type === "vector-database") {
+    return sortByLabel(normalized);
+  }
+
   if (parent.type === "mongo-buckets") {
     return sortByLabel(normalized);
   }

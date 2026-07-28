@@ -153,6 +153,59 @@ test("duplicating a grouped connection keeps the copy in the same group", async 
   }
 });
 
+test("reloading connections preserves the current grouped layout when the saved layout is temporarily unavailable", async () => {
+  const originalFetch = globalThis.fetch;
+  const storage = installMemoryStorage();
+  const savedConnections: ConnectionConfig[] = [conn("pg", "pg"), conn("pg2", "pg2"), conn("pg3", "pg3"), conn("pg4", "pg4")];
+  let savedLayout: SidebarLayout | null = {
+    groups: [
+      { id: "group-a", name: "dir[a]", collapsed: false },
+      { id: "group-b", name: "dir[b]", collapsed: false },
+    ],
+    order: [
+      { type: "group", id: "group-a", connectionIds: ["pg", "pg2"] },
+      { type: "group", id: "group-b", connectionIds: ["pg3", "pg4"] },
+    ],
+  };
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/connection/list") {
+      return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/layout/sidebar") {
+      if (init?.method === "POST") {
+        savedLayout = JSON.parse(String(init.body ?? "null"));
+        return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify(savedLayout), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    assert.deepEqual(
+      store.treeNodes.map((node) => node.label),
+      ["dir[a]", "dir[b]"],
+    );
+
+    savedLayout = null;
+    await store.initFromDisk();
+
+    assert.deepEqual(
+      store.treeNodes.map((node) => node.label),
+      ["dir[a]", "dir[b]"],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
 test("importing grouped dbx connections remaps exported layout to new connection ids", async () => {
   const originalFetch = globalThis.fetch;
   const storage = installMemoryStorage();
@@ -208,6 +261,61 @@ test("importing grouped dbx connections remaps exported layout to new connection
       group.children?.map((node) => node.id),
       ["old-conn-1", "old-conn-2"],
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
+test("importing DBeaver connections remaps and applies nested folder layout", async () => {
+  const originalFetch = globalThis.fetch;
+  const storage = installMemoryStorage();
+  let savedConnections: ConnectionConfig[] = [];
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/connection/list") {
+      return new Response(JSON.stringify(savedConnections), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/layout/sidebar") {
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/connection/save") {
+      savedConnections = JSON.parse(String(init?.body ?? "[]"));
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const dataSources = JSON.stringify({
+      folders: { Parent: {}, Child: { parent: "Parent" } },
+      connections: {
+        imported: {
+          id: "dbeaver-connection",
+          name: "Imported MySQL",
+          folder: "Parent/Child",
+          provider: "mysql",
+          driver: "mysql",
+          configuration: { host: "127.0.0.1", port: 3306, database: "app" },
+        },
+      },
+    });
+    const content = JSON.stringify({ format: "dbeaver-import", dataSources });
+
+    const result = await store.importConnectionsFromFile(content, null);
+    assert.equal(result.count, 1);
+    assert.ok(result.layout);
+    store.applySidebarLayout(result.layout!);
+
+    assert.equal(store.treeNodes[0]?.label, "Parent");
+    assert.equal(store.treeNodes[0]?.children?.[0]?.label, "Child");
+    assert.equal(store.treeNodes[0]?.children?.[0]?.children?.[0]?.label, "Imported MySQL");
+    assert.notEqual(store.treeNodes[0]?.children?.[0]?.children?.[0]?.id, "dbeaver-connection");
   } finally {
     globalThis.fetch = originalFetch;
     storage.restore();

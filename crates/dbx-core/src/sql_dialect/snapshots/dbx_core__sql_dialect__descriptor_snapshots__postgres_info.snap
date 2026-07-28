@@ -1,0 +1,56 @@
+---
+source: crates/dbx-core/src/sql_dialect/descriptor_snapshots.rs
+assertion_line: 49
+expression: info
+---
+{
+  "kind": "postgres",
+  "label": "postgres",
+  "capabilities": [
+    "add_column",
+    "drop_column",
+    "rename_column",
+    "alter_existing_column",
+    "comment",
+    "create_index",
+    "drop_index",
+    "rebuild_index",
+    "index_type",
+    "index_include",
+    "index_filter",
+    "index_comment",
+    "alter_primary_key",
+    "foreign_key",
+    "create_table",
+    "drop_table",
+    "truncate_table",
+    "create_trigger",
+    "drop_trigger",
+    "create_function",
+    "drop_function",
+    "create_sequence",
+    "drop_sequence",
+    "alter_owner",
+    "grant_revoke",
+    "if_not_exists",
+    "create_or_replace",
+    "temporary_table",
+    "transactional_ddl",
+    "identity_columns"
+  ],
+  "max_identifier_length": 63,
+  "supports_schemas": true,
+  "supports_catalogs": false,
+  "max_columns_per_table": 1600,
+  "supports_json_type": true,
+  "supports_array_type": true,
+  "supports_enum_type": true,
+  "supports_uuid_type": true,
+  "supports_auto_increment": false,
+  "supports_identity_columns": true,
+  "supports_sequences": true,
+  "supports_partitioning": true,
+  "supports_full_text_index": true,
+  "supports_spatial_index": true,
+  "supports_transactional_ddl": true
+}

@@ -1,4 +1,4 @@
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, TableInfoTab } from "@/types/database";
 
 export interface TableMetadataCapabilities {
   columns: boolean;
@@ -26,6 +26,12 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     triggers: false,
   },
   elasticsearch: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
+  hbase: {
     indexes: false,
     foreignKeys: false,
     triggers: false,
@@ -70,4 +76,19 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
 
 export function getTableMetadataCapabilities(dbType?: DatabaseType): TableMetadataCapabilities {
   return { ...defaultCapabilities, ...(dbType ? capabilityByType[dbType] : undefined) };
+}
+
+export function firstStructureMetadataTab(capabilities: TableMetadataCapabilities, isCreateMode: boolean): TableInfoTab {
+  // Structure editing should open on an editable metadata page; DDL remains a
+  // read-only fallback for databases that do not expose editable metadata.
+  if (capabilities.columns) return "columns";
+  if (capabilities.indexes) return "indexes";
+  if (capabilities.foreignKeys) return "foreignKeys";
+  if (capabilities.triggers) return "triggers";
+  if (!isCreateMode && capabilities.ddl) return "ddl";
+  return "columns";
+}
+
+export function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities: TableMetadataCapabilities, isCreateMode: boolean): boolean {
+  return (tab === "columns" && capabilities.columns) || (tab === "indexes" && capabilities.indexes) || (tab === "foreignKeys" && capabilities.foreignKeys) || (tab === "triggers" && capabilities.triggers) || (tab === "ddl" && capabilities.ddl && !isCreateMode);
 }

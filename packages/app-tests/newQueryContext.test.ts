@@ -48,6 +48,7 @@ test("new query target prefers the active data tab context", () => {
     connectionId: "conn-data",
     database: "analytics",
     schema: undefined,
+    catalog: undefined,
     shouldRefreshDefaultDatabase: false,
   });
 });
@@ -73,6 +74,7 @@ test("new query target uses the selected sidebar node when there is no active ta
     connectionId: "conn-tree",
     database: "reporting",
     schema: "public",
+    catalog: undefined,
     shouldRefreshDefaultDatabase: false,
   });
 });
@@ -96,6 +98,7 @@ test("new query target prefers the selected sidebar node after sidebar focus", (
     connectionId: "conn-tree",
     database: "reporting",
     schema: undefined,
+    catalog: undefined,
     shouldRefreshDefaultDatabase: false,
   });
 });
@@ -112,6 +115,7 @@ test("new query target refreshes default database for connection-only sidebar no
     connectionId: "conn-tree",
     database: "saved_default",
     schema: undefined,
+    catalog: undefined,
     shouldRefreshDefaultDatabase: true,
   });
 });

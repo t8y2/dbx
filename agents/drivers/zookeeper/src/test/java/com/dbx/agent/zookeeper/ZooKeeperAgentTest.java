@@ -4,13 +4,26 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.test.TestingServer;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.ZooDefs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 final class ZooKeeperAgentTest {
     @AfterEach
@@ -104,6 +117,16 @@ final class ZooKeeperAgentTest {
     }
 
     @Test
+    void statLookupConcurrencyUsesConservativeDefaultsAndOverrides() {
+        Assertions.assertEquals(16, ZooKeeperAgent.configuredStatLookupConcurrency(null, null));
+        Assertions.assertEquals(20, ZooKeeperAgent.configuredStatLookupConcurrency("20", "12"));
+        Assertions.assertEquals(12, ZooKeeperAgent.configuredStatLookupConcurrency(null, "12"));
+        Assertions.assertEquals(1, ZooKeeperAgent.configuredStatLookupConcurrency("0", null));
+        Assertions.assertEquals(64, ZooKeeperAgent.configuredStatLookupConcurrency("128", null));
+        Assertions.assertEquals(16, ZooKeeperAgent.configuredStatLookupConcurrency("not-a-number", null));
+    }
+
+    @Test
     void connectAndTestConnectionWorkAgainstTestingServer() throws Exception {
         try (TestingServer server = new TestingServer()) {
             JsonObject connect = result(request(
@@ -119,6 +142,75 @@ final class ZooKeeperAgentTest {
                 "{\"connection\":{\"connect_string\":\"" + server.getConnectString() + "\"}}"
             ));
             Assertions.assertTrue(test.get("ok").getAsBoolean());
+        }
+    }
+
+    @Test
+    void defaultTimeoutAllowsSessionEstablishmentAfterFiveSeconds() throws Exception {
+        try (TestingServer server = new TestingServer();
+             DelayedTcpProxy proxy = new DelayedTcpProxy(server.getConnectString(), 5500)) {
+            long startedAt = System.nanoTime();
+            JsonObject connect = result(request(
+                1,
+                "connect",
+                "{\"connection\":{\"connect_string\":\"" + proxy.getConnectString() + "\"}}"
+            ));
+            long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+
+            Assertions.assertTrue(connect.get("ok").getAsBoolean());
+            Assertions.assertTrue(elapsedMs >= 5000, "expected delayed handshake, took " + elapsedMs + "ms");
+        }
+    }
+
+    @Test
+    void connectFailsFastWhenAllServersAreUnreachable() {
+        long startedAt = System.nanoTime();
+        JsonObject error = error(request(
+            1,
+            "connect",
+            "{\"connection\":{\"connect_string\":\"127.0.0.1:1\",\"connection_timeout_ms\":15000}}"
+        ));
+        long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+
+        Assertions.assertTrue(
+            error.get("message").getAsString().contains("No reachable ZooKeeper server"),
+            "expected fast unreachable error, got: " + error.get("message").getAsString()
+        );
+        Assertions.assertTrue(elapsedMs < 4000, "expected fast failure, took " + elapsedMs + "ms");
+    }
+
+    @Test
+    void connectUsesReachableServerWithoutDroppingEnsembleMembers() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            JsonObject connect = result(request(
+                1,
+                "connect",
+                "{\"connection\":{\"connect_string\":\"127.0.0.1:1," + server.getConnectString() + "\"}}"
+            ));
+            Assertions.assertTrue(connect.get("ok").getAsBoolean());
+
+            JsonObject get = result(request(2, "kv_get", "{\"key\":\"/\"}"));
+            Assertions.assertTrue(get.get("found").getAsBoolean());
+        }
+    }
+
+    @Test
+    void reachableConnectStringPreservesFullEnsembleAndChroot() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            String alive = server.getConnectString();
+            String ensemble = "127.0.0.1:1," + alive + "/app";
+
+            Assertions.assertEquals(
+                ensemble,
+                ZooKeeperAgent.reachableConnectString(ensemble, 1000)
+            );
+            Assertions.assertEquals(alive, ZooKeeperAgent.reachableConnectString(alive, 1000));
+
+            IllegalStateException error = Assertions.assertThrows(
+                IllegalStateException.class,
+                () -> ZooKeeperAgent.reachableConnectString("127.0.0.1:1/app", 1000)
+            );
+            Assertions.assertTrue(error.getMessage().contains("No reachable ZooKeeper server"));
         }
     }
 
@@ -162,6 +254,31 @@ final class ZooKeeperAgentTest {
             Assertions.assertEquals(metadata.get("czxid").getAsLong(), metadata.get("createRevision").getAsLong());
             Assertions.assertEquals(metadata.get("mzxid").getAsLong(), metadata.get("modRevision").getAsLong());
             Assertions.assertEquals(metadata.get("dataLength").getAsInt(), metadata.get("valueSize").getAsInt());
+        }
+    }
+
+    @Test
+    void kvGetReadsZnodeCreatedWithoutDataAsEmptyUtf8() throws Exception {
+        try (TestingServer server = new TestingServer();
+             CuratorFramework curator = CuratorFrameworkFactory.newClient(
+                 server.getConnectString(),
+                 new ExponentialBackoffRetry(100, 3)
+            )) {
+            curator.start();
+            curator.getZookeeperClient().getZooKeeper().create(
+                "/empty",
+                null,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                CreateMode.PERSISTENT
+            );
+            connect(server);
+
+            JsonObject get = result(request(3, "kv_get", "{\"key\":\"/empty\"}"));
+
+            Assertions.assertTrue(get.get("found").getAsBoolean());
+            Assertions.assertEquals("utf8", get.getAsJsonObject("value").get("encoding").getAsString());
+            Assertions.assertEquals("", get.getAsJsonObject("value").get("data").getAsString());
+            Assertions.assertEquals(0, get.getAsJsonObject("metadata").get("valueSize").getAsInt());
         }
     }
 
@@ -398,8 +515,25 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":false}"));
 
-            Assertions.assertEquals(List.of("/app", "/config"), listedKeys(list));
+            Assertions.assertEquals(List.of("/app", "/config", "/zookeeper"), listedKeys(list));
             Assertions.assertTrue(list.get("continuation").isJsonNull());
+        }
+    }
+
+    @Test
+    void listPrefixKeepsDirectChildMetadataForLazyExpansion() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            connect(server);
+            result(request(2, "kv_put", "{\"key\":\"/app/name\",\"value\":{\"encoding\":\"utf8\",\"data\":\"dbx\"}}"));
+            result(request(3, "kv_put", "{\"key\":\"/config\",\"value\":{\"encoding\":\"utf8\",\"data\":\"cfg\"}}"));
+
+            JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":false}"));
+            JsonObject app = listedRow(list, "/app");
+            JsonObject config = listedRow(list, "/config");
+
+            Assertions.assertEquals(1, app.get("numChildren").getAsInt());
+            Assertions.assertEquals(0, config.get("numChildren").getAsInt());
+            Assertions.assertEquals(3, config.get("dataLength").getAsInt());
         }
     }
 
@@ -412,7 +546,10 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(5, "kv_list_prefix", "{\"prefix\":\"/\"}"));
 
-            Assertions.assertEquals(List.of("/app", "/app/name", "/config"), listedKeys(list));
+            Assertions.assertEquals(
+                List.of("/app", "/app/name", "/config", "/zookeeper", "/zookeeper/config", "/zookeeper/quota"),
+                listedKeys(list)
+            );
             Assertions.assertTrue(list.get("continuation").isJsonNull());
         }
     }
@@ -426,7 +563,10 @@ final class ZooKeeperAgentTest {
 
             JsonObject list = result(request(6, "kv_list_prefix", "{\"prefix\":\"/\",\"recursive\":true}"));
 
-            Assertions.assertEquals(List.of("/app", "/app/name", "/config"), listedKeys(list));
+            Assertions.assertEquals(
+                List.of("/app", "/app/name", "/config", "/zookeeper", "/zookeeper/config", "/zookeeper/quota"),
+                listedKeys(list)
+            );
         }
     }
 
@@ -457,11 +597,19 @@ final class ZooKeeperAgentTest {
                 "kv_list_prefix",
                 "{\"prefix\":\"/\",\"limit\":2,\"continuation\":\"" + continuation + "\"}"
             ));
+            String secondContinuation = second.get("continuation").getAsString();
+            JsonObject third = result(request(
+                7,
+                "kv_list_prefix",
+                "{\"prefix\":\"/\",\"limit\":2,\"continuation\":\"" + secondContinuation + "\"}"
+            ));
 
             Assertions.assertEquals(List.of("/a", "/b"), listedKeys(first));
             Assertions.assertFalse(continuation.isBlank());
-            Assertions.assertEquals(List.of("/c"), listedKeys(second));
-            Assertions.assertTrue(second.get("continuation").isJsonNull());
+            Assertions.assertEquals(List.of("/c", "/zookeeper"), listedKeys(second));
+            Assertions.assertFalse(secondContinuation.isBlank());
+            Assertions.assertEquals(List.of("/zookeeper/config", "/zookeeper/quota"), listedKeys(third));
+            Assertions.assertTrue(third.get("continuation").isJsonNull());
         }
     }
 
@@ -539,5 +687,100 @@ final class ZooKeeperAgentTest {
             keys.add(row.getAsJsonObject().get("key").getAsString());
         }
         return keys;
+    }
+
+    private static JsonObject listedRow(JsonObject listResult, String key) {
+        JsonArray rows = listResult.getAsJsonArray("keys");
+        for (JsonElement row : rows) {
+            JsonObject object = row.getAsJsonObject();
+            if (key.equals(object.get("key").getAsString())) {
+                return object;
+            }
+        }
+        Assertions.fail("expected listed row for " + key);
+        return new JsonObject();
+    }
+
+    private static final class DelayedTcpProxy implements AutoCloseable {
+        private final ServerSocket listener;
+        private final InetSocketAddress target;
+        private final long delayMs;
+        private final ExecutorService executor;
+        private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
+
+        private DelayedTcpProxy(String targetConnectString, long delayMs) throws IOException {
+            this.listener = new ServerSocket(0);
+            this.target = ZooKeeperAgent.parseEndpoint(targetConnectString);
+            this.delayMs = delayMs;
+            this.executor = Executors.newCachedThreadPool(task -> {
+                Thread thread = new Thread(task, "dbx-zookeeper-delayed-proxy");
+                thread.setDaemon(true);
+                return thread;
+            });
+            executor.submit(this::acceptConnections);
+        }
+
+        private String getConnectString() {
+            return "127.0.0.1:" + listener.getLocalPort();
+        }
+
+        private void acceptConnections() {
+            while (!listener.isClosed()) {
+                try {
+                    Socket client = listener.accept();
+                    sockets.add(client);
+                    executor.submit(() -> forwardAfterDelay(client));
+                } catch (IOException error) {
+                    if (!listener.isClosed()) {
+                        throw new IllegalStateException("Delayed proxy failed to accept a connection", error);
+                    }
+                }
+            }
+        }
+
+        private void forwardAfterDelay(Socket client) {
+            try {
+                Thread.sleep(delayMs);
+                Socket server = new Socket();
+                sockets.add(server);
+                server.connect(target);
+                executor.submit(() -> copyUntilClosed(client, server));
+                copyUntilClosed(server, client);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                closeSocket(client);
+            } catch (IOException error) {
+                closeSocket(client);
+            }
+        }
+
+        private void copyUntilClosed(Socket source, Socket destination) {
+            try {
+                source.getInputStream().transferTo(destination.getOutputStream());
+            } catch (IOException ignored) {
+                // Closing either side is expected when a probe or client disconnects.
+            } finally {
+                closeSocket(source);
+                closeSocket(destination);
+            }
+        }
+
+        private void closeSocket(Socket socket) {
+            sockets.remove(socket);
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+                // Best effort cleanup for test sockets.
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            listener.close();
+            for (Socket socket : sockets) {
+                closeSocket(socket);
+            }
+            executor.shutdownNow();
+        }
     }
 }

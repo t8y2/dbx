@@ -1,7 +1,7 @@
 import type { TreeNode, TreeNodeType } from "@/types/database";
 import { createSidebarLabelMatcher, type SidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
 
-const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view"]);
+const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
 
 const normalizedLabelCache = new WeakMap<TreeNode, { label: string; normalized: string }>();
 
@@ -23,23 +23,32 @@ function normalizedLabel(node: TreeNode): string {
 }
 
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
-  return filterSidebarTreeWithMatcher(nodes, createSidebarLabelMatcher(query), collapsedIds, searchableNodeTypes);
+  const matchLabel = query ? createSidebarLabelMatcher(query) : undefined;
+  if (!matchLabel && searchableNodeTypes === undefined) return nodes;
+  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes);
 }
 
-function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
+function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
     if (node.type === "object-browser" && node.hiddenChildren) {
-      const matches = node.hiddenChildren.map((child) => ({ node: child, score: matchLabel(normalizedLabel(child))?.score ?? 0 })).filter((match) => match.score > 0);
+      const matches = node.hiddenChildren.flatMap((child) => {
+        if (searchableNodeTypes && !searchableNodeTypes.has(child.type)) return [];
+        const match = matchLabel?.(normalizedLabel(child));
+        if (matchLabel && !match) return [];
+        return [{ node: child, score: match?.score ?? 0 }];
+      });
       filteredNodes.push(...matches);
       continue;
     }
 
     const label = normalizedLabel(node);
     const canSelfMatch = !searchableNodeTypes || searchableNodeTypes.has(node.type);
-    const selfMatch = canSelfMatch ? bestMatch(matchLabel, label, node.comment) : null;
-    const preservesSubtree = !!selfMatch && preserveMatchedSubtreeTypes.has(node.type);
+    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment) : { score: 0 }) : null;
+    // Type-only filtering keeps matching rows and their ancestor path, but not
+    // unrelated descendants that would make the selected type appear ignored.
+    const preservesSubtree = !!matchLabel && !!selfMatch && preserveMatchedSubtreeTypes.has(node.type);
     const filteredChildren = preservesSubtree ? node.children : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes) : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0)) {
@@ -69,4 +78,52 @@ export function filterSidebarSearchRootsByConnectionState(nodes: TreeNode[], con
     if (node.type === "connection-group" || node.type === "connection") return true;
     return node.connectionId ? connectedIds.has(node.connectionId) : true;
   });
+}
+
+export function resolveSidebarFilterGuards(showConnectedConnectionsOnly: boolean, searchQuery: string, hasSearchScopeFilter: boolean) {
+  const isTreeSearchFiltering = !!searchQuery.trim() || hasSearchScopeFilter;
+  return {
+    isTreeSearchFiltering,
+    isRootListPartial: showConnectedConnectionsOnly || isTreeSearchFiltering,
+  };
+}
+
+/**
+ * Produces a display-only connection tree containing connected connections and
+ * the groups that contain them. Connection descendants stay intact because
+ * this filter controls the connection list, not database-object visibility.
+ */
+export function filterSidebarTreeToConnectedConnections(nodes: readonly TreeNode[], connectedIds: ReadonlySet<string>): TreeNode[] {
+  let changed = false;
+  const filtered: TreeNode[] = [];
+
+  for (const node of nodes) {
+    if (node.type === "connection") {
+      if (node.connectionId && connectedIds.has(node.connectionId)) {
+        filtered.push(node);
+      } else {
+        changed = true;
+      }
+      continue;
+    }
+
+    if (node.type !== "connection-group") {
+      filtered.push(node);
+      continue;
+    }
+
+    const children = filterSidebarTreeToConnectedConnections(node.children ?? [], connectedIds);
+    if (children.length === 0) {
+      changed = true;
+      continue;
+    }
+    if (children !== node.children) {
+      changed = true;
+      filtered.push({ ...node, children });
+    } else {
+      filtered.push(node);
+    }
+  }
+
+  return changed ? filtered : (nodes as TreeNode[]);
 }

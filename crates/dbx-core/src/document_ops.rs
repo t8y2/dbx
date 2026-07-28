@@ -1,6 +1,6 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::mongo_document_id_params;
-use crate::db::mongo_driver::MongoDocumentResult;
+use crate::db::document_result::DocumentQueryResult;
 use crate::db::{elasticsearch_driver, mongo_driver, vector_driver};
 
 pub use crate::db::vector_driver::CollectionInfo;
@@ -27,12 +27,14 @@ pub struct MongoGridFsBucketInfo {
     pub total_bytes: i64,
 }
 
+fn cmp_names(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_lower = left.to_lowercase();
+    let right_lower = right.to_lowercase();
+    left_lower.cmp(&right_lower).then_with(|| left.cmp(right))
+}
+
 fn sort_names(mut names: Vec<String>) -> Vec<String> {
-    names.sort_by(|left, right| {
-        let left_lower = left.to_lowercase();
-        let right_lower = right.to_lowercase();
-        left_lower.cmp(&right_lower).then_with(|| left.cmp(right))
-    });
+    names.sort_by(|left, right| cmp_names(left, right));
     names
 }
 
@@ -52,7 +54,8 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
             }
             Err(error) => Err(error),
         },
-        PoolKind::Elasticsearch(_) | PoolKind::VectorDb(_) => Ok(vec!["default".to_string()]),
+        PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
+        PoolKind::VectorDb(client) => vector_driver::list_databases(client).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             match client.mongo_list_databases::<Vec<serde_json::Value>>().await {
@@ -83,14 +86,21 @@ fn mongo_list_databases_unauthorized(error: &str) -> bool {
     lower.contains("not authorized") && lower.contains("listdatabases")
 }
 
-fn mongo_collection_info(name: String) -> CollectionInfo {
+fn mongo_collection_info(name: String, kind: mongo_driver::MongoCollectionKind) -> CollectionInfo {
     CollectionInfo {
         name: name.clone(),
         id: name,
         dimension: None,
-        kind: Some("collection".to_string()),
+        kind: Some(kind.as_str().to_string()),
         bucket_name: None,
     }
+}
+
+fn sort_mongo_collection_specs(
+    mut specs: Vec<mongo_driver::MongoCollectionSpec>,
+) -> Vec<mongo_driver::MongoCollectionSpec> {
+    specs.sort_by(|left, right| cmp_names(&left.name, &right.name));
+    specs
 }
 
 pub(crate) fn mongo_gridfs_bucket_names(names: &[String]) -> Vec<String> {
@@ -122,6 +132,78 @@ fn mongo_bucket_infos(names: &[String]) -> Vec<CollectionInfo> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridFsBucketSortField {
+    Name,
+    FileCount,
+    TotalBytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GridFsBucketSort {
+    field: GridFsBucketSortField,
+    descending: bool,
+}
+
+fn parse_gridfs_bucket_sort(sort: Option<&str>) -> Result<GridFsBucketSort, String> {
+    let Some(raw) = sort.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(GridFsBucketSort { field: GridFsBucketSortField::Name, descending: false });
+    };
+
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("Invalid GridFS bucket sort JSON: {e}"))?;
+    let object = value.as_object().ok_or_else(|| "GridFS bucket sort must be a JSON object".to_string())?;
+    if object.len() != 1 {
+        return Err("GridFS bucket sort must contain exactly one field".to_string());
+    }
+
+    let (field_name, direction) = object.iter().next().expect("checked len");
+    let field = match field_name.as_str() {
+        "name" => GridFsBucketSortField::Name,
+        "fileCount" => GridFsBucketSortField::FileCount,
+        "totalBytes" => GridFsBucketSortField::TotalBytes,
+        _ => return Err(format!("Unsupported GridFS bucket sort field: {field_name}")),
+    };
+    let descending = match direction {
+        serde_json::Value::Number(value) if value.as_i64() == Some(-1) => true,
+        serde_json::Value::Number(value) if value.as_i64() == Some(1) => false,
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("desc") || value == "-1" => true,
+        serde_json::Value::String(value) if value.eq_ignore_ascii_case("asc") || value == "1" => false,
+        _ => return Err("GridFS bucket sort direction must be 1, -1, 'asc', or 'desc'".to_string()),
+    };
+
+    Ok(GridFsBucketSort { field, descending })
+}
+
+fn filter_and_sort_gridfs_bucket_infos(
+    mut buckets: Vec<MongoGridFsBucketInfo>,
+    filter: Option<&str>,
+    sort: Option<&str>,
+) -> Result<Vec<MongoGridFsBucketInfo>, String> {
+    if let Some(filter_text) = filter.map(str::trim).filter(|value| !value.is_empty()) {
+        let needle = filter_text.to_lowercase();
+        buckets.retain(|bucket| bucket.name.to_lowercase().contains(&needle));
+    }
+
+    let sort = parse_gridfs_bucket_sort(sort)?;
+    buckets.sort_by(|left, right| {
+        let name_cmp =
+            left.name.to_lowercase().cmp(&right.name.to_lowercase()).then_with(|| left.name.cmp(&right.name));
+        let ordering = match sort.field {
+            GridFsBucketSortField::Name => name_cmp,
+            GridFsBucketSortField::FileCount => left.file_count.cmp(&right.file_count).then_with(|| name_cmp),
+            GridFsBucketSortField::TotalBytes => left.total_bytes.cmp(&right.total_bytes).then_with(|| name_cmp),
+        };
+        if sort.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+
+    Ok(buckets)
+}
+
 pub async fn list_collections_core(
     state: &AppState,
     connection_id: &str,
@@ -131,9 +213,10 @@ pub async fn list_collections_core(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            let names = sort_names(mongo_driver::list_collections(client, database).await?);
+            let specs = sort_mongo_collection_specs(mongo_driver::list_collection_specs(client, database).await?);
+            let names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
             let mut infos = mongo_bucket_infos(&names);
-            infos.extend(names.into_iter().map(mongo_collection_info));
+            infos.extend(specs.into_iter().map(|spec| mongo_collection_info(spec.name, spec.kind)));
             Ok(infos)
         }
         PoolKind::Elasticsearch(client) => {
@@ -143,12 +226,17 @@ pub async fn list_collections_core(
                 .map(|n| CollectionInfo { name: n.clone(), id: n, dimension: None, kind: None, bucket_name: None })
                 .collect())
         }
-        PoolKind::VectorDb(client) => vector_driver::list_collections_with_db(&client, database).await,
+        PoolKind::VectorDb(client) => vector_driver::list_collections_with_db(client, database).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let names = sort_names(client.mongo_list_collections(database).await?);
             let mut infos = mongo_bucket_infos(&names);
-            infos.extend(names.into_iter().map(mongo_collection_info));
+            // Legacy agent returns names only; treat every entry as a plain collection.
+            infos.extend(
+                names
+                    .into_iter()
+                    .map(|name| mongo_collection_info(name, mongo_driver::MongoCollectionKind::Collection)),
+            );
             Ok(infos)
         }
         _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
@@ -160,11 +248,13 @@ pub async fn list_gridfs_files_core(
     connection_id: &str,
     database: &str,
     bucket: &str,
+    filter: Option<&str>,
+    sort: Option<&str>,
 ) -> Result<Vec<MongoGridFsFileInfo>, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
-        PoolKind::MongoDb(client) => mongo_driver::list_gridfs_files(client, database, bucket).await,
+        PoolKind::MongoDb(client) => mongo_driver::list_gridfs_files(client, database, bucket, filter, sort).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS file browsing".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
     }
@@ -174,6 +264,8 @@ pub async fn list_gridfs_buckets_core(
     state: &AppState,
     connection_id: &str,
     database: &str,
+    filter: Option<&str>,
+    sort: Option<&str>,
 ) -> Result<Vec<MongoGridFsBucketInfo>, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
@@ -185,7 +277,7 @@ pub async fn list_gridfs_buckets_core(
             for bucket_name in bucket_names {
                 buckets.push(mongo_driver::gridfs_bucket_summary(client, database, &bucket_name).await?);
             }
-            Ok(buckets)
+            filter_and_sort_gridfs_bucket_infos(buckets, filter, sort)
         }
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket browsing".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -285,12 +377,17 @@ pub async fn find_documents_core(
     filter: Option<&str>,
     projection: Option<&str>,
     sort: Option<&str>,
-) -> Result<MongoDocumentResult, String> {
+) -> Result<DocumentQueryResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            mongo_driver::find_documents(client, database, collection, skip, limit, filter, projection, sort).await
+            // Document browser responses must retain BSON type metadata so nested filters
+            // can round-trip ObjectId, Date, and int64 values through Extended JSON.
+            mongo_driver::find_documents_extended_json(
+                client, database, collection, skip, limit, filter, projection, sort,
+            )
+            .await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
@@ -300,8 +397,8 @@ pub async fn find_documents_core(
         PoolKind::VectorDb(client) => {
             let client = client.clone();
             drop(connections);
-            let _ = (database, filter, sort);
-            vector_driver::find_documents(&client, collection, skip, limit).await
+            let _ = (filter, sort);
+            vector_driver::find_documents(&client, database, collection, skip, limit).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -316,10 +413,39 @@ pub async fn find_documents_core(
             if let Some(projection) = projection {
                 params["projection"] = serde_json::json!(projection);
             }
-            client.mongo_find_documents(params).await
+            match client.mongo_find_documents_extended_json(params.clone()).await {
+                Ok(result) => Ok(result),
+                Err(error) if is_unknown_agent_method_error(&error, "find_documents_extended_json") => {
+                    client.mongo_find_documents(params).await
+                }
+                Err(error) => Err(error),
+            }
         }
         _ => Err("Not a MongoDB/Elasticsearch/vector connection".to_string()),
     }
+}
+
+pub async fn count_elasticsearch_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    filter: Option<&str>,
+) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            elasticsearch_driver::count_documents(&client, index, filter).await
+        }
+        _ => Err("Not an Elasticsearch connection".to_string()),
+    }
+}
+
+fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains(method) && (lower.contains("unknown method") || lower.contains("method not found"))
 }
 
 pub async fn insert_document_core(
@@ -328,6 +454,7 @@ pub async fn insert_document_core(
     database: &str,
     collection: &str,
     doc_json: &str,
+    routing: Option<&str>,
 ) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
@@ -336,7 +463,7 @@ pub async fn insert_document_core(
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
             drop(connections);
-            elasticsearch_driver::insert_document(&client, collection, doc_json).await
+            elasticsearch_driver::insert_document(&client, collection, doc_json, routing).await
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -420,7 +547,10 @@ pub async fn delete_document_core(
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_mongo_database, mongo_gridfs_bucket_names, mongo_list_databases_unauthorized, sort_names};
+    use super::{
+        fallback_mongo_database, filter_and_sort_gridfs_bucket_infos, mongo_gridfs_bucket_names,
+        mongo_list_databases_unauthorized, parse_gridfs_bucket_sort, sort_names, MongoGridFsBucketInfo,
+    };
 
     #[test]
     fn sorts_names_case_insensitively() {
@@ -463,5 +593,50 @@ mod tests {
         ]);
 
         assert_eq!(buckets, vec!["orders".to_string(), "reports".to_string()]);
+    }
+
+    #[test]
+    fn filters_gridfs_buckets_by_case_insensitive_name_match() {
+        let buckets = filter_and_sort_gridfs_bucket_infos(
+            vec![
+                MongoGridFsBucketInfo { name: "images".to_string(), file_count: 4, total_bytes: 512 },
+                MongoGridFsBucketInfo { name: "nightly-reports".to_string(), file_count: 9, total_bytes: 4096 },
+                MongoGridFsBucketInfo { name: "videos".to_string(), file_count: 2, total_bytes: 8192 },
+            ],
+            Some("REPORT"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            buckets.into_iter().map(|bucket| bucket.name).collect::<Vec<_>>(),
+            vec!["nightly-reports".to_string()]
+        );
+    }
+
+    #[test]
+    fn sorts_gridfs_buckets_by_total_bytes_descending() {
+        let buckets = filter_and_sort_gridfs_bucket_infos(
+            vec![
+                MongoGridFsBucketInfo { name: "images".to_string(), file_count: 4, total_bytes: 512 },
+                MongoGridFsBucketInfo { name: "nightly-reports".to_string(), file_count: 9, total_bytes: 4096 },
+                MongoGridFsBucketInfo { name: "videos".to_string(), file_count: 2, total_bytes: 8192 },
+            ],
+            None,
+            Some(r#"{"totalBytes":-1}"#),
+        )
+        .unwrap();
+
+        assert_eq!(
+            buckets.into_iter().map(|bucket| bucket.name).collect::<Vec<_>>(),
+            vec!["videos".to_string(), "nightly-reports".to_string(), "images".to_string()]
+        );
+    }
+
+    #[test]
+    fn gridfs_bucket_sort_rejects_unknown_fields() {
+        let error = parse_gridfs_bucket_sort(Some(r#"{"createdAt":-1}"#)).unwrap_err();
+
+        assert!(error.contains("Unsupported GridFS bucket sort field"));
     }
 }

@@ -53,8 +53,35 @@ test("unknown / empty commands are treated as non-mutating (no cache thrash)", (
 test("resolveRedisCommandSpec resolves subcommand then main", () => {
   const sub = resolveRedisCommandSpec(["XGROUP", "CREATE"]);
   assert.ok(sub);
-  assert.equal(sub?.safety, "confirm");
+  assert.equal(sub?.safety, "write");
   const main = resolveRedisCommandSpec(["GET"]);
   assert.ok(main);
   assert.equal(main?.group, "string");
+});
+
+test("resolveRedisCommandSpec resolves every OBJECT subcommand with Redis arity", () => {
+  const expectedArities = new Map([
+    ["ENCODING", 3],
+    ["FREQ", 3],
+    ["IDLETIME", 3],
+    ["REFCOUNT", 3],
+    ["HELP", 2],
+  ]);
+
+  for (const [subcommand, arity] of expectedArities) {
+    const spec = resolveRedisCommandSpec(["OBJECT", subcommand]);
+    assert.ok(spec, `OBJECT ${subcommand} should resolve`);
+    assert.equal(spec.arity, arity);
+    assert.equal(spec.group, "generic");
+  }
+
+  assert.equal(resolveRedisCommandSpec(["OBJECT", "UNKNOWN"]), undefined);
+});
+
+test("normal writes do not require confirmation but destructive commands do", () => {
+  assert.equal(resolveRedisCommandSpec(["SET"])?.safety, "write");
+  assert.equal(resolveRedisCommandSpec(["HSET"])?.safety, "write");
+  assert.equal(resolveRedisCommandSpec(["LPUSH"])?.safety, "write");
+  assert.equal(resolveRedisCommandSpec(["DEL"])?.safety, "confirm");
+  assert.equal(resolveRedisCommandSpec(["FLUSHDB"])?.safety, "confirm");
 });

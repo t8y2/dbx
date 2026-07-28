@@ -6,6 +6,7 @@ import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Lock, Loader2, ShieldCheck } from "@lucide/vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import { apiUrl } from "@/lib/common/webPath";
+import { translateBackendError } from "@/i18n/backend-errors";
 
 const props = withDefaults(
   defineProps<{
@@ -21,6 +22,21 @@ const password = ref("");
 const confirmPassword = ref("");
 const error = ref("");
 const loading = ref(false);
+
+// The auth routes report failures as `{"error": "..."}`, so unwrap that before
+// translating; anything else is treated as a plain-text message.
+async function readAuthError(res: Response): Promise<string> {
+  const text = (await res.text()).trim();
+  if (!text) return t("auth.loginFailed");
+  let message = text;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.error === "string") message = parsed.error;
+  } catch {
+    // not JSON — fall through with the raw body
+  }
+  return translateBackendError(t, message) || t("auth.loginFailed");
+}
 
 async function submit() {
   if (props.setupMode && password.value !== confirmPassword.value) {
@@ -40,8 +56,7 @@ async function submit() {
     if (res.ok) {
       emit("authenticated");
     } else {
-      const text = await res.text();
-      error.value = text || t("auth.loginFailed");
+      error.value = await readAuthError(res);
     }
   } catch (e: any) {
     error.value = e?.message || t("auth.connectFailed");

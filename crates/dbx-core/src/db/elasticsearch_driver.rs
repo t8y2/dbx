@@ -1,13 +1,13 @@
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-use reqwest::Client as HttpClient;
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
+use reqwest::{Client as HttpClient, Method, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::time::Duration;
 
 use super::{http_client_builder, with_connection_timeout};
-use crate::db::mongo_driver::MongoDocumentResult;
+use crate::db::document_result::DocumentQueryResult;
 
 const ELASTICSEARCH_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -30,11 +30,25 @@ const ELASTICSEARCH_PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
 const ELASTICSEARCH_QUERY_VALUE_ENCODE_SET: &AsciiSet =
     &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'%').add(b'&').add(b'+').add(b'/').add(b'=').add(b'?');
 
+const KIBANA_PROXY_STATUS_HEADER: &str = "x-console-proxy-status-code";
+const ELASTICSEARCH_REST_TABLE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+const ELASTICSEARCH_REST_TABLE_MAX_ROWS: usize = 2_000;
+const ELASTICSEARCH_REST_TABLE_MAX_CELLS: usize = 200_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElasticsearchTransportMode {
+    Direct,
+    KibanaProxy,
+}
+
 pub struct EsClient {
     http: HttpClient,
     base_url: String,
     fallback_base_urls: Vec<String>,
     auth: Option<(String, String)>,
+    transport_mode: ElasticsearchTransportMode,
+    /// GET path used for connect / health / test (default "/").
+    connectivity_check_path: String,
 }
 
 impl EsClient {
@@ -45,6 +59,26 @@ impl EsClient {
         accept_invalid_certs: bool,
         timeout: Duration,
     ) -> Self {
+        Self::new_with_mode(
+            url,
+            username,
+            password,
+            accept_invalid_certs,
+            timeout,
+            ElasticsearchTransportMode::Direct,
+            "/".to_string(),
+        )
+    }
+
+    fn new_with_mode(
+        url: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+        accept_invalid_certs: bool,
+        timeout: Duration,
+        transport_mode: ElasticsearchTransportMode,
+        connectivity_check_path: String,
+    ) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = match (username, password) {
             (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
@@ -53,7 +87,7 @@ impl EsClient {
         let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
         let http = builder.build().unwrap_or_else(|_| HttpClient::new());
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self { http, base_url, fallback_base_urls, auth }
+        Self { http, base_url, fallback_base_urls, auth, transport_mode, connectivity_check_path }
     }
 
     pub fn from_config(
@@ -62,28 +96,53 @@ impl EsClient {
         password: Option<&str>,
         tls_enabled: bool,
         url_params: Option<&str>,
+        external_config: Option<&Value>,
         timeout: Duration,
     ) -> Self {
-        Self::new(url, username, password, elasticsearch_accept_invalid_certs(tls_enabled, url_params), timeout)
+        let kibana_base_path = elasticsearch_kibana_base_path(external_config);
+        let transport_mode = if kibana_base_path.is_some() {
+            ElasticsearchTransportMode::KibanaProxy
+        } else {
+            ElasticsearchTransportMode::Direct
+        };
+        let base_url = format!("{}{}", url.trim_end_matches('/'), kibana_base_path.as_deref().unwrap_or(""));
+        let connectivity_check_path = elasticsearch_connectivity_check_path(external_config);
+        Self::new_with_mode(
+            &base_url,
+            username,
+            password,
+            elasticsearch_accept_invalid_certs(tls_enabled, url_params),
+            timeout,
+            transport_mode,
+            connectivity_check_path,
+        )
     }
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.get(format!("{}{}", self.base_url, path));
-        self.with_auth(req)
+        self.request(Method::GET, path)
     }
 
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.post(format!("{}{}", self.base_url, path));
-        self.with_auth(req)
+        self.request(Method::POST, path)
     }
 
     fn put(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.put(format!("{}{}", self.base_url, path));
-        self.with_auth(req)
+        self.request(Method::PUT, path)
     }
 
     fn delete(&self, path: &str) -> reqwest::RequestBuilder {
-        let req = self.http.delete(format!("{}{}", self.base_url, path));
+        self.request(Method::DELETE, path)
+    }
+
+    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        let req = match self.transport_mode {
+            ElasticsearchTransportMode::Direct => self.http.request(method, format!("{}{}", self.base_url, path)),
+            ElasticsearchTransportMode::KibanaProxy => self
+                .http
+                .post(format!("{}/api/console/proxy", self.base_url))
+                .query(&[("path", path), ("method", method.as_str())])
+                .header("kbn-xsrf", "true"),
+        };
         self.with_auth(req)
     }
 
@@ -94,6 +153,21 @@ impl EsClient {
             req
         }
     }
+
+    fn response_status(&self, response: &reqwest::Response) -> StatusCode {
+        if self.transport_mode == ElasticsearchTransportMode::KibanaProxy {
+            if let Some(status) = response
+                .headers()
+                .get(KIBANA_PROXY_STATUS_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u16>().ok())
+                .and_then(|value| StatusCode::from_u16(value).ok())
+            {
+                return status;
+            }
+        }
+        response.status()
+    }
 }
 
 impl Clone for EsClient {
@@ -103,21 +177,69 @@ impl Clone for EsClient {
             base_url: self.base_url.clone(),
             fallback_base_urls: self.fallback_base_urls.clone(),
             auth: self.auth.clone(),
+            transport_mode: self.transport_mode,
+            connectivity_check_path: self.connectivity_check_path.clone(),
         }
+    }
+}
+
+fn elasticsearch_kibana_base_path(external_config: Option<&Value>) -> Option<String> {
+    let config = external_config?.as_object()?;
+    let mode = config.get("mode").and_then(Value::as_str)?;
+    if !mode.eq_ignore_ascii_case("kibana") {
+        return None;
+    }
+
+    let base_path = config.get("kibanaBasePath").and_then(Value::as_str).unwrap_or("").trim().trim_matches('/');
+    Some(if base_path.is_empty() { String::new() } else { format!("/{base_path}") })
+}
+
+/// Path used for connectivity checks (test / open / health). Defaults to `/`.
+/// Accepts bare paths (`my-index/_search`) or a single-line `GET path` paste.
+pub fn elasticsearch_connectivity_check_path(external_config: Option<&Value>) -> String {
+    let raw = external_config
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("connectivityCheckPath"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if raw.is_empty() {
+        return "/".to_string();
+    }
+
+    // First line only — ignore accidental body lines from console paste.
+    let line = raw.lines().next().unwrap_or("").trim();
+    let without_method = line
+        .strip_prefix("GET ")
+        .or_else(|| line.strip_prefix("get "))
+        .or_else(|| line.strip_prefix("Get "))
+        .unwrap_or(line)
+        .trim();
+    if without_method.is_empty() || without_method == "/" {
+        return "/".to_string();
+    }
+
+    if without_method.starts_with('/') {
+        without_method.to_string()
+    } else {
+        format!("/{without_method}")
     }
 }
 
 pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result<(), String> {
     let mut errors = Vec::new();
     let urls = std::iter::once(client.base_url.clone()).chain(client.fallback_base_urls.clone());
+    let check_path = client.connectivity_check_path.clone();
 
     for base_url in urls {
         client.base_url = base_url.clone();
+        let path = check_path.clone();
         let resp = with_connection_timeout("Elasticsearch", timeout, async {
-            client.get("/").send().await.map_err(|e| {
+            client.get(&path).send().await.map_err(|e| {
                 format!(
-                    "Elasticsearch connection failed for {}: {}",
+                    "Elasticsearch connection failed for {} ({}): {}",
                     redact_elasticsearch_url(&base_url),
+                    path,
                     format_reqwest_error(&e)
                 )
             })
@@ -132,10 +254,10 @@ pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result
             }
         };
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = client.response_status(&resp);
+        if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Elasticsearch error ({status}): {body}"));
+            return Err(format!("Elasticsearch error ({status}) for {check_path}: {body}"));
         }
         return Ok(());
     }
@@ -198,6 +320,16 @@ fn elasticsearch_query_value(value: &str) -> String {
 
 fn elasticsearch_document_path(index: &str, id: &str, routing: Option<&str>) -> String {
     let base = format!("/{}/_doc/{}", elasticsearch_path_segment(index), elasticsearch_path_segment(id));
+    elasticsearch_path_with_routing_refresh(base, routing)
+}
+
+/// Auto-id index path: `POST /{index}/_doc` with optional custom routing.
+fn elasticsearch_auto_id_document_path(index: &str, routing: Option<&str>) -> String {
+    let base = format!("/{}/_doc", elasticsearch_path_segment(index));
+    elasticsearch_path_with_routing_refresh(base, routing)
+}
+
+fn elasticsearch_path_with_routing_refresh(base: String, routing: Option<&str>) -> String {
     if let Some(routing) = routing.map(str::trim).filter(|value| !value.is_empty()) {
         format!("{base}?routing={}&refresh=true", elasticsearch_query_value(routing))
     } else {
@@ -242,7 +374,7 @@ pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
         .send()
         .await
         .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -255,7 +387,7 @@ pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
 pub async fn get_columns(client: &EsClient, index: &str) -> Result<Vec<crate::db::ColumnInfo>, String> {
     let path = elasticsearch_index_path(index, "_mapping");
     let resp = client.get(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -333,12 +465,20 @@ fn push_mapping_column(
         numeric_precision: None,
         numeric_scale: None,
         character_maximum_length: None,
+        enum_values: None,
+        ..Default::default()
     });
 }
 
 #[derive(Deserialize)]
 struct SearchResponse {
     hits: SearchHits,
+    #[serde(rename = "_shards")]
+    shards: Option<ElasticsearchShards>,
+    #[serde(default)]
+    timed_out: bool,
+    #[serde(default)]
+    terminated_early: bool,
 }
 
 #[derive(Deserialize)]
@@ -349,13 +489,20 @@ struct SearchHits {
 
 enum HitsTotal {
     Count(u64),
-    Value { value: u64 },
+    Value { value: u64, is_exact: bool },
 }
 
 impl HitsTotal {
     fn value(&self) -> u64 {
         match self {
-            Self::Count(value) | Self::Value { value } => *value,
+            Self::Count(value) | Self::Value { value, .. } => *value,
+        }
+    }
+
+    fn is_exact(&self) -> bool {
+        match self {
+            Self::Count(_) => true,
+            Self::Value { is_exact, .. } => *is_exact,
         }
     }
 }
@@ -370,7 +517,10 @@ impl<'de> Deserialize<'de> for HitsTotal {
             return Ok(Self::Count(count));
         }
         if let Some(count) = value.get("value").and_then(serde_json::Value::as_u64) {
-            return Ok(Self::Value { value: count });
+            // Object totals are exact only when Elasticsearch explicitly says
+            // so. Treat an absent or unknown relation conservatively.
+            let is_exact = value.get("relation").and_then(serde_json::Value::as_str) == Some("eq");
+            return Ok(Self::Value { value: count, is_exact });
         }
         Err(serde::de::Error::custom("expected hits.total as a number or an object with value"))
     }
@@ -393,19 +543,74 @@ pub async fn find_documents(
     limit: i64,
     filter: Option<&str>,
     sort: Option<&str>,
-) -> Result<MongoDocumentResult, String> {
+) -> Result<DocumentQueryResult, String> {
     let body = build_find_documents_body(skip, limit, filter, sort)?;
 
     let path = elasticsearch_index_path(index, "_search");
     let resp = client.post(&path).json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
 
     let result: SearchResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
 
+    search_response_to_document_result(result)
+}
+
+#[derive(Deserialize)]
+struct CountResponse {
+    count: u64,
+    #[serde(rename = "_shards")]
+    shards: ElasticsearchShards,
+}
+
+#[derive(Deserialize)]
+struct ElasticsearchShards {
+    total: u64,
+    successful: u64,
+    #[serde(default)]
+    skipped: u64,
+    failed: u64,
+}
+
+impl ElasticsearchShards {
+    fn is_complete(&self) -> bool {
+        // Elasticsearch only skips shards that cannot match, so successful and
+        // skipped shards together must account for every requested shard.
+        self.failed == 0 && self.successful.checked_add(self.skipped) == Some(self.total)
+    }
+}
+
+pub async fn count_documents(client: &EsClient, index: &str, filter: Option<&str>) -> Result<u64, String> {
+    let body = build_count_documents_body(filter)?;
+    let path = elasticsearch_index_path(index, "_count");
+    let resp = client.post(&path).json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+
+    let result: CountResponse = resp.json().await.map_err(|e| format!("Elasticsearch count parse error: {e}"))?;
+    if !result.shards.is_complete() {
+        return Err(format!(
+            "Elasticsearch count returned an incomplete shard response: {} successful, {} skipped, {} failed of {} shards",
+            result.shards.successful, result.shards.skipped, result.shards.failed, result.shards.total,
+        ));
+    }
+    Ok(result.count)
+}
+
+fn search_response_to_document_result(result: SearchResponse) -> Result<DocumentQueryResult, String> {
+    // A 200 search response can still omit failed shards. Only expose an
+    // exact total when both the total relation and shard metadata agree.
+    let total_is_exact = !result.timed_out
+        && !result.terminated_early
+        && result.hits.total.is_exact()
+        && result.shards.as_ref().is_some_and(ElasticsearchShards::is_complete);
+    let total = result.hits.total.value();
     let documents: Vec<serde_json::Value> = result
         .hits
         .hits
@@ -423,7 +628,22 @@ pub async fn find_documents(
         })
         .collect();
 
-    Ok(MongoDocumentResult { documents, total: result.hits.total.value() })
+    // Keep the exact JSON numeric tokens alongside the compatibility value tree.
+    // Desktop IPC and browser JSON parsing otherwise coerce ES long values through
+    // JavaScript Number before the document editor can serialize them again.
+    let raw_documents = documents
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Elasticsearch document serialization failed: {e}"))?;
+
+    Ok(DocumentQueryResult {
+        documents,
+        raw_documents: Some(raw_documents),
+        extended_documents: None,
+        total,
+        total_is_exact,
+    })
 }
 
 fn build_find_documents_body(
@@ -441,6 +661,14 @@ fn build_find_documents_body(
     }
 
     body.insert("sort".to_string(), elasticsearch_sort_from_document_sort(sort)?);
+    Ok(serde_json::Value::Object(body))
+}
+
+fn build_count_documents_body(filter: Option<&str>) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::Map::new();
+    if let Some(query) = elasticsearch_query_from_document_filter(filter)? {
+        body.insert("query".to_string(), query);
+    }
     Ok(serde_json::Value::Object(body))
 }
 
@@ -470,6 +698,12 @@ fn translate_document_filter_value(value: &serde_json::Value) -> Result<Option<s
                 if !should.is_empty() {
                     must.push(serde_json::json!({ "bool": { "should": should, "minimum_should_match": 1 } }));
                 }
+            }
+            "$esQuery" => {
+                if !value.is_object() {
+                    return Err("$esQuery must be an object".to_string());
+                }
+                must.push(value.clone());
             }
             key if key.starts_with('$') => {
                 return Err(format!("Unsupported Elasticsearch filter operator: {key}"));
@@ -640,13 +874,19 @@ fn elasticsearch_sort_from_document_sort(sort: Option<&str>) -> Result<serde_jso
     Ok(serde_json::Value::Array(items))
 }
 
-pub async fn insert_document(client: &EsClient, index: &str, doc_json: &str) -> Result<String, String> {
-    let doc = elasticsearch_document_body_from_json(doc_json)?;
+pub async fn insert_document(
+    client: &EsClient,
+    index: &str,
+    doc_json: &str,
+    routing: Option<&str>,
+) -> Result<String, String> {
+    // Prefer explicit routing arg; fall back to body metadata for backward compatibility.
+    let (doc, routing) = elasticsearch_document_body_and_routing_from_json(doc_json, routing)?;
 
-    let path = elasticsearch_index_path(index, "_doc?refresh=true");
+    let path = elasticsearch_auto_id_document_path(index, routing.as_deref());
     let resp = client.post(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -667,16 +907,12 @@ pub async fn update_document(
     let path = elasticsearch_document_path(index, id, routing.as_deref());
     let resp = client.put(&path).json(&doc).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
 
     Ok(1)
-}
-
-fn elasticsearch_document_body_from_json(doc_json: &str) -> Result<serde_json::Value, String> {
-    elasticsearch_document_body_and_routing_from_json(doc_json, None).map(|(doc, _)| doc)
 }
 
 fn elasticsearch_document_body_and_routing_from_json(
@@ -709,7 +945,7 @@ pub async fn delete_document(client: &EsClient, index: &str, id: &str, routing: 
     let path = elasticsearch_document_path(index, id, routing);
     let resp = client.delete(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    if !resp.status().is_success() {
+    if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
@@ -717,9 +953,178 @@ pub async fn delete_document(client: &EsClient, index: &str, id: &str, routing: 
     Ok(1)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElasticsearchRestBodyKind {
+    Json,
+    Ndjson,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ElasticsearchRestRequest {
+    method: Method,
+    path: String,
+    body: Option<String>,
+    body_kind: ElasticsearchRestBodyKind,
+}
+
+fn strip_leading_elasticsearch_comments(input: &str) -> &str {
+    let mut rest = input;
+    loop {
+        rest = rest.trim_start();
+        if let Some(comment) = rest.strip_prefix('#').or_else(|| rest.strip_prefix("//")) {
+            rest = comment.split_once('\n').map_or("", |(_, remaining)| remaining);
+            continue;
+        }
+        if let Some(comment) = rest.strip_prefix("/*") {
+            rest = comment.split_once("*/").map_or("", |(_, remaining)| remaining);
+            continue;
+        }
+        return rest.trim();
+    }
+}
+
+fn is_elasticsearch_ndjson_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    path == "/_bulk"
+        || path.ends_with("/_bulk")
+        || path == "/_msearch"
+        || path.ends_with("/_msearch")
+        || path == "/_msearch/template"
+        || path.ends_with("/_msearch/template")
+}
+
+fn is_elasticsearch_cat_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    path == "/_cat" || path.starts_with("/_cat/")
+}
+
+fn elasticsearch_query_parameter(path: &str, name: &str) -> Option<String> {
+    let query = path.split_once('?')?.1;
+    query.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        let key = percent_decode_str(key).decode_utf8_lossy();
+        if key.eq_ignore_ascii_case(name) {
+            Some(percent_decode_str(value).decode_utf8_lossy().into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+fn add_default_cat_json_format(mut request: ElasticsearchRestRequest) -> ElasticsearchRestRequest {
+    if is_elasticsearch_cat_path(&request.path) && elasticsearch_query_parameter(&request.path, "format").is_none() {
+        request.path.push(if request.path.contains('?') { '&' } else { '?' });
+        request.path.push_str("format=json");
+    }
+    request
+}
+
+fn normalize_elasticsearch_rest_path(path: &str) -> String {
+    let (path_part, query) = path.split_once('?').map_or((path, None), |(path, query)| (path, Some(query)));
+    let mut normalized = String::with_capacity(path.len());
+    let mut chars = path_part.chars().peekable();
+    let mut in_date_math = false;
+
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            let mut lookahead = chars.clone();
+            if let (Some(first), Some(second)) = (lookahead.next(), lookahead.next()) {
+                if first.is_ascii_hexdigit() && second.is_ascii_hexdigit() {
+                    normalized.push(ch);
+                    normalized.push(chars.next().unwrap());
+                    normalized.push(chars.next().unwrap());
+                    continue;
+                }
+            }
+        }
+
+        if ch == '<' {
+            in_date_math = true;
+        }
+        let encoded = if in_date_math {
+            match ch {
+                '<' => Some("%3C"),
+                '>' => Some("%3E"),
+                '/' => Some("%2F"),
+                '{' => Some("%7B"),
+                '}' => Some("%7D"),
+                '|' => Some("%7C"),
+                '+' => Some("%2B"),
+                ':' => Some("%3A"),
+                ',' => Some("%2C"),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(encoded) = encoded {
+            normalized.push_str(encoded);
+        } else {
+            normalized.push(ch);
+        }
+        if ch == '>' {
+            in_date_math = false;
+        }
+    }
+
+    if let Some(query) = query {
+        normalized.push('?');
+        normalized.push_str(query);
+    }
+    normalized
+}
+
+fn parse_elasticsearch_rest_request(input: &str) -> Result<ElasticsearchRestRequest, String> {
+    let input = strip_leading_elasticsearch_comments(input);
+    if input.is_empty() {
+        return Err("Invalid query: expected METHOD /path".to_string());
+    }
+
+    let (request_line, body) = input.split_once('\n').map_or((input, None), |(line, body)| {
+        let body = body.trim();
+        (line, (!body.is_empty()).then(|| body.to_string()))
+    });
+    let (method, path) =
+        request_line.trim().split_once(char::is_whitespace).ok_or("Invalid query: expected METHOD /path")?;
+    let method = method.to_ascii_uppercase();
+    let method = Method::from_bytes(method.as_bytes())
+        .map_err(|_| format!("Unsupported HTTP method: {method}. Use GET, POST, PUT, DELETE, or HEAD."))?;
+    if !matches!(method, Method::GET | Method::POST | Method::PUT | Method::DELETE | Method::HEAD) {
+        return Err(format!("Unsupported HTTP method: {}. Use GET, POST, PUT, DELETE, or HEAD.", method.as_str()));
+    }
+
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("Invalid query: expected METHOD /path".to_string());
+    }
+    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    let path = normalize_elasticsearch_rest_path(&path);
+    let body_kind = if is_elasticsearch_ndjson_path(&path) {
+        ElasticsearchRestBodyKind::Ndjson
+    } else {
+        ElasticsearchRestBodyKind::Json
+    };
+
+    Ok(ElasticsearchRestRequest { method, path, body, body_kind })
+}
+
+fn validate_elasticsearch_ndjson(body: &str) -> Result<String, String> {
+    for (index, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        serde_json::from_str::<serde_json::Value>(line)
+            .map_err(|error| format!("Invalid NDJSON body at line {}: {error}", index + 1))?;
+    }
+    let mut normalized = body.trim_end().to_string();
+    normalized.push('\n');
+    Ok(normalized)
+}
+
 pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate::types::QueryResult, String> {
     let start = std::time::Instant::now();
-    let input = input.trim();
+    let input = strip_leading_elasticsearch_comments(input);
 
     if let Some(search_query) = parse_select_star_search_query(input) {
         return execute_search_query(client, search_query, start).await;
@@ -747,56 +1152,28 @@ pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<crate:
         return execute_sql_query(client, input, start).await;
     }
 
-    let (method, rest) = input.split_once(char::is_whitespace).ok_or("Invalid query: expected METHOD /path")?;
-    let method = method.to_uppercase();
-
-    let (path, body) = if let Some(pos) = rest.find('\n') {
-        let p = rest[..pos].trim();
-        let b = rest[pos + 1..].trim();
-        (p, if b.is_empty() { None } else { Some(b) })
-    } else {
-        (rest.trim(), None)
-    };
-
-    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
-
-    let resp = match method.as_str() {
-        "GET" => {
-            let req = client.get(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
+    // CAT APIs default to text, so request JSON for an unformatted CAT call.
+    // The frontend renders the returned HTTP body in its JSON response panel.
+    let request = add_default_cat_json_format(parse_elasticsearch_rest_request(input)?);
+    let mut builder = client.request(request.method, &request.path);
+    if let Some(body) = request.body {
+        builder = match request.body_kind {
+            ElasticsearchRestBodyKind::Json => {
+                let json: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|e| format!("Invalid JSON body: {e}"))?;
+                builder.json(&json)
             }
-        }
-        "POST" => {
-            let req = client.post(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
-            }
-        }
-        "PUT" => {
-            let req = client.put(&path);
-            if let Some(b) = body {
-                let json: serde_json::Value = serde_json::from_str(b).map_err(|e| format!("Invalid JSON body: {e}"))?;
-                req.json(&json).send().await
-            } else {
-                req.send().await
-            }
-        }
-        "DELETE" => client.delete(&path).send().await,
-        _ => return Err(format!("Unsupported HTTP method: {method}. Use GET, POST, PUT, or DELETE.")),
+            ElasticsearchRestBodyKind::Ndjson => builder
+                .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
+                .body(validate_elasticsearch_ndjson(&body)?),
+        };
     }
-    .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let resp = builder.send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
 
-    let status = resp.status().as_u16();
-    let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+    let status = client.response_status(&resp).as_u16();
+    let body = resp.text().await.map_err(|e| format!("Elasticsearch response read failed: {e}"))?;
 
-    parse_elasticsearch_response(status, body, start)
+    parse_elasticsearch_rest_response(status, &body, start)
 }
 
 // Size to use when `SELECT *` is run without an explicit LIMIT — large enough
@@ -825,7 +1202,7 @@ async fn execute_search_query(
     let path = elasticsearch_index_path(&query.index, "_search");
     let resp =
         client.post(&path).json(&query.body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    let status = resp.status().as_u16();
+    let status = client.response_status(&resp).as_u16();
     let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
     // Capture the index's true match total before the body is consumed by the
     // parser — needed below when we report total instead of rows.len().
@@ -842,73 +1219,11 @@ async fn execute_search_query(
 
 fn parse_elasticsearch_response(
     status: u16,
-    body: serde_json::Value,
+    mut body: serde_json::Value,
     start: std::time::Instant,
 ) -> Result<crate::types::QueryResult, String> {
     if let Some(result) = parse_sql_response(&body, start) {
         Ok(result)
-    } else if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()) {
-        // Treat any `_search`-shaped body as the hits result, even when empty —
-        // a 0-row match is a valid empty result, not a reason to fall back to
-        // the raw-JSON status/response view.
-        let mut all_keys = Vec::<String>::new();
-        let docs: Vec<serde_json::Map<String, serde_json::Value>> = hits
-            .iter()
-            .map(|hit| {
-                let mut row = serde_json::Map::new();
-                if let Some(source) = hit.get("_source").and_then(|s| s.as_object()) {
-                    for (k, v) in source {
-                        row.insert(k.clone(), v.clone());
-                    }
-                }
-                row.insert("_id".to_string(), hit.get("_id").cloned().unwrap_or(serde_json::Value::Null));
-                if let Some(routing) = hit.get("_routing") {
-                    row.insert("_routing".to_string(), routing.clone());
-                }
-                for k in row.keys() {
-                    if !all_keys.contains(k) {
-                        all_keys.push(k.clone());
-                    }
-                }
-                row
-            })
-            .collect();
-        if all_keys.is_empty() {
-            // 0 hits → there's no doc to derive columns from; surface `_id`
-            // so the grid at least shows a column header for the empty set.
-            all_keys.push("_id".to_string());
-        }
-
-        let rows: Vec<Vec<serde_json::Value>> = docs
-            .iter()
-            .map(|doc| {
-                all_keys
-                    .iter()
-                    .map(|k| {
-                        doc.get(k)
-                            .map(|v| match v {
-                                serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
-                                other => serde_json::Value::String(other.to_string()),
-                            })
-                            .unwrap_or(serde_json::Value::Null)
-                    })
-                    .collect()
-            })
-            .collect();
-
-        let row_count = rows.len() as u64;
-
-        Ok(crate::types::QueryResult {
-            columns: all_keys,
-            column_types: Vec::new(),
-            column_sortables: vec![],
-            rows,
-            affected_rows: row_count,
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
-        })
     } else if let Some(aggs) = body.get("aggregations").or_else(|| body.get("aggs")).and_then(|v| v.as_object()) {
         let (columns, rows) = parse_aggregations(aggs);
         if !columns.is_empty() {
@@ -923,35 +1238,254 @@ fn parse_elasticsearch_response(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             })
         } else {
-            let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
-            Ok(crate::types::QueryResult {
-                columns: vec!["status".to_string(), "response".to_string()],
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
-                affected_rows: 0,
-                execution_time_ms: start.elapsed().as_millis(),
-                truncated: false,
-                session_id: None,
-                has_more: false,
-            })
+            Ok(json_response_result(status, &body, start))
         }
-    } else {
-        let pretty = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
+    } else if let Some(hits) = body.pointer_mut("/hits/hits").and_then(serde_json::Value::as_array_mut) {
+        // Treat any `_search`-shaped body as the hits result, even when empty —
+        // a 0-row match is a valid empty result, not a reason to fall back to
+        // the raw-JSON status/response view.
+        let hits = std::mem::take(hits);
+        let (columns, column_types, rows) = parse_elasticsearch_search_hits(hits);
+        let row_count = rows.len() as u64;
+
         Ok(crate::types::QueryResult {
-            columns: vec!["status".to_string(), "response".to_string()],
-            column_types: Vec::new(),
+            columns,
+            column_types,
             column_sortables: vec![],
-            rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(pretty)]],
-            affected_rows: 0,
+            rows,
+            affected_rows: row_count,
             execution_time_ms: start.elapsed().as_millis(),
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
+    } else {
+        Ok(json_response_result(status, &body, start))
     }
+}
+
+fn parse_elasticsearch_search_hits(
+    hits: Vec<serde_json::Value>,
+) -> (Vec<String>, Vec<String>, Vec<Vec<serde_json::Value>>) {
+    let mut columns = Vec::<String>::new();
+    let mut column_indexes = HashMap::<String, usize>::new();
+    let mut json_column_indexes = HashSet::<usize>::new();
+    let mut rows = Vec::<Vec<serde_json::Value>>::with_capacity(hits.len());
+
+    for mut hit in hits {
+        let mut row = vec![serde_json::Value::Null; columns.len()];
+        if let Some(source) = hit.get_mut("_source").and_then(serde_json::Value::as_object_mut) {
+            for (key, value) in std::mem::take(source) {
+                append_elasticsearch_json_cell(
+                    &mut columns,
+                    &mut column_indexes,
+                    &mut json_column_indexes,
+                    &mut rows,
+                    &mut row,
+                    key,
+                    value,
+                );
+            }
+        }
+        let id = hit.get_mut("_id").map(serde_json::Value::take).unwrap_or(serde_json::Value::Null);
+        append_elasticsearch_json_cell(
+            &mut columns,
+            &mut column_indexes,
+            &mut json_column_indexes,
+            &mut rows,
+            &mut row,
+            "_id".to_string(),
+            id,
+        );
+        if let Some(routing) = hit.get_mut("_routing") {
+            append_elasticsearch_json_cell(
+                &mut columns,
+                &mut column_indexes,
+                &mut json_column_indexes,
+                &mut rows,
+                &mut row,
+                "_routing".to_string(),
+                routing.take(),
+            );
+        }
+        rows.push(row);
+    }
+
+    if columns.is_empty() {
+        columns.push("_id".to_string());
+    }
+    let column_types = infer_elasticsearch_json_column_types(&rows, columns.len(), &json_column_indexes);
+    (columns, column_types, rows)
+}
+
+fn append_elasticsearch_json_cell(
+    columns: &mut Vec<String>,
+    column_indexes: &mut HashMap<String, usize>,
+    json_column_indexes: &mut HashSet<usize>,
+    previous_rows: &mut [Vec<serde_json::Value>],
+    row: &mut Vec<serde_json::Value>,
+    column: String,
+    value: serde_json::Value,
+) {
+    let is_json_cell = matches!(value, serde_json::Value::Array(_) | serde_json::Value::Object(_));
+    let value = if is_json_cell { serde_json::Value::String(value.to_string()) } else { value };
+    if let Some(index) = column_indexes.get(&column).copied() {
+        if is_json_cell {
+            json_column_indexes.insert(index);
+        }
+        row[index] = value;
+        return;
+    }
+
+    let index = columns.len();
+    if is_json_cell {
+        json_column_indexes.insert(index);
+    }
+    column_indexes.insert(column.clone(), index);
+    columns.push(column);
+    for previous_row in previous_rows {
+        previous_row.push(serde_json::Value::Null);
+    }
+    row.push(value);
+}
+
+fn infer_elasticsearch_json_column_types(
+    rows: &[Vec<serde_json::Value>],
+    column_count: usize,
+    json_column_indexes: &HashSet<usize>,
+) -> Vec<String> {
+    (0..column_count)
+        .map(|column_index| {
+            if json_column_indexes.contains(&column_index) {
+                return "json".to_string();
+            }
+            let mut inferred = None;
+            for value in rows.iter().filter_map(|row| row.get(column_index)) {
+                let value_type = match value {
+                    serde_json::Value::Null => continue,
+                    serde_json::Value::Bool(_) => "boolean",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "text",
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => "json",
+                };
+                inferred = match inferred {
+                    None => Some(value_type),
+                    Some(existing) if existing == value_type => Some(existing),
+                    Some(_) => Some("json"),
+                };
+                if inferred == Some("json") {
+                    break;
+                }
+            }
+            inferred.unwrap_or("unknown").to_string()
+        })
+        .collect()
+}
+
+fn elasticsearch_rest_search_exceeds_table_limits(body: &serde_json::Value) -> bool {
+    let Some(hits) = body.pointer("/hits/hits").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if hits.len() > ELASTICSEARCH_REST_TABLE_MAX_ROWS {
+        return true;
+    }
+
+    let mut columns = HashSet::<&str>::new();
+    columns.insert("_id");
+    for hit in hits {
+        if hit.get("_routing").is_some() {
+            columns.insert("_routing");
+        }
+        if let Some(source) = hit.get("_source").and_then(serde_json::Value::as_object) {
+            columns.extend(source.keys().map(String::as_str));
+        }
+        if hits.len().saturating_mul(columns.len()) > ELASTICSEARCH_REST_TABLE_MAX_CELLS {
+            return true;
+        }
+    }
+    false
+}
+
+fn json_response_result(status: u16, body: &serde_json::Value, start: std::time::Instant) -> crate::types::QueryResult {
+    let body_text = serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string());
+    raw_json_response_result(status, body_text, start)
+}
+
+fn raw_json_response_result(
+    status: u16,
+    body_text: impl Into<String>,
+    start: std::time::Instant,
+) -> crate::types::QueryResult {
+    crate::types::QueryResult {
+        columns: vec!["status".to_string(), "response".to_string()],
+        column_types: Vec::new(),
+        column_sortables: vec![],
+        rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(body_text.into())]],
+        affected_rows: 0,
+        execution_time_ms: start.elapsed().as_millis(),
+        truncated: false,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+    }
+}
+
+fn parse_elasticsearch_rest_response(
+    status: u16,
+    body_text: &str,
+    start: std::time::Instant,
+) -> Result<crate::types::QueryResult, String> {
+    if body_text.trim().is_empty() {
+        return Ok(json_response_result(status, &serde_json::Value::Null, start));
+    }
+
+    if status >= 400 {
+        return Ok(raw_json_response_result(status, body_text, start));
+    }
+
+    if body_text.len() > ELASTICSEARCH_REST_TABLE_MAX_BODY_BYTES {
+        return Ok(raw_json_response_result(status, body_text, start));
+    }
+
+    if let Ok(body) = serde_json::from_str::<serde_json::Value>(body_text) {
+        if elasticsearch_rest_search_exceeds_table_limits(&body) {
+            return Ok(raw_json_response_result(status, body_text, start));
+        }
+        // Prefer a tabular view for search hits (_source columns), SQL API
+        // responses, and aggregations so the desktop data grid can display and
+        // copy rows like relational results. Other JSON (mapping, cluster
+        // info, …) stays as a lossless status/response panel with the raw body.
+        let mut result = parse_elasticsearch_response(status, body, start)?;
+        if result.columns == ["status".to_string(), "response".to_string()] {
+            return Ok(raw_json_response_result(status, body_text, start));
+        }
+        // Attach the raw response body so the UI can toggle between the
+        // table and the original JSON for Elasticsearch REST results.
+        result.elasticsearch_raw_body = Some(body_text.to_string());
+        return Ok(result);
+    }
+
+    // CAT APIs default to text/plain for human-readable output. Keep those
+    // responses visible instead of dropping them when JSON parsing is not valid.
+    let rows: Vec<Vec<serde_json::Value>> =
+        body_text.lines().map(|line| vec![serde_json::Value::String(line.to_string())]).collect();
+    let affected_rows = rows.len() as u64;
+    Ok(crate::types::QueryResult {
+        columns: vec!["response".to_string()],
+        column_types: Vec::new(),
+        column_sortables: vec![],
+        rows,
+        affected_rows,
+        execution_time_ms: start.elapsed().as_millis(),
+        truncated: false,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+    })
 }
 
 fn parse_select_star_search_query(input: &str) -> Option<ElasticsearchSearchQuery> {
@@ -1064,7 +1598,7 @@ async fn execute_translated_select_star(
         .send()
         .await
         .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    let status = resp.status().as_u16();
+    let status = client.response_status(&resp).as_u16();
     let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
     let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
 
@@ -1086,7 +1620,7 @@ async fn execute_sql_query(
     let body = serde_json::json!({ "query": query });
     let resp =
         client.post("/_sql").json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    let status = resp.status();
+    let status = client.response_status(&resp);
     let response_body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
 
     if !status.is_success() {
@@ -1369,6 +1903,7 @@ fn parse_sql_response(body: &serde_json::Value, start: std::time::Instant) -> Op
         truncated: false,
         session_id: body.get("cursor").and_then(|cursor| cursor.as_str()).map(str::to_string),
         has_more: body.get("cursor").and_then(|cursor| cursor.as_str()).is_some(),
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -1462,11 +1997,100 @@ fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        build_find_documents_body, elasticsearch_accept_invalid_certs, elasticsearch_base_url_fallbacks,
-        redact_elasticsearch_url, EsClient, SearchResponse,
+        build_count_documents_body, build_find_documents_body, elasticsearch_accept_invalid_certs,
+        elasticsearch_base_url_fallbacks, redact_elasticsearch_url, EsClient, SearchResponse,
     };
     use serde_json::json;
     use std::time::Duration;
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "HTTP request ended before its body was received");
+            bytes.extend_from_slice(&buffer[..read]);
+
+            let Some(headers_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let content_length = std::str::from_utf8(&bytes[..headers_end])
+                .unwrap()
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            let request_end = headers_end + 4 + content_length;
+            if bytes.len() >= request_end {
+                bytes.truncate(request_end);
+                return String::from_utf8(bytes).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn parses_rest_request_after_comments_and_preserves_query_parameters() {
+        let request = super::parse_elasticsearch_rest_request(
+            "# JVM statistics\n// available on Elasticsearch 7+\nGET /_nodes/stats/jvm?pretty",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
+        assert_eq!(request.body, None);
+        assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Json);
+    }
+
+    #[test]
+    fn parses_rest_request_after_multiline_block_comment() {
+        let request = super::parse_elasticsearch_rest_request(
+            "/* node statistics\n   safe on supported clusters */\nGET /_nodes/stats/jvm?pretty",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
+    }
+
+    #[test]
+    fn parses_lowercase_rest_method() {
+        let request = super::parse_elasticsearch_rest_request("get /_cluster/health").unwrap();
+
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.path, "/_cluster/health");
+    }
+
+    #[test]
+    fn encodes_raw_date_math_paths_without_double_encoding() {
+        let raw = super::parse_elasticsearch_rest_request("GET /<logs-{now/d}>/_search?pretty").unwrap();
+        assert_eq!(raw.path, "/%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty");
+
+        let encoded = super::parse_elasticsearch_rest_request("GET /%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty").unwrap();
+        assert_eq!(encoded.path, "/%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty");
+    }
+
+    #[test]
+    fn detects_ndjson_endpoints_with_index_and_query_parameters() {
+        let request = super::parse_elasticsearch_rest_request(
+            "POST /orders/_bulk?refresh=true\n{\"index\":{\"_id\":\"1\"}}\n{\"name\":\"Notebook\"}",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, reqwest::Method::POST);
+        assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Ndjson);
+        assert!(request.body.is_some());
+    }
+
+    #[test]
+    fn normalizes_ndjson_with_a_required_trailing_newline() {
+        let body = "{\"index\":{}}\n{\"name\":\"Notebook\"}";
+        assert_eq!(super::validate_elasticsearch_ndjson(body).unwrap(), format!("{body}\n"));
+        assert!(super::validate_elasticsearch_ndjson("{\"index\":{}}\nnot-json").is_err());
+    }
 
     #[test]
     fn url_params_can_disable_elasticsearch_tls_verification() {
@@ -1500,11 +2124,97 @@ mod tests {
             Some("secret"),
             false,
             Some("sslmode=disable"),
+            None,
             Duration::from_secs(1),
         );
 
         assert_eq!(client.base_url, "https://localhost:9200");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:9200"]);
+        assert_eq!(client.connectivity_check_path, "/");
+    }
+
+    #[test]
+    fn connectivity_check_path_normalizes_get_path_and_defaults() {
+        assert_eq!(super::elasticsearch_connectivity_check_path(None), "/");
+        assert_eq!(super::elasticsearch_connectivity_check_path(Some(&json!({ "connectivityCheckPath": "" }))), "/");
+        assert_eq!(
+            super::elasticsearch_connectivity_check_path(Some(&json!({
+                "connectivityCheckPath": "GET pro-jmsau-nwm-applog-*/_search"
+            }))),
+            "/pro-jmsau-nwm-applog-*/_search"
+        );
+        assert_eq!(
+            super::elasticsearch_connectivity_check_path(Some(&json!({
+                "connectivityCheckPath": "my-index/_search\n{\"query\":{\"match_all\":{}}}"
+            }))),
+            "/my-index/_search"
+        );
+
+        let client = EsClient::from_config(
+            "https://localhost:5601/",
+            None,
+            None,
+            false,
+            None,
+            Some(&json!({
+                "mode": "kibana",
+                "connectivityCheckPath": "GET pro-logs-*/_search"
+            })),
+            Duration::from_secs(1),
+        );
+        assert_eq!(client.connectivity_check_path, "/pro-logs-*/_search");
+    }
+
+    #[tokio::test]
+    async fn test_connection_uses_configured_connectivity_check_path() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /pro-logs-*/_search "), "unexpected request: {request}");
+            let body = r#"{"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut client = EsClient::from_config(
+            &format!("http://{addr}"),
+            None,
+            None,
+            false,
+            None,
+            Some(&json!({ "connectivityCheckPath": "/pro-logs-*/_search" })),
+            Duration::from_secs(2),
+        );
+        super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn elasticsearch_client_from_config_enables_kibana_proxy_with_base_path() {
+        let external_config = json!({ "mode": "kibana", "kibanaBasePath": "/kibana/s/analytics/" });
+        let client = EsClient::from_config(
+            "https://localhost:5601/",
+            Some("elastic"),
+            Some("secret"),
+            false,
+            None,
+            Some(&external_config),
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(client.base_url, "https://localhost:5601/kibana/s/analytics");
+        assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:5601/kibana/s/analytics"]);
+        assert_eq!(client.transport_mode, super::ElasticsearchTransportMode::KibanaProxy);
     }
 
     #[test]
@@ -1537,6 +2247,28 @@ mod tests {
     }
 
     #[test]
+    fn builds_elasticsearch_auto_id_document_path_with_routing() {
+        assert_eq!(
+            super::elasticsearch_auto_id_document_path("orders/2026", Some("tenant/a&b")),
+            "/orders%2F2026/_doc?routing=tenant%2Fa%26b&refresh=true"
+        );
+        assert_eq!(super::elasticsearch_auto_id_document_path("orders", None), "/orders/_doc?refresh=true");
+    }
+
+    #[test]
+    fn insert_document_body_extracts_routing_without_embedding_it() {
+        let (doc, routing) =
+            super::elasticsearch_document_body_and_routing_from_json(r#"{"_routing":"tenant-1","name":"Alice"}"#, None)
+                .expect("parse insert body");
+        assert_eq!(routing.as_deref(), Some("tenant-1"));
+        assert_eq!(doc, serde_json::json!({"name":"Alice"}));
+        assert_eq!(
+            super::elasticsearch_auto_id_document_path("orders", routing.as_deref()),
+            "/orders/_doc?routing=tenant-1&refresh=true"
+        );
+    }
+
+    #[test]
     fn elasticsearch_sql_detection_does_not_treat_rest_methods_as_sql() {
         assert!(super::is_elasticsearch_sql_query("SELECT * FROM index_task_v1"));
         assert!(super::is_elasticsearch_sql_query(" select count(*) from index_task_v1"));
@@ -1558,6 +2290,128 @@ mod tests {
                 "sort": [{ "created_at": { "order": "desc" } }]
             })
         );
+        assert!(body.get("track_total_hits").is_none());
+    }
+
+    #[test]
+    fn builds_elasticsearch_find_body_with_native_query_builder_filter() {
+        let body = build_find_documents_body(
+            0,
+            25,
+            Some(
+                r#"{
+                    "$esQuery": {
+                        "bool": {
+                            "must": [{"match": {"customer_name": "Customer"}}],
+                            "filter": [{"range": {"amount": {"gte": 500}}}],
+                            "must_not": [{"term": {"status": "cancelled"}}]
+                        }
+                    }
+                }"#,
+            ),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            body["query"],
+            json!({
+                "bool": {
+                    "must": [{"match": {"customer_name": "Customer"}}],
+                    "filter": [{"range": {"amount": {"gte": 500}}}],
+                    "must_not": [{"term": {"status": "cancelled"}}]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn builds_elasticsearch_count_body_with_the_same_native_query_filter() {
+        let body = build_count_documents_body(Some(r#"{"$esQuery":{"term":{"status":"active"}}}"#)).unwrap();
+
+        assert_eq!(body, json!({ "query": { "term": { "status": "active" } } }));
+        assert!(body.get("from").is_none());
+        assert!(body.get("size").is_none());
+        assert!(body.get("sort").is_none());
+    }
+
+    #[test]
+    fn builds_elasticsearch_count_body_with_structured_filter_operators() {
+        let filter = r#"{"$and":[{"city":{"$ne":"上海"}},{"age":{"$gte":18}}]}"#;
+        assert_eq!(
+            build_count_documents_body(Some(filter)).unwrap(),
+            json!({
+                "query": {
+                    "bool": {
+                        "filter": [
+                            { "bool": { "must_not": [{ "term": { "city": "上海" } }] } },
+                            { "range": { "age": { "gte": 18 } } }
+                        ]
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_only_complete_elasticsearch_count_shards() {
+        assert!(super::ElasticsearchShards { total: 3, successful: 2, skipped: 1, failed: 0 }.is_complete());
+        assert!(!super::ElasticsearchShards { total: 3, successful: 2, skipped: 0, failed: 0 }.is_complete());
+        assert!(!super::ElasticsearchShards { total: 3, successful: 2, skipped: 0, failed: 1 }.is_complete());
+    }
+
+    #[tokio::test]
+    async fn counts_documents_with_the_translated_filter() {
+        use tokio::io::AsyncWriteExt;
+
+        let response_body = r#"{"count":552033,"_shards":{"total":3,"successful":3,"skipped":0,"failed":0}}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /orders/_count "));
+            let body = request.split_once("\r\n\r\n").unwrap().1;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(body).unwrap(),
+                json!({ "query": { "term": { "status": "active" } } })
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body,
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        assert_eq!(super::count_documents(&client, "orders", Some(r#"{"status":"active"}"#)).await.unwrap(), 552_033);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_partial_elasticsearch_document_count() {
+        use tokio::io::AsyncWriteExt;
+
+        let response_body = r#"{"count":4,"_shards":{"total":3,"successful":2,"skipped":0,"failed":1}}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /orders/_count "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body,
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let error = super::count_documents(&client, "orders", None).await.unwrap_err();
+        assert!(error.contains("incomplete shard response: 2 successful, 0 skipped, 1 failed of 3 shards"));
+        server.await.unwrap();
     }
 
     #[test]
@@ -1632,6 +2486,7 @@ mod tests {
     #[test]
     fn parses_search_total_from_elasticsearch_6_number_shape() {
         let response: SearchResponse = serde_json::from_value(json!({
+            "_shards": { "total": 1, "successful": 1, "skipped": 0, "failed": 0 },
             "hits": {
                 "total": 5,
                 "hits": []
@@ -1640,11 +2495,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.hits.total.value(), 5);
+        assert!(response.hits.total.is_exact());
     }
 
     #[test]
     fn parses_search_total_from_elasticsearch_7_object_shape() {
         let response: SearchResponse = serde_json::from_value(json!({
+            "_shards": { "total": 1, "successful": 1, "skipped": 0, "failed": 0 },
             "hits": {
                 "total": { "value": 5, "relation": "eq" },
                 "hits": []
@@ -1653,6 +2510,78 @@ mod tests {
         .unwrap();
 
         assert_eq!(response.hits.total.value(), 5);
+        assert!(response.hits.total.is_exact());
+        let result = super::search_response_to_document_result(response).unwrap();
+        assert!(result.total_is_exact);
+    }
+
+    #[test]
+    fn preserves_elasticsearch_lower_bound_total_relation() {
+        let response: SearchResponse = serde_json::from_value(json!({
+            "hits": {
+                "total": { "value": 10_000, "relation": "gte" },
+                "hits": []
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(response.hits.total.value(), 10_000);
+        assert!(!response.hits.total.is_exact());
+        let result = super::search_response_to_document_result(response).unwrap();
+        assert_eq!(result.total, 10_000);
+        assert!(!result.total_is_exact);
+    }
+
+    #[test]
+    fn treats_search_total_as_a_lower_bound_when_a_shard_failed() {
+        let response: SearchResponse = serde_json::from_value(json!({
+            "_shards": { "total": 3, "successful": 2, "skipped": 0, "failed": 1 },
+            "hits": {
+                "total": { "value": 5, "relation": "eq" },
+                "hits": []
+            }
+        }))
+        .unwrap();
+
+        let result = super::search_response_to_document_result(response).unwrap();
+        assert_eq!(result.total, 5);
+        assert!(!result.total_is_exact);
+    }
+
+    #[test]
+    fn treats_timed_out_or_terminated_searches_as_lower_bounds() {
+        for response in [
+            json!({
+                "timed_out": true,
+                "_shards": { "total": 1, "successful": 1, "skipped": 0, "failed": 0 },
+                "hits": { "total": { "value": 5, "relation": "eq" }, "hits": [] }
+            }),
+            json!({
+                "terminated_early": true,
+                "_shards": { "total": 1, "successful": 1, "skipped": 0, "failed": 0 },
+                "hits": { "total": { "value": 5, "relation": "eq" }, "hits": [] }
+            }),
+        ] {
+            let response: SearchResponse = serde_json::from_value(response).unwrap();
+            let result = super::search_response_to_document_result(response).unwrap();
+            assert_eq!(result.total, 5);
+            assert!(!result.total_is_exact);
+        }
+    }
+
+    #[test]
+    fn treats_search_total_without_shard_metadata_as_a_lower_bound() {
+        let response: SearchResponse = serde_json::from_value(json!({
+            "hits": {
+                "total": { "value": 5, "relation": "eq" },
+                "hits": []
+            }
+        }))
+        .unwrap();
+
+        let result = super::search_response_to_document_result(response).unwrap();
+        assert_eq!(result.total, 5);
+        assert!(!result.total_is_exact);
     }
 
     #[test]
@@ -1671,6 +2600,21 @@ mod tests {
     }
 
     #[test]
+    fn preserves_long_literals_in_document_transport_json() {
+        let response: SearchResponse = serde_json::from_str(
+            r#"{"hits":{"total":{"value":1,"relation":"eq"},"hits":[{"_id":"doc-1","_source":{"id":2018551659033767937,"string_id":"2018551659033767937","legacy":{"$numberLong":"2018551659033767937"}}}]}}"#,
+        )
+        .unwrap();
+
+        let result = super::search_response_to_document_result(response).unwrap();
+
+        assert_eq!(
+            result.raw_documents.as_deref(),
+            Some(&[r#"{"id":2018551659033767937,"string_id":"2018551659033767937","legacy":{"$numberLong":"2018551659033767937"},"_id":"doc-1"}"#.to_string()][..])
+        );
+    }
+
+    #[test]
     fn parses_search_response_rows_with_routing_metadata() {
         let result = super::parse_elasticsearch_response(
             200,
@@ -1685,14 +2629,667 @@ mod tests {
         )
         .unwrap();
 
+        assert_ne!(result.columns, vec!["status", "response"]);
+        let name_idx = result.columns.iter().position(|column| column == "name").unwrap();
+        assert_eq!(result.rows[0][name_idx], json!("Alice"));
         let routing_idx = result.columns.iter().position(|column| column == "_routing").unwrap();
         assert_eq!(result.rows[0][routing_idx], json!("tenant-1"));
     }
 
     #[test]
-    fn document_body_removes_elasticsearch_id_metadata() {
-        let doc = super::elasticsearch_document_body_from_json(r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#)
+    fn keeps_sql_api_response_tabular() {
+        let result = super::parse_elasticsearch_response(
+            200,
+            json!({
+                "columns": [{ "name": "name" }],
+                "rows": [["Alice"]]
+            }),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        assert_eq!(result.columns, vec!["name"]);
+        assert_eq!(result.rows, vec![vec![json!("Alice")]]);
+    }
+
+    #[test]
+    fn parses_aggregation_response_before_empty_hits() {
+        let result = super::parse_elasticsearch_response(
+            200,
+            json!({
+                "hits": {
+                    "total": { "value": 5, "relation": "eq" },
+                    "hits": []
+                },
+                "aggregations": {
+                    "by_status": {
+                        "doc_count_error_upper_bound": 0,
+                        "sum_other_doc_count": 0,
+                        "buckets": [
+                            { "key": "paid", "doc_count": 3 },
+                            { "key": "cancelled", "doc_count": 1 },
+                            { "key": "pending", "doc_count": 1 }
+                        ]
+                    }
+                }
+            }),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        let key_idx = result.columns.iter().position(|column| column == "key").unwrap();
+        let count_idx = result.columns.iter().position(|column| column == "doc_count").unwrap();
+
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0][key_idx], json!("paid"));
+        assert_eq!(result.rows[0][count_idx], json!("3"));
+        assert_eq!(result.affected_rows, 3);
+    }
+
+    #[test]
+    fn parses_plain_text_rest_response_without_dropping_body() {
+        let body =
+            "health status index           docs.count store.size\ngreen  open   app-log-2026-07 42         10mb\n";
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
+
+        assert_eq!(result.columns, vec!["response"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0][0], json!("health status index           docs.count store.size"));
+        assert_eq!(result.rows[1][0], json!("green  open   app-log-2026-07 42         10mb"));
+        assert_eq!(result.affected_rows, 2);
+    }
+
+    #[test]
+    fn adds_json_format_only_when_cat_format_is_not_explicit() {
+        let plain =
+            super::add_default_cat_json_format(super::parse_elasticsearch_rest_request("GET /_cat/indices").unwrap());
+        assert_eq!(plain.path, "/_cat/indices?format=json");
+
+        let defaulted =
+            super::add_default_cat_json_format(super::parse_elasticsearch_rest_request("GET /_cat/indices?v").unwrap());
+        assert_eq!(defaulted.path, "/_cat/indices?v&format=json");
+
+        let explicit_text = super::add_default_cat_json_format(
+            super::parse_elasticsearch_rest_request("GET /_cat/indices?format=txt").unwrap(),
+        );
+        assert_eq!(explicit_text.path, "/_cat/indices?format=txt");
+    }
+
+    #[test]
+    fn preserves_http_status_for_plain_text_rest_errors() {
+        let result =
+            super::parse_elasticsearch_rest_response(503, "service temporarily unavailable", std::time::Instant::now())
+                .unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows, vec![vec![json!(503), json!("service temporarily unavailable")]]);
+    }
+
+    #[test]
+    fn keeps_mapping_rest_response_numeric_literals_lossless() {
+        let body = r#"{
+  "products": {
+    "mappings": {
+      "_meta": {
+        "largest_id": 123456789012345678901234567890,
+        "ratio": 0.123456789012345678901234567890,
+        "estimate": 1e400
+      },
+      "properties": { "name": { "type": "keyword" } }
+    }
+  }
+}"#;
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1].as_str(), Some(body));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_preserves_index_specific_cat_json_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body = r#"[{"health":"green","index":"app-log-2026-07","docs.count":"42"}]"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /_cat/indices/data_pack_and_box_index_v1?format=json "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "GET /_cat/indices/data_pack_and_box_index_v1").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows, vec![vec![json!(200), json!(body)]]);
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_preserves_explicit_cat_json_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body = r#"[{"index":"data_pack_and_box_index_v1","docs.count":"42"}]"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /_cat/indices/data_pack_and_box_index_v1?format=json "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "GET /_cat/indices/data_pack_and_box_index_v1?format=json")
+            .await
             .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows, vec![vec![json!(200), json!(body)]])
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_keeps_default_cat_text_when_server_does_not_return_json() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body = "health status\ngreen  open\n";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /_cat/indices?format=json "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "GET /_cat/indices").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["response"]);
+        assert_eq!(result.rows, vec![vec![json!("health status")], vec![json!("green  open")]]);
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_keeps_explicit_text_cat_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body = "health status\ngreen  open\n";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /_cat/indices?format=txt "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "GET /_cat/indices?format=txt").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["response"]);
+        assert_eq!(result.rows, vec![vec![json!("health status")], vec![json!("green  open")]]);
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_preserves_numeric_literals_from_http_body() {
+        use tokio::io::AsyncWriteExt;
+
+        let response_body = r#"{"largest_id":123456789012345678901234567890,"ratio":0.123456789012345678901234567890,"estimate":1e400}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /products/_mapping "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "GET /products/_mapping").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1].as_str(), Some(response_body));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_head_request_returns_http_status() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("HEAD /orders "));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "HEAD /orders").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1], json!("null"));
+    }
+
+    #[tokio::test]
+    async fn kibana_proxy_rewrites_method_path_and_preserves_elasticsearch_status() {
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+
+        let response_body = r#"{"error":{"type":"index_not_found_exception"},"status":404}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            let request_target = headers.lines().next().unwrap().split_whitespace().nth(1).unwrap();
+            let url = reqwest::Url::parse(&format!("http://localhost{request_target}")).unwrap();
+            let query = url.query_pairs().into_owned().collect::<HashMap<_, _>>();
+
+            assert_eq!(url.path(), "/kibana/s/analytics/api/console/proxy");
+            assert_eq!(query.get("path").map(String::as_str), Some("/missing/_doc/1?refresh=true"));
+            assert_eq!(query.get("method").map(String::as_str), Some("DELETE"));
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("kbn-xsrf: true")), "{headers}");
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("authorization: Basic ZWxhc3RpYzpzZWNyZXQ=")));
+            assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(), json!({ "reason": "cleanup" }));
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-console-proxy-status-code: 404\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let external_config = json!({ "mode": "kibana", "kibanaBasePath": "/kibana/s/analytics" });
+        let client = EsClient::from_config(
+            &format!("http://{addr}"),
+            Some("elastic"),
+            Some("secret"),
+            false,
+            None,
+            Some(&external_config),
+            Duration::from_secs(1),
+        );
+        let result =
+            super::execute_rest_query(&client, "DELETE /missing/_doc/1?refresh=true\n{\"reason\":\"cleanup\"}")
+                .await
+                .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.rows[0][0], json!(404));
+        assert_eq!(result.rows[0][1], json!(response_body));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_sends_encoded_date_math_path() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /%3Clogs-%7Bnow%2Fd%7D%3E/_search?pretty "), "{request}");
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        super::execute_rest_query(&client, "GET /<logs-{now/d}>/_search?pretty").await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_rest_msearch_sends_ndjson_content_type_and_trailing_newline() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("POST /_msearch "));
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("content-type: application/x-ndjson")));
+            assert_eq!(body, "{\"index\":\"orders\"}\n{\"size\":0}\n");
+
+            let response_body = r#"{"responses":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(
+            &client,
+            "// run two searches\nPOST /_msearch\n{\"index\":\"orders\"}\n{\"size\":0}",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.rows[0][0], json!(200));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_delete_sends_json_body() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("DELETE /_search/scroll "));
+            assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(), json!({ "scroll_id": ["scroll-1"] }));
+
+            let response_body = r#"{"succeeded":true,"num_freed":1}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result =
+            super::execute_rest_query(&client, "DELETE /_search/scroll\n{\"scroll_id\":[\"scroll-1\"]}").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(result.rows[0][1].as_str().unwrap()).unwrap(),
+            json!({ "succeeded": true, "num_freed": 1 })
+        );
+    }
+
+    #[test]
+    fn parses_search_rest_response_as_source_table() {
+        let body = r#"{"took":1,"hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"Alice","age":30,"active":true,"deleted_at":null,"profile":{"team":"core"},"tags":["admin","reader"]}},{"_id":"2","_routing":"shard-a","_source":{"name":"Bob","city":"NYC"}}]}}"#;
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
+
+        assert_ne!(result.columns, vec!["status", "response"]);
+        assert!(result.columns.contains(&"name".to_string()));
+        assert!(result.columns.contains(&"_id".to_string()));
+        assert_eq!(result.rows.len(), 2);
+        let name_idx = result.columns.iter().position(|c| c == "name").unwrap();
+        let id_idx = result.columns.iter().position(|c| c == "_id").unwrap();
+        assert_eq!(result.rows[0][name_idx], json!("Alice"));
+        assert_eq!(result.rows[0][id_idx], json!("1"));
+        let age_idx = result.columns.iter().position(|c| c == "age").unwrap();
+        let active_idx = result.columns.iter().position(|c| c == "active").unwrap();
+        let deleted_at_idx = result.columns.iter().position(|c| c == "deleted_at").unwrap();
+        let profile_idx = result.columns.iter().position(|c| c == "profile").unwrap();
+        let tags_idx = result.columns.iter().position(|c| c == "tags").unwrap();
+        assert_eq!(result.rows[0][age_idx], json!(30));
+        assert_eq!(result.rows[0][active_idx], json!(true));
+        assert_eq!(result.rows[0][deleted_at_idx], serde_json::Value::Null);
+        assert_eq!(result.rows[0][profile_idx], json!(r#"{"team":"core"}"#));
+        assert_eq!(result.rows[0][tags_idx], json!(r#"["admin","reader"]"#));
+        assert_eq!(result.column_types[age_idx], "number");
+        assert_eq!(result.column_types[active_idx], "boolean");
+        assert_eq!(result.column_types[profile_idx], "json");
+        assert_eq!(result.column_types[tags_idx], "json");
+        let city_idx = result.columns.iter().position(|c| c == "city").unwrap();
+        assert_eq!(result.rows[1][city_idx], json!("NYC"));
+        let routing_idx = result.columns.iter().position(|c| c == "_routing").unwrap();
+        assert_eq!(result.rows[1][routing_idx], json!("shard-a"));
+        assert_eq!(result.affected_rows, 2);
+        assert_eq!(result.elasticsearch_raw_body.as_deref(), Some(body));
+    }
+
+    #[test]
+    fn parses_empty_search_rest_response_as_empty_table() {
+        let body = r#"{"took":1,"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}"#;
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
+
+        assert_eq!(result.columns, vec!["_id"]);
+        assert!(result.rows.is_empty());
+        assert_eq!(result.affected_rows, 0);
+    }
+
+    #[test]
+    fn sparse_search_response_over_table_cell_limit_falls_back_to_raw_json() {
+        let hits = (0..450)
+            .map(|index| {
+                let mut source = serde_json::Map::new();
+                source.insert(format!("field_{index}"), json!(index));
+                json!({ "_id": index.to_string(), "_source": source })
+            })
+            .collect::<Vec<_>>();
+        let body = json!({ "hits": { "hits": hits } }).to_string();
+
+        let result = super::parse_elasticsearch_rest_response(200, &body, std::time::Instant::now()).unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1], json!(body));
+        assert_eq!(result.elasticsearch_raw_body, None);
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_keeps_json_error_response() {
+        use tokio::io::AsyncWriteExt;
+
+        let response_body = r#"{"error":{"type":"index_not_found_exception","reason":"no such index"},"status":404}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /missing/_mapping "));
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "GET /missing/_mapping").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(404));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(result.rows[0][1].as_str().unwrap()).unwrap(),
+            json!({ "error": { "type": "index_not_found_exception", "reason": "no such index" }, "status": 404 })
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_select_query_keeps_search_response_tabular() {
+        use tokio::io::AsyncWriteExt;
+
+        let response_body = r#"{"hits":{"hits":[{"_id":"product-1","_source":{"name":"Notebook"}}]}}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /products/_search "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "SELECT * FROM products LIMIT 1").await.unwrap();
+        server.await.unwrap();
+
+        assert_ne!(result.columns, vec!["status", "response"]);
+        let name_idx = result.columns.iter().position(|column| column == "name").unwrap();
+        assert_eq!(result.rows[0][name_idx], json!("Notebook"));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_search_preserves_full_json_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body = json!({
+            "took": 3,
+            "hits": {
+                "total": { "value": 1, "relation": "eq" },
+                "max_score": 1.0,
+                "hits": [{
+                    "_index": "products",
+                    "_id": "product-1",
+                    "_score": 1.0,
+                    "_source": { "name": "Notebook", "price": 1299 },
+                    "highlight": { "name": ["<em>Note</em>book"] }
+                }]
+            },
+            "aggregations": {
+                "by_category": {
+                    "buckets": [{ "key": "electronics", "doc_count": 1 }]
+                }
+            }
+        });
+        let response_body = body.to_string();
+        let server_response_body = response_body.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /products/_search "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                server_response_body.len(),
+                server_response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result =
+            super::execute_rest_query(&client, "POST /products/_search\n{\"query\":{\"match_all\":{}}}").await.unwrap();
+        server.await.unwrap();
+
+        // The response now parses hits+aggs into a tabular result (aggregation
+        // columns) instead of the raw status/response JSON panel.
+        assert!(result.columns.contains(&"key".to_string()));
+        assert!(result.columns.contains(&"doc_count".to_string()));
+        assert_ne!(result.columns, vec!["status", "response"]);
+        // Raw body is attached for JSON toggle in the UI.
+        assert!(result.elasticsearch_raw_body.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_KIBANA_URL pointing to a reachable Kibana instance"]
+    async fn live_kibana_proxy_supports_metadata_queries_and_document_writes() {
+        let url = std::env::var("DBX_TEST_KIBANA_URL").expect("DBX_TEST_KIBANA_URL is required");
+        let username = std::env::var("DBX_TEST_KIBANA_USERNAME").ok();
+        let password = std::env::var("DBX_TEST_KIBANA_PASSWORD").ok();
+        let base_path = std::env::var("DBX_TEST_KIBANA_BASE_PATH").unwrap_or_default();
+        let external_config = json!({ "mode": "kibana", "kibanaBasePath": base_path });
+        let mut client = EsClient::from_config(
+            &url,
+            username.as_deref(),
+            password.as_deref(),
+            false,
+            None,
+            Some(&external_config),
+            Duration::from_secs(20),
+        );
+        super::test_connection(&mut client, Duration::from_secs(20)).await.unwrap();
+
+        let index = format!("dbx-kibana-proxy-{}", uuid::Uuid::new_v4().simple());
+        let create = super::execute_rest_query(
+            &client,
+            &format!(
+                "PUT /{index}\n{{\"mappings\":{{\"properties\":{{\"name\":{{\"type\":\"keyword\"}},\"price\":{{\"type\":\"double\"}}}}}}}}"
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(create.rows[0][0], json!(200));
+
+        let id = super::insert_document(&client, &index, r#"{"name":"Notebook","price":12.5}"#, None).await.unwrap();
+        assert!(!id.is_empty());
+        assert!(super::list_indices(&client).await.unwrap().contains(&index));
+
+        let columns = super::get_columns(&client, &index).await.unwrap();
+        assert!(columns.iter().any(|column| column.name == "name" && column.data_type == "keyword"));
+        assert!(columns.iter().any(|column| column.name == "price" && column.data_type == "double"));
+
+        let documents = super::find_documents(&client, &index, 0, 10, None, None).await.unwrap();
+        assert_eq!(documents.total, 1);
+        assert_eq!(documents.documents[0]["name"], json!("Notebook"));
+
+        super::update_document(&client, &index, &id, r#"{"name":"Notebook Pro","price":15.0}"#, None).await.unwrap();
+        let sql_result = super::execute_rest_query(&client, &format!("SELECT * FROM {index} LIMIT 10")).await.unwrap();
+        let name_index = sql_result.columns.iter().position(|column| column == "name").unwrap();
+        assert_eq!(sql_result.rows[0][name_index], json!("Notebook Pro"));
+
+        super::delete_document(&client, &index, &id, None).await.unwrap();
+        let delete = super::execute_rest_query(&client, &format!("DELETE /{index}")).await.unwrap();
+        assert_eq!(delete.rows[0][0], json!(200));
+    }
+
+    #[test]
+    fn document_body_removes_elasticsearch_id_metadata() {
+        let (doc, _) = super::elasticsearch_document_body_and_routing_from_json(
+            r#"{"_id":"abc","_routing":"tenant-1","name":"Alice"}"#,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(doc, json!({ "name": "Alice" }));
     }
@@ -1723,7 +3320,8 @@ mod tests {
 
     #[test]
     fn document_body_preserves_user_field_order() {
-        let doc = super::elasticsearch_document_body_from_json(r#"{"z":1,"_id":"abc","a":2}"#).unwrap();
+        let (doc, _) =
+            super::elasticsearch_document_body_and_routing_from_json(r#"{"z":1,"_id":"abc","a":2}"#, None).unwrap();
 
         assert_eq!(serde_json::to_string(&doc).unwrap(), r#"{"z":1,"a":2}"#);
     }

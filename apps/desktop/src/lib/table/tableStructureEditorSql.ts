@@ -20,11 +20,14 @@ export interface EditableStructureColumn {
   id: string;
   name: string;
   dataType: string;
+  enumValues?: string[];
   isNullable: boolean;
   defaultValue: string;
   comment: string;
   isPrimaryKey: boolean;
   extra: ColumnExtra;
+  characterSet?: string;
+  collation?: string;
   original?: ColumnInfo;
   originalPosition?: number;
   markedForDrop: boolean;
@@ -83,6 +86,10 @@ export interface BuildTableStructureChangeSqlOptions {
 export interface TableStructureChangeSql {
   statements: string[];
   warnings: string[];
+}
+
+export interface SqliteTableStructureChangePreview extends TableStructureChangeSql {
+  schemaRevision: string;
 }
 
 export interface BuildSingleColumnAlterSqlOptions {

@@ -1,0 +1,50 @@
+name: Database Environments
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/database/**'
+      - 'scripts/database-env.mjs'
+      - 'scripts/database-env.test.mjs'
+      - 'Makefile'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'docs/content/docs/database-lab.mdx'
+      - 'docs/content/docs/database-lab.cn.mdx'
+      - '.github/workflows/database-environments.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/database/**'
+      - 'scripts/database-env.mjs'
+      - 'scripts/database-env.test.mjs'
+      - 'Makefile'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'docs/content/docs/database-lab.mdx'
+      - 'docs/content/docs/database-lab.cn.mdx'
+      - '.github/workflows/database-environments.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  database-environments:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+
+      - name: Validate database environment tooling
+        run: |
+          pnpm test:db-env
+          make db-check

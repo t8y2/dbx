@@ -10,11 +10,14 @@ import {
   extractCteDefinitions,
   getSqlCompletionContext,
   recordCompletionSelection,
+  shouldChainSqlCompletionAfterAccept,
   type SqlCompletionColumn,
   type SqlCompletionForeignKey,
   type SqlCompletionObject,
   type SqlCompletionTable,
 } from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
+import { sqlCompletionContextFromSemantic } from "../../apps/desktop/src/lib/sql/semantic/completion.ts";
+import { buildSqlSemanticModel } from "../../apps/desktop/src/lib/sql/semantic/model.ts";
 
 const tables: SqlCompletionTable[] = [
   { name: "users", schema: "public", type: "table" },
@@ -106,7 +109,7 @@ test("suggests lower-case SQL keywords when configured", () => {
   );
 });
 
-test("suggests PostgreSQL-specific data types and functions", () => {
+test("suggests database-specific data types and functions", () => {
   const typeItems = buildSqlCompletionItems("create table events (payload js", "create table events (payload js".length, {
     tables: [],
     columnsByTable: new Map(),
@@ -127,6 +130,51 @@ test("suggests PostgreSQL-specific data types and functions", () => {
     columnsByTable: new Map(),
     databaseType: "mysql",
   });
+  const mysqlSysdateItems = buildSqlCompletionItems("select sysd", "select sysd".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlCurrentDateItems = buildSqlCompletionItems("select current_d", "select current_d".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlCurrentTimestampItems = buildSqlCompletionItems("select current_t", "select current_t".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlCurdateItems = buildSqlCompletionItems("select curd", "select curd".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlIfnullItems = buildSqlCompletionItems("select ifn", "select ifn".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlDateAddItems = buildSqlCompletionItems("select date_a", "select date_a".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlDateSubItems = buildSqlCompletionItems("select date_s", "select date_s".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlSubstringIndexItems = buildSqlCompletionItems("select substring_i", "select substring_i".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlLeftItems = buildSqlCompletionItems("select lef", "select lef".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
   const postgresDateItems = buildSqlCompletionItems("select date_f", "select date_f".length, {
     tables: [],
     columnsByTable: new Map(),
@@ -137,10 +185,129 @@ test("suggests PostgreSQL-specific data types and functions", () => {
   assert.ok(serialItems.some((item) => item.type === "keyword" && item.label === "SERIAL"));
   assert.ok(functionItems.some((item) => item.type === "function" && item.label === "JSONB_BUILD_OBJECT"));
   assert.ok(mysqlFunctionItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"));
+  assert.ok(mysqlSysdateItems.some((item) => item.type === "function" && item.label === "SYSDATE"));
+  assert.ok(mysqlCurrentDateItems.some((item) => item.type === "function" && item.label === "CURRENT_DATE"));
+  assert.ok(mysqlCurrentTimestampItems.some((item) => item.type === "function" && item.label === "CURRENT_TIMESTAMP"));
+  assert.ok(mysqlCurrentTimestampItems.some((item) => item.type === "function" && item.label === "CURRENT_TIME"));
+  assert.ok(mysqlCurdateItems.some((item) => item.type === "function" && item.label === "CURDATE"));
+  assert.ok(mysqlIfnullItems.some((item) => item.type === "function" && item.label === "IFNULL"));
+  assert.equal(
+    mysqlDateAddItems.find((item) => item.type === "function" && item.label === "DATE_ADD")?.apply,
+    "DATE_ADD(${date}, INTERVAL ${expr} ${unit})",
+  );
+  assert.equal(
+    mysqlDateSubItems.find((item) => item.type === "function" && item.label === "DATE_SUB")?.apply,
+    "DATE_SUB(${date}, INTERVAL ${expr} ${unit})",
+  );
+  assert.ok(mysqlSubstringIndexItems.some((item) => item.type === "function" && item.label === "SUBSTRING_INDEX"));
+  assert.ok(mysqlLeftItems.some((item) => item.type === "function" && item.label === "LEFT"));
+  assert.ok(mysqlLeftItems.some((item) => item.type === "keyword" && item.label === "LEFT"));
   assert.equal(
     postgresDateItems.some((item) => item.type === "function" && item.label === "DATE_FORMAT"),
     false,
   );
+
+  const mysqlDateTypeItems = buildSqlCompletionItems("CREATE TABLE t (d dat", "CREATE TABLE t (d dat".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlTimeTypeItems = buildSqlCompletionItems("CREATE TABLE t (tm tim", "CREATE TABLE t (tm tim".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  assert.equal(mysqlDateTypeItems[0]?.label, "DATE");
+  assert.equal(mysqlDateTypeItems.some((item) => item.type === "function" && item.label === "DATE"), false);
+  assert.equal(mysqlTimeTypeItems[0]?.label, "TIME");
+  assert.equal(mysqlTimeTypeItems.some((item) => item.type === "function" && item.label === "TIME"), false);
+
+  const mysqlCreateViewItems = buildSqlCompletionItems("CREATE VIEW v AS SELECT dat", "CREATE VIEW v AS SELECT dat".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  assert.ok(mysqlCreateViewItems.some((item) => item.type === "function" && item.label === "DATE"));
+});
+
+test("suggests Oracle SQL, PL/SQL, and data type keywords", () => {
+  const keywordCases = [
+    ["tru", "TRUNCATE"],
+    ["mer", "MERGE"],
+    ["dec", "DECLARE"],
+    ["els", "ELSIF"],
+    ["pac", "PACKAGE"],
+    ["seq", "SEQUENCE"],
+    ["flash", "FLASHBACK"],
+    ["mat", "MATERIALIZED VIEW"],
+  ] as const;
+
+  for (const [prefix, expected] of keywordCases) {
+    const items = buildSqlCompletionItems(prefix, prefix.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+    });
+    assert.ok(
+      items.some((item) => item.type === "keyword" && item.label === expected),
+      `${expected} should be suggested for ${prefix}`,
+    );
+  }
+
+  const typeSql = "CREATE TABLE events (payload varc";
+  const typeItems = buildSqlCompletionItems(typeSql, typeSql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+  });
+  assert.ok(typeItems.some((item) => item.type === "keyword" && item.label === "VARCHAR2"));
+});
+
+test("does not suggest cross-dialect words for Oracle", () => {
+  const unsupportedWords = ["LIMIT", "LOCALTIME", "USE", "ELSEIF", "SERIAL", "BIGSERIAL", "TEXT", "BOOLEAN", "STRING", "TIME"];
+
+  for (const unsupportedWord of unsupportedWords) {
+    const prefix = unsupportedWord.toLowerCase();
+    const items = buildSqlCompletionItems(prefix, prefix.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+    });
+    assert.equal(
+      items.some((item) => item.type === "keyword" && item.label === unsupportedWord),
+      false,
+      `${unsupportedWord} should not be suggested for Oracle`,
+    );
+  }
+
+  for (const supportedWord of ["LOCALTIMESTAMP", "NUMBER", "VARCHAR2", "XMLTYPE"]) {
+    const prefix = supportedWord.toLowerCase();
+    const items = buildSqlCompletionItems(prefix, prefix.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+    });
+    assert.ok(
+      items.some((item) => item.type === "keyword" && item.label === supportedWord),
+      `${supportedWord} should be suggested for Oracle`,
+    );
+  }
+});
+
+test("keeps TRUNCATE as a statement keyword for Oracle-compatible databases", () => {
+  for (const databaseType of ["oracle", "oceanbase-oracle"] as const) {
+    const items = buildSqlCompletionItems("tru", 3, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType,
+    });
+
+    assert.ok(items.some((item) => item.type === "keyword" && item.label === "TRUNCATE"));
+    assert.equal(
+      items.some((item) => item.type === "function" && item.label === "TRUNCATE"),
+      false,
+    );
+  }
 });
 
 test("suggests Manticore Search SQL functions and command snippets", () => {
@@ -263,6 +430,36 @@ test("leaves safe PostgreSQL column identifiers unquoted when completion inserts
   assert.equal(column?.apply, "article");
 });
 
+test("quotes PostgreSQL reserved-word column identifiers when completion inserts them", () => {
+  // Reserved words absent from the completion keyword phrase list (which has
+  // "ORDER BY" but not "order") must still be quoted as column references.
+  const reservedColumns = ["order", "do", "returning", "ilike", "window", "true"];
+  const reservedColumnsByTable = new Map<string, SqlCompletionColumn[]>([["public.bookings", reservedColumns.map((name) => ({ name, table: "bookings", schema: "public", dataType: "text" }))]]);
+  const sql = "select  from bookings";
+  const items = buildSqlCompletionItems(sql, "select ".length, {
+    tables: [{ name: "bookings", schema: "public", type: "table" }],
+    columnsByTable: reservedColumnsByTable,
+    dialect: "postgres",
+  });
+
+  for (const name of reservedColumns) {
+    const column = items.find((item) => item.type === "column" && item.label === name);
+    assert.equal(column?.apply, `"${name}"`, `expected reserved column "${name}" to be quoted`);
+  }
+});
+
+test("quotes PostgreSQL reserved-word table identifiers when completion inserts them", () => {
+  const sql = "select * from ord";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "order", schema: "public", type: "table" }],
+    columnsByTable: new Map(),
+    dialect: "postgres",
+  });
+
+  const table = items.find((item) => item.type === "table" && item.label === "order");
+  assert.equal(table?.apply, '"order"');
+});
+
 test("suggests matching table names after FROM", () => {
   const sql = "select * from us";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -274,6 +471,78 @@ test("suggests matching table names after FROM", () => {
     items.slice(0, 2).map((item) => item.label),
     ["users", "user_profiles"],
   );
+});
+
+test("suggests SQL Server tables for unquoted Chinese prefixes", () => {
+  const sql = "select * from 客户";
+  const context = getSqlCompletionContext(sql, sql.length);
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "客户订单", schema: "dbo", type: "table" },
+      { name: "订单", schema: "dbo", type: "table" },
+    ],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.equal(context.prefix, "客户");
+  assert.equal(context.suggestTables, true);
+  assert.equal(context.exclusiveTableSuggestions, true);
+  assert.deepEqual(
+    items.filter((item) => item.type === "table").map((item) => item.label),
+    ["客户订单"],
+  );
+  assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), true);
+});
+
+test("preserves Unicode prefixes through the semantic completion context", () => {
+  const sql = "select * from dbo.客户";
+  const legacy = getSqlCompletionContext(sql, sql.length);
+  const semantic = buildSqlSemanticModel(sql, sql.length, { databaseType: "sqlserver", dialect: "sqlserver" });
+  const context = sqlCompletionContextFromSemantic(semantic, legacy);
+
+  assert.equal(context.prefix, "客户");
+  assert.equal(context.qualifier, "dbo");
+  assert.deepEqual(context.qualifierParts, ["dbo"]);
+  assert.equal(sql.slice(sql.length - context.prefix.length), "客户");
+});
+
+test("parses Unicode identifier start and continuation code points", () => {
+  for (const prefix of ["Δelta", "a\u0301", "𐐀表"] as const) {
+    const sql = `select * from ${prefix}`;
+    const context = getSqlCompletionContext(sql, sql.length);
+
+    assert.equal(context.prefix, prefix);
+    assert.equal(sql.slice(sql.length - context.prefix.length), prefix);
+  }
+});
+
+test("preserves ASCII, qualified, and quoted identifier parsing", () => {
+  const cases = [
+    { sql: "select * from ord", prefix: "ord", qualifier: undefined, qualifierParts: undefined },
+    { sql: "select * from dbo.客户", prefix: "客户", qualifier: "dbo", qualifierParts: ["dbo"] },
+    { sql: "select * from [sales].ord", prefix: "ord", qualifier: "sales", qualifierParts: ["sales"] },
+    { sql: 'select * from "sales".ord', prefix: "ord", qualifier: "sales", qualifierParts: ["sales"] },
+  ] as const;
+
+  for (const expected of cases) {
+    const context = getSqlCompletionContext(expected.sql, expected.sql.length);
+
+    assert.equal(context.prefix, expected.prefix);
+    assert.equal(context.qualifier, expected.qualifier);
+    assert.deepEqual(context.qualifierParts, expected.qualifierParts);
+  }
+});
+
+test("uses the full Unicode prefix as the replacement range without result reuse", () => {
+  const sql = "select * from dbo.客户";
+  const context = getSqlCompletionContext(sql, sql.length);
+  const replacementFrom = sql.length - context.prefix.length;
+
+  assert.equal(replacementFrom, sql.indexOf("客户"));
+  assert.equal(sql.slice(replacementFrom), "客户");
+  assert.equal(getSqlCompletionResultValidFor(sql, sql.length), undefined);
 });
 
 test("ranks prefix matches above substring matches for table names", () => {
@@ -316,6 +585,101 @@ test("suggests only matching columns for an explicit alias qualifier prefix", ()
   assert.deepEqual(
     columnItems.map((item) => [item.label, item.type, item.detail]),
     [["name", "column", "public.users  [varchar]"]],
+  );
+});
+
+test("does not mix routines into an explicit table alias column completion", () => {
+  const sql = "select u.na from public.users u";
+  const cursor = "select u.na".length;
+  const items = buildSqlCompletionItems(sql, cursor, {
+    tables,
+    columnsByTable,
+    objects: [{ name: "name_formatter", schema: "u", type: "function", applyName: "u.name_formatter" }],
+    databaseType: "oracle",
+  });
+
+  assert.ok(items.some((item) => item.label === "name" && item.type === "column"));
+  assert.equal(items.some((item) => item.label === "name_formatter"), false);
+});
+
+test("suggests matching database functions alongside referenced columns", () => {
+  const sql = "SELECT st_ FROM public.routes";
+  const items = buildSqlCompletionItems(sql, "SELECT st_".length, {
+    tables: [{ name: "routes", schema: "public", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "public.routes",
+        [
+          { name: "start_sid", table: "routes", schema: "public", dataType: "integer" },
+          { name: "start_dept", table: "routes", schema: "public", dataType: "text" },
+        ],
+      ],
+    ]),
+    objects: [
+      { name: "st_area", schema: "public", type: "function", dataType: "double precision", comment: "Returns an area" },
+      { name: "st_x", schema: "public", type: "function", dataType: "double precision" },
+      { name: "st_refresh", schema: "public", type: "procedure" },
+    ],
+    databaseType: "postgres",
+    currentSchema: "public",
+  });
+
+  const area = items.find((item) => item.label === "st_area" && item.type === "function");
+  assert.ok(area);
+  assert.equal(area.detail, "function in public  [double precision]");
+  assert.equal(area.info, "public.st_area\nReturns an area");
+  assert.ok(items.some((item) => item.label === "start_sid" && item.type === "column"));
+  assert.equal(
+    items.some((item) => item.label === "st_refresh"),
+    false,
+  );
+  assert.equal(
+    items.some((item) => item.label === "LAST_VALUE" || item.label === "FIRST_VALUE"),
+    false,
+  );
+  assert.ok(items.findIndex((item) => item.label === "st_area" && item.type === "function") < items.findIndex((item) => item.label === "start_sid" && item.type === "column"));
+});
+
+test("keeps an exact referenced column above an exact database function", () => {
+  const sql = "SELECT st_area FROM public.routes";
+  const items = buildSqlCompletionItems(sql, "SELECT st_area".length, {
+    tables: [{ name: "routes", schema: "public", type: "table" }],
+    columnsByTable: new Map([["public.routes", [{ name: "st_area", table: "routes", schema: "public", dataType: "numeric" }]]]),
+    objects: [{ name: "st_area", schema: "public", type: "function", dataType: "double precision", boost: 2400 }],
+    databaseType: "oracle",
+    currentSchema: "public",
+  });
+
+  const exactMatches = items.filter((item) => item.label === "st_area");
+  assert.deepEqual(
+    exactMatches.map((item) => item.type),
+    ["column", "function"],
+  );
+});
+
+test("does not suggest database functions in exclusive table or column contexts", () => {
+  const input = {
+    tables: [{ name: "routes", schema: "public", type: "table" as const }],
+    columnsByTable: new Map([["public.routes", [{ name: "start_sid", table: "routes", schema: "public" }]]]),
+    objects: [{ name: "st_area", schema: "public", type: "function" as const }],
+    databaseType: "postgres" as const,
+  };
+
+  const tableSql = "SELECT * FROM st_";
+  assert.equal(
+    buildSqlCompletionItems(tableSql, tableSql.length, input).some((item) => item.label === "st_area"),
+    false,
+  );
+
+  const updateSql = "UPDATE public.routes SET st_";
+  const updateContext = getSqlCompletionContext(updateSql, updateSql.length);
+  assert.equal(updateContext.qualifier, undefined);
+  assert.equal(updateContext.contextKind, "column");
+  assert.equal(updateContext.exclusiveColumnSuggestions, true);
+  assert.equal(updateContext.suggestRoutines, false);
+  assert.equal(
+    buildSqlCompletionItems(updateSql, updateSql.length, input).some((item) => item.label === "st_area"),
+    false,
   );
 });
 
@@ -544,6 +908,54 @@ test("suggests tables after LEFT JOIN", () => {
   assert.ok(items.some((item) => item.label === "user_profiles" && item.type === "table"));
 });
 
+test("suggests compound JOIN keywords while typing a join modifier", () => {
+  const sql = "select * from users le";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  const leftJoinIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT JOIN");
+  const leftIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT");
+
+  assert.ok(leftJoinIndex >= 0);
+  assert.ok(leftIndex >= 0);
+  assert.ok(leftJoinIndex < leftIndex, "LEFT JOIN should rank ahead of the single LEFT token");
+  assert.equal(items[leftJoinIndex]?.apply, "LEFT JOIN ");
+});
+
+test("keeps MySQL LEFT JOIN ranking when LEFT() is also a function", () => {
+  const sql = "select * from users le";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  const leftJoinIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT JOIN");
+  const leftKeywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LEFT");
+  const leftFunctionIndex = items.findIndex((item) => item.type === "function" && item.label === "LEFT");
+
+  assert.ok(leftJoinIndex >= 0);
+  assert.ok(leftKeywordIndex >= 0);
+  assert.ok(leftFunctionIndex >= 0);
+  assert.ok(leftJoinIndex < leftKeywordIndex, "LEFT JOIN should rank ahead of LEFT keyword");
+  assert.ok(leftJoinIndex < leftFunctionIndex, "LEFT JOIN should rank ahead of LEFT()");
+});
+
+test("suggests JOIN after a join modifier", () => {
+  const sql = "select * from users left ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.deepEqual(
+    items.map((item) => [item.label, item.type]),
+    [["JOIN", "keyword"]],
+  );
+});
+
 test("suggests tables after comma in FROM clause", () => {
   const sql = "select * from users, or";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -592,6 +1004,16 @@ test("keeps schema-qualified FROM object input in table suggestion mode", () => 
     tableItems.map((item) => item.label),
     ["users", "user_profiles"],
   );
+});
+
+test("keeps an accepted schema with trailing dot in table suggestion mode", () => {
+  const sql = "SELECT *\nFROM DBX_TEST.";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.equal(context.qualifier, "DBX_TEST");
+  assert.equal(context.prefix, "");
+  assert.equal(context.suggestTables, true);
+  assert.equal(context.exclusiveTableSuggestions, true);
 });
 
 test("keeps database-qualified FROM input in table suggestion mode", () => {
@@ -733,6 +1155,28 @@ test("suggests SQL Server IIF and CHOOSE scalar functions", () => {
   );
 });
 
+test("only suggests Cloudflare D1 supported common functions", () => {
+  const supported = buildSqlCompletionItems("SELECT SQ", "SELECT SQ".length, {
+    tables,
+    columnsByTable,
+    databaseType: "cloudflare-d1",
+  });
+  const unsupportedNow = buildSqlCompletionItems("SELECT NO", "SELECT NO".length, {
+    tables,
+    columnsByTable,
+    databaseType: "cloudflare-d1",
+  });
+  const unsupportedPower = buildSqlCompletionItems("SELECT PO", "SELECT PO".length, {
+    tables,
+    columnsByTable,
+    databaseType: "cloudflare-d1",
+  });
+
+  assert.ok(supported.some((item) => item.label === "SQRT"));
+  assert.ok(!unsupportedNow.some((item) => item.label === "NOW"));
+  assert.ok(!unsupportedPower.some((item) => item.label === "POWER"));
+});
+
 test("suggests SQL Server IDENTITY_INSERT after SET", () => {
   const sql = "set  iden";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -829,7 +1273,53 @@ test("auto-opens completion after word characters and explicit dot qualifiers", 
 });
 
 test("auto-opens table completion immediately after FROM context whitespace", () => {
-  for (const sql of ["select * from ", "select * from users join ", "select * from users, "]) {
+  for (const sql of ["select * from ", "select * from users join ", "select * from users, ", "insert into "]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), true, sql);
+  }
+});
+
+test("auto-opens column completion immediately after condition context whitespace", () => {
+  for (const { sql, cursor = sql.length } of [
+    { sql: "select * from users where " },
+    {
+      sql: "SELECT *\nFROM t_0001 AS t0 WHERE \nLIMIT 100;",
+      cursor: "SELECT *\nFROM t_0001 AS t0 WHERE ".length,
+    },
+  ]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), true, sql);
+  }
+});
+
+test("does not auto-open column completion immediately after comparison operators", () => {
+  for (const sql of ["SELECT * FROM public.users WHERE id>", "SELECT * FROM public.users WHERE id> ", "SELECT * FROM public.users WHERE id = "]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), false, sql);
+  }
+  const rhsColumnPrefix = "SELECT * FROM public.users WHERE id > i";
+  assert.equal(shouldAutoOpenSqlCompletion(rhsColumnPrefix, rhsColumnPrefix.length), true);
+});
+
+test("does not auto-open keyword completion immediately after a completed numeric WHERE value", () => {
+  for (const { sql, cursor = sql.length } of [
+    { sql: "SELECT * FROM public.users WHERE id > 0" },
+    { sql: "SELECT * FROM public.users WHERE id > 0 " },
+    {
+      sql: "SELECT *\nFROM t_0001 AS t0 WHERE id>0\nLIMIT 100;",
+      cursor: "SELECT *\nFROM t_0001 AS t0 WHERE id>0".length,
+    },
+  ]) {
+    assert.equal(shouldAutoOpenSqlCompletion(sql, cursor), false, sql);
+  }
+  const nextKeywordPrefix = "SELECT * FROM public.users WHERE id > 0 l";
+  assert.equal(shouldAutoOpenSqlCompletion(nextKeywordPrefix, nextKeywordPrefix.length), true);
+});
+
+test("auto-opens keyword completion after JOIN modifier whitespace", () => {
+  assert.equal(shouldAutoOpenSqlCompletion("select * from users left ", "select * from users left ".length), true);
+  assert.equal(shouldAutoOpenSqlCompletion("select left ", "select left ".length), false);
+});
+
+test("auto-opens INSERT target column completion after column-list punctuation", () => {
+  for (const sql of ["insert into users (", "insert into users (id, "]) {
     assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length), true, sql);
   }
 });
@@ -851,6 +1341,25 @@ test("suggests table names for empty FROM context prefix", () => {
   );
 });
 
+test("suggests table names for empty INSERT INTO target prefix", () => {
+  const items = buildSqlCompletionItems("insert into ", "insert into ".length, {
+    tables,
+    columnsByTable,
+    schemas: ["public", "express-vue", "mall"],
+  });
+
+  assert.deepEqual(
+    items.slice(0, 4).map((item) => [item.label, item.type]),
+    [
+      ["users", "table"],
+      ["user_profiles", "table"],
+      ["orders", "table"],
+      ["ticket_summary", "table"],
+    ],
+  );
+  assert.ok(items.findIndex((item) => item.type === "schema" && item.label === "public") > 3);
+});
+
 test("suggests matching table names for partial table input", () => {
   const items = buildSqlCompletionItems("select * from ihli", "select * from ihli".length, {
     tables: [{ name: "ihli_data", schema: "public", type: "table" }],
@@ -861,6 +1370,96 @@ test("suggests matching table names for partial table input", () => {
   assert.deepEqual(
     tableItems.map((item) => [item.label, item.type, item.detail]),
     [["ihli_data", "table", "public.ihli_data"]],
+  );
+});
+
+test("keeps completed references while removing active JOIN table prefixes", () => {
+  const context = getSqlCompletionContext("select * from users join ex", "select * from users join ex".length);
+
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["users"],
+  );
+});
+
+test("extracts JOIN tables without explicit aliases", () => {
+  const sql = "select * from a join b on a.id = b.id";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map((table) => table.name),
+    ["a", "b"],
+  );
+});
+
+test("extracts MySQL backtick-qualified tables across a JOIN", () => {
+  const sql = [
+    "select",
+    "  `jobdb`.`job_application_ats_process`.`process_id`,",
+    "  count(*)",
+    "from",
+    "  `jobdb`.`job_application`",
+    "join `jobdb`.`job_application_ats_process` on",
+    "  `jobdb`.`job_application`.`id` = `jobdb`.`job_application_ats_process`.`app_id`",
+  ].join("\n");
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name }) => ({ schema, name })),
+    [
+      { schema: "jobdb", name: "job_application" },
+      { schema: "jobdb", name: "job_application_ats_process" },
+    ],
+  );
+});
+
+test("extracts every table across consecutive JOINs", () => {
+  const sql = "select * from db.a join db.b on 1=1 join db.c on 2=2";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name }) => ({ schema, name })),
+    [
+      { schema: "db", name: "a" },
+      { schema: "db", name: "b" },
+      { schema: "db", name: "c" },
+    ],
+  );
+});
+
+test("extracts tables across a MySQL STRAIGHT_JOIN", () => {
+  const sql = "select * from db.a straight_join db.b on db.a.id = db.b.id";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name, alias }) => ({ schema, name, alias })),
+    [
+      { schema: "db", name: "a", alias: undefined },
+      { schema: "db", name: "b", alias: undefined },
+    ],
+  );
+});
+
+test("keeps explicit table aliases across a JOIN", () => {
+  const sql = "select * from db.a x join db.b y";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ schema, name, alias }) => ({ schema, name, alias })),
+    [
+      { schema: "db", name: "a", alias: "x" },
+      { schema: "db", name: "b", alias: "y" },
+    ],
+  );
+});
+
+test("does not treat WHERE as a table alias", () => {
+  const sql = "select * from a where id = 1";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ name, alias }) => ({ name, alias })),
+    [{ name: "a", alias: undefined }],
   );
 });
 
@@ -879,6 +1478,102 @@ test("ranks exact table matches above prefix and fuzzy matches", () => {
     tableItems.map((item) => item.label),
     ["toh", "toh_archive", "to_his_rec"],
   );
+});
+
+test("ranks exact keyword matches above prefix-matching routines (#3002)", () => {
+  const sql = "create table t (id int";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [
+      { name: "int_proc_sync", type: "procedure" },
+      { name: "sp_interface", type: "procedure" },
+      { name: "fn_to_int", type: "function" },
+    ],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+  });
+
+  assert.equal(items[0]?.label, "INT");
+  assert.equal(items[0]?.type, "keyword");
+});
+
+test("preserves an exact routine match before truncating candidates", () => {
+  const sql = "select aaa";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [
+      ...Array.from({ length: 200 }, (_, index) => ({ name: `a_a_a_${index}`, type: "procedure" as const })),
+      { name: "aaa", type: "function" },
+    ],
+    columnsByTable: new Map(),
+  });
+
+  assert.equal(items[0]?.label, "aaa");
+  assert.equal(items[0]?.type, "function");
+});
+
+test("ranks an exact table label match first", () => {
+  const sql = "select * from orders";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: "orders_archive", type: "table" },
+    ],
+    columnsByTable: new Map(),
+  });
+
+  assert.equal(items[0]?.label, "orders");
+  assert.equal(items[0]?.type, "table");
+});
+
+test("ranks an exact column match above an exact keyword match", () => {
+  const sql = "select limit from t";
+  const items = buildSqlCompletionItems(sql, "select limit".length, {
+    tables: [{ name: "t", type: "table" }],
+    columnsByTable: new Map([["t", [{ name: "limit", table: "t", dataType: "text" }]]]),
+  });
+  const columnIndex = items.findIndex((item) => item.type === "column" && item.label === "limit");
+  const keywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === "LIMIT");
+
+  assert.ok(columnIndex >= 0);
+  assert.ok(keywordIndex >= 0);
+  assert.ok(columnIndex < keywordIndex);
+});
+
+test("ranks an exact table match above foreign-key related prefix matches", () => {
+  const sql = "select * from orders join customers";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: "customers", type: "table" },
+      { name: "customers_ext", type: "table" },
+    ],
+    columnsByTable: new Map(),
+    foreignKeysByTable: new Map([["orders", [{ column: "customer_id", ref_table: "customers_ext", ref_column: "id" }]]]),
+  });
+
+  assert.equal(items[0]?.label, "customers");
+  assert.equal(items[0]?.type, "table");
+});
+
+test("ranks an exact match first even when a fuzzy candidate outscores the numeric boost", () => {
+  // A long tight-fuzzy foreign-key candidate accumulates boundary bonuses beyond
+  // EXACT_LABEL_MATCH_BOOST; only the exactMatch comparator key keeps the exact item first.
+  const exactName = "ab".repeat(300);
+  const fuzzyName = Array.from({ length: 300 }, () => "ab").join("_");
+  const sql = `select * from orders join ${exactName}`;
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "orders", type: "table" },
+      { name: exactName, type: "table" },
+      { name: fuzzyName, type: "table" },
+    ],
+    columnsByTable: new Map(),
+    foreignKeysByTable: new Map([["orders", [{ column: "x_id", ref_table: fuzzyName, ref_column: "id" }]]]),
+  });
+
+  assert.equal(items[0]?.label, exactName);
+  assert.equal(items[0]?.type, "table");
 });
 
 test("does not reuse table completion results across typed prefixes", () => {
@@ -943,6 +1638,17 @@ test("prioritizes FROM after SELECT star when typing the keyword", () => {
 
 test("prioritizes referenced columns in WHERE conditions", () => {
   const sql = "SELECT * FROM public.users WHERE i";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    databaseType: "mysql",
+  });
+
+  assert.equal(items[0]?.label, "id");
+});
+
+test("prioritizes referenced columns after WHERE comparison operators", () => {
+  const sql = "SELECT * FROM public.users WHERE id > i";
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables,
     columnsByTable,
@@ -1086,6 +1792,22 @@ test("keeps snippets below matching WHERE field columns", () => {
   );
 });
 
+test("suggests referenced table columns after WHERE whitespace", () => {
+  const sql = "select * from users where ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+  });
+
+  assert.deepEqual(
+    items
+      .filter((item) => item.type === "column")
+      .slice(0, 3)
+      .map((item) => item.label),
+    ["id", "name", "email"],
+  );
+});
+
 test("suggests user functions and triggers with fuzzy matching", () => {
   const sql = "select fun";
   const items = buildSqlCompletionItems(sql, sql.length, {
@@ -1133,6 +1855,88 @@ test("suggests package members after package qualifier", () => {
   assert.ok(member);
   assert.equal(member.type, "function");
   assert.equal(member.apply, "calculate_bonus()");
+});
+
+test("keeps Oracle functions available in qualified expression routine context", () => {
+  const sql = "select HGY.FN_";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables,
+    columnsByTable,
+    objects: [
+      { name: "FN_CHECKIDCARD", schema: "HGY", type: "function" },
+      { name: "FN_REFRESH", schema: "HGY", type: "procedure" },
+    ],
+    databaseType: "oracle",
+  });
+
+  const fn = items.find((item) => item.label === "FN_CHECKIDCARD");
+  assert.ok(fn);
+  assert.equal(fn.apply, "FN_CHECKIDCARD()");
+  assert.equal(items.find((item) => item.type === "function")?.label, "FN_CHECKIDCARD");
+});
+
+test("prioritizes current Oracle schema tables and safely qualifies other schemas", () => {
+  const sql = "select * from dept_d";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "DEPT_DICT", schema: "COMM", type: "table", applyName: "COMM.DEPT_DICT", boost: 0 },
+      { name: "DEPT_DICT", schema: "APP", type: "table", applyName: "DEPT_DICT", boost: 2400 },
+      { name: "DEPT_DICT", schema: "SYS", type: "view", applyName: "SYS.DEPT_DICT", boost: -1200 },
+    ],
+    columnsByTable,
+    databaseType: "oracle",
+  });
+  const matches = items.filter((item) => item.label === "DEPT_DICT");
+
+  assert.deepEqual(
+    matches.map((item) => item.apply),
+    ["DEPT_DICT", "COMM.DEPT_DICT", "SYS.DEPT_DICT"],
+  );
+});
+
+test("does not duplicate an Oracle schema qualifier when applying a scoped table", () => {
+  const sql = "select * from COMM.DEPT_D";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "DEPT_DICT", schema: "COMM", type: "table" }],
+    columnsByTable,
+    databaseType: "oracle",
+    currentSchema: "APP",
+  });
+
+  const table = items.find((item) => item.label === "DEPT_DICT");
+  assert.ok(table);
+  assert.equal(table.apply, "DEPT_DICT");
+});
+
+test("keeps same-name Oracle routines from different schemas", () => {
+  const sql = "select FN_CHECK";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [
+      { name: "FN_CHECK", schema: "APP", type: "function", boost: 2400 },
+      { name: "FN_CHECK", schema: "HR", type: "function" },
+    ],
+    columnsByTable: new Map(),
+    databaseType: "oracle",
+    currentSchema: "APP",
+  });
+
+  assert.deepEqual(
+    items.filter((item) => item.label === "FN_CHECK").map((item) => item.apply),
+    ["FN_CHECK()", "HR.FN_CHECK()"],
+  );
+});
+
+test("still deduplicates built-in and database routines outside Oracle metadata search", () => {
+  const sql = "select DATE_FORMAT";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [{ name: "DATE_FORMAT", schema: "app", type: "function" }],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+
+  assert.equal(items.filter((item) => item.type === "function" && item.label === "DATE_FORMAT").length, 1);
 });
 
 test("matches alias qualifier case-insensitively", () => {
@@ -1236,6 +2040,27 @@ test("returns cast signature with AS syntax", () => {
   });
 });
 
+test("uses dialect-specific argument order for CONVERT completion and signature help", () => {
+  const sql = "select conv";
+  const sqlServerItems = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+  });
+  const mysqlItems = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+
+  assert.equal(sqlServerItems.find((item) => item.label === "CONVERT")?.apply, "CONVERT(${type}, ${expression})");
+  assert.equal(mysqlItems.find((item) => item.label === "CONVERT")?.apply, "CONVERT(${expression}, ${type})");
+
+  const functionSql = "select convert(";
+  assert.deepEqual(getSqlFunctionSignatureHelp(functionSql, functionSql.length, "sqlserver")?.parameters, ["type", "expression"]);
+  assert.deepEqual(getSqlFunctionSignatureHelp(functionSql, functionSql.length, "mysql")?.parameters, ["expression", "type"]);
+});
+
 test("returns null signature help outside function calls", () => {
   assert.equal(getSqlFunctionSignatureHelp("select created_at from users", "select created_at".length), null);
 });
@@ -1289,12 +2114,90 @@ test("detects INSERT INTO column list context", () => {
   const context = getSqlCompletionContext("INSERT INTO users (", "INSERT INTO users (".length);
   assert.equal(context.insertTable, "users");
   assert.equal(context.exclusiveColumnSuggestions, true);
+  assert.deepEqual(context.referencedTables, []);
 });
 
 test("detects INSERT INTO with schema-qualified table", () => {
   const context = getSqlCompletionContext("INSERT INTO public.users (", "INSERT INTO public.users (".length);
   assert.equal(context.insertTable, "users");
   assert.equal(context.insertSchema, "public");
+});
+
+test("detects INSERT INTO column list with three-part qualified table", () => {
+  const sql = "INSERT INTO analytics.public.users (";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.equal(context.insertTable, "users");
+  assert.equal(context.insertDatabase, "analytics");
+  assert.equal(context.insertSchema, "public");
+});
+
+test("detects SQL Server bracket-qualified database, schema, and table references", () => {
+  const sql = "SELECT * FROM [DatabaseA].[IN].[orders] a LEFT JOIN [DatabaseB].[OUT].[orders] b ON b.";
+  const context = getSqlCompletionContext(sql, sql.length);
+
+  assert.deepEqual(
+    context.referencedTables.map(({ name, database, schema, alias }) => ({ name, database, schema, alias })),
+    [
+      { name: "orders", database: "DatabaseA", schema: "IN", alias: "a" },
+      { name: "orders", database: "DatabaseB", schema: "OUT", alias: "b" },
+    ],
+  );
+});
+
+test("scopes SQL Server cross-database alias columns to the referenced database", () => {
+  const sql = "SELECT * FROM [DatabaseA].[OUT].[orders] a LEFT JOIN [DatabaseB].[OUT].[orders] b ON b.";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map([
+      ["DatabaseA.OUT.orders", [{ name: "source_marker", table: "orders", schema: "OUT" }]],
+      ["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]],
+    ]),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.deepEqual(
+    items.filter((item) => item.type === "column").map((item) => item.label),
+    ["target_marker"],
+  );
+});
+
+test("suggests INSERT columns for a SQL Server three-part target", () => {
+  const sql = "INSERT INTO [DatabaseB].[OUT].[orders] (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    columnsByTable: new Map([["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]]]),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.equal(items.find((item) => item.type === "snippet" && item.label === "orders.*")?.apply, "target_marker");
+});
+
+test("detects MySQL backtick-qualified INSERT INTO column list context", () => {
+  const sql = "INSERT INTO `other_db`.`orders` (";
+  const context = getSqlCompletionContext(sql, sql.length);
+  assert.equal(context.insertTable, "orders");
+  assert.equal(context.insertSchema, "other_db");
+});
+
+test("does not treat partial INSERT INTO targets as referenced tables", () => {
+  const context = getSqlCompletionContext("INSERT INTO ord", "INSERT INTO ord".length);
+
+  assert.equal(context.contextKind, "insert_target");
+  assert.equal(context.suggestTables, true);
+  assert.equal(context.exclusiveTableSuggestions, true);
+  assert.deepEqual(context.referencedTables, []);
+});
+
+test("does not treat following SQL keywords as table references while completing table names", () => {
+  const sql = "SELECT *\nFROM \nLIMIT 100";
+  const cursor = "SELECT *\nFROM ".length;
+  const context = getSqlCompletionContext(sql, cursor);
+
+  assert.equal(context.suggestTables, true);
+  assert.deepEqual(context.referencedTables, []);
 });
 
 test("suggests columns for INSERT INTO target table", () => {
@@ -1307,6 +2210,92 @@ test("suggests columns for INSERT INTO target table", () => {
   assert.ok(columnItems.some((item) => item.label === "id"));
   assert.ok(columnItems.some((item) => item.label === "name"));
   assert.ok(columnItems.some((item) => item.label === "email"));
+});
+
+test("suggests all target columns for INSERT INTO column list", () => {
+  const items = buildSqlCompletionItems("INSERT INTO users (", "INSERT INTO users (".length, {
+    tables,
+    columnsByTable,
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, name, email");
+});
+
+test("keeps INSERT INTO all-column expansion available after a column prefix", () => {
+  const items = buildSqlCompletionItems("INSERT INTO users (id", "INSERT INTO users (id".length, {
+    tables,
+    columnsByTable,
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, name, email");
+});
+
+test("quotes PostgreSQL identifiers in INSERT INTO all-column expansion", () => {
+  const sql = 'INSERT INTO public."OrderLines" (';
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: postgresQuotedTables,
+    columnsByTable: postgresQuotedColumnsByTable,
+    databaseType: "postgres",
+    dialect: "postgres",
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "OrderLines.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, 'article, "OrderId", "User", "has""quote"');
+});
+
+test("suggests all target columns for schema-qualified INSERT INTO column lists", () => {
+  const sql = "INSERT INTO dbo.Users (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "Users", schema: "dbo", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "dbo.Users",
+        [
+          { name: "Id", table: "Users", schema: "dbo", dataType: "bigint" },
+          { name: "DisplayName", table: "Users", schema: "dbo", dataType: "nvarchar" },
+        ],
+      ],
+    ]),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "Users.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "Id, DisplayName");
+});
+
+test("scopes INSERT INTO all-column expansion to the database-qualified MySQL target", () => {
+  const sql = "INSERT INTO other_db.orders (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "orders", schema: "other_db", type: "table" }],
+    columnsByTable: mysqlCrossDatabaseColumnsByTable,
+    databaseType: "mysql",
+    dialect: "mysql",
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "orders.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, number, status");
+});
+
+test("suggests all target columns for MySQL backtick-qualified INSERT INTO", () => {
+  const sql = "INSERT INTO `other_db`.`orders` (";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "orders", schema: "other_db", type: "table" }],
+    columnsByTable: mysqlCrossDatabaseColumnsByTable,
+    databaseType: "mysql",
+    dialect: "mysql",
+  });
+
+  const allColumns = items.find((item) => item.type === "snippet" && item.label === "orders.*");
+  assert.ok(allColumns);
+  assert.equal(allColumns.apply, "id, number, status");
 });
 
 // --- Column data type in detail ---
@@ -1359,6 +2348,11 @@ test("suggests schema names alongside tables in FROM context", () => {
     schemas: ["public", "private", "audit"],
   });
   const schemaItems = items.filter((item) => item.type === "schema");
+  const firstSchemaIndex = items.findIndex((item) => item.type === "schema");
+  const firstTableIndex = items.findIndex((item) => item.type === "table");
+
+  assert.ok(firstTableIndex >= 0);
+  assert.ok(firstSchemaIndex > firstTableIndex);
   assert.equal(schemaItems.length, 3);
   assert.ok(schemaItems.some((item) => item.label === "public"));
   assert.equal(schemaItems[0]?.apply, "public.");
@@ -1373,6 +2367,8 @@ test("schema items include apply value with trailing dot", () => {
   const schemaItems = items.filter((item) => item.type === "schema");
   assert.equal(schemaItems.length, 1);
   assert.equal(schemaItems[0]?.apply, "public.");
+  assert.equal(shouldChainSqlCompletionAfterAccept(schemaItems[0]!), true);
+  assert.equal(shouldChainSqlCompletionAfterAccept({ type: "table", apply: "users" }), false);
 });
 
 // --- Quoted identifier fix ---
@@ -1448,7 +2444,7 @@ test("filters data type keywords out of SELECT context", () => {
 
 // --- Qualified column names for duplicates ---
 
-test("shows qualified column names when multiple tables share column name", () => {
+test("uses row-source aliases when multiple tables share column names", () => {
   const sql = "select  from public.users u join public.orders o on u.id = o.user_id";
   const items = buildSqlCompletionItems(sql, "select ".length, {
     tables,
@@ -1456,12 +2452,12 @@ test("shows qualified column names when multiple tables share column name", () =
   });
   const columns = items.filter((item) => item.type === "column");
   assert.ok(
-    columns.some((item) => item.label === "users.id"),
-    "should show users.id",
+    columns.some((item) => item.label === "u.id" && item.apply === "u.id"),
+    "should show u.id",
   );
   assert.ok(
-    columns.some((item) => item.label === "orders.id"),
-    "should show orders.id",
+    columns.some((item) => item.label === "o.id" && item.apply === "o.id"),
+    "should show o.id",
   );
   assert.ok(
     columns.some((item) => item.label === "name"),
@@ -1575,6 +2571,116 @@ test("automatic table aliases avoid reserved words", () => {
   assert.ok(tableItem);
   assert.notEqual(tableItem!.apply, "orders AS or");
   assert.equal(tableItem!.apply, "orders AS ord");
+});
+
+test("automatic table aliases respect text after the cursor", () => {
+  const cases: Array<[string, number, string]> = [
+    ["select * from ord AS o", "select * from ord".length, "orders"],
+    ["select * from ord o", "select * from ord".length, "orders"],
+    ["select * from ord where id = 1", "select * from ord".length, "orders AS ord"],
+    ["select * from ord", "select * from ord".length, "orders AS ord"],
+    ["select * from ord, users", "select * from ord".length, "orders AS ord"],
+    ["select * from orders AS o", "select * from or".length, "orders"],
+    ["select * from ord单 AS o", "select * from ord".length, "orders"],
+    ["select * from orde\u0301 AS o", "select * from ord".length, "orders"],
+    ["select * from ord𐐀 AS o", "select * from ord".length, "orders"],
+    ['select * from ord AS "o"', "select * from ord".length, "orders"],
+    ["select * from ord `o`", "select * from ord".length, "orders"],
+    ["select * from ord AS ", "select * from ord".length, "orders"],
+    ["select * from ord /* comment */ AS o", "select * from ord".length, "orders"],
+    ["select * from ord -- comment\n  o", "select * from ord".length, "orders"],
+    ["select * from ord\n  o", "select * from ord".length, "orders"],
+    ["select * from ord /* ; */ AS o", "select * from ord".length, "orders"],
+    ["select * from ord /* comment */ where id = 1", "select * from ord".length, "orders AS ord"],
+  ];
+
+  for (const [sql, cursor, expectedApply] of cases) {
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables,
+      columnsByTable,
+      autoAliasTables: true,
+    });
+
+    const tableItem = items.find((item) => item.type === "table" && item.label === "orders");
+    assert.ok(tableItem, `should suggest orders for ${sql}`);
+    assert.equal(tableItem!.apply, expectedApply, sql);
+  }
+});
+
+test("table alias suggestions respect text after the cursor", () => {
+  const aliasedCases: Array<[string, number]> = [
+    ["select * from orders AS o", "select * from orders ".length],
+    ['select * from orders AS "o"', "select * from orders ".length],
+    ["select * from orders AS ", "select * from orders ".length],
+    ["select * from orders /* c */ AS o", "select * from orders ".length],
+  ];
+
+  for (const [sql, cursor] of aliasedCases) {
+    const items = buildSqlCompletionItems(sql, cursor, { tables, columnsByTable });
+    const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for orders");
+    assert.equal(aliasItem, undefined, sql);
+  }
+
+  const items = buildSqlCompletionItems("select * from orders ", "select * from orders ".length, { tables, columnsByTable });
+  const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for orders");
+  assert.ok(aliasItem, "alias snippet should remain available when no alias follows");
+});
+
+test("table alias suggestions avoid SQL keywords", () => {
+  const items = buildSqlCompletionItems("select * from item_file ", "select * from item_file ".length, {
+    tables: [{ name: "item_file", schema: "public", type: "table" }],
+    columnsByTable,
+  });
+
+  const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for item_file");
+  assert.ok(aliasItem);
+  assert.notEqual(aliasItem!.apply, "AS if ");
+  assert.equal(aliasItem!.apply, "AS it ");
+});
+
+test("automatic table aliases avoid SQL keywords", () => {
+  const cases: Array<[string, string]> = [
+    ["account_store", "account_store AS ac"],
+    ["account_type", "account_type AS ac"],
+    ["data_order", "data_order AS da"],
+    ["invoice_note", "invoice_note AS inv"],
+    ["item_file", "item_file AS it"],
+    ["item_status", "item_status AS it"],
+    ["new_order", "new_order AS ne"],
+    ["no_config", "no_config AS nc"],
+    ["order_node", "order_node AS ord"],
+    ["order_flow", "order_flow AS ord"],
+    ["order_region", "order_region AS ord"],
+    ["row_value", "row_value AS rv"],
+    ["use_case", "use_case AS uc"],
+    ["user_role", "user_role AS ur"],
+  ];
+
+  for (const [tableName, expectedApply] of cases) {
+    const sql = `select * from ${tableName.slice(0, 3)}`;
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: tableName, schema: "public", type: "table" }],
+      columnsByTable,
+      autoAliasTables: true,
+    });
+
+    const tableItem = items.find((item) => item.type === "table" && item.label === tableName);
+    assert.ok(tableItem, `should suggest ${tableName}`);
+    assert.equal(tableItem!.apply, expectedApply);
+  }
+});
+
+test("does not force automatic table aliases when disabled", () => {
+  const sql = "select * from item";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "item_file", schema: "public", type: "table" }],
+    columnsByTable,
+    autoAliasTables: false,
+  });
+
+  const tableItem = items.find((item) => item.type === "table" && item.label === "item_file");
+  assert.ok(tableItem);
+  assert.equal(tableItem!.apply, "item_file");
 });
 
 test("table alias suggestions avoid existing aliases", () => {

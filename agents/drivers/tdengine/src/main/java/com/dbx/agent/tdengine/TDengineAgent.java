@@ -8,7 +8,8 @@ import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
@@ -16,16 +17,20 @@ import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
+import com.taosdata.jdbc.TSDBDriver;
+import com.taosdata.jdbc.rs.RestfulConnection;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.temporal.ChronoField;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -42,16 +47,26 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class TDengineAgent extends BaseDatabaseAgent {
+    private static final long TABLE_CACHE_TTL_MILLIS = 10_000L;
     private static final DateTimeFormatter TDENGINE_TIMESTAMP_FORMAT =
-        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+        new DateTimeFormatterBuilder()
+            .appendPattern("yyyy-MM-dd HH:mm:ss")
+            .appendFraction(ChronoField.NANO_OF_SECOND, 3, 9, true)
+            .toFormatter();
     private static final Pattern NUMERIC_PRECISION_PATTERN =
         Pattern.compile("(?i)^(decimal|numeric)\\((\\d+)(?:,\\s*\\d+)?\\)");
     private static final Pattern NUMERIC_SCALE_PATTERN =
         Pattern.compile("(?i)^(decimal|numeric)\\(\\d+,\\s*(\\d+)\\)");
     private static final Pattern CHARACTER_LENGTH_PATTERN =
         Pattern.compile("(?i)^(binary|nchar|varchar|varbinary)\\((\\d+)\\)");
+    private static final Pattern COMPOSITE_KEY_PATTERN =
+        Pattern.compile("(?i)\\bCOMPOSITE\\s+KEY\\b");
 
     private Connection connection;
+    private final Object tableCacheLock = new Object();
+    private String tableCacheSchema = "";
+    private long tableCacheTimeMillis;
+    private List<TableInfo> tableCache = Collections.emptyList();
 
     @Override
     public Connection getConnection() {
@@ -62,6 +77,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     public void connect(ConnectParams params) {
         uncheckedVoid(() -> {
             connection = TDengineConnectionFactory.open(params);
+            clearTableCache();
         });
     }
 
@@ -98,18 +114,39 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     @Override
     public List<TableInfo> listTables(String schema) {
+        return listTables(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        if (!normalized.tableTypeAllowed("TABLE")) {
+            return Collections.emptyList();
+        }
+        return normalized.filterTables(listTablesFromShow(schema));
+    }
+
+    private List<TableInfo> listTablesFromShow(String schema) {
+        List<TableInfo> cached = cachedTables(schema);
+        if (cached != null) {
+            return cached;
+        }
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE"));
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE"));
+            // Connector/J 3.6.3 ignores Statement#setMaxRows. Read the SHOW
+            // results once and page locally from a short-lived cache instead of
+            // issuing the same full scan for every sidebar page.
+            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE", false));
+            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE", true));
 
             Map<String, TableInfo> distinct = new LinkedHashMap<>();
             for (TableInfo table : result) {
                 distinct.putIfAbsent(table.getTable_type() + ":" + table.getName(), table);
             }
             List<TableInfo> sorted = new ArrayList<>(distinct.values());
-            sorted.sort(Comparator.comparing(table -> table.getName().toLowerCase(Locale.ROOT)));
-            return sorted;
+            sortTablesForHierarchy(sorted);
+            cacheTables(schema, sorted);
+            return copyTables(sorted);
         });
     }
 
@@ -170,24 +207,28 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
-        return JdbcExecutor.INSTANCE.execute(
+        QueryResult result = JdbcExecutor.current().execute(
             requireConnected(),
             sql,
-            schema,
+            prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
             this::tdengineResultValue
         );
+        if (mayChangeMetadata(sql)) {
+            clearTableCache();
+        }
+        return result;
     }
 
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
-        return JdbcExecutor.INSTANCE.executePage(
+        return JdbcExecutor.current().executePage(
             requireConnected(),
             sql,
-            schema,
+            prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options,
             this::tdengineResultValue
@@ -196,10 +237,10 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
-        return JdbcExecutor.INSTANCE.startTableRead(
+        return JdbcExecutor.current().startTableRead(
             requireConnected(),
             sql,
-            schema,
+            prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options,
             this::tdengineResultValue
@@ -212,27 +253,151 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     }
 
     @Override
+    public QueryResult executeTransaction(List<String> statements, String schema) {
+        QueryResult result = super.executeTransaction(statements, prepareExecutionSchema(schema));
+        if (statements.stream().anyMatch(TDengineAgent::mayChangeMetadata)) {
+            clearTableCache();
+        }
+        return result;
+    }
+
+    @Override
+    public QueryResult executeBatch(List<String> statements, String schema) {
+        QueryResult result = super.executeBatch(statements, prepareExecutionSchema(schema));
+        if (statements.stream().anyMatch(TDengineAgent::mayChangeMetadata)) {
+            clearTableCache();
+        }
+        return result;
+    }
+
+    private String prepareExecutionSchema(String schema) {
+        return unchecked(() -> prepareExecutionSchema(requireConnected(), schema));
+    }
+
+    static String prepareExecutionSchema(Connection connection, String schema) throws SQLException {
+        if (!(connection instanceof RestfulConnection) || schema == null || schema.trim().isEmpty()) {
+            return schema;
+        }
+
+        String database = schema.trim();
+        // Connector/J 3.6.3 misparses quoted USE statements and puts the whole SQL in /rest/sql/<db>.
+        connection.setCatalog(database);
+        connection.setClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME, database);
+        return null;
+    }
+
+    @Override
     public void disconnect() {
         uncheckedVoid(() -> {
             if (connection != null) {
                 connection.close();
             }
             connection = null;
+            clearTableCache();
         });
     }
 
-    private List<TableInfo> queryTables(String sql, String tableType) throws Exception {
+    private List<TableInfo> queryTables(String sql, String tableType, boolean includesStableName) throws Exception {
         List<TableInfo> result = new ArrayList<>();
-        try (java.sql.Statement stmt = requireConnected().createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-            while (rs.next()) {
-                result.add(new TableInfo(rs.getString(1), tableType, null));
+        try (java.sql.Statement stmt = requireConnected().createStatement()) {
+            try (ResultSet rs = stmt.executeQuery(sql)) {
+                while (rs.next()) {
+                    // SHOW TABLES returns the owning STABLE as its fourth column. It
+                    // is absent for ordinary tables and older servers, where this
+                    // best-effort read simply leaves the table at the root level.
+                    String parentName = includesStableName ? optionalString(rs, 4) : null;
+                    if (parentName != null && parentName.trim().isEmpty()) {
+                        parentName = null;
+                    }
+                    result.add(new TableInfo(rs.getString(1), tableType, null, null, parentName));
+                }
             }
         }
         return result;
     }
 
-    private static List<ColumnInfo> readDescribeColumns(ResultSet rs) throws Exception {
+    private List<TableInfo> cachedTables(String schema) {
+        String normalizedSchema = normalizedSchema(schema);
+        synchronized (tableCacheLock) {
+            if (cacheFresh(tableCacheTimeMillis) && tableCacheSchema.equals(normalizedSchema)) {
+                return copyTables(tableCache);
+            }
+        }
+        return null;
+    }
+
+    private void cacheTables(String schema, List<TableInfo> tables) {
+        synchronized (tableCacheLock) {
+            tableCacheSchema = normalizedSchema(schema);
+            tableCache = copyTables(tables);
+            tableCacheTimeMillis = System.currentTimeMillis();
+        }
+    }
+
+    private void clearTableCache() {
+        synchronized (tableCacheLock) {
+            tableCacheSchema = "";
+            tableCacheTimeMillis = 0L;
+            tableCache = Collections.emptyList();
+        }
+    }
+
+    private static boolean cacheFresh(long cachedAtMillis) {
+        return cachedAtMillis > 0L && System.currentTimeMillis() - cachedAtMillis <= TABLE_CACHE_TTL_MILLIS;
+    }
+
+    private static String normalizedSchema(String schema) {
+        return schema == null ? "" : schema.trim();
+    }
+
+    private static List<TableInfo> copyTables(List<TableInfo> tables) {
+        List<TableInfo> copies = new ArrayList<>(tables.size());
+        for (TableInfo table : tables) {
+            copies.add(new TableInfo(
+                table.getName(),
+                table.getTable_type(),
+                table.getComment(),
+                table.getParent_schema(),
+                table.getParent_name()
+            ));
+        }
+        return copies;
+    }
+
+    private static boolean mayChangeMetadata(String sql) {
+        String normalized = sql == null ? "" : sql.trim().toLowerCase(Locale.ROOT);
+        return normalized.startsWith("create ")
+            || normalized.startsWith("drop ")
+            || normalized.startsWith("alter ")
+            || normalized.startsWith("rename ")
+            || normalized.startsWith("truncate ");
+    }
+
+    static void sortTablesForHierarchy(List<TableInfo> tables) {
+        tables.sort((left, right) -> {
+            String leftGroup = hierarchyGroupName(left);
+            String rightGroup = hierarchyGroupName(right);
+            int groupCompared = leftGroup.compareTo(rightGroup);
+            if (groupCompared != 0) {
+                return groupCompared;
+            }
+
+            boolean leftIsParent = left.getParent_name() == null;
+            boolean rightIsParent = right.getParent_name() == null;
+            if (leftIsParent != rightIsParent) {
+                return leftIsParent ? -1 : 1;
+            }
+            return left.getName().toLowerCase(Locale.ROOT).compareTo(right.getName().toLowerCase(Locale.ROOT));
+        });
+    }
+
+    private static String hierarchyGroupName(TableInfo table) {
+        String parentName = table.getParent_name();
+        String groupName = parentName == null || parentName.trim().isEmpty() ? table.getName() : parentName;
+        return groupName.toLowerCase(Locale.ROOT);
+    }
+
+    static List<ColumnInfo> readDescribeColumns(ResultSet rs) throws Exception {
         List<ColumnInfo> result = new ArrayList<>();
         int ordinal = 0;
         while (rs.next()) {
@@ -241,12 +406,13 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             String dataType = coalesce(rs.getString(2));
             String note = optionalString(rs, 4);
             boolean isTag = note != null && note.toUpperCase(Locale.ROOT).contains("TAG");
+            boolean isPrimaryKey = !isTag && (ordinal == 1 || (note != null && COMPOSITE_KEY_PATTERN.matcher(note).find()));
             result.add(new ColumnInfo(
                 name,
                 dataType,
-                ordinal != 1,
+                !isPrimaryKey,
                 null,
-                ordinal == 1 && !isTag,
+                isPrimaryKey,
                 note,
                 isTag ? "TAG" : null,
                 parseNumericPrecision(dataType),
@@ -371,7 +537,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new TDengineAgent()).run();
+        new MultiSessionJsonRpcServer(TDengineAgent::new).run();
     }
 }
 

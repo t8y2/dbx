@@ -3,7 +3,7 @@ package com.dbx.agent.iris;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.StandardJdbcMetadata;
 
 import java.sql.Connection;
@@ -154,6 +154,6 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new IrisAgent()).run();
+        new MultiSessionJsonRpcServer(IrisAgent::new).run();
     }
 }

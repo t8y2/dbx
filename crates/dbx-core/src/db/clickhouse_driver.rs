@@ -1,10 +1,12 @@
+use futures::StreamExt;
 use reqwest::{Certificate, Client as HttpClient};
 use serde::Deserialize;
 use std::fs;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use super::{http_client_builder, with_connection_timeout};
-use crate::query::MAX_ROWS;
+use crate::query::{canceled_error, MAX_ROWS};
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{ColumnInfo, DatabaseInfo, IndexInfo, ObjectStatistics, QueryResult, TableInfo};
 
@@ -13,12 +15,15 @@ pub struct ChClient {
     base_url: String,
     username: Option<String>,
     password: Option<String>,
+    /// 用户在连接配置「URL 参数」中填写的自定义 HTTP query 参数（已归一化），
+    /// 例如 `dialect_type=ANSI`，会追加到每次请求的 URL query string 上。
+    extra_params: Option<String>,
 }
 
 impl ChClient {
     pub fn new(url: &str, username: Option<String>, password: Option<String>, timeout: Duration) -> Self {
         let http = http_client_builder(timeout).build().unwrap_or_else(|_| HttpClient::new());
-        Self { http, base_url: url.trim_end_matches('/').to_string(), username, password }
+        Self { http, base_url: url.trim_end_matches('/').to_string(), username, password, extra_params: None }
     }
 
     pub fn new_with_ca_cert(
@@ -26,6 +31,7 @@ impl ChClient {
         username: Option<String>,
         password: Option<String>,
         ca_cert_path: Option<&str>,
+        extra_params: Option<&str>,
         timeout: Duration,
     ) -> Result<Self, String> {
         let mut builder = http_client_builder(timeout);
@@ -39,7 +45,24 @@ impl ChClient {
             builder = builder.add_root_certificate(cert);
         }
         let http = builder.build().map_err(|e| format!("Failed to configure ClickHouse HTTP client: {e}"))?;
-        Ok(Self { http, base_url: url.trim_end_matches('/').to_string(), username, password })
+        Ok(Self {
+            http,
+            base_url: url.trim_end_matches('/').to_string(),
+            username,
+            password,
+            extra_params: normalize_extra_params(extra_params),
+        })
+    }
+}
+
+/// 归一化用户填写的「URL 参数」：去除首尾空白与开头的 `?`/`&`，
+/// 返回可直接拼接到 query string 的片段；为空时返回 None。
+fn normalize_extra_params(params: Option<&str>) -> Option<String> {
+    let trimmed = params?.trim().trim_start_matches('?').trim_start_matches('&').trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -75,6 +98,7 @@ impl Clone for ChClient {
             base_url: self.base_url.clone(),
             username: self.username.clone(),
             password: self.password.clone(),
+            extra_params: self.extra_params.clone(),
         }
     }
 }
@@ -100,15 +124,145 @@ enum QueryResultLimit {
     Limited(usize),
 }
 
-fn build_query_url(base_url: &str, database: Option<&str>, limit: QueryResultLimit) -> String {
-    let mut url = format!("{}/?default_format=JSONCompact", base_url);
+enum QueryResultFormat {
+    JsonCompact,
+    JsonCompactEachRowWithNamesAndTypes,
+}
+
+const CLICKHOUSE_STREAM_ROW_LIMIT_REACHED: &str = "__DBX_CLICKHOUSE_STREAM_ROW_LIMIT_REACHED__";
+
+impl QueryResultFormat {
+    fn as_str(&self) -> &'static str {
+        match self {
+            QueryResultFormat::JsonCompact => "JSONCompact",
+            QueryResultFormat::JsonCompactEachRowWithNamesAndTypes => "JSONCompactEachRowWithNamesAndTypes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClickHouseQueryStreamItem {
+    Columns { columns: Vec<String>, column_types: Vec<String> },
+    Row(Vec<serde_json::Value>),
+}
+
+fn build_query_url(
+    base_url: &str,
+    database: Option<&str>,
+    limit: QueryResultLimit,
+    extra_params: Option<&str>,
+) -> String {
+    build_query_url_with_format(base_url, database, limit, QueryResultFormat::JsonCompact, extra_params)
+}
+
+fn build_query_url_with_format(
+    base_url: &str,
+    database: Option<&str>,
+    limit: QueryResultLimit,
+    format: QueryResultFormat,
+    extra_params: Option<&str>,
+) -> String {
+    let mut url = format!("{}/?default_format={}", base_url, format.as_str());
     if let Some(db) = database {
         url.push_str(&format!("&database={db}"));
     }
     if let QueryResultLimit::Limited(max_rows) = limit {
         url.push_str(&format!("&max_result_rows={max_rows}&result_overflow_mode=break"));
     }
+    // 用户自定义 URL 参数放在最后追加，允许其覆盖前面的默认设置（ClickHouse 取同名参数的最后一个值）
+    if let Some(params) = normalize_extra_params(extra_params) {
+        url.push('&');
+        url.push_str(&params);
+    }
     url
+}
+
+#[derive(Default)]
+struct ClickHouseStreamParser {
+    line_index: usize,
+    columns: Vec<String>,
+}
+
+impl ClickHouseStreamParser {
+    fn parse_line(&mut self, line: &str) -> Result<Option<ClickHouseQueryStreamItem>, String> {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            return Ok(None);
+        }
+
+        match self.line_index {
+            0 => {
+                self.columns = parse_stream_string_array(line, "column names")?;
+                self.line_index = 1;
+                Ok(None)
+            }
+            1 => {
+                let column_types = parse_stream_string_array(line, "column types")?;
+                self.line_index = 2;
+                Ok(Some(ClickHouseQueryStreamItem::Columns { columns: self.columns.clone(), column_types }))
+            }
+            _ => {
+                let row = parse_stream_value_array(line, "row")?;
+                self.line_index += 1;
+                Ok(Some(ClickHouseQueryStreamItem::Row(row)))
+            }
+        }
+    }
+
+    fn finish(&self) -> Result<(), String> {
+        if self.line_index == 1 {
+            return Err("ClickHouse stream ended before column types were received".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn parse_stream_string_array(line: &str, label: &str) -> Result<Vec<String>, String> {
+    parse_stream_value_array(line, label).map(|values| {
+        values
+            .into_iter()
+            .map(|value| match value {
+                serde_json::Value::String(value) => value,
+                other => other.to_string(),
+            })
+            .collect()
+    })
+}
+
+fn parse_stream_value_array(line: &str, label: &str) -> Result<Vec<serde_json::Value>, String> {
+    serde_json::from_str(line).map_err(|e| format!("ClickHouse stream parse error in {label}: {e}"))
+}
+
+fn process_stream_buffer(
+    buffer: &mut Vec<u8>,
+    parser: &mut ClickHouseStreamParser,
+    on_item: &mut impl FnMut(ClickHouseQueryStreamItem) -> Result<(), String>,
+) -> Result<(), String> {
+    while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+        let line_bytes: Vec<u8> = buffer.drain(..=newline).collect();
+        let line_bytes = &line_bytes[..line_bytes.len().saturating_sub(1)];
+        let line =
+            std::str::from_utf8(line_bytes).map_err(|e| format!("ClickHouse stream contains invalid UTF-8: {e}"))?;
+        if let Some(item) = parser.parse_line(line)? {
+            on_item(item)?;
+        }
+    }
+    Ok(())
+}
+
+fn process_stream_remainder(
+    buffer: &mut Vec<u8>,
+    parser: &mut ClickHouseStreamParser,
+    on_item: &mut impl FnMut(ClickHouseQueryStreamItem) -> Result<(), String>,
+) -> Result<(), String> {
+    if !buffer.is_empty() {
+        let line = std::str::from_utf8(buffer).map_err(|e| format!("ClickHouse stream contains invalid UTF-8: {e}"))?;
+        if let Some(item) = parser.parse_line(line)? {
+            on_item(item)?;
+        }
+        buffer.clear();
+    }
+    parser.finish()
 }
 
 fn build_request(client: &ChClient, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -129,7 +283,7 @@ async fn ch_query_with_limit(
     database: Option<&str>,
     limit: QueryResultLimit,
 ) -> Result<ChJsonResult, String> {
-    let url = build_query_url(&client.base_url, database, limit);
+    let url = build_query_url(&client.base_url, database, limit, client.extra_params.as_deref());
     log::info!("[clickhouse] query url={url} user={:?} has_pass={}", client.username, client.password.is_some());
     let req = build_request(client, client.http.post(&url).body(sql.to_string()));
     let resp = req.send().await.map_err(|e| format!("ClickHouse request failed: {e}"))?;
@@ -140,6 +294,76 @@ async fn ch_query_with_limit(
         return Err(format!("ClickHouse error: {body}"));
     }
     resp.json::<ChJsonResult>().await.map_err(|e| format!("ClickHouse parse error: {e}"))
+}
+
+pub async fn stream_query_with_max_rows(
+    client: &ChClient,
+    database: &str,
+    sql: &str,
+    max_rows: Option<usize>,
+    cancel_token: Option<CancellationToken>,
+    mut on_item: impl FnMut(ClickHouseQueryStreamItem) -> Result<(), String>,
+) -> Result<(), String> {
+    let max_rows = max_rows.map(|max_rows| max_rows.max(1));
+    let limit = max_rows.map(QueryResultLimit::Limited).unwrap_or(QueryResultLimit::Unlimited);
+    let url = build_query_url_with_format(
+        &client.base_url,
+        Some(database),
+        limit,
+        QueryResultFormat::JsonCompactEachRowWithNamesAndTypes,
+        client.extra_params.as_deref(),
+    );
+    log::info!("[clickhouse] stream query url={url} user={:?} has_pass={}", client.username, client.password.is_some());
+    let req = build_request(client, client.http.post(&url).body(sql.to_string()));
+    let resp = req.send().await.map_err(|e| format!("ClickHouse request failed: {e}"))?;
+    log::info!("[clickhouse] stream response status={}", resp.status());
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        log::error!("[clickhouse] stream error body: {body}");
+        return Err(format!("ClickHouse error: {body}"));
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = Vec::new();
+    let mut parser = ClickHouseStreamParser::default();
+    let mut rows_seen = 0usize;
+    let mut emit_item = |item: ClickHouseQueryStreamItem| -> Result<(), String> {
+        if matches!(item, ClickHouseQueryStreamItem::Row(_)) {
+            rows_seen = rows_seen.saturating_add(1);
+        }
+        on_item(item)?;
+        if max_rows.is_some_and(|max_rows| rows_seen >= max_rows) {
+            return Err(CLICKHOUSE_STREAM_ROW_LIMIT_REACHED.to_string());
+        }
+        Ok(())
+    };
+
+    loop {
+        let chunk = match cancel_token.as_ref() {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(canceled_error()),
+                    chunk = stream.next() => chunk,
+                }
+            }
+            None => stream.next().await,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(|e| format!("ClickHouse stream read failed: {e}"))?;
+        buffer.extend_from_slice(&chunk);
+        match process_stream_buffer(&mut buffer, &mut parser, &mut emit_item) {
+            Err(error) if error == CLICKHOUSE_STREAM_ROW_LIMIT_REACHED => return Ok(()),
+            result => result?,
+        }
+    }
+
+    match process_stream_remainder(&mut buffer, &mut parser, &mut emit_item) {
+        Err(error) if error == CLICKHOUSE_STREAM_ROW_LIMIT_REACHED => Ok(()),
+        result => result,
+    }
 }
 
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
@@ -269,11 +493,16 @@ fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows:
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 
 pub async fn test_connection(client: &ChClient, timeout: Duration) -> Result<(), String> {
-    let url = format!("{}/?query=SELECT%201", client.base_url);
+    let mut url = format!("{}/?query=SELECT%201", client.base_url);
+    if let Some(params) = normalize_extra_params(client.extra_params.as_deref()) {
+        url.push('&');
+        url.push_str(&params);
+    }
     let req = build_request(client, client.http.get(&url));
     let resp = with_connection_timeout("ClickHouse", timeout, async {
         req.send().await.map_err(|e| format!("ClickHouse connection failed: {e}"))
@@ -348,6 +577,8 @@ pub async fn get_columns(client: &ChClient, database: &str, table: &str) -> Resu
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
+                ..Default::default()
             }
         })
         .collect())
@@ -409,7 +640,12 @@ pub async fn execute_query_with_max_rows(
         let result = ch_query_with_limit(client, sql, Some(database), QueryResultLimit::Limited(row_limit + 1)).await?;
         Ok(limited_query_result(result, start.elapsed().as_millis(), Some(row_limit)))
     } else {
-        let url = build_query_url(&client.base_url, Some(database), QueryResultLimit::Unlimited);
+        let url = build_query_url(
+            &client.base_url,
+            Some(database),
+            QueryResultLimit::Unlimited,
+            client.extra_params.as_deref(),
+        );
         let req = build_request(client, client.http.post(&url).body(sql.to_string()));
         let resp = req.send().await.map_err(|e| format!("ClickHouse request failed: {e}"))?;
         if !resp.status().is_success() {
@@ -426,6 +662,7 @@ pub async fn execute_query_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -440,11 +677,88 @@ mod tests {
             "http://localhost:8123",
             Some("analytics"),
             QueryResultLimit::Limited(crate::query::MAX_ROWS + 1),
+            None,
         );
 
         assert_eq!(
             url,
             "http://localhost:8123/?default_format=JSONCompact&database=analytics&max_result_rows=10001&result_overflow_mode=break"
+        );
+    }
+
+    #[test]
+    fn query_url_appends_custom_url_params() {
+        // 用户在「URL 参数」填 dialect_type=ANSI，应追加到 query string 末尾
+        let url = build_query_url(
+            "http://localhost:8123",
+            Some("analytics"),
+            QueryResultLimit::Unlimited,
+            Some("dialect_type=ANSI"),
+        );
+
+        assert_eq!(url, "http://localhost:8123/?default_format=JSONCompact&database=analytics&dialect_type=ANSI");
+    }
+
+    #[test]
+    fn query_url_normalizes_leading_symbols_and_ignores_blank_params() {
+        // 允许用户带上开头的 ? 或 &，也允许多个参数
+        let url = build_query_url(
+            "http://localhost:8123",
+            None,
+            QueryResultLimit::Unlimited,
+            Some("?dialect_type=ANSI&max_threads=8"),
+        );
+        assert_eq!(url, "http://localhost:8123/?default_format=JSONCompact&dialect_type=ANSI&max_threads=8");
+
+        // 空白参数不产生多余的 &
+        let url = build_query_url("http://localhost:8123", None, QueryResultLimit::Unlimited, Some("   "));
+        assert_eq!(url, "http://localhost:8123/?default_format=JSONCompact");
+    }
+
+    #[test]
+    fn stream_query_url_uses_line_delimited_names_and_types_format() {
+        let url = build_query_url_with_format(
+            "http://localhost:8123",
+            Some("analytics"),
+            QueryResultLimit::Limited(500),
+            QueryResultFormat::JsonCompactEachRowWithNamesAndTypes,
+            None,
+        );
+
+        assert_eq!(
+            url,
+            "http://localhost:8123/?default_format=JSONCompactEachRowWithNamesAndTypes&database=analytics&max_result_rows=500&result_overflow_mode=break"
+        );
+    }
+
+    #[test]
+    fn stream_parser_reads_columns_types_and_rows_across_chunks() {
+        let mut buffer = b"[\"id\",\"name\"]\n[\"UInt64\",\"String\"]\n[1,\"Ada\"]\n[2,\"Linus\"".to_vec();
+        let mut parser = ClickHouseStreamParser::default();
+        let mut items = Vec::new();
+
+        process_stream_buffer(&mut buffer, &mut parser, &mut |item| {
+            items.push(item);
+            Ok(())
+        })
+        .unwrap();
+        buffer.extend_from_slice(b"]\n");
+        process_stream_remainder(&mut buffer, &mut parser, &mut |item| {
+            items.push(item);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            items,
+            vec![
+                ClickHouseQueryStreamItem::Columns {
+                    columns: vec!["id".to_string(), "name".to_string()],
+                    column_types: vec!["UInt64".to_string(), "String".to_string()],
+                },
+                ClickHouseQueryStreamItem::Row(vec![serde_json::json!(1), serde_json::json!("Ada")]),
+                ClickHouseQueryStreamItem::Row(vec![serde_json::json!(2), serde_json::json!("Linus")]),
+            ]
         );
     }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLazyKvKeyTreeState, flattenLazyKvKeyTree, replaceLazyKvChildren, resetLazyKvKeyTree } from "@/lib/zookeeper/zookeeperLazyKeyTree";
+import { createLazyKvKeyTreeState, createZooKeeperChildPathDraft, flattenLazyKvKeyTree, replaceLazyKvChildren, resetLazyKvKeyTree } from "@/lib/zookeeper/zookeeperLazyKeyTree";
 
 describe("zookeeper lazy key tree", () => {
   it("stores only the current path direct children on reset", () => {
@@ -41,5 +41,12 @@ describe("zookeeper lazy key tree", () => {
 
     expect(state.rootContinuation).toBe("root-next");
     expect(app?.continuation).toBe("child-next");
+  });
+
+  it("does not prefill root as a creatable znode path", () => {
+    expect(createZooKeeperChildPathDraft("")).toBe("");
+    expect(createZooKeeperChildPathDraft("/")).toBe("");
+    expect(createZooKeeperChildPathDraft("/app")).toBe("/app/");
+    expect(createZooKeeperChildPathDraft("app/")).toBe("/app/");
   });
 });

@@ -102,7 +102,7 @@ pub struct DbOperationBudget {
 
 - `query_timeout_secs = 0`：表示 SQL 执行本身不设超时。前端不得静默将其变为有限值（如 60s）。现有代码已正确处理：前端 `withFrontendQueryTimeout` 在 `timeoutSecs === 0` 时直接返回 promise 不加超时；后端 `resolve_query_timeout` 在 `Some(0)` 时返回 `None`。
 - `query_timeout_secs > 0`：SQL 执行超时为用户配置值。前端兜底超时设为配置值的 2 倍，让后端先触发自己的超时，前端超时仅作为网络异常下的兜底。
-- `query_timeout_secs` 缺失或无效：使用默认值 30s（`DEFAULT_QUERY_TIMEOUT_SECS`）。
+- `query_timeout_secs` 缺失或无效：使用默认值 60s（`DEFAULT_QUERY_TIMEOUT_SECS`）。
 
 **2. 基础设施超时 — 始终有硬性上限**
 
@@ -468,4 +468,3 @@ Windows 环境验证：
 ## 相关文档
 
 - `docs/pips/plans/2026-06-24-database-connection-timeout-recovery.md`
- 

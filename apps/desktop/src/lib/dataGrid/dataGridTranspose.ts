@@ -1,3 +1,7 @@
+import { COLUMN_WIDTH_DENSITY_PRESETS, percentileValue } from "@/lib/dataGrid/dataGridColumnWidth";
+import { restoredDataGridScrollLeft } from "@/lib/dataGrid/dataGridInfiniteScroll";
+import type { ColumnWidthDensity } from "@/stores/settingsStore";
+
 export interface DataGridTransposeState {
   showTranspose: boolean;
   transposeRowIndex: number | null;
@@ -82,6 +86,71 @@ export interface TransposeFieldWidthOptions {
   maxWidth?: number;
   charWidth?: number;
   padding?: number;
+  density?: ColumnWidthDensity;
+}
+
+export interface TransposeRecordWidthsOptions {
+  records: readonly (readonly unknown[])[];
+  density: ColumnWidthDensity;
+  previousWidths?: readonly number[];
+  manualWidthIndexes?: ReadonlySet<number>;
+}
+
+const TRANSPOSE_RECORD_MIN_WIDTH = 96;
+const TRANSPOSE_RECORD_DEFAULT_WIDTH = 168;
+const TRANSPOSE_FIELD_MIN_WIDTH = 104;
+const TRANSPOSE_FIELD_MAX_WIDTH = 220;
+
+// 转置视图每种密度对应的缩放因子（不再依赖 charWidth）
+const TRANSPOSE_DENSITY_SCALE: Record<ColumnWidthDensity, number> = {
+  compact: 0.875,
+  standard: 1,
+  comfortable: 1.125,
+};
+
+function densityScaledWidth(width: number, density: ColumnWidthDensity): number {
+  return Math.round(width * TRANSPOSE_DENSITY_SCALE[density]);
+}
+
+function transposeDisplayText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? (JSON.stringify(value) ?? String(value)) : String(value);
+}
+
+export function defaultTransposeRecordWidth(density: ColumnWidthDensity): number {
+  return densityScaledWidth(TRANSPOSE_RECORD_DEFAULT_WIDTH, density);
+}
+
+export function minTransposeRecordWidth(density: ColumnWidthDensity): number {
+  return densityScaledWidth(TRANSPOSE_RECORD_MIN_WIDTH, density);
+}
+
+export function minTransposeFieldWidth(density: ColumnWidthDensity): number {
+  return densityScaledWidth(TRANSPOSE_FIELD_MIN_WIDTH, density);
+}
+
+export function calculateTransposeRecordWidth(values: readonly unknown[], density: ColumnWidthDensity): number {
+  const preset = COLUMN_WIDTH_DENSITY_PRESETS[density];
+  const minWidth = minTransposeRecordWidth(density);
+  const scale = TRANSPOSE_DENSITY_SCALE[density];
+  const valueWidths: number[] = [];
+  for (const value of values) {
+    const displayLen = Math.min(transposeDisplayText(value).length, preset.valueTextLimit);
+    valueWidths.push(Math.round((displayLen * preset.charWidth + preset.cellPadding) * scale));
+  }
+  const maxWidth = Math.max(minWidth, percentileValue(valueWidths, preset.valueWidthPercentile));
+  return Math.max(minWidth, Math.min(preset.maxWidth, Math.round(maxWidth)));
+}
+
+export function transposeRecordWidthsForDensity(options: TransposeRecordWidthsOptions): number[] {
+  const previousWidths = options.previousWidths ?? [];
+  const manualWidthIndexes = options.manualWidthIndexes ?? new Set<number>();
+  return options.records.map((record, index) => (manualWidthIndexes.has(index) && previousWidths[index] !== undefined ? previousWidths[index] : calculateTransposeRecordWidth(record, options.density)));
+}
+
+export function averageTransposeRecordWidth(widths: readonly number[], density: ColumnWidthDensity): number {
+  if (widths.length === 0) return defaultTransposeRecordWidth(density);
+  return widths.reduce((sum, width) => sum + width, 0) / widths.length;
 }
 
 export interface TransposeScrollLeftOptions {
@@ -99,11 +168,25 @@ export interface TransposeRecordIndexesForModeOptions {
   visibleRecordIndexes: number[];
 }
 
+export interface AutoTransposeSingleRowOptions {
+  enabled: boolean;
+  preserveTranspose: boolean;
+  rowCount: number;
+  columnCount: number;
+}
+
 export function nextTransposeState(showTranspose: boolean, transposeRowIndex: number | null, requestedRowIndex: number): DataGridTransposeState {
   if (showTranspose && transposeRowIndex === requestedRowIndex) {
     return { showTranspose: false, transposeRowIndex: null };
   }
   return { showTranspose: true, transposeRowIndex: requestedRowIndex };
+}
+
+export function restoreDataGridAfterTranspose(options: { scroller: Pick<HTMLElement, "scrollLeft" | "scrollWidth" | "clientWidth"> | null; scrollLeftBeforeTranspose: number; attachCanvasResizeObserver: () => void; refreshGridScrollerMetrics: () => void }) {
+  if (!options.scroller) return;
+  options.scroller.scrollLeft = restoredDataGridScrollLeft(options.scrollLeftBeforeTranspose, options.scroller.scrollWidth, options.scroller.clientWidth);
+  options.attachCanvasResizeObserver();
+  options.refreshGridScrollerMetrics();
 }
 
 export function nextContextTransposeState(options: ContextTransposeStateOptions): DataGridTransposeState {
@@ -131,6 +214,10 @@ export function nextTransposeStateForRecordCount(showTranspose: boolean, transpo
     showTranspose: true,
     transposeRowIndex: Math.max(0, Math.min(totalRecords - 1, requestedRowIndex)),
   };
+}
+
+export function shouldAutoTransposeSingleRow(options: AutoTransposeSingleRowOptions): boolean {
+  return options.enabled && !options.preserveTranspose && options.rowCount === 1 && options.columnCount > 1;
 }
 
 export function buildTransposeRows<T>(options: BuildTransposeRowsOptions<T>): Array<DataGridTransposeRow<T>> {
@@ -218,10 +305,12 @@ export function transposeAnchorRowIndex(options: TransposeAnchorOptions): number
 }
 
 export function transposeFieldWidth(columns: string[], options: TransposeFieldWidthOptions = {}): number {
-  const minWidth = options.minWidth ?? 104;
-  const maxWidth = options.maxWidth ?? 220;
-  const charWidth = options.charWidth ?? 8;
-  const padding = options.padding ?? 32;
+  const density = options.density ?? "standard";
+  const preset = COLUMN_WIDTH_DENSITY_PRESETS[density];
+  const minWidth = options.minWidth ?? minTransposeFieldWidth(density);
+  const maxWidth = options.maxWidth ?? densityScaledWidth(TRANSPOSE_FIELD_MAX_WIDTH, density);
+  const charWidth = options.charWidth ?? preset.charWidth;
+  const padding = options.padding ?? preset.cellPadding + 4;
   const longest = columns.reduce((max, column) => Math.max(max, column.length), 0);
   return Math.min(maxWidth, Math.max(minWidth, Math.ceil(longest * charWidth + padding)));
 }

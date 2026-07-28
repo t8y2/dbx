@@ -394,24 +394,24 @@ async function initJsonEditor() {
             minHeight: "260px",
             maxHeight: "360px",
             fontSize: "12px",
-            border: "1px solid hsl(var(--border))",
+            border: "1px solid var(--border)",
             borderRadius: "var(--radius-md)",
-            backgroundColor: "hsl(var(--background))",
-            color: "hsl(var(--foreground))",
+            backgroundColor: "var(--background)",
+            color: "var(--foreground)",
           },
           ".cm-scroller": {
             fontFamily: "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
           },
           ".cm-gutters": {
-            backgroundColor: "hsl(var(--muted) / 0.35)",
-            color: "hsl(var(--muted-foreground))",
-            borderRight: "1px solid hsl(var(--border))",
+            backgroundColor: "color-mix(in srgb, var(--muted) 35%, transparent)",
+            color: "var(--muted-foreground)",
+            borderRight: "1px solid var(--border)",
           },
           ".cm-activeLine, .cm-activeLineGutter": {
-            backgroundColor: "hsl(var(--muted) / 0.45)",
+            backgroundColor: "color-mix(in srgb, var(--muted) 45%, transparent)",
           },
           ".cm-focused": {
-            outline: "2px solid hsl(var(--ring) / 0.35)",
+            outline: "2px solid color-mix(in srgb, var(--ring) 35%, transparent)",
             outlineOffset: "1px",
           },
         }),
@@ -478,11 +478,11 @@ onBeforeUnmount(() => {
     <div class="flex flex-wrap items-center gap-2">
       <input ref="fileInputRef" type="file" accept="application/json,.json" class="hidden" @change="onImportFile" />
       <Button type="button" variant="outline" size="sm" @click="importConfig">
-        <Upload class="mr-2 h-4 w-4" />
+        <Download class="mr-2 h-4 w-4" />
         {{ t("settings.sqlFormatterImport") }}
       </Button>
       <Button type="button" variant="outline" size="sm" @click="exportConfig">
-        <Download class="mr-2 h-4 w-4" />
+        <Upload class="mr-2 h-4 w-4" />
         {{ t("settings.sqlFormatterExport") }}
       </Button>
       <Button type="button" variant="outline" size="sm" @click="restoreDefaults">
@@ -564,10 +564,10 @@ onBeforeUnmount(() => {
           <div class="space-y-2">
             <Label>{{ t("settings.sqlFormatterIndent") }}</Label>
             <div class="grid grid-cols-2 gap-2">
-              <Button type="button" variant="outline" class="justify-center" :class="!settings.useTabs ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="updateOption('useTabs', false)">
+              <Button type="button" variant="outline" class="justify-center" :class="!settings.useTabs ? 'dbx-choice-selected' : ''" @click="updateOption('useTabs', false)">
                 {{ t("settings.sqlFormatterIndentSpaces") }}
               </Button>
-              <Button type="button" variant="outline" class="justify-center" :class="settings.useTabs ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="updateOption('useTabs', true)">
+              <Button type="button" variant="outline" class="justify-center" :class="settings.useTabs ? 'dbx-choice-selected' : ''" @click="updateOption('useTabs', true)">
                 {{ t("settings.sqlFormatterIndentTabs") }}
               </Button>
             </div>

@@ -2,7 +2,7 @@ package com.dbx.agent.saphana;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import java.util.Arrays;
 import java.util.Collections;
 
@@ -21,6 +21,6 @@ public final class SapHanaAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new SapHanaAgent()).run();
+        new MultiSessionJsonRpcServer(SapHanaAgent::new).run();
     }
 }

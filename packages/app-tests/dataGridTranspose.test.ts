@@ -290,7 +290,7 @@ test("uses the first selected cell range row as the transpose anchor when contex
 
 test("sizes the transpose field column from visible field names", () => {
   assert.equal(transposeFieldWidth(["id", "iso3", "year"]), 104);
-  assert.equal(transposeFieldWidth(["country_name"]), 128);
+  assert.equal(transposeFieldWidth(["country_name"]), 124);
 });
 
 test("caps the transpose field column width for long field names", () => {

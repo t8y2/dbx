@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { displayCellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
+import { DATA_GRID_CELL_DISPLAY_MAX_LENGTH, displayCellValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 
 test("displayCellValue returns NULL for null", () => {
   assert.equal(displayCellValue(null), "NULL");
@@ -25,6 +25,21 @@ test("displayCellValue returns String for strings", () => {
 test("displayCellValue does not truncate long strings", () => {
   const long = "a".repeat(1000);
   assert.equal(displayCellValue(long), long);
+});
+
+test("limitDataGridCellDisplay preserves bounded SQL Server varchar values", () => {
+  const value = "a".repeat(500);
+  assert.equal(limitDataGridCellDisplay(value, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH), value);
+});
+
+test("limitDataGridCellDisplay marks oversized LOB previews as truncated", () => {
+  const value = "a".repeat(DATA_GRID_CELL_DISPLAY_MAX_LENGTH + 1);
+  assert.equal(limitDataGridCellDisplay(value), `${"a".repeat(DATA_GRID_CELL_DISPLAY_MAX_LENGTH)}...`);
+});
+
+test("limitDataGridCellDisplay preserves the default grid rendering limit", () => {
+  const value = "a".repeat(500);
+  assert.equal(limitDataGridCellDisplay(value), `${"a".repeat(DATA_GRID_CELL_DISPLAY_MAX_LENGTH)}...`);
 });
 
 test("displayCellValue serializes JSON strings containing complex nested objects", () => {

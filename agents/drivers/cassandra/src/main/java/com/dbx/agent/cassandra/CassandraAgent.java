@@ -7,7 +7,7 @@ import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcIdentifiers;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.sql.PreparedStatement;
@@ -163,7 +163,13 @@ public final class CassandraAgent extends AbstractJdbcAgent {
         String baseUrl = "jdbc:cassandra://" + params.getHost() + ":" + params.getPort();
         String keyspace = coalesce(params.getDatabase()).trim();
         // Cassandra rejects an empty keyspace path; omit it so DBX can connect first and list keyspaces.
-        return keyspace.isEmpty() ? baseUrl : baseUrl + "/" + keyspace;
+        String url = keyspace.isEmpty() ? baseUrl : baseUrl + "/" + keyspace;
+        // Multi-DC clusters require localdatacenter=<dc>
+        String extraParams = coalesce(params.getUrl_params()).trim();
+        while (extraParams.startsWith("?") || extraParams.startsWith("&")) {
+            extraParams = extraParams.substring(1);
+        }
+        return extraParams.isEmpty() ? url : url + "?" + extraParams;
     }
 
     private static List<String> targetColumns(String options) {
@@ -183,6 +189,6 @@ public final class CassandraAgent extends AbstractJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new CassandraAgent()).run();
+        new MultiSessionJsonRpcServer(CassandraAgent::new).run();
     }
 }

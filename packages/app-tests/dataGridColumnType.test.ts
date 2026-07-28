@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { resolveHeaderColumnType } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnType.ts";
+import { compactHeaderColumnType, resolveHeaderColumnType } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnType.ts";
 
 test("prefers table-metadata type over the result type", () => {
   const type = resolveHeaderColumnType({
@@ -52,4 +52,10 @@ test("treats blank/whitespace types as absent and falls through", () => {
   assert.equal(type, "text");
 
   assert.equal(resolveHeaderColumnType({ tableColumnType: "", resultColumnTypes: [""], actualColIdx: 0 }), undefined);
+});
+
+test("hides MySQL enum values from the compact header type", () => {
+  assert.equal(compactHeaderColumnType("enum('pending','active')"), "enum");
+  assert.equal(compactHeaderColumnType("ENUM('', 'normal')"), "enum");
+  assert.equal(compactHeaderColumnType("varchar(255)"), "varchar(255)");
 });

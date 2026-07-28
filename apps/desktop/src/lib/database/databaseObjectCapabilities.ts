@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 
-export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface DatabaseObjectCapabilities {
   sidebarObjects: SidebarObjectKind[];
@@ -9,12 +9,14 @@ export interface DatabaseObjectCapabilities {
 }
 
 const TABLE_VIEW_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW"];
+const TABLE_VIEW_MV_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW"];
 
 const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"];
 
 const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"];
+const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
 
 const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres
@@ -25,21 +27,30 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres like
   ["kingbase", POSTGRES_LIKE_OBJECTS],
   ["highgo", POSTGRES_LIKE_OBJECTS],
+  ["uxdb", POSTGRES_LIKE_OBJECTS],
   ["vastbase", POSTGRES_LIKE_OBJECTS],
   ["redshift", POSTGRES_LIKE_OBJECTS],
   // oracle
   ["oracle", ORACLE_OBJECTS],
   ["dameng", ORACLE_OBJECTS],
   ["oceanbase-oracle", ORACLE_OBJECTS],
+  ["xugu", XUGU_OBJECTS],
   // table and view
   ["sqlite", TABLE_VIEW_OBJECTS],
   ["rqlite", TABLE_VIEW_OBJECTS],
   ["turso", TABLE_VIEW_OBJECTS],
+  ["cloudflare-d1", TABLE_VIEW_OBJECTS],
   ["duckdb", TABLE_VIEW_OBJECTS],
   ["clickhouse", TABLE_VIEW_OBJECTS],
+  // Doris: backend listing path still uses the generic SHOW TABLES path (see
+  // `list_tables_once` for `PoolKind::Mysql` in crates/dbx-core/src/schema.rs)
+  // and lacks a MV classifier. Keep Doris on TABLE_VIEW_OBJECTS until a
+  // Doris-specific MV listing/classification lands, otherwise the UI advertises
+  // MV support that the backend cannot route.
   ["doris", TABLE_VIEW_OBJECTS],
-  ["starrocks", TABLE_VIEW_OBJECTS],
+  ["starrocks", TABLE_VIEW_MV_OBJECTS],
   ["hive", TABLE_VIEW_OBJECTS],
+  ["spark", TABLE_VIEW_OBJECTS],
   ["trino", TABLE_VIEW_OBJECTS],
   ["prestosql", TABLE_VIEW_OBJECTS],
   ["cassandra", TABLE_VIEW_OBJECTS],
@@ -50,6 +61,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["neo4j", TABLE_VIEW_OBJECTS],
   // others
   ["influxdb", ["TABLE"]],
+  ["hbase", ["TABLE"]],
   ["questdb", ["TABLE", "VIEW", "MATERIALIZED_VIEW"]],
   ["manticoresearch", ["TABLE", "FUNCTION"]],
   ["databend", ["TABLE", "VIEW", "PROCEDURE"]],
@@ -72,7 +84,10 @@ export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   const value = type.toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
+  if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
+  if (normalized.includes("TRIGGER")) return "TRIGGER";
+  if (normalized.includes("TYPE")) return "TYPE";
   if (normalized.includes("MATERIALIZED_VIEW")) return "MATERIALIZED_VIEW";
   if (value.includes("VIEW")) return "VIEW";
   if (value.includes("SEQ")) return "SEQUENCE";

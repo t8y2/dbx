@@ -2,11 +2,11 @@ import Link from "next/link";
 
 const i18n = {
   en: {
-    tagline: "15 MB to manage 50+ databases.",
+    tagline: "20 MB to manage 70+ databases.",
     copyright: `© ${new Date().getFullYear()} DBX. All rights reserved.`,
   },
   cn: {
-    tagline: "15MB，管理50+种数据库。",
+    tagline: "20MB，管理70+种数据库。",
     copyright: `© ${new Date().getFullYear()} DBX.`,
   },
 };

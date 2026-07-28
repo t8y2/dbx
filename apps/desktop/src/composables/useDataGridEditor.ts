@@ -1,15 +1,19 @@
-import { ref, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, type ComputedRef, type Ref } from "vue";
+import { ref, shallowRef, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, toRaw, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
 import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
-import { DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
+import { DBX_NEO4J_ELEMENT_ID_COLUMN, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import i18n from "@/i18n";
 
 interface RowItem {
   id: number;
@@ -39,6 +43,7 @@ type CommitEditResult =
 
 interface CommitEditOptions {
   promoteDraft?: boolean;
+  explicitValue?: string | null;
 }
 
 type GridScrollerRef =
@@ -52,6 +57,7 @@ type GridScrollerRef =
 
 export interface CustomSaveHandler {
   save: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<void>;
+  applySavedChanges?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; columns: string[] }) => void;
   preview?: (changes: { dirtyRows: Map<number, Map<number, CellValue>>; newRows: CellValue[][]; deletedRows: Set<number>; columns: string[]; rows: CellValue[][] }) => Promise<string[]>;
   canInsert?: boolean;
   canDelete?: boolean;
@@ -91,6 +97,8 @@ export interface UseDataGridEditorOptions {
   pageSize: Ref<number>;
   currentPage: Ref<number>;
   cacheKey?: ComputedRef<string | undefined>;
+  /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
+  onResultPayloadMutated?: () => void;
   emit: {
     (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number): void;
   };
@@ -133,10 +141,15 @@ const closingPendingSnapshotTabs = new Set<string>();
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
 const MAX_PENDING_CHANGES_HISTORY = 100;
 
-function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][]): boolean {
+function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][], appendedFromRowCount?: number): boolean {
   if (!previousRows) return true;
-  if (previousRows.length !== nextRows.length) return true;
-  return previousRows.some((row, index) => row !== nextRows[index]);
+  if (appendedFromRowCount !== previousRows.length || previousRows.length > nextRows.length) {
+    if (previousRows.length !== nextRows.length) return true;
+    return previousRows.some((row, index) => toRaw(row) !== toRaw(nextRows[index]));
+  }
+  // Infinite scrolling appends rows without changing existing source indexes.
+  // Preserve pending edits only when every previously loaded row is the same object.
+  return previousRows.some((row, index) => toRaw(row) !== toRaw(nextRows[index]));
 }
 
 function cacheKeyBelongsToTab(cacheKey: string, tabId: string) {
@@ -166,6 +179,7 @@ export function clearDataGridPendingSnapshotsForTab(tabId: string) {
 export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const connectionStore = useConnectionStore();
   const historyStore = useHistoryStore();
+  const productionSafetyStore = useProductionSafetyStore();
 
   const {
     result,
@@ -193,7 +207,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const editingCell = ref<{ rowId: number; col: number } | null>(null);
   const editValue = ref("");
   const scrollerRef = ref<GridScrollerRef | null>(null);
-  const dirtyRows = ref<Map<number, Map<number, CellValue>>>(new Map());
+  const dirtyRows = shallowRef<Map<number, Map<number, CellValue>>>(new Map());
   const newRows = ref<CellValue[][]>([]);
   const deletedRows = ref<Set<number>>(new Set());
   const quickEntryDraftRow = ref<CellValue[]>([]);
@@ -259,9 +273,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function focusEditInput(select = true) {
     const focusInput = () => {
       if (typeof document === "undefined") return;
-      const root = getScrollerElement()?.closest("[data-grid-root]");
+      const scroller = getScrollerElement();
+      const root = scroller?.closest("[data-grid-root]");
       const input = (root ?? document).querySelector(".cell-edit-input") as HTMLInputElement | HTMLTextAreaElement | null;
-      input?.focus();
+      if (input) focusDataGridEditorWithoutScrolling(input, scroller);
       if (select && input) {
         if (input instanceof HTMLTextAreaElement && input.dataset.expandedCellEditor === "true") {
           input.setSelectionRange?.(0, 0);
@@ -294,6 +309,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function touchPendingChanges() {
+    // Save errors describe the previous pending snapshot; edits, undo/redo, and rollback make them stale.
+    saveError.value = "";
     pendingChangesVersion.value++;
   }
 
@@ -385,14 +402,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function preserveScrollPosition() {
-    const el = getScrollerElement();
-    if (!el) return () => {};
-    const top = el.scrollTop;
-    const left = el.scrollLeft;
-    return () => {
-      el.scrollTop = top;
-      el.scrollLeft = left;
-    };
+    return preserveDataGridScrollPosition(getScrollerElement());
   }
 
   function readScrollPosition(): PendingChangesSnapshot["scroll"] | undefined {
@@ -443,6 +453,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     restoreScroll();
     nextTick(() => {
       restoreScroll();
+      if (typeof requestAnimationFrame !== "function") {
+        isCancelling = false;
+        return;
+      }
       let attempts = 0;
       const restoreNextFrame = () => {
         restoreScroll();
@@ -473,19 +487,59 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   // --- Cell value coercion ---
-  function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number): CellValue {
+  interface ApplyCellValueOptions {
+    preserveEmptyString?: boolean;
+  }
+
+  function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number, options: ApplyCellValueOptions = {}): CellValue {
     return coerceDataGridCellValue({
       value,
       oldValue,
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(columnIndex),
+      preserveEmptyString: options.preserveEmptyString,
     }) as CellValue;
   }
 
+  let isBatching = false;
+  let batchUndoSnapshotPushed = false;
+  let batchMutated = false;
+  let batchColumnInfoCache: Map<number, ColumnInfo | undefined> | null = null;
+
+  function beginBatch() {
+    if (isBatching) return;
+    isBatching = true;
+    batchUndoSnapshotPushed = false;
+    batchMutated = false;
+    batchColumnInfoCache = new Map();
+  }
+
+  function commitBatch() {
+    if (!isBatching) return;
+    isBatching = false;
+    batchColumnInfoCache = null;
+    if (!batchMutated) return;
+    dirtyRows.value = new Map(dirtyRows.value);
+    newRows.value = [...newRows.value];
+    touchPendingChanges();
+  }
+
+  function markBatchMutated() {
+    if (isBatching) batchMutated = true;
+  }
+
   function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
+    if (isBatching && batchColumnInfoCache) {
+      if (batchColumnInfoCache.has(columnIndex)) {
+        return batchColumnInfoCache.get(columnIndex);
+      }
+    }
     const columnName = sourceColumns.value?.[columnIndex] ?? result.value.columns[columnIndex];
-    if (!columnName) return undefined;
-    return tableMeta.value?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase());
+    const info = columnName ? tableMeta.value?.columns.find((column) => column.name.toLowerCase() === columnName.toLowerCase()) : undefined;
+    if (isBatching && batchColumnInfoCache) {
+      batchColumnInfoCache.set(columnIndex, info);
+    }
+    return info;
   }
 
   function canEditColumn(columnIndex: number): boolean {
@@ -624,7 +678,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (item.isDraft) {
       ensureQuickEntryDraftRow();
       const oldVal = quickEntryDraftRow.value[col] ?? null;
-      const newVal = coerceCellValue(editValue.value, oldVal, col);
+      const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
       const nextDraftRow = [...quickEntryDraftRow.value];
       nextDraftRow[col] = newVal;
       if (newVal !== oldVal) pushUndoSnapshot();
@@ -650,7 +704,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
     if (item.isNew && item.newIndex !== undefined) {
       const oldVal = newRows.value[item.newIndex]?.[col];
-      const newVal = coerceCellValue(editValue.value, oldVal, col);
+      const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
       const changed = newVal !== oldVal;
       if (changed) pushUndoSnapshot();
       if (newRows.value[item.newIndex]) {
@@ -675,7 +729,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
 
     const oldVal = result.value.rows[item.sourceIndex]?.[col];
-    const newVal = coerceCellValue(editValue.value, oldVal, col);
+    const newVal = options.explicitValue !== undefined ? options.explicitValue : coerceCellValue(editValue.value, oldVal, col);
     const changed = newVal !== item.data[col];
     if (newVal !== oldVal) {
       if (changed) pushUndoSnapshot();
@@ -712,10 +766,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       suppressNextBlurCommit = false;
       return;
     }
-    await commitEditAndMaybeAutoSave(options);
+    const restoreScroll = preserveScrollPosition();
+    const pendingCommit = commitEditAndMaybeAutoSave(options);
+    restoreScrollAcrossFrames(restoreScroll);
+    await pendingCommit;
   }
 
-  function applyCellValue(rowId: number, col: number, value: string | null) {
+  function applyCellValue(rowId: number, col: number, value: string | null, options: ApplyCellValueOptions = {}) {
     if (!canEditColumn(col)) return;
     const item = getRowItem(rowId);
     if (!item || item.isDeleted) return;
@@ -724,11 +781,21 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       ensureQuickEntryDraftRow();
       const oldVal = quickEntryDraftRow.value[col] ?? null;
       const nextDraftRow = [...quickEntryDraftRow.value];
-      nextDraftRow[col] = value === null ? null : coerceCellValue(value, oldVal, col);
+      nextDraftRow[col] = value === null ? null : coerceCellValue(value, oldVal, col, options);
       if (nextDraftRow[col] === oldVal) return;
-      pushUndoSnapshot();
+      if (isBatching) {
+        if (!batchUndoSnapshotPushed) {
+          pushUndoSnapshot();
+          batchUndoSnapshotPushed = true;
+        }
+      } else {
+        pushUndoSnapshot();
+      }
       quickEntryDraftRow.value = draftRowHasValue(nextDraftRow) ? nextDraftRow : emptyDraftRow();
-      touchPendingChanges();
+      markBatchMutated();
+      if (!isBatching) {
+        touchPendingChanges();
+      }
       scheduleQuickEntryDraftPromotion();
       return;
     }
@@ -738,12 +805,22 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       const row = newRows.value[item.newIndex];
       if (!row) return;
       const oldVal = row[col];
-      const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
+      const newVal = value === null ? null : coerceCellValue(value, oldVal, col, options);
       if (newVal === oldVal) return;
-      pushUndoSnapshot();
+      if (isBatching) {
+        if (!batchUndoSnapshotPushed) {
+          pushUndoSnapshot();
+          batchUndoSnapshotPushed = true;
+        }
+      } else {
+        pushUndoSnapshot();
+      }
       row[col] = newVal;
-      newRows.value = [...newRows.value];
-      touchPendingChanges();
+      markBatchMutated();
+      if (!isBatching) {
+        newRows.value = [...newRows.value];
+        touchPendingChanges();
+      }
       return;
     }
 
@@ -754,22 +831,42 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const rowChanges = dirtyRows.value.get(item.sourceIndex);
     const hasPendingCellChange = rowChanges?.has(col) ?? false;
     const currentVal = hasPendingCellChange ? rowChanges!.get(col) : oldVal;
-    const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
+    const newVal = value === null ? null : coerceCellValue(value, oldVal, col, options);
     if (newVal === currentVal) return;
     if (newVal !== oldVal) {
-      pushUndoSnapshot();
+      if (isBatching) {
+        if (!batchUndoSnapshotPushed) {
+          pushUndoSnapshot();
+          batchUndoSnapshotPushed = true;
+        }
+      } else {
+        pushUndoSnapshot();
+      }
       if (!dirtyRows.value.has(item.sourceIndex)) dirtyRows.value.set(item.sourceIndex, new Map());
       dirtyRows.value.get(item.sourceIndex)!.set(col, newVal);
+      markBatchMutated();
       if (useTransaction.value && !transactionActive.value) {
         enterTransaction();
       }
     } else {
-      if (hasPendingCellChange) pushUndoSnapshot();
+      if (hasPendingCellChange) {
+        if (isBatching) {
+          if (!batchUndoSnapshotPushed) {
+            pushUndoSnapshot();
+            batchUndoSnapshotPushed = true;
+          }
+        } else {
+          pushUndoSnapshot();
+        }
+      }
       rowChanges?.delete(col);
       if (rowChanges?.size === 0) dirtyRows.value.delete(item.sourceIndex);
+      if (hasPendingCellChange) markBatchMutated();
     }
-    dirtyRows.value = new Map(dirtyRows.value);
-    touchPendingChanges();
+    if (!isBatching) {
+      dirtyRows.value = new Map(dirtyRows.value);
+      touchPendingChanges();
+    }
   }
 
   function restoreCellValue(rowId: number, col: number) {
@@ -850,14 +947,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function clonedRowData(item: RowItem): CellValue[] {
     const columnInfoByName = new Map((tableMeta.value?.columns ?? []).map((column) => [column.name.toLowerCase(), column]));
     return item.data.map((val, i) => {
-      const columnName = result.value.columns[i];
+      const columnName = sourceColumns.value?.[i] ?? result.value.columns[i];
       const columnInfo = columnInfoByName.get(columnName.toLowerCase());
       return shouldClearClonedColumn(columnName, columnInfo) ? null : val;
     });
   }
 
   function shouldClearClonedColumn(columnName: string, columnInfo: ColumnInfo | undefined): boolean {
-    if (resolvedDatabaseType.value === "oracle" && columnName.toUpperCase() === DBX_ROWID_COLUMN) return true;
+    if (usesSyntheticRowIdKey(resolvedDatabaseType.value, [columnName])) return true;
     if (resolvedDatabaseType.value === "neo4j" && columnName === DBX_NEO4J_ELEMENT_ID_COLUMN) return true;
     const extra = columnInfo?.extra ?? "";
     const columnDefault = columnInfo?.column_default ?? "";
@@ -900,27 +997,55 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
   }
 
-  function applyDeleteRow(rowId: number) {
-    const item = getRowItem(rowId);
-    if (!item) return;
-    if (item.isNew && item.newIndex !== undefined) {
-      if (isSavingNewRow(item)) return;
-      pushUndoSnapshot();
-      newRows.value.splice(item.newIndex, 1);
+  function applyDeleteRows(rowIds: number[]) {
+    const items = rowIds.map((rowId) => getRowItem(rowId)).filter((item): item is RowItem => !!item);
+    if (items.length === 0) return;
+
+    const newIndexes = new Set<number>();
+    const sourceIndexes = new Set<number>();
+    const deletedRowIds = new Set<number>();
+
+    for (const item of items) {
+      if (item.isNew && item.newIndex !== undefined) {
+        if (isSavingNewRow(item)) continue;
+        newIndexes.add(item.newIndex);
+        deletedRowIds.add(item.id);
+      } else if (item.sourceIndex !== undefined && canEditExistingRows.value) {
+        sourceIndexes.add(item.sourceIndex);
+        deletedRowIds.add(item.id);
+      }
+    }
+
+    if (newIndexes.size === 0 && sourceIndexes.size === 0) return;
+
+    // Batch row deletion into one reactive update so multi-row deletes do not
+    // rebuild the entire grid and undo history once per selected row.
+    pushUndoSnapshot();
+    if (newIndexes.size > 0) {
+      [...newIndexes]
+        .sort((a, b) => b - a)
+        .forEach((newIndex) => {
+          newRows.value.splice(newIndex, 1);
+        });
       newRows.value = [...newRows.value];
-    } else if (item.sourceIndex !== undefined) {
-      if (!canEditExistingRows.value) return;
-      pushUndoSnapshot();
-      dirtyRows.value.delete(item.sourceIndex);
-      deletedRows.value.add(item.sourceIndex);
+    }
+    if (sourceIndexes.size > 0) {
+      for (const sourceIndex of sourceIndexes) {
+        dirtyRows.value.delete(sourceIndex);
+        deletedRows.value.add(sourceIndex);
+      }
       dirtyRows.value = new Map(dirtyRows.value);
       deletedRows.value = new Set(deletedRows.value);
     }
     touchPendingChanges();
-    if (editingCell.value?.rowId === rowId) editingCell.value = null;
+    if (editingCell.value && deletedRowIds.has(editingCell.value.rowId)) editingCell.value = null;
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
     }
+  }
+
+  function applyDeleteRow(rowId: number) {
+    applyDeleteRows([rowId]);
   }
 
   const showDeleteRowConfirm = ref(false);
@@ -939,9 +1064,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function confirmDeleteRow() {
     if (pendingDeleteRowIds.value.length > 0) {
-      for (const rowId of pendingDeleteRowIds.value) {
-        applyDeleteRow(rowId);
-      }
+      applyDeleteRows(pendingDeleteRowIds.value);
       pendingDeleteRowIds.value = [];
       return;
     }
@@ -1055,6 +1178,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!tableMeta.value) return null;
     return {
       databaseType: resolvedDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId.value),
       tableMeta: tableMeta.value,
       columns: result.value.columns,
       sourceColumns: sourceColumns.value,
@@ -1085,8 +1209,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       inserted_rows: snapshot.newRows.length,
       updated_rows: snapshot.dirtyRows.size,
       deleted_rows: snapshot.deletedRows.size,
-      statements,
-      rollback_statements: success ? rollbackStatements : [],
+      statement_count: statements.length,
+      rollback_statement_count: success ? rollbackStatements.length : 0,
       error: success ? undefined : historyResult?.error,
     };
     await historyStore.add({
@@ -1133,8 +1257,24 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     const customHandler = customSaveHandler?.value;
+    const connection = connectionStore.getConfig(connectionId.value ?? "");
+    const customHandlerProductionContext = productionContextForDatabase(connection, database.value);
+    if (customHandler && customHandlerProductionContext.active) {
+      // Custom data sources may not expose SQL, but their row mutations still need the same production interlock.
+      if (saveOptions.autoSave) {
+        return;
+      }
+      const confirmed = await productionSafetyStore.requestConfirmation({
+        sql: describeDataGridChanges(snapshot),
+        connectionName: connection?.name,
+        database: database.value,
+        productionDatabases: customHandlerProductionContext.databases,
+        source: "Data editor",
+      });
+      if (!confirmed) return;
+    }
     if (customHandler && snapshot.newRows.length > 0 && customHandler.supportsInsert !== true && customHandler.canInsert !== true) {
-      saveError.value = "当前保存目标不支持新增行。";
+      saveError.value = i18n.global.t("grid.insertRowsNotSupported");
       return;
     }
     saveError.value = "";
@@ -1157,7 +1297,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         return;
       }
       snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
+      customHandler.applySavedChanges?.({ dirtyRows: snapshot.dirtyRows, columns: result.value.columns });
       applyDirtyRowsToResult(snapshot);
+      options.onResultPayloadMutated?.();
       clearSavedPendingChanges(snapshot);
       if (!hasPendingChanges.value) exitTransaction();
       clearPendingChangeHistory();
@@ -1191,6 +1333,25 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     const rollbackStmts = preparedSave?.rollbackStatements ?? [];
+    const productionAssessment = assessProductionSql(stmts.join(";\n"), connection, database.value);
+    if (productionAssessment.active && productionAssessment.isMutation) {
+      // Autosave must never write production data without an operator reviewing the generated statements.
+      if (saveOptions.autoSave) {
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+      const confirmed = await productionSafetyStore.requestConfirmation({
+        sql: stmts.join("\n"),
+        connectionName: connection?.name,
+        database: database.value,
+        productionDatabases: productionAssessment.databases,
+        source: "Data editor",
+      });
+      if (!confirmed) {
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+    }
     const start = Date.now();
     let apiResult: { affected_rows?: number } | undefined;
     console.info("[DBX][dataGrid:save-statements]", {
@@ -1200,7 +1361,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       rollbackStatements: rollbackStmts,
     });
 
-    if (useTransaction.value && hasBackendSaveTarget.value) {
+    if (useTransaction.value && stmts.length > 1 && hasBackendSaveTarget.value) {
       try {
         apiResult = await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
       } catch (e: any) {
@@ -1233,6 +1394,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       console.warn("[DBX] failed to record data grid history", e);
     }
     applyDirtyRowsToResult(snapshot);
+    options.onResultPayloadMutated?.();
     snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
     clearSavedPendingChanges(snapshot);
     if (!hasPendingChanges.value) exitTransaction();
@@ -1244,9 +1406,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function discardChanges() {
-    dirtyRows.value.clear();
+    dirtyRows.value = new Map();
     newRows.value = [];
-    deletedRows.value.clear();
+    deletedRows.value = new Set();
     quickEntryDraftRow.value = emptyDraftRow();
     queuedAutoSaveChanges.clear();
     editingCell.value = null;
@@ -1255,13 +1417,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     exitTransaction();
   }
 
-  // Pending changes reference rows by sourceIndex. When the result set changes
-  // (e.g. different WHERE clause, pagination), stale indices point to wrong rows.
+  // Pending changes reference rows by sourceIndex. Replacements (different WHERE,
+  // sort, normal pagination, refresh) invalidate them; prefix-only appends do not.
   let previousResultRows = result.value.rows;
   watch(
-    () => result.value.rows,
-    (rows) => {
-      if (!dataGridRowsIdentityChanged(previousResultRows, rows)) {
+    () => [result.value.rows, (result.value as { appended_from_row_count?: number }).appended_from_row_count] as const,
+    ([rows, appendedFromRowCount]) => {
+      if (!dataGridRowsIdentityChanged(previousResultRows, rows, appendedFromRowCount)) {
         previousResultRows = rows;
         return;
       }
@@ -1391,6 +1553,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     isSaving,
     saveError,
     useTransaction,
+    beginBatch,
+    commitBatch,
     enterTransaction,
     exitTransaction,
     startEdit,
@@ -1404,6 +1568,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     addRow,
     cloneRow,
     cloneRows,
+    applyDeleteRows,
     applyDeleteRow,
     showDeleteRowConfirm,
     pendingDeleteRowId,
@@ -1442,4 +1607,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
     },
   };
+}
+
+function describeDataGridChanges(snapshot: { newRows: unknown[]; dirtyRows: Map<unknown, unknown>; deletedRows: Set<unknown> }): string {
+  const changes = [snapshot.newRows.length ? `INSERT: ${snapshot.newRows.length} row(s)` : "", snapshot.dirtyRows.size ? `UPDATE: ${snapshot.dirtyRows.size} row(s)` : "", snapshot.deletedRows.size ? `DELETE: ${snapshot.deletedRows.size} row(s)` : ""].filter(Boolean);
+  return changes.join("\n") || "DATA GRID WRITE";
 }

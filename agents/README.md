@@ -1,17 +1,20 @@
 # DBX Agents
 
+English | [简体中文](README.zh-CN.md)
+
 Agent drivers for [DBX](https://github.com/t8y2/dbx) — database support via JDBC and native database drivers.
 
 Each agent runs as a standalone process and communicates with DBX via stdin/stdout JSON-RPC 2.0.
 
 ## Supported Databases
 
-| Agent | Database | JDBC Driver |
+| Agent | Database | Driver |
 |-------|----------|-------------|
 | access | Microsoft Access | UCanAccess |
 | dameng | 达梦 DM8 | DM JDBC |
-| kingbase | 人大金仓 KingbaseES | KingbaseES JDBC |
+| kingbase | 人大金仓 KingbaseES | gokb Go native agent |
 | vastbase | Vastbase | Vastbase JDBC |
+| uxdb | UXDB | UXDB JDBC |
 | goldendb | GoldenDB | MySQL Connector/J |
 | databend | Databend | Databend JDBC |
 | databricks | Databricks SQL | Databricks JDBC |
@@ -41,20 +44,21 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | iotdb | Apache IoTDB | IoTDB JDBC |
 | etcd | etcd | jetcd |
 | zookeeper | Apache ZooKeeper | Apache Curator |
+| rabbitmq | RabbitMQ | RabbitMQ AMQP Java client |
 
 
 ## Multi-JRE Support
 
-Most Java agents target JRE 21. Native agents, such as `oracle` and `xugu`, do not require a JRE. DBX downloads and manages the JRE 21 installation automatically for Java agents.
+Most Java agents target JRE 21. Native agents, such as `oracle`, `kingbase`, and `xugu`, do not require a JRE. DBX downloads and manages the JRE 21 installation automatically for Java agents.
 
 ## Choosing a Driver Language
 
 For new agents, prefer a **native (Go or Rust) driver** over a Java/JDBC agent whenever a mature, license-compatible native driver is available. Native agents ship as a single self-contained executable with no JRE, which significantly reduces memory footprint and startup time — the JVM baseline that every Java agent pays even when idle is avoided entirely.
 
-- **Native (Go/Rust)** — preferred when a usable native driver exists. See `drivers/oracle-go` (go-ora) and `drivers/xugu` as reference implementations. No JRE download or management is needed.
+- **Native (Go/Rust)** — preferred when a usable native driver exists. See `drivers/oracle-go` (go-ora), `drivers/kingbase-go` (gokb), and `drivers/xugu` as reference implementations. No JRE download or management is needed.
 - **Java/JDBC** — the default fallback when only a JDBC driver exists for the database, or when the native driver is immature or unmaintained. Most agents still fall in this category.
 
-Native agents implement the same JSON-RPC contract and `versions.json` registration as Java agents; they ship an `agent` executable instead of `agent.jar`. If both a native and a Java path exist for the same database, default DBX to the native one and keep the Java variant only as a compatibility fallback — see how `oracle` (go-ora native) coexists with `oracle-legacy` / `oracle-10g`.
+Native agents implement the same JSON-RPC contract and `versions.json` registration as Java agents; they ship an `agent` executable instead of `agent.jar`. If both native and Java source implementations exist for the same database, publish only the native artifact unless the Java variant has a separately registered compatibility profile, such as `oracle-legacy` / `oracle-10g`.
 
 ## Build
 
@@ -63,10 +67,11 @@ Requires JDK 21 (Gradle toolchain auto-downloads if needed).
 ```bash
 ./gradlew shadowJar
 (cd drivers/oracle-go && go build -o agent .)
+(cd drivers/kingbase-go && go build -o agent .)
 (cd drivers/xugu && go build -o agent .)
 ```
 
-Output JARs are in `drivers/{module}/build/libs/`. Native agents build from `drivers/oracle-go` and `drivers/xugu`.
+Output JARs are in `drivers/{module}/build/libs/`. Native agents build from `drivers/oracle-go`, `drivers/kingbase-go`, and `drivers/xugu`.
 
 ### Local DBX Runtime Test
 
@@ -80,7 +85,14 @@ cp agents/drivers/<db_type>/build/libs/*-all.jar ~/.dbx/agents/drivers/<db_type>
 
 Restart DBX or disconnect and reconnect the database so the new agent process loads the replacement JAR.
 
-Native agents such as `oracle` and `xugu` use the `agent` executable in the driver directory instead of `agent.jar`.
+Native agents such as `oracle`, `kingbase`, and `xugu` use the `agent` executable in the driver directory instead of `agent.jar`.
+
+## Versioning
+
+Agent module versions are tracked in [`versions.json`](versions.json).
+
+- **Changing an existing driver** — do not edit `versions.json` manually. The release CI diffs each `drivers/<module>/` directory against the previous tag and auto-bumps the patch version for every changed module (see [`bump-agent-versions.mjs`](../.github/scripts/bump-agent-versions.mjs)). A change to the shared `agents/common` runtime bumps every module that packages it.
+- **Adding a new driver** — add an entry to `versions.json`, e.g. `"rabbitmq": "0.1.0"`. The CI only bumps keys already present in the file, so a new module is invisible to versioning until it is registered here. In the same change, also add the module to `settings.gradle` and the support table above — `versions.json` keys must match the agent modules declared in `settings.gradle`, excluding the infrastructure modules `common` and `test-support`.
 
 ## Development
 

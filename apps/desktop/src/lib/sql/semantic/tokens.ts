@@ -29,7 +29,7 @@ function readQuoted(input: string, start: number, open: string, close: string): 
   return input.length;
 }
 
-export function tokenizeSqlSemantic(input: string): SqlSemanticToken[] {
+export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSemanticToken[] {
   const tokens: SqlSemanticToken[] = [];
   let index = 0;
   let depth = 0;
@@ -51,10 +51,16 @@ export function tokenizeSqlSemantic(input: string): SqlSemanticToken[] {
       continue;
     }
 
-    if (ch === "#") {
+    if (ch === "#" && dialectId === "mysql") {
       index += 1;
       while (index < input.length && input[index] !== "\n" && input[index] !== "\r") index += 1;
       tokens.push(token("comment", input.slice(start, index), start, index, depth));
+      continue;
+    }
+
+    if (ch === "#" && dialectId === "postgres") {
+      index += 1;
+      tokens.push(token("operator", ch, start, index, depth));
       continue;
     }
 
@@ -70,6 +76,16 @@ export function tokenizeSqlSemantic(input: string): SqlSemanticToken[] {
       index = readQuoted(input, start, "'", "'");
       tokens.push(token("string", input.slice(start, index), start, index, depth, "'"));
       continue;
+    }
+
+    if (ch === "$") {
+      const marker = /^\$[A-Za-z_0-9]*\$/.exec(input.slice(start))?.[0];
+      if (marker) {
+        const closing = input.indexOf(marker, start + marker.length);
+        index = closing < 0 ? input.length : closing + marker.length;
+        tokens.push(token("string", input.slice(start, index), start, index, depth, marker));
+        continue;
+      }
     }
 
     if (ch === '"') {
@@ -106,7 +122,7 @@ export function tokenizeSqlSemantic(input: string): SqlSemanticToken[] {
 
     if (WORD_START.test(ch)) {
       index += 1;
-      while (index < input.length && WORD_PART.test(input[index] ?? "")) index += 1;
+      while (index < input.length && WORD_PART.test(input[index] ?? "") && !(dialectId === "postgres" && input[index] === "#")) index += 1;
       tokens.push(token("word", input.slice(start, index), start, index, depth));
       continue;
     }

@@ -2,7 +2,7 @@ package com.dbx.agent.yashandb;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 
 public final class YashandbAgent extends ConfiguredJdbcAgent {
     public static final JdbcAgentProfile YASHANDB_PROFILE = new JdbcAgentProfile(
@@ -17,6 +17,6 @@ public final class YashandbAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new YashandbAgent()).run();
+        new MultiSessionJsonRpcServer(YashandbAgent::new).run();
     }
 }

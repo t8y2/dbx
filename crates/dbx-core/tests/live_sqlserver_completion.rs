@@ -1,21 +1,26 @@
 use dbx_core::connection::{AppState, PoolKind};
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
+use dbx_core::sql::{SqlFileRequest, SqlFileStatus};
+use dbx_core::sql_file_import::execute_sql_file_content;
 use dbx_core::storage::Storage;
 use dbx_core::table_structure_sql::{
     build_table_structure_change_sql, ColumnInfo, EditableStructureColumn, TableStructureSqlOptions,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connection::ConnectionConfig {
     dbx_core::models::connection::ConnectionConfig {
         id: id.to_string(),
         name: id.to_string(),
+        note: String::new(),
         db_type: DatabaseType::SqlServer,
         driver_profile: None,
         driver_label: None,
         url_params: None,
+        agent_java_options: Vec::new(),
         host: std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
         port: std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433),
         username: std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string()),
@@ -24,6 +29,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         visible_databases: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
+        init_script: None,
         color: None,
         transport_layers: Vec::new(),
         connect_timeout_secs: 10,
@@ -54,7 +60,89 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         jdbc_driver_paths: Vec::new(),
         one_time: false,
         read_only: false,
+        is_production: false,
+        production_databases: vec![],
+        show_system_schemas: false,
+        database_info: None,
     }
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_column_metadata_marks_non_positional_insert_columns() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let mut client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let computed_table = format!("dbx_insert_computed_{suffix}");
+    let temporal_table = format!("dbx_insert_temporal_{suffix}");
+    let history_table = format!("dbx_insert_history_{suffix}");
+    let create_computed = format!(
+        "CREATE TABLE dbo.[{computed_table}] (id int IDENTITY(1,1) NOT NULL, quantity int NOT NULL, doubled AS quantity * 2, note nvarchar(40) NOT NULL)"
+    );
+    let create_temporal = format!(
+        "CREATE TABLE dbo.[{temporal_table}] (\
+         id int IDENTITY(1,1) NOT NULL PRIMARY KEY, \
+         note nvarchar(40) NOT NULL, \
+         valid_from datetime2 GENERATED ALWAYS AS ROW START HIDDEN NOT NULL DEFAULT SYSUTCDATETIME(), \
+         valid_to datetime2 GENERATED ALWAYS AS ROW END HIDDEN NOT NULL DEFAULT CONVERT(datetime2, '9999-12-31 23:59:59.9999999'), \
+         PERIOD FOR SYSTEM_TIME (valid_from, valid_to)\
+         ) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.[{history_table}]))"
+    );
+
+    dbx_core::db::sqlserver::execute_query(&mut client, &create_computed).await.expect("create computed table");
+    dbx_core::db::sqlserver::execute_query(&mut client, &create_temporal).await.expect("create temporal table");
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("INSERT INTO dbo.[{computed_table}] VALUES (3, N'normal')"),
+    )
+    .await
+    .expect("insert while omitting identity and computed columns");
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("INSERT INTO dbo.[{temporal_table}] VALUES (N'temporal')"),
+    )
+    .await
+    .expect("insert while omitting identity and hidden temporal columns");
+
+    let computed = dbx_core::db::sqlserver::get_column_metadata(&mut client, "dbo", &computed_table)
+        .await
+        .expect("read computed metadata");
+    let temporal = dbx_core::db::sqlserver::get_column_metadata(&mut client, "dbo", &temporal_table)
+        .await
+        .expect("read temporal metadata");
+
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("ALTER TABLE dbo.[{temporal_table}] SET (SYSTEM_VERSIONING = OFF)"),
+    )
+    .await
+    .expect("disable system versioning");
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("DROP TABLE dbo.[{temporal_table}], dbo.[{history_table}], dbo.[{computed_table}]"),
+    )
+    .await
+    .expect("drop metadata probe tables");
+
+    let identity = computed.iter().find(|metadata| metadata.column.name == "id").expect("identity column");
+    let quantity = computed.iter().find(|metadata| metadata.column.name == "quantity").expect("normal column");
+    let doubled = computed.iter().find(|metadata| metadata.column.name == "doubled").expect("computed column");
+    let valid_from = temporal.iter().find(|metadata| metadata.column.name == "valid_from").expect("row start column");
+    let valid_to = temporal.iter().find(|metadata| metadata.column.name == "valid_to").expect("row end column");
+
+    assert!(identity.is_identity);
+    assert!(!quantity.is_identity && !quantity.is_computed && !quantity.is_hidden);
+    assert!(doubled.is_computed);
+    assert!(valid_from.is_hidden && valid_from.generated_always_type == 1);
+    assert!(valid_to.is_hidden && valid_to.generated_always_type == 2);
 }
 
 #[tokio::test]
@@ -86,6 +174,49 @@ async fn live_sqlserver_execute_query_creates_schema() {
     assert_eq!(verify_result.rows.len(), 1);
     assert!(verify_result.rows[0][0].as_i64().is_some(), "schema_id row={:?}", verify_result.rows[0]);
     assert!(schemas.expect("list schemas").contains(&schema));
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_explicit_transaction_batch_can_rollback() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let mut client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+
+    let table = format!("dbx_txn_{}", uuid::Uuid::new_v4().simple());
+    dbx_core::db::sqlserver::execute_query(
+        &mut client,
+        &format!("CREATE TABLE dbo.[{table}] (id INT PRIMARY KEY, name NVARCHAR(50)); INSERT INTO dbo.[{table}] VALUES (50, N'old');"),
+    )
+    .await
+    .expect("create transaction test table");
+
+    let execution = dbx_core::db::sqlserver::execute_batch(
+        &mut client,
+        &format!("BEGIN TRANSACTION\nUPDATE dbo.[{table}] SET name = N'changed' WHERE id = 50;"),
+    )
+    .await;
+    let transaction_count =
+        dbx_core::db::sqlserver::execute_query(&mut client, "SELECT @@TRANCOUNT AS transaction_count").await;
+    let rollback = dbx_core::db::sqlserver::execute_batch(&mut client, "ROLLBACK TRANSACTION").await;
+    let verify =
+        dbx_core::db::sqlserver::execute_query(&mut client, &format!("SELECT name FROM dbo.[{table}] WHERE id = 50"))
+            .await;
+    let cleanup = dbx_core::db::sqlserver::execute_query(&mut client, &format!("DROP TABLE dbo.[{table}]")).await;
+
+    execution.expect("execute explicit transaction batch without error 266");
+    let transaction_count = transaction_count.expect("read transaction count");
+    assert_eq!(transaction_count.rows, vec![vec![serde_json::json!(1)]]);
+    rollback.expect("rollback explicit transaction");
+    let verify = verify.expect("verify rolled-back value");
+    assert_eq!(verify.rows, vec![vec![serde_json::json!("old")]]);
+    cleanup.expect("drop transaction test table");
 }
 
 #[tokio::test]
@@ -186,9 +317,12 @@ fn structure_column(
             is_primary_key: false,
             extra: None,
             comment: None,
+            ..Default::default()
         }),
         original_position: None,
         marked_for_drop: false,
+        character_set: String::new(),
+        collation: String::new(),
     }
 }
 
@@ -225,7 +359,7 @@ async fn live_sqlserver_stream_first_result_set_exports_cte_query_rows() {
     let mut rows = Vec::new();
     let result = dbx_core::db::sqlserver::stream_first_result_set(&mut client, &sql, None, None, |item| {
         match item {
-            dbx_core::db::sqlserver::SqlServerStreamItem::Columns(stream_columns) => {
+            dbx_core::db::sqlserver::SqlServerStreamItem::Columns { columns: stream_columns, .. } => {
                 columns = stream_columns.to_vec();
             }
             dbx_core::db::sqlserver::SqlServerStreamItem::Row(row) => {
@@ -303,10 +437,12 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         schema: Some("dbo".to_string()),
         sql: sql.clone(),
         query_base_sql: sql,
+        setup_sql: Vec::new(),
         database_type: DatabaseType::SqlServer,
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),
         format: "csv".to_string(),
+        include_sql_sheet: false,
         page_size: 1,
         row_limit: None,
         total_rows: None,
@@ -314,6 +450,10 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         keyset_optimization_enabled: true,
         client_session_id: None,
         execution_id: Some(format!("live-sqlserver-export-{suffix}")),
+        date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -335,6 +475,84 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
     assert!(csv.contains("\"1\",\"alpha\""));
     assert!(csv.contains("\"2\",\"beta\""));
     assert!(!csv.contains("\n\n"));
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+async fn live_sqlserver_sql_file_import_executes_go_batches() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let client =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some(&database), None, Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let table = format!("dbx_sql_file_{suffix}");
+    let procedure = format!("dbx_sql_file_proc_{suffix}");
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-file-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "live-sqlserver-file";
+    let mut config = live_sqlserver_config(connection_id, &database);
+    config.host = host;
+    config.port = port;
+    config.username = user;
+    config.password = password;
+    state.configs.write().await.insert(connection_id.to_string(), config);
+    state.connections.write().await.insert(
+        format!("{connection_id}:{database}"),
+        PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client))),
+    );
+
+    let script = format!(
+        "CREATE TABLE [dbo].[{table}] (id INT NOT NULL);\n\
+         GO\n\
+         INSERT INTO [dbo].[{table}] (id) VALUES (1);\n\
+         GO\n\
+         CREATE PROCEDURE [dbo].[{procedure}] AS\n\
+         BEGIN\n\
+             SELECT COUNT(*) AS item_count FROM [dbo].[{table}];\n\
+         END\n\
+         GO"
+    );
+    let request = SqlFileRequest {
+        execution_id: format!("live-sqlserver-file-{suffix}"),
+        connection_id: connection_id.to_string(),
+        database: database.clone(),
+        file_path: "fixture.sql".to_string(),
+        continue_on_error: false,
+    };
+    let done_seen = AtomicBool::new(false);
+
+    execute_sql_file_content(&state, &request, &script, CancellationToken::new(), Instant::now(), |progress| {
+        if progress.status == SqlFileStatus::Done {
+            done_seen.store(true, Ordering::Relaxed);
+        }
+    })
+    .await
+    .expect("execute SQL Server file with GO batches");
+
+    let pool_key = format!("{connection_id}:{database}");
+    let connections = state.connections.read().await;
+    let PoolKind::SqlServer(client) = connections.get(&pool_key).expect("SQL Server pool") else {
+        panic!("expected SQL Server pool");
+    };
+    let mut client = client.lock().await;
+    let rows = dbx_core::db::sqlserver::execute_query(&mut client, &format!("EXEC [dbo].[{procedure}]")).await;
+    let cleanup = format!("DROP PROCEDURE [dbo].[{procedure}]; DROP TABLE [dbo].[{table}];");
+    let _ = dbx_core::db::sqlserver::execute_batch(&mut client, &cleanup).await;
+    drop(client);
+    drop(connections);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(done_seen.load(Ordering::Relaxed));
+    let rows = rows.expect("execute imported procedure");
+    assert_eq!(rows.rows.first().and_then(|row| row.first()), Some(&serde_json::json!(1)));
 }
 
 #[tokio::test]
@@ -400,6 +618,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         create_table: true,
         mode: dbx_core::transfer::TransferMode::Append,
         target_table_name_case: dbx_core::transfer::TransferTableNameCase::Upper,
+        ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };
     let result = dbx_core::transfer::transfer_table(
@@ -490,4 +709,141 @@ async fn live_sqlserver_completion_assistant_searches_metadata_before_limiting()
 
     let cleanup = format!("DROP TABLE [{schema}].[{table}];");
     let _ = dbx_core::db::sqlserver::execute_batch(&mut client, &cleanup).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server instance"]
+async fn live_sqlserver_cross_database_metadata_and_query() {
+    let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_SQLSERVER_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(1433);
+    let user = std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
+    let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+    let default_database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "master".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let database_a = format!("dbx_completion_a_{}", &suffix[..8]);
+    let database_b = format!("dbx_completion_b_{}", &suffix[..8]);
+
+    let mut master =
+        dbx_core::db::sqlserver::connect(&host, port, &user, &password, Some("master"), None, Duration::from_secs(10))
+            .await
+            .expect("connect SQL Server master");
+    dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!("CREATE DATABASE [{database_a}]; CREATE DATABASE [{database_b}];"),
+    )
+    .await
+    .expect("create completion databases");
+
+    let mut client_a = dbx_core::db::sqlserver::connect(
+        &host,
+        port,
+        &user,
+        &password,
+        Some(&database_a),
+        None,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("connect database A");
+    let mut client_b = dbx_core::db::sqlserver::connect(
+        &host,
+        port,
+        &user,
+        &password,
+        Some(&database_b),
+        None,
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("connect database B");
+    dbx_core::db::sqlserver::execute_batch(&mut client_a, "CREATE SCHEMA [IN]")
+        .await
+        .expect("create database A IN schema");
+    dbx_core::db::sqlserver::execute_batch(&mut client_a, "CREATE SCHEMA [OUT]")
+        .await
+        .expect("create database A OUT schema");
+    dbx_core::db::sqlserver::execute_batch(
+        &mut client_a,
+        "CREATE TABLE [IN].[orders_in] (id INT PRIMARY KEY); CREATE TABLE [OUT].[orders] (id INT PRIMARY KEY, source_marker NVARCHAR(20)); INSERT INTO [OUT].[orders] VALUES (1, N'A');",
+    )
+    .await
+    .expect("create database A fixtures");
+    dbx_core::db::sqlserver::execute_batch(&mut client_b, "CREATE SCHEMA [OUT]")
+        .await
+        .expect("create database B OUT schema");
+    dbx_core::db::sqlserver::execute_batch(
+        &mut client_b,
+        "CREATE TABLE [OUT].[orders_out] (id INT PRIMARY KEY); CREATE TABLE [OUT].[orders] (id INT PRIMARY KEY, target_marker NVARCHAR(20)); INSERT INTO [OUT].[orders] VALUES (1, N'B');",
+    )
+    .await
+    .expect("create database B fixtures");
+    drop(client_a);
+    drop(client_b);
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-cross-database-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "live-sqlserver-cross-database";
+    let mut config = live_sqlserver_config(connection_id, &default_database);
+    config.host = host;
+    config.port = port;
+    config.username = user;
+    config.password = password;
+    state.configs.write().await.insert(connection_id.to_string(), config);
+
+    let tables_a = dbx_core::schema::list_tables_core(
+        &state,
+        connection_id,
+        &database_a,
+        "IN",
+        Some("orders"),
+        Some(20),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("list database A tables");
+    let tables_b = dbx_core::schema::list_tables_core(
+        &state,
+        connection_id,
+        &database_b,
+        "OUT",
+        Some("orders"),
+        Some(20),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("list database B tables");
+    assert!(tables_a.iter().any(|table| table.name == "orders_in"));
+    assert!(tables_b.iter().any(|table| table.name == "orders_out"));
+
+    let columns_a = dbx_core::schema::get_columns_core(&state, connection_id, &database_a, "OUT", "orders")
+        .await
+        .expect("load database A columns");
+    let columns_b = dbx_core::schema::get_columns_core(&state, connection_id, &database_b, "OUT", "orders")
+        .await
+        .expect("load database B columns");
+    assert!(columns_a.iter().any(|column| column.name == "source_marker"));
+    assert!(!columns_a.iter().any(|column| column.name == "target_marker"));
+    assert!(columns_b.iter().any(|column| column.name == "target_marker"));
+    assert!(!columns_b.iter().any(|column| column.name == "source_marker"));
+
+    let query = format!("SELECT a.source_marker, b.target_marker FROM [{database_a}].[OUT].[orders] a JOIN [{database_b}].[OUT].[orders] b ON a.id = b.id");
+    let result =
+        dbx_core::query::execute_sql_statement(&state, connection_id, &default_database, &query, Some("dbo"), None)
+            .await
+            .expect("execute cross-database join");
+    assert_eq!(result.rows, vec![vec![serde_json::json!("A"), serde_json::json!("B")]]);
+
+    state.remove_connection_pools_detached(connection_id).await;
+    for database in [&database_a, &database_b] {
+        let cleanup =
+            format!("ALTER DATABASE [{database}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{database}];");
+        dbx_core::db::sqlserver::execute_batch(&mut master, &cleanup).await.expect("drop completion database");
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -73,15 +73,24 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
 
     @Override
     public List<ObjectInfo> listObjects(String schema) {
-        return StandardJdbcMetadata.INSTANCE.listObjects(listTables(schema), schema);
+        return StandardJdbcMetadata.INSTANCE.listObjects(
+            requireConnection(),
+            profile,
+            configuredDatabase,
+            schema,
+            MetadataListConstraints.NONE
+        );
     }
 
     @Override
     public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
-        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
-        MetadataListConstraints tableConstraints =
-            new MetadataListConstraints(normalized.getFilter(), null, null, normalized.getObjectTypes());
-        return StandardJdbcMetadata.INSTANCE.listObjects(listTables(schema, tableConstraints), schema, normalized);
+        return StandardJdbcMetadata.INSTANCE.listObjects(
+            requireConnection(),
+            profile,
+            configuredDatabase,
+            schema,
+            constraints
+        );
     }
 
     @Override
@@ -135,7 +144,14 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
             foreignKeys = Collections.emptyList();
         }
 
-        return DatabaseAgent.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys);
+        String tableComment = null;
+        try {
+            tableComment = getTableComment(schema, table);
+        } catch (RuntimeException e) {
+            // Table comment is optional; DDL generation should still succeed without it.
+        }
+
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, Collections.emptyList(), false, false, tableComment);
     }
 
     @Override

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveEditorTheme } from "@/lib/editor/editorThemes";
+import { buildSqlCompletionThemeRules, resolveEditorTheme } from "@/lib/editor/editorThemes";
 import type { AppThemePalette } from "@/lib/app/appTheme";
 import type { EditorTheme } from "@/stores/settingsStore";
 
@@ -41,5 +41,21 @@ describe("resolveEditorTheme", () => {
         expect(resolveEditorTheme(theme, "light", palette)).toBe(theme);
       }
     }
+  });
+});
+
+describe("SQL completion theme", () => {
+  it("uses the configurable medium radius for the popup container", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete"]).toMatchObject({ borderRadius: "var(--dbx-radius-md)" });
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li"]).toMatchObject({ borderRadius: "var(--dbx-radius-sm)" });
+  });
+
+  it("keeps completion labels ahead of long detail text", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    expect(rules[".cm-completionLabel"]).toMatchObject({ flex: "0 1 auto" });
+    expect(rules[".cm-completionDetail"]).toMatchObject({ flex: "1 1 0", minWidth: "0", textOverflow: "ellipsis" });
   });
 });

@@ -1,0 +1,31 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/etcd:v3.7.0
+    container_name: dbx-etcd-3.7
+    command:
+      - /usr/local/bin/etcd
+      - --name=s1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://0.0.0.0:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://0.0.0.0:2380
+      - --initial-cluster=s1=http://0.0.0.0:2380
+      - --initial-cluster-token=tkn
+      - --initial-cluster-state=new
+      - --log-level=info
+      - --logger=zap
+      - --log-outputs=stderr
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-2380}:2379"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${ETCD_PEER_PORT:-2381}:2380"
+    volumes:
+      - data:/etcd-data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+volumes:
+  data:

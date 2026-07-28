@@ -9,17 +9,24 @@ use redis::{
     TlsMode, Value as RedisRawValue,
 };
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, future::Future, time::Duration, time::Instant};
 use tokio::sync::{Mutex, MutexGuard};
 
 use super::json_value_for_js;
 
 const STREAM_ENTRY_LIMIT: usize = 100;
+const STREAM_PENDING_PAGE_SIZE: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
 const HASH_FILTER_SCAN_MAX_ITERATIONS: usize = 10;
 const DEFAULT_REDIS_DATABASES: u32 = 16;
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const CLUSTER_CURSOR_NODE_BITS: u64 = 16;
 const CLUSTER_CURSOR_NODE_MASK: u64 = (1 << CLUSTER_CURSOR_NODE_BITS) - 1;
 const CLUSTER_CURSOR_SCAN_MASK: u64 = (1 << (64 - CLUSTER_CURSOR_NODE_BITS)) - 1;
+const CLUSTER_SCAN_SESSION_LIMIT: usize = 128;
+const CLUSTER_SCAN_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
+const INVALID_CLUSTER_SCAN_CURSOR_ERROR: &str = "Redis cluster scan cursor is invalid or expired";
+const MAX_SAFE_INTEGER_CURSOR: u64 = (1 << 53) - 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisDatabaseInfo {
@@ -64,18 +71,193 @@ pub struct RedisScanResult {
 pub struct RedisValue {
     pub key_display: String,
     pub key_raw: String,
-    pub key_type: String,
     pub ttl: i64,
-    pub value_is_binary: bool,
-    pub value: serde_json::Value,
-    pub total: Option<u64>,
-    pub scan_cursor: Option<u64>,
+    pub redis_type: String,
+    pub data: RedisValueData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedisBlobEncoding {
+    Utf8,
+    Binary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisBlob {
+    pub raw_base64: String,
+    pub encoding: RedisBlobEncoding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisListItem {
+    pub index: u64,
+    pub value: RedisBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisSetItem {
+    pub member: RedisBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisHashItem {
+    pub field: RedisBlob,
+    pub value: RedisBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisZsetItem {
+    pub score: String,
+    pub member: RedisBlob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamField {
+    pub field: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamEntry {
+    pub id: String,
+    pub fields: Vec<RedisStreamField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamGroup {
+    pub name: RedisBlob,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub consumers: u64,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub pending: u64,
+    pub last_delivered_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_optional_redis_u64_for_js")]
+    pub entries_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_optional_redis_u64_for_js")]
+    pub lag: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamConsumer {
+    pub name: RedisBlob,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub pending: u64,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub idle_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_optional_redis_u64_for_js")]
+    pub inactive_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamPendingEntry {
+    pub id: String,
+    pub consumer: RedisBlob,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub idle_ms: u64,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub deliveries: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamPendingPage {
+    pub entries: Vec<RedisStreamPendingEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+// JSON and Tauri IPC both deliver numbers to JavaScript, so preserve large Redis counters as text.
+fn serialize_redis_u64_for_js<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if *value > JS_MAX_SAFE_INTEGER {
+        serializer.serialize_str(&value.to_string())
+    } else {
+        serializer.serialize_u64(*value)
+    }
+}
+
+fn serialize_optional_redis_u64_for_js<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(value) => serialize_redis_u64_for_js(value, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RedisValueData {
+    String {
+        content: RedisBlob,
+    },
+    Json {
+        /// Original JSON.GET payload used throughout the RedisJSON UI.
+        value: String,
+    },
+    List {
+        items: Vec<RedisListItem>,
+        total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Set {
+        items: Vec<RedisSetItem>,
+        total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Hash {
+        items: Vec<RedisHashItem>,
+        total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Zset {
+        items: Vec<RedisZsetItem>,
+        total: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Stream {
+        entries: Vec<RedisStreamEntry>,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RedisCollectionPage {
+    List {
+        items: Vec<RedisListItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Set {
+        items: Vec<RedisSetItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Hash {
+        items: Vec<RedisHashItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
+    Zset {
+        items: Vec<RedisZsetItem>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_cursor: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RedisCommandSafety {
     Allowed,
+    Write,
     Confirm,
     Blocked,
 }
@@ -109,6 +291,70 @@ pub struct RedisClusterPool {
     pub tls_insecure: bool,
     pub username: String,
     pub password: String,
+    scan_sessions: Box<Mutex<RedisClusterScanSessions>>,
+}
+
+#[derive(Debug, Clone)]
+struct RedisClusterKeyScanSession {
+    master_nodes: Vec<RedisNodeEndpoint>,
+    node_index: usize,
+    node_cursor: u64,
+    pattern: String,
+    last_used: Instant,
+}
+
+impl RedisClusterKeyScanSession {
+    fn new(master_nodes: Vec<RedisNodeEndpoint>, pattern: &str) -> Self {
+        Self { master_nodes, node_index: 0, node_cursor: 0, pattern: pattern.to_string(), last_used: Instant::now() }
+    }
+}
+
+#[derive(Debug)]
+struct RedisClusterScanSessions {
+    next_cursor: u64,
+    entries: HashMap<u64, RedisClusterKeyScanSession>,
+}
+
+impl Default for RedisClusterScanSessions {
+    fn default() -> Self {
+        Self { next_cursor: 1, entries: HashMap::new() }
+    }
+}
+
+impl RedisClusterScanSessions {
+    fn take(&mut self, cursor: u64) -> Option<RedisClusterKeyScanSession> {
+        self.remove_expired();
+        self.entries.remove(&cursor)
+    }
+
+    fn insert(&mut self, cursor: Option<u64>, mut session: RedisClusterKeyScanSession) -> u64 {
+        self.remove_expired();
+        while self.entries.len() >= CLUSTER_SCAN_SESSION_LIMIT {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, entry)| entry.last_used).map(|(id, _)| *id) else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+
+        let cursor = cursor.filter(|value| *value > 0).unwrap_or_else(|| self.next_available_cursor());
+        session.last_used = Instant::now();
+        self.entries.insert(cursor, session);
+        cursor
+    }
+
+    fn remove_expired(&mut self) {
+        self.entries.retain(|_, entry| entry.last_used.elapsed() < CLUSTER_SCAN_SESSION_TTL);
+    }
+
+    fn next_available_cursor(&mut self) -> u64 {
+        loop {
+            let cursor = self.next_cursor;
+            self.next_cursor = if cursor >= MAX_SAFE_INTEGER_CURSOR { 1 } else { cursor + 1 };
+            if cursor != 0 && !self.entries.contains_key(&cursor) {
+                return cursor;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,17 +443,8 @@ pub async fn connect_standalone(
     timeout: std::time::Duration,
 ) -> Result<redis::aio::MultiplexedConnection, String> {
     let mut last_error = None;
-    for auth in redis_auth_candidates(&config.username, &config.password) {
-        let client = redis::Client::open(connection_info(
-            host,
-            port,
-            config.ssl,
-            config.redis_tls_insecure(),
-            &auth.username,
-            &auth.password,
-            redis_database_index(config),
-        ))
-        .map_err(|e| format!("Redis connection failed: {e}"))?;
+    for info in standalone_connection_infos(config, host, port) {
+        let client = redis::Client::open(info).map_err(|e| format!("Redis connection failed: {e}"))?;
         match connect_client_with_timeout(client, timeout, "Redis").await {
             Ok(con) => return Ok(con),
             Err(err) if last_error.is_none() || is_redis_auth_error(&err) => {
@@ -221,6 +458,23 @@ pub async fn connect_standalone(
         }
     }
     Err(last_error.unwrap_or_else(|| "Redis connection failed".to_string()))
+}
+
+fn standalone_connection_infos(config: &ConnectionConfig, host: &str, port: u16) -> Vec<ConnectionInfo> {
+    redis_auth_candidates(&config.username, &config.password)
+        .into_iter()
+        .map(|auth| {
+            connection_info(
+                host,
+                port,
+                config.ssl,
+                config.redis_tls_insecure(),
+                &auth.username,
+                &auth.password,
+                redis_database_index(config),
+            )
+        })
+        .collect()
 }
 
 async fn connect_client_with_timeout(
@@ -359,6 +613,7 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
                     tls_insecure: config.redis_tls_insecure(),
                     username: auth.username,
                     password: auth.password,
+                    scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
                 });
             }
             Err(err) if last_error.is_none() || is_redis_auth_error(&err) => {
@@ -426,6 +681,7 @@ pub async fn connect_routed_cluster(
         tls_insecure: config.redis_tls_insecure(),
         username: auth.username,
         password: auth.password,
+        scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
     };
     if pool.node_routes.is_empty() {
         pool.node_routes = identity_routes(&unique_master_nodes(&pool.slot_ranges));
@@ -831,42 +1087,170 @@ pub async fn scan_cluster_keys_page_with_options(
     count: usize,
     include_types: bool,
 ) -> Result<RedisScanResult, String> {
-    let master_nodes = cluster_master_nodes(pool).await?;
-    if master_nodes.is_empty() {
-        return Ok(RedisScanResult { cursor: 0, keys: Vec::new(), total_keys: 0 });
+    scan_cluster_keys_batch(pool, cursor, pattern, count, 1, include_types).await
+}
+
+pub async fn scan_cluster_keys_batch(
+    pool: &RedisClusterPool,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+) -> Result<RedisScanResult, String> {
+    scan_cluster_keys_batch_with(
+        &pool.scan_sessions,
+        || async { cluster_master_nodes(pool).await },
+        |endpoint| async move { connect_cluster_node(pool, &endpoint).await },
+        cursor,
+        pattern,
+        count,
+        max_iterations,
+        include_types,
+    )
+    .await
+}
+
+async fn scan_cluster_keys_batch_with<C, Discover, DiscoverFuture, Connect, ConnectFuture>(
+    sessions: &Mutex<RedisClusterScanSessions>,
+    mut discover_master_nodes: Discover,
+    connect_node: Connect,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+) -> Result<RedisScanResult, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+    Discover: FnMut() -> DiscoverFuture,
+    DiscoverFuture: Future<Output = Result<Vec<RedisNodeEndpoint>, String>>,
+    Connect: FnMut(RedisNodeEndpoint) -> ConnectFuture,
+    ConnectFuture: Future<Output = Result<C, String>>,
+{
+    let (mut session, can_continue) = if cursor == 0 {
+        let master_nodes = canonical_cluster_master_nodes(discover_master_nodes().await?);
+        if master_nodes.is_empty() {
+            return Ok(RedisScanResult { cursor: 0, keys: Vec::new(), total_keys: 0 });
+        }
+        (RedisClusterKeyScanSession::new(master_nodes, pattern), false)
+    } else {
+        let previous_session = sessions.lock().await.take(cursor);
+        match previous_session {
+            Some(session) if session.pattern == pattern => (session, true),
+            Some(session) => {
+                sessions.lock().await.insert(Some(cursor), session);
+                return Err(INVALID_CLUSTER_SCAN_CURSOR_ERROR.to_string());
+            }
+            None => return Err(INVALID_CLUSTER_SCAN_CURSOR_ERROR.to_string()),
+        }
+    };
+    let include_total_keys = !can_continue;
+    let retry_session = can_continue.then(|| session.clone());
+
+    let batch = match scan_cluster_keys_batch_on_session(
+        &mut session,
+        connect_node,
+        pattern,
+        count,
+        max_iterations,
+        include_types,
+        include_total_keys,
+    )
+    .await
+    {
+        Ok(batch) => batch,
+        Err(error) => {
+            if let Some(retry_session) = retry_session {
+                // A failed batch may have advanced across nodes without returning its keys, so retries must resume
+                // from the request's original position rather than the partially mutated session.
+                sessions.lock().await.insert(Some(cursor), retry_session);
+            }
+            return Err(error);
+        }
+    };
+
+    if batch.complete {
+        return Ok(RedisScanResult { cursor: 0, keys: batch.keys, total_keys: batch.total_keys });
     }
 
-    let (mut node_index, node_cursor) = decode_cluster_cursor(cursor);
-    if node_index >= master_nodes.len() {
-        node_index = 0;
+    let session_cursor = sessions.lock().await.insert(can_continue.then_some(cursor), session);
+    Ok(RedisScanResult { cursor: session_cursor, keys: batch.keys, total_keys: batch.total_keys })
+}
+
+struct RedisClusterKeyScanBatch {
+    keys: Vec<RedisKeyInfo>,
+    total_keys: u64,
+    complete: bool,
+}
+
+async fn scan_cluster_keys_batch_on_session<C, Connect, ConnectFuture>(
+    session: &mut RedisClusterKeyScanSession,
+    mut connect_node: Connect,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+    include_total_keys: bool,
+) -> Result<RedisClusterKeyScanBatch, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+    Connect: FnMut(RedisNodeEndpoint) -> ConnectFuture,
+    ConnectFuture: Future<Output = Result<C, String>>,
+{
+    if session.master_nodes.is_empty() || session.node_index >= session.master_nodes.len() {
+        return Ok(RedisClusterKeyScanBatch { keys: Vec::new(), total_keys: 0, complete: true });
     }
 
-    let total_keys = cluster_total_keys(pool, &master_nodes).await;
-    for index in node_index..master_nodes.len() {
-        let endpoint = &master_nodes[index];
-        let mut con = connect_cluster_node(pool, endpoint).await?;
-        let current_cursor = if index == node_index { node_cursor } else { 0 };
-        let result = scan_keys_page_with_options(&mut con, current_cursor, pattern, count, include_types).await?;
-        if !result.keys.is_empty() {
-            let next_cursor = if result.cursor != 0 {
-                encode_cluster_cursor(index, result.cursor)?
-            } else if index + 1 < master_nodes.len() {
-                encode_cluster_cursor(index + 1, 0)?
-            } else {
-                0
+    let mut connections: Vec<Option<C>> = std::iter::repeat_with(|| None).take(session.master_nodes.len()).collect();
+    let mut total_keys = 0;
+    if include_total_keys {
+        for (index, endpoint) in session.master_nodes.iter().cloned().enumerate() {
+            let Ok(mut connection) = connect_node(endpoint).await else {
+                continue;
             };
-            return Ok(RedisScanResult { cursor: next_cursor, keys: result.keys, total_keys });
-        }
-        if result.cursor != 0 {
-            return Ok(RedisScanResult {
-                cursor: encode_cluster_cursor(index, result.cursor)?,
-                keys: Vec::new(),
-                total_keys,
-            });
+            total_keys += redis::cmd("DBSIZE").query_async::<u64>(&mut connection).await.unwrap_or(0);
+            connections[index] = Some(connection);
         }
     }
 
-    Ok(RedisScanResult { cursor: 0, keys: Vec::new(), total_keys })
+    let iterations = max_iterations.max(1);
+    let target_keys = count.max(1);
+    let mut all_keys = Vec::new();
+
+    for _ in 0..iterations {
+        if connections[session.node_index].is_none() {
+            connections[session.node_index] =
+                Some(connect_node(session.master_nodes[session.node_index].clone()).await?);
+        }
+        let connection = connections[session.node_index].as_mut().ok_or("Redis cluster node connection unavailable")?;
+        let page =
+            scan_keys_batch_inner(connection, session.node_cursor, pattern, count, 1, include_types, false).await?;
+        all_keys.extend(page.keys);
+
+        let complete = if page.cursor != 0 {
+            session.node_cursor = page.cursor;
+            false
+        } else if session.node_index + 1 < session.master_nodes.len() {
+            session.node_index += 1;
+            session.node_cursor = 0;
+            false
+        } else {
+            true
+        };
+
+        if complete || all_keys.len() >= target_keys {
+            return Ok(RedisClusterKeyScanBatch { keys: all_keys, total_keys, complete });
+        }
+    }
+
+    Ok(RedisClusterKeyScanBatch { keys: all_keys, total_keys, complete: false })
+}
+
+fn canonical_cluster_master_nodes(mut master_nodes: Vec<RedisNodeEndpoint>) -> Vec<RedisNodeEndpoint> {
+    master_nodes.sort_unstable_by(|left, right| left.host.cmp(&right.host).then(left.port.cmp(&right.port)));
+    master_nodes.dedup();
+    master_nodes
 }
 
 pub async fn scan_cluster_values_page(
@@ -1219,15 +1603,161 @@ pub fn parse_command_argv(command_text: &str) -> Result<Vec<String>, String> {
 }
 
 pub fn classify_command(command: &str) -> RedisCommandSafety {
+    // Read access is an explicit allowlist. Commands added by a newer Redis
+    // version, module, or proxy remain high-risk until DBX reviews them.
     match command.to_ascii_uppercase().as_str() {
-        "KEYS" | "FLUSHALL" | "SHUTDOWN" | "CONFIG" | "SAVE" | "BGSAVE" | "SLAVEOF" | "REPLICAOF" | "MIGRATE"
-        | "MODULE" | "SCRIPT" | "EVAL" | "EVALSHA" => RedisCommandSafety::Blocked,
-        "DEL" | "UNLINK" | "EXPIRE" | "EXPIREAT" | "PEXPIRE" | "PEXPIREAT" | "PERSIST" | "RENAME" | "RENAMENX"
-        | "SET" | "SETEX" | "PSETEX" | "SETNX" | "MSET" | "MSETNX" | "HSET" | "HDEL" | "LPUSH" | "RPUSH" | "LPOP"
-        | "RPOP" | "LSET" | "LREM" | "SADD" | "SREM" | "ZADD" | "ZREM" | "XADD" | "XDEL" | "FLUSHDB" => {
-            RedisCommandSafety::Confirm
-        }
-        _ => RedisCommandSafety::Allowed,
+        "BITCOUNT"
+        | "BITFIELD_RO"
+        | "BITPOS"
+        | "COMMAND"
+        | "DBSIZE"
+        | "DUMP"
+        | "ECHO"
+        | "EXISTS"
+        | "EXPIRETIME"
+        | "GEODIST"
+        | "GEOHASH"
+        | "GEOPOS"
+        | "GEORADIUS_RO"
+        | "GEORADIUSBYMEMBER_RO"
+        | "GEOSEARCH"
+        | "GET"
+        | "GETBIT"
+        | "GETRANGE"
+        | "HEXISTS"
+        | "HGET"
+        | "HGETALL"
+        | "HKEYS"
+        | "HLEN"
+        | "HMGET"
+        | "HRANDFIELD"
+        | "HSCAN"
+        | "HSTRLEN"
+        | "HVALS"
+        | "INFO"
+        | "LASTSAVE"
+        | "LCS"
+        | "LINDEX"
+        | "LLEN"
+        | "LPOS"
+        | "LRANGE"
+        | "MGET"
+        | "OBJECT"
+        | "PEXPIRETIME"
+        | "PFCOUNT"
+        | "PING"
+        | "PTTL"
+        | "PUBSUB"
+        | "RANDOMKEY"
+        | "ROLE"
+        | "SCAN"
+        | "SCARD"
+        | "SDIFF"
+        | "SINTER"
+        | "SINTERCARD"
+        | "SISMEMBER"
+        | "SMEMBERS"
+        | "SMISMEMBER"
+        | "SORT_RO"
+        | "SRANDMEMBER"
+        | "SSCAN"
+        | "STRLEN"
+        | "SUNION"
+        | "TIME"
+        | "TTL"
+        | "TYPE"
+        | "WAIT"
+        | "WAITAOF"
+        | "XINFO"
+        | "XLEN"
+        | "XPENDING"
+        | "XRANGE"
+        | "XREAD"
+        | "XREVRANGE"
+        | "ZCARD"
+        | "ZCOUNT"
+        | "ZDIFF"
+        | "ZINTER"
+        | "ZINTERCARD"
+        | "ZLEXCOUNT"
+        | "ZMSCORE"
+        | "ZRANDMEMBER"
+        | "ZRANGE"
+        | "ZRANGEBYLEX"
+        | "ZRANGEBYSCORE"
+        | "ZRANK"
+        | "ZREVRANGE"
+        | "ZREVRANGEBYLEX"
+        | "ZREVRANGEBYSCORE"
+        | "ZREVRANK"
+        | "ZSCAN"
+        | "ZSCORE"
+        | "ZUNION"
+        | "BF.CARD"
+        | "BF.EXISTS"
+        | "BF.INFO"
+        | "BF.MEXISTS"
+        | "CF.COUNT"
+        | "CF.EXISTS"
+        | "CF.INFO"
+        | "CF.MEXISTS"
+        | "CMS.INFO"
+        | "CMS.QUERY"
+        | "FT._LIST"
+        | "FT.AGGREGATE"
+        | "FT.DICTDUMP"
+        | "FT.EXPLAIN"
+        | "FT.EXPLAINCLI"
+        | "FT.INFO"
+        | "FT.PROFILE"
+        | "FT.SEARCH"
+        | "FT.SPELLCHECK"
+        | "FT.SYNDUMP"
+        | "FT.TAGVALS"
+        | "GRAPH.RO_QUERY"
+        | "JSON.ARRINDEX"
+        | "JSON.ARRLEN"
+        | "JSON.GET"
+        | "JSON.MGET"
+        | "JSON.OBJKEYS"
+        | "JSON.OBJLEN"
+        | "JSON.RESP"
+        | "JSON.STRLEN"
+        | "JSON.TYPE"
+        | "TDIGEST.BYRANK"
+        | "TDIGEST.BYREVRANK"
+        | "TDIGEST.CDF"
+        | "TDIGEST.INFO"
+        | "TDIGEST.MAX"
+        | "TDIGEST.MIN"
+        | "TDIGEST.QUANTILE"
+        | "TDIGEST.RANK"
+        | "TDIGEST.REVRANK"
+        | "TDIGEST.TRIMMED_MEAN"
+        | "TOPK.INFO"
+        | "TOPK.LIST"
+        | "TOPK.QUERY"
+        | "TS.GET"
+        | "TS.INFO"
+        | "TS.MGET"
+        | "TS.MRANGE"
+        | "TS.QUERYINDEX"
+        | "TS.RANGE" => RedisCommandSafety::Allowed,
+        "DEL" | "UNLINK" | "EXPIRE" | "EXPIREAT" | "PEXPIRE" | "PEXPIREAT" | "RENAME" | "RENAMENX" | "GETDEL"
+        | "HDEL" | "JSON.ARRPOP" | "JSON.ARRTRIM" | "JSON.CLEAR" | "JSON.DEL" | "JSON.FORGET" | "BLMOVE" | "BLMPOP"
+        | "BLPOP" | "BRPOP" | "BRPOPLPUSH" | "LPOP" | "LMOVE" | "LMPOP" | "RPOP" | "RPOPLPUSH" | "LREM" | "LTRIM"
+        | "SPOP" | "SREM" | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN"
+        | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT"
+        | "SDIFFSTORE" | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE"
+        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
+        "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
+        | "GETEX" | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX"
+        | "SETRANGE" | "MSET" | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX"
+        | "JSON.ARRAPPEND" | "JSON.ARRINSERT" | "JSON.MERGE" | "JSON.MSET" | "JSON.NUMINCRBY" | "JSON.NUMMULTBY"
+        | "JSON.SET" | "JSON.STRAPPEND" | "JSON.TOGGLE" | "LINSERT" | "LSET" | "LPUSH" | "LPUSHX" | "PFADD"
+        | "RPUSH" | "RPUSHX" | "RESTORE" | "SADD" | "ZADD" | "ZINCRBY" | "SETBIT" | "SPUBLISH" | "PUBLISH"
+        | "TOUCH" | "XADD" | "XACK" | "XAUTOCLAIM" | "XCLAIM" | "XREADGROUP" | "XSETID" => RedisCommandSafety::Write,
+        _ => RedisCommandSafety::Blocked,
     }
 }
 
@@ -1288,25 +1818,18 @@ pub fn is_redis_json_type(key_type: &str) -> bool {
     matches!(key_type.to_ascii_uppercase().as_str(), "REJSON-RL" | "JSON")
 }
 
-pub fn redis_json_raw_to_json(value: RedisRawValue) -> Result<serde_json::Value, String> {
-    match redis_raw_to_json(value) {
-        serde_json::Value::Null => Ok(serde_json::Value::Null),
-        serde_json::Value::String(text) => {
-            serde_json::from_str(&text).map(json_value_for_js).map_err(|e| format!("Invalid RedisJSON value: {e}"))
+pub fn redis_json_raw_to_text(value: RedisRawValue) -> Result<String, String> {
+    match value {
+        RedisRawValue::BulkString(bytes) => {
+            String::from_utf8(bytes).map_err(|e| format!("RedisJSON value is not valid UTF-8: {e}"))
         }
-        other => Ok(json_value_for_js(other)),
+        RedisRawValue::SimpleString(text) => Ok(text),
+        RedisRawValue::VerbatimString { text, .. } => Ok(text),
+        // Do not turn a key deleted between TYPE and JSON.GET into an editable
+        // JSON null; saving that draft would recreate a phantom key.
+        RedisRawValue::Nil => Err("RedisJSON key no longer exists".to_string()),
+        other => Err(format!("Unexpected RedisJSON response: {other:?}")),
     }
-}
-
-pub fn redis_json_value_preview(value: &serde_json::Value) -> String {
-    const MAX_PREVIEW_LEN: usize = 160;
-    let text = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
-    if text.chars().count() <= MAX_PREVIEW_LEN {
-        return text;
-    }
-    let mut preview = text.chars().take(MAX_PREVIEW_LEN).collect::<String>();
-    preview.push('…');
-    preview
 }
 
 pub fn redis_key_value_preview(key_type: &str) -> String {
@@ -1431,8 +1954,9 @@ fn redis_raw_value_to_command_arg(v: &RedisRawValue) -> Option<String> {
 /// Try to convert a RedisRawValue to a u64.
 fn redis_value_to_u64(v: &RedisRawValue) -> Option<u64> {
     match v {
-        RedisRawValue::Int(i) => Some(*i as u64),
+        RedisRawValue::Int(i) => u64::try_from(*i).ok(),
         RedisRawValue::BulkString(bytes) => std::str::from_utf8(bytes).ok().and_then(|s| s.parse().ok()),
+        RedisRawValue::SimpleString(value) => value.parse().ok(),
         _ => None,
     }
 }
@@ -1536,8 +2060,24 @@ pub async fn scan_keys_batch<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
+    scan_keys_batch_inner(con, cursor, pattern, count, max_iterations, include_types, true).await
+}
+
+async fn scan_keys_batch_inner<C>(
+    con: &mut C,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+    include_total_keys: bool,
+) -> Result<RedisScanResult, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
     let iterations = max_iterations.max(1);
-    let total_keys: u64 = if cursor == 0 { redis::cmd("DBSIZE").query_async(con).await.unwrap_or(0) } else { 0 };
+    let total_keys: u64 =
+        if include_total_keys && cursor == 0 { redis::cmd("DBSIZE").query_async(con).await.unwrap_or(0) } else { 0 };
 
     let is_exact_match = !pattern.contains('*') && !pattern.contains('?') && !pattern.contains('[');
     if cursor == 0 && is_exact_match && !pattern.is_empty() {
@@ -1572,7 +2112,7 @@ where
 
     let mut current_cursor = cursor;
 
-    for _ in 0..iterations {
+    for iteration in 0..iterations {
         let raw: RedisRawValue = redis::cmd("SCAN")
             .arg(current_cursor)
             .arg("MATCH")
@@ -1622,9 +2162,24 @@ where
             return Ok(RedisScanResult { cursor: 0, keys: all_keys, total_keys });
         }
         current_cursor = next_cursor;
+
+        // MATCH may yield sparse or empty batches. Keep scanning within the
+        // caller's bounded budget, but stop once this result page is full.
+        if !should_continue_key_scan(all_keys.len(), count, iteration + 1, iterations) {
+            break;
+        }
     }
 
     Ok(RedisScanResult { cursor: current_cursor, keys: all_keys, total_keys })
+}
+
+fn should_continue_key_scan(
+    matched_keys: usize,
+    target_keys: usize,
+    completed_iterations: usize,
+    max_iterations: usize,
+) -> bool {
+    matched_keys < target_keys.max(1) && completed_iterations < max_iterations.max(1)
 }
 
 pub async fn scan_values_page<C>(
@@ -1701,17 +2256,18 @@ where
         let Ok(value) = get_value(con, &key).await else {
             continue;
         };
-        if !redis_value_matches_query(&value.value, query) {
+        if !redis_value_matches_query(&value, query) {
             continue;
         }
 
-        let value_preview = redis_search_value_preview(&value.value);
+        let value_preview = redis_search_value_preview(&value.data);
+        let size = redis_search_value_size(&value);
         result.push(RedisKeyInfo {
             key_display: value.key_display,
             key_raw: value.key_raw,
-            key_type: value.key_type,
+            key_type: value.redis_type,
             ttl: value.ttl,
-            size: redis_search_value_size(&value.value, value.total),
+            size,
             value_preview,
         });
     }
@@ -1723,19 +2279,18 @@ pub async fn get_value<C>(con: &mut C, key: &[u8]) -> Result<RedisValue, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let key_type: String = redis::cmd("TYPE").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+    let redis_type: String = redis::cmd("TYPE").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
 
     let ttl: i64 = redis::cmd("TTL").arg(key).query_async(con).await.unwrap_or(-1);
 
-    let (value, value_is_binary, total, scan_cursor) = match key_type.as_str() {
+    let data = match redis_type.as_str() {
         "string" => {
             let v: RedisRawValue = redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
-            let value_is_binary = redis_value_contains_binary(&v);
-            let value = match v {
-                RedisRawValue::BulkString(bytes) => json_string_to_js_safe(redis_bytes_to_display(&bytes)),
-                other => redis_raw_to_json(other),
-            };
-            (value, value_is_binary, None, None)
+            RedisValueData::String {
+                content: redis_value_to_bytes(v)
+                    .map(|bytes| redis_blob_from_bytes(&bytes))
+                    .ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?,
+            }
         }
         "list" => {
             let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
@@ -1743,53 +2298,47 @@ where
             let v: RedisRawValue =
                 redis::cmd("LRANGE").arg(key).arg(0).arg(end).query_async(con).await.map_err(|e| e.to_string())?;
             let cursor = if len > COLLECTION_PAGE_SIZE as u64 { Some(COLLECTION_PAGE_SIZE as u64) } else { None };
-            (redis_array_to_json(v), false, Some(len), cursor)
+            RedisValueData::List { items: redis_list_items_from_raw(v, 0), total: len, scan_cursor: cursor }
         }
         "set" => {
             let len: u64 = redis::cmd("SCARD").arg(key).query_async(con).await.unwrap_or(0);
-            let (next_cursor, items) = sscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
-            let cursor = if next_cursor > 0 { Some(next_cursor) } else { None };
-            (serde_json::Value::Array(items), false, Some(len), cursor)
+            let (cursor, items) = sscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
+            RedisValueData::Set { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
         "zset" => {
             let len: u64 = redis::cmd("ZCARD").arg(key).query_async(con).await.unwrap_or(0);
-            let (next_cursor, items) = zscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
-            let cursor = if next_cursor > 0 { Some(next_cursor) } else { None };
-            (serde_json::Value::Array(items), false, Some(len), cursor)
+            let (cursor, items) = zscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
+            RedisValueData::Zset { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
         "hash" => {
             let len: u64 = redis::cmd("HLEN").arg(key).query_async(con).await.unwrap_or(0);
-            let (next_cursor, items) = hscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
-            let cursor = if next_cursor > 0 { Some(next_cursor) } else { None };
-            (serde_json::Value::Array(items), false, Some(len), cursor)
+            let (cursor, items) = hscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
+            RedisValueData::Hash { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
-        "stream" => (get_stream_entries(con, key).await?, false, None, None),
+        "stream" => RedisValueData::Stream { entries: get_stream_entries(con, key).await? },
         key_type if is_redis_json_type(key_type) => {
             let raw: RedisRawValue =
                 redis::cmd("JSON.GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
-            (redis_json_raw_to_json(raw)?, false, None, None)
+            RedisValueData::Json { value: redis_json_raw_to_text(raw)? }
         }
-        _ => (serde_json::Value::Null, false, None, None),
+        _ => RedisValueData::Unknown,
     };
 
     Ok(RedisValue {
         key_display: redis_key_bytes_to_display(key),
         key_raw: redis_key_bytes_to_raw(key),
-        key_type,
+        redis_type,
         ttl,
-        value_is_binary,
-        value,
-        total,
-        scan_cursor,
+        data,
     })
 }
 
-fn redis_value_matches_query(value: &serde_json::Value, query: &str) -> bool {
+fn redis_value_matches_query(value: &RedisValue, query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {
         return false;
     }
-    redis_search_value_text(value).to_lowercase().contains(&query.to_lowercase())
+    redis_search_value_text(&value.data).to_lowercase().contains(&query.to_lowercase())
 }
 
 fn redis_key_matches_query(key_display: &str, key_raw: &str, query: &str) -> bool {
@@ -1801,35 +2350,38 @@ fn redis_key_matches_query(key_display: &str, key_raw: &str, query: &str) -> boo
     key_display.to_lowercase().contains(&query) || key_raw.to_lowercase().contains(&query)
 }
 
-fn redis_search_value_text(value: &serde_json::Value) -> String {
+fn redis_search_value_text(value: &RedisValueData) -> String {
     match value {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Array(arr) => {
-            // Hash type: [{field: "f1", value: "v1"}, ...] — extract field names and values
-            if let Some(first) = arr.first() {
-                if first.get("field").is_some() && first.get("value").is_some() {
-                    let parts: Vec<String> = arr
-                        .iter()
-                        .flat_map(|item| {
-                            let f = item.get("field").and_then(|v| v.as_str()).unwrap_or("");
-                            let v = item.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                            vec![f.to_string(), v.to_string()]
-                        })
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    return parts.join(" ");
-                }
-            }
-            if arr.is_empty() {
-                return String::new();
-            }
-            serde_json::to_string(&arr).unwrap_or_default()
+        RedisValueData::String { content } => redis_blob_display_text(content),
+        RedisValueData::Json { value } => value.clone(),
+        RedisValueData::List { items, .. } => {
+            items.iter().map(|item| redis_blob_display_text(&item.value)).collect::<Vec<_>>().join(" ")
         }
-        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+        RedisValueData::Set { items, .. } => {
+            items.iter().map(|item| redis_blob_display_text(&item.member)).collect::<Vec<_>>().join(" ")
+        }
+        RedisValueData::Hash { items, .. } => items
+            .iter()
+            .flat_map(|item| [redis_blob_display_text(&item.field), redis_blob_display_text(&item.value)])
+            .collect::<Vec<_>>()
+            .join(" "),
+        RedisValueData::Zset { items, .. } => items
+            .iter()
+            .flat_map(|item| [item.score.clone(), redis_blob_display_text(&item.member)])
+            .collect::<Vec<_>>()
+            .join(" "),
+        RedisValueData::Stream { entries } => entries
+            .iter()
+            .flat_map(|entry| {
+                entry.fields.iter().flat_map(|field| [field.field.clone(), field.value.clone()]).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        RedisValueData::Unknown => String::new(),
     }
 }
 
-fn redis_search_value_preview(value: &serde_json::Value) -> String {
+fn redis_search_value_preview(value: &RedisValueData) -> String {
     const MAX_PREVIEW_LEN: usize = 160;
     let text = redis_search_value_text(value);
     if text.chars().count() <= MAX_PREVIEW_LEN {
@@ -1840,17 +2392,23 @@ fn redis_search_value_preview(value: &serde_json::Value) -> String {
     preview
 }
 
-fn redis_search_value_size(value: &serde_json::Value, total: Option<u64>) -> u64 {
-    if let Some(total) = total {
-        return total;
-    }
-    match value {
-        serde_json::Value::String(text) => text.len() as u64,
-        _ => 0,
+fn redis_search_value_size(value: &RedisValue) -> u64 {
+    match &value.data {
+        RedisValueData::String { content } => base64::engine::general_purpose::STANDARD
+            .decode(&content.raw_base64)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0),
+        RedisValueData::Json { value } => value.len() as u64,
+        RedisValueData::List { total, .. }
+        | RedisValueData::Set { total, .. }
+        | RedisValueData::Hash { total, .. }
+        | RedisValueData::Zset { total, .. } => *total,
+        RedisValueData::Stream { entries } => entries.len() as u64,
+        RedisValueData::Unknown => 0,
     }
 }
 
-async fn get_stream_entries<C>(con: &mut C, key: &[u8]) -> Result<serde_json::Value, String>
+async fn get_stream_entries<C>(con: &mut C, key: &[u8]) -> Result<Vec<RedisStreamEntry>, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -1865,6 +2423,64 @@ where
         .map_err(|e| e.to_string())?;
 
     Ok(parse_stream_entries(raw))
+}
+
+pub async fn get_stream_groups<C>(con: &mut C, key: &[u8]) -> Result<Vec<RedisStreamGroup>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let raw: RedisRawValue =
+        redis::cmd("XINFO").arg("GROUPS").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+
+    Ok(parse_stream_groups(raw))
+}
+
+pub async fn get_stream_consumers<C>(con: &mut C, key: &[u8], group: &[u8]) -> Result<Vec<RedisStreamConsumer>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let raw: RedisRawValue =
+        redis::cmd("XINFO").arg("CONSUMERS").arg(key).arg(group).query_async(con).await.map_err(|e| e.to_string())?;
+
+    Ok(parse_stream_consumers(raw))
+}
+
+pub async fn get_stream_pending_page<C>(
+    con: &mut C,
+    key: &[u8],
+    group: &[u8],
+    cursor: Option<&str>,
+    consumer: Option<&[u8]>,
+) -> Result<RedisStreamPendingPage, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let cursor = cursor.filter(|value| !value.is_empty());
+    let start = cursor.unwrap_or("-");
+    // Redis before 6.2 has no exclusive XPENDING ranges. A cursor page needs
+    // a duplicate candidate and a lookahead row to page without skipping IDs.
+    let requested_count = STREAM_PENDING_PAGE_SIZE + 1 + usize::from(cursor.is_some());
+    let mut command = redis::cmd("XPENDING");
+    command.arg(key).arg(group).arg(start).arg("+").arg(requested_count);
+    if let Some(consumer) = consumer {
+        command.arg(consumer);
+    }
+    let raw: RedisRawValue = command.query_async(con).await.map_err(|e| e.to_string())?;
+
+    let mut entries = parse_stream_pending_entries(raw);
+    if let Some(cursor) = cursor {
+        if entries.first().is_some_and(|entry| entry.id == cursor) {
+            entries.remove(0);
+        }
+    }
+    let next_cursor = if entries.len() > STREAM_PENDING_PAGE_SIZE {
+        entries.truncate(STREAM_PENDING_PAGE_SIZE);
+        entries.last().map(|entry| entry.id.clone())
+    } else {
+        None
+    };
+
+    Ok(RedisStreamPendingPage { entries, next_cursor })
 }
 
 fn parse_scan_keys(raw: RedisRawValue) -> Result<(u64, Vec<Vec<u8>>), String> {
@@ -1892,16 +2508,14 @@ fn parse_scan_keys(raw: RedisRawValue) -> Result<(u64, Vec<Vec<u8>>), String> {
     Ok((cursor, parsed))
 }
 
-fn parse_stream_entries(raw: RedisRawValue) -> serde_json::Value {
+fn parse_stream_entries(raw: RedisRawValue) -> Vec<RedisStreamEntry> {
     match raw {
-        RedisRawValue::Array(entries) => {
-            serde_json::Value::Array(entries.into_iter().filter_map(parse_stream_entry).collect())
-        }
-        _ => serde_json::Value::Null,
+        RedisRawValue::Array(entries) => entries.into_iter().filter_map(parse_stream_entry).collect(),
+        _ => Vec::new(),
     }
 }
 
-fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
+fn parse_stream_entry(entry: RedisRawValue) -> Option<RedisStreamEntry> {
     let mut parts = match entry {
         RedisRawValue::Array(parts) if parts.len() == 2 => parts.into_iter(),
         _ => return None,
@@ -1913,7 +2527,7 @@ fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
         _ => return None,
     };
 
-    let mut field_map = serde_json::Map::new();
+    let mut parsed_fields = Vec::new();
     let mut fields = fields.into_iter();
     while let Some(field) = fields.next() {
         let Some(value) = fields.next() else {
@@ -1921,14 +2535,86 @@ fn parse_stream_entry(entry: RedisRawValue) -> Option<serde_json::Value> {
         };
         if let Some(field_name) = redis_value_to_string(field) {
             let value = redis_value_to_string(value).unwrap_or_default();
-            field_map.insert(field_name, json_string_to_js_safe(value));
+            parsed_fields.push(RedisStreamField { field: field_name, value });
         }
     }
 
-    Some(serde_json::json!({
-        "id": id,
-        "fields": field_map,
-    }))
+    Some(RedisStreamEntry { id, fields: parsed_fields })
+}
+
+fn parse_stream_groups(raw: RedisRawValue) -> Vec<RedisStreamGroup> {
+    match raw {
+        RedisRawValue::Array(groups) => groups.into_iter().filter_map(parse_stream_group).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_stream_group(group: RedisRawValue) -> Option<RedisStreamGroup> {
+    let mut attributes = parse_stream_info_attributes(group)?;
+    Some(RedisStreamGroup {
+        name: redis_value_to_blob(attributes.remove("name")?)?,
+        consumers: redis_value_to_u64(&attributes.remove("consumers")?)?,
+        pending: redis_value_to_u64(&attributes.remove("pending")?)?,
+        last_delivered_id: redis_value_to_string(attributes.remove("last-delivered-id")?)?,
+        entries_read: attributes.remove("entries-read").and_then(|value| redis_value_to_u64(&value)),
+        lag: attributes.remove("lag").and_then(|value| redis_value_to_u64(&value)),
+    })
+}
+
+fn parse_stream_consumers(raw: RedisRawValue) -> Vec<RedisStreamConsumer> {
+    match raw {
+        RedisRawValue::Array(consumers) => consumers.into_iter().filter_map(parse_stream_consumer).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_stream_consumer(consumer: RedisRawValue) -> Option<RedisStreamConsumer> {
+    let mut attributes = parse_stream_info_attributes(consumer)?;
+    Some(RedisStreamConsumer {
+        name: redis_value_to_blob(attributes.remove("name")?)?,
+        pending: redis_value_to_u64(&attributes.remove("pending")?)?,
+        idle_ms: redis_value_to_u64(&attributes.remove("idle")?)?,
+        inactive_ms: attributes.remove("inactive").and_then(|value| redis_value_to_u64(&value)),
+    })
+}
+
+fn parse_stream_pending_entries(raw: RedisRawValue) -> Vec<RedisStreamPendingEntry> {
+    match raw {
+        RedisRawValue::Array(entries) => entries.into_iter().filter_map(parse_stream_pending_entry).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_stream_pending_entry(entry: RedisRawValue) -> Option<RedisStreamPendingEntry> {
+    let mut parts = match entry {
+        RedisRawValue::Array(parts) if parts.len() == 4 => parts.into_iter(),
+        _ => return None,
+    };
+
+    Some(RedisStreamPendingEntry {
+        id: redis_value_to_string(parts.next()?)?,
+        consumer: redis_value_to_blob(parts.next()?)?,
+        idle_ms: redis_value_to_u64(&parts.next()?)?,
+        deliveries: redis_value_to_u64(&parts.next()?)?,
+    })
+}
+
+fn parse_stream_info_attributes(raw: RedisRawValue) -> Option<HashMap<String, RedisRawValue>> {
+    let RedisRawValue::Array(parts) = raw else {
+        return None;
+    };
+
+    let mut attributes = HashMap::new();
+    let mut parts = parts.into_iter();
+    while let Some(name) = parts.next() {
+        let value = parts.next()?;
+        attributes.insert(redis_value_to_string(name)?, value);
+    }
+    Some(attributes)
+}
+
+fn redis_value_to_blob(value: RedisRawValue) -> Option<RedisBlob> {
+    redis_value_to_bytes(value).map(|bytes| redis_blob_from_bytes(&bytes))
 }
 
 fn redis_value_to_string(value: RedisRawValue) -> Option<String> {
@@ -1941,14 +2627,6 @@ fn redis_value_to_string(value: RedisRawValue) -> Option<String> {
         RedisRawValue::VerbatimString { text, .. } => Some(redis_bytes_to_display(text.as_bytes())),
         RedisRawValue::Okay => Some("OK".to_string()),
         _ => None,
-    }
-}
-
-fn redis_value_contains_binary(value: &RedisRawValue) -> bool {
-    match value {
-        RedisRawValue::BulkString(bytes) => std::str::from_utf8(bytes).is_err(),
-        RedisRawValue::VerbatimString { text, .. } => std::str::from_utf8(text.as_bytes()).is_err(),
-        _ => false,
     }
 }
 
@@ -1965,42 +2643,37 @@ fn redis_value_to_bytes(value: RedisRawValue) -> Option<Vec<u8>> {
     }
 }
 
-fn redis_array_to_json(value: RedisRawValue) -> serde_json::Value {
-    match value {
-        RedisRawValue::Array(values) => serde_json::Value::Array(
-            values
-                .into_iter()
-                .map(|v| match v {
-                    RedisRawValue::BulkString(bytes) => json_string_to_js_safe(redis_bytes_to_display(&bytes)),
-                    other => redis_raw_to_json(other),
-                })
-                .collect(),
-        ),
-        other => redis_raw_to_json(other),
+fn redis_blob_from_bytes(bytes: &[u8]) -> RedisBlob {
+    RedisBlob {
+        raw_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        encoding: if std::str::from_utf8(bytes).is_ok() { RedisBlobEncoding::Utf8 } else { RedisBlobEncoding::Binary },
     }
 }
 
-fn redis_raw_to_json(value: RedisRawValue) -> serde_json::Value {
-    match value {
-        RedisRawValue::Nil => serde_json::Value::Null,
-        RedisRawValue::Array(values) => serde_json::Value::Array(values.into_iter().map(redis_raw_to_json).collect()),
-        other => serde_json::Value::String(redis_value_to_string(other).unwrap_or_default()),
-    }
-}
-
-/// If the text is JSON (starts with `{` or `[`), parse it, apply
-/// `json_value_for_js` (converting large ints to strings), then re-serialize
-/// back to a compact JSON string. Otherwise return the text unchanged.
-fn json_string_to_js_safe(text: String) -> serde_json::Value {
-    let trimmed = text.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let safe = json_value_for_js(json);
-            let re_serialized = serde_json::to_string(&safe).unwrap_or(text);
-            return serde_json::Value::String(re_serialized);
+fn redis_blob_display_text(blob: &RedisBlob) -> String {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&blob.raw_base64).unwrap_or_default();
+    if matches!(blob.encoding, RedisBlobEncoding::Utf8) {
+        if let Ok(text) = std::str::from_utf8(&bytes) {
+            return text.to_string();
         }
     }
-    serde_json::Value::String(text)
+    redis_bytes_to_display(&bytes)
+}
+
+fn redis_list_items_from_raw(value: RedisRawValue, start_index: u64) -> Vec<RedisListItem> {
+    match value {
+        RedisRawValue::Array(values) => values
+            .into_iter()
+            .enumerate()
+            .filter_map(|(offset, value)| {
+                redis_value_to_bytes(value).map(|bytes| RedisListItem {
+                    index: start_index + offset as u64,
+                    value: redis_blob_from_bytes(&bytes),
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn redis_bytes_to_display(bytes: &[u8]) -> String {
@@ -2035,13 +2708,47 @@ pub async fn set_string<C>(con: &mut C, key: &[u8], value: &str, ttl: Option<i64
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    redis::cmd("SET").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
-    if let Some(t) = ttl {
-        if t > 0 {
-            redis::cmd("EXPIRE").arg(key).arg(t).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+    match ttl {
+        Some(t) => {
+            redis::cmd("SET").arg(key).arg(value).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+            if t > 0 {
+                redis::cmd("EXPIRE").arg(key).arg(t).query_async::<()>(con).await.map_err(|e| e.to_string())?;
+            }
+            Ok(())
         }
+        None => set_string_preserving_ttl(con, key, value).await,
     }
-    Ok(())
+}
+
+async fn set_string_preserving_ttl<C>(con: &mut C, key: &[u8], value: &str) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    match redis::cmd("SET").arg(key).arg(value).arg("KEEPTTL").query_async::<()>(con).await {
+        Ok(()) => Ok(()),
+        Err(error) if is_unsupported_keepttl_error(&error) => {
+            let remaining_ms = redis::cmd("PTTL").arg(key).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+            let mut command = redis::cmd("SET");
+            command.arg(key).arg(value);
+            if remaining_ms >= 0 {
+                // Redis requires PX to be positive. A zero PTTL means the key is
+                // about to expire, so one millisecond is the closest equivalent.
+                command.arg("PX").arg(remaining_ms.max(1));
+            }
+            command.query_async::<()>(con).await.map_err(|e| e.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn is_unsupported_keepttl_error(error: &redis::RedisError) -> bool {
+    if error.kind() != redis::ErrorKind::ResponseError {
+        return false;
+    }
+
+    let detail = error.detail().unwrap_or_default().to_ascii_lowercase();
+    detail.contains("syntax error")
+        || ((detail.contains("unknown") || detail.contains("unsupported")) && detail.contains("keepttl"))
 }
 
 pub async fn delete_key<C>(con: &mut C, key: &[u8]) -> Result<(), String>
@@ -2182,9 +2889,31 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     if ttl > 0 {
-        redis::cmd("EXPIRE").arg(key).arg(ttl).query_async::<()>(con).await.map_err(|e| e.to_string())
+        let applied =
+            redis::cmd("EXPIRE").arg(key).arg(ttl).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+        if applied == 1 {
+            Ok(())
+        } else {
+            Err("Redis key no longer exists; EXPIRE was not applied".to_string())
+        }
     } else {
+        // Redis treats PERSIST as idempotent: a zero reply also means the key
+        // was already persistent. Follow-up reads in the UI handle a key that
+        // disappeared concurrently without requiring an extra ACL permission.
         redis::cmd("PERSIST").arg(key).query_async::<()>(con).await.map_err(|e| e.to_string())
+    }
+}
+
+pub async fn set_expire_at<C>(con: &mut C, key: &[u8], expire_at: i64) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let applied =
+        redis::cmd("EXPIREAT").arg(key).arg(expire_at).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+    if applied == 1 {
+        Ok(())
+    } else {
+        Err("Redis key no longer exists; EXPIREAT was not applied".to_string())
     }
 }
 
@@ -2205,12 +2934,12 @@ pub async fn load_more_collection<C>(
     key_type: &str,
     cursor: u64,
     count: usize,
-    match_pattern: Option<&str>,
-) -> Result<RedisValue, String>
+    filter_query: Option<&str>,
+) -> Result<RedisCollectionPage, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let (value, next_cursor) = match key_type {
+    match key_type {
         "list" => {
             let start = cursor as i64;
             let end = start + count as i64 - 1;
@@ -2218,41 +2947,29 @@ where
                 redis::cmd("LRANGE").arg(key).arg(start).arg(end).query_async(con).await.map_err(|e| e.to_string())?;
             let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
             let next = cursor + count as u64;
-            let cursor = if next < len { Some(next) } else { None };
-            (redis_array_to_json(v), cursor)
+            Ok(RedisCollectionPage::List {
+                items: redis_list_items_from_raw(v, cursor),
+                scan_cursor: (next < len).then_some(next),
+            })
         }
         "set" => {
-            let (next, items) = sscan_page_raw(con, key, cursor, count).await?;
-            let cursor = if next > 0 { Some(next) } else { None };
-            (serde_json::Value::Array(items), cursor)
+            let (next_cursor, items) = sscan_page_raw(con, key, cursor, count).await?;
+            Ok(RedisCollectionPage::Set { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
         "zset" => {
-            let (next, items) = zscan_page_raw(con, key, cursor, count).await?;
-            let cursor = if next > 0 { Some(next) } else { None };
-            (serde_json::Value::Array(items), cursor)
+            let (next_cursor, items) = zscan_page_raw(con, key, cursor, count).await?;
+            Ok(RedisCollectionPage::Zset { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
         "hash" => {
-            let (next, items) = if let Some(pattern) = match_pattern {
-                hscan_matching_page_raw(con, key, cursor, count, pattern).await?
+            let (next_cursor, items) = if let Some(query) = filter_query.filter(|query| !query.is_empty()) {
+                hscan_filtered_page_raw(con, key, cursor, count, query).await?
             } else {
                 hscan_page_raw(con, key, cursor, count, None).await?
             };
-            let cursor = if next > 0 { Some(next) } else { None };
-            (serde_json::Value::Array(items), cursor)
+            Ok(RedisCollectionPage::Hash { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
-        _ => return Err(format!("Pagination not supported for type: {key_type}")),
-    };
-
-    Ok(RedisValue {
-        key_display: redis_key_bytes_to_display(key),
-        key_raw: redis_key_bytes_to_raw(key),
-        key_type: key_type.to_string(),
-        ttl: -1,
-        value_is_binary: false,
-        value,
-        total: None,
-        scan_cursor: next_cursor,
-    })
+        _ => Err(format!("Pagination not supported for type: {key_type}")),
+    }
 }
 
 async fn hscan_page_raw<C>(
@@ -2261,7 +2978,7 @@ async fn hscan_page_raw<C>(
     cursor: u64,
     count: usize,
     match_pattern: Option<&str>,
-) -> Result<(u64, Vec<serde_json::Value>), String>
+) -> Result<(u64, Vec<RedisHashItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2271,16 +2988,16 @@ where
         cmd.arg("MATCH").arg(pattern);
     }
     let raw: RedisRawValue = cmd.query_async(con).await.map_err(|e| e.to_string())?;
-    parse_scan_pairs(raw, "hash")
+    parse_scan_hash_entries(raw)
 }
 
-async fn hscan_matching_page_raw<C>(
+async fn hscan_filtered_page_raw<C>(
     con: &mut C,
     key: &[u8],
     cursor: u64,
     count: usize,
-    pattern: &str,
-) -> Result<(u64, Vec<serde_json::Value>), String>
+    query: &str,
+) -> Result<(u64, Vec<RedisHashItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2289,11 +3006,11 @@ where
     let target = count.max(1);
 
     for _ in 0..HASH_FILTER_SCAN_MAX_ITERATIONS {
-        let (next, page) = hscan_page_raw(con, key, cur, target, Some(pattern)).await?;
-        items.extend(page);
+        let (next, page) = hscan_page_raw(con, key, cur, target, None).await?;
+        items.extend(page.into_iter().filter(|item| hash_entry_matches_query(item, query)));
         cur = next;
-        // Redis applies MATCH during incremental scans and may return empty pages.
-        // Stop only after a bounded number of chunks so sparse matches progress without an unbounded full-hash scan.
+        // HSCAN MATCH only checks field names, so value search has to filter returned pairs client-side.
+        // Keep a hard scan bound so sparse value matches cannot turn one UI search into a full hash walk.
         if cur == 0 || items.len() >= target {
             break;
         }
@@ -2302,12 +3019,22 @@ where
     Ok((cur, items))
 }
 
+fn hash_entry_matches_query(item: &RedisHashItem, query: &str) -> bool {
+    let query = query.to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let field = redis_blob_display_text(&item.field);
+    let value = redis_blob_display_text(&item.value);
+    field.to_lowercase().contains(&query) || value.to_lowercase().contains(&query)
+}
+
 async fn sscan_page_raw<C>(
     con: &mut C,
     key: &[u8],
     cursor: u64,
     count: usize,
-) -> Result<(u64, Vec<serde_json::Value>), String>
+) -> Result<(u64, Vec<RedisSetItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2327,7 +3054,7 @@ async fn zscan_page_raw<C>(
     key: &[u8],
     cursor: u64,
     count: usize,
-) -> Result<(u64, Vec<serde_json::Value>), String>
+) -> Result<(u64, Vec<RedisZsetItem>), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2339,10 +3066,11 @@ where
         .query_async(con)
         .await
         .map_err(|e| e.to_string())?;
-    parse_scan_pairs(raw, "zset")
+    let (next_cursor, items) = parse_scan_pairs(raw)?;
+    Ok((next_cursor, items.into_iter().map(|(member, score)| RedisZsetItem { score, member }).collect()))
 }
 
-fn parse_scan_pairs(raw: RedisRawValue, kind: &str) -> Result<(u64, Vec<serde_json::Value>), String> {
+fn parse_scan_pairs(raw: RedisRawValue) -> Result<(u64, Vec<(RedisBlob, String)>), String> {
     let RedisRawValue::Array(parts) = raw else {
         return Err("Invalid SCAN response".to_string());
     };
@@ -2363,19 +3091,17 @@ fn parse_scan_pairs(raw: RedisRawValue, kind: &str) -> Result<(u64, Vec<serde_js
     let mut iter = entries.iter();
     while let Some(a) = iter.next() {
         let Some(b) = iter.next() else { break };
-        let a_str = redis_value_to_string(a.clone()).unwrap_or_default();
-        let b = redis_value_to_string(b.clone()).unwrap_or_default();
-        if kind == "zset" {
-            items.push(serde_json::json!({"member": a_str, "score": b}));
-        } else {
-            items.push(serde_json::json!({"field": a_str, "value": json_string_to_js_safe(b)}));
-        }
+        let member = redis_value_to_bytes(a.clone())
+            .map(|bytes| redis_blob_from_bytes(&bytes))
+            .ok_or_else(|| "Invalid SCAN member payload".to_string())?;
+        let value = redis_value_to_string(b.clone()).unwrap_or_default();
+        items.push((member, value));
     }
 
     Ok((cursor, items))
 }
 
-fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<serde_json::Value>), String> {
+fn parse_scan_hash_entries(raw: RedisRawValue) -> Result<(u64, Vec<RedisHashItem>), String> {
     let RedisRawValue::Array(parts) = raw else {
         return Err("Invalid SCAN response".to_string());
     };
@@ -2392,34 +3118,86 @@ fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<serde_json::Value>
         return Err("Invalid SCAN entries".to_string());
     };
 
-    let items = entries.iter().filter_map(|v| redis_value_to_string(v.clone())).map(json_string_to_js_safe).collect();
+    let mut items = Vec::new();
+    let mut iter = entries.iter();
+    while let Some(field) = iter.next() {
+        let Some(value) = iter.next() else { break };
+        let field = redis_value_to_bytes(field.clone())
+            .map(|bytes| redis_blob_from_bytes(&bytes))
+            .ok_or_else(|| "Invalid hash field payload".to_string())?;
+        let value = redis_value_to_bytes(value.clone())
+            .map(|bytes| redis_blob_from_bytes(&bytes))
+            .ok_or_else(|| "Invalid hash value payload".to_string())?;
+        items.push(RedisHashItem { field, value });
+    }
+
+    Ok((cursor, items))
+}
+
+fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<RedisSetItem>), String> {
+    let RedisRawValue::Array(parts) = raw else {
+        return Err("Invalid SCAN response".to_string());
+    };
+    if parts.len() != 2 {
+        return Err("Invalid SCAN response".to_string());
+    }
+
+    let cursor = redis_value_to_string(parts[0].clone())
+        .ok_or("Invalid cursor")?
+        .parse::<u64>()
+        .map_err(|_| "Invalid cursor".to_string())?;
+
+    let RedisRawValue::Array(entries) = &parts[1] else {
+        return Err("Invalid SCAN entries".to_string());
+    };
+
+    let items = entries
+        .iter()
+        .filter_map(|value| {
+            redis_value_to_bytes(value.clone()).map(|bytes| RedisSetItem { member: redis_blob_from_bytes(&bytes) })
+        })
+        .collect();
 
     Ok((cursor, items))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::{
+        collections::{HashMap, VecDeque},
+        future::ready,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex as StdMutex,
+        },
+    };
 
     use super::{
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
         parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
-        parse_stream_entries, redis_auth_candidates, redis_cluster_slot, redis_command_raw_to_json,
-        redis_database_index, redis_json_raw_to_json, redis_json_value_preview, redis_key_bytes_to_display,
-        redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview,
-        redis_raw_to_json, redis_sentinel_master_endpoint, redis_value_contains_binary, redis_value_matches_query,
-        RedisAuthCandidate, RedisClusterSlotRange, RedisCommandSafety, RedisNodeEndpoint, RedisRawValue,
+        parse_stream_consumers, parse_stream_entries, parse_stream_groups, parse_stream_pending_entries,
+        redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot, redis_command_raw_to_json,
+        redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query,
+        redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint, redis_value_matches_query,
+        redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob, RedisBlobEncoding,
+        RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint,
+        RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry, RedisStreamField,
+        RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
 
     struct FakeRedisConnection {
-        responses: VecDeque<RedisRawValue>,
+        responses: VecDeque<redis::RedisResult<RedisRawValue>>,
         commands: Vec<String>,
     }
 
     impl FakeRedisConnection {
         fn new(responses: Vec<RedisRawValue>) -> Self {
+            Self { responses: responses.into_iter().map(Ok).collect(), commands: Vec::new() }
+        }
+
+        fn with_results(responses: Vec<redis::RedisResult<RedisRawValue>>) -> Self {
             Self { responses: responses.into(), commands: Vec::new() }
         }
 
@@ -2432,8 +3210,8 @@ mod tests {
     impl ConnectionLike for FakeRedisConnection {
         fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, RedisRawValue> {
             self.commands.push(String::from_utf8_lossy(&cmd.get_packed_command()).into_owned());
-            let response = self.responses.pop_front().unwrap_or(RedisRawValue::Nil);
-            Box::pin(async move { Ok(response) })
+            let response = self.responses.pop_front().unwrap_or(Ok(RedisRawValue::Nil));
+            Box::pin(async move { response })
         }
 
         fn req_packed_commands<'a>(
@@ -2448,6 +3226,43 @@ mod tests {
         fn get_db(&self) -> i64 {
             0
         }
+    }
+
+    struct TrackedRedisConnection {
+        responses: VecDeque<redis::RedisResult<RedisRawValue>>,
+        commands: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl TrackedRedisConnection {
+        fn new(responses: Vec<RedisRawValue>, commands: Arc<StdMutex<Vec<String>>>) -> Self {
+            Self { responses: responses.into_iter().map(Ok).collect(), commands }
+        }
+    }
+
+    impl ConnectionLike for TrackedRedisConnection {
+        fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, RedisRawValue> {
+            self.commands.lock().unwrap().push(String::from_utf8_lossy(&cmd.get_packed_command()).into_owned());
+            let response = self.responses.pop_front().unwrap_or(Ok(RedisRawValue::Nil));
+            Box::pin(async move { response })
+        }
+
+        fn req_packed_commands<'a>(
+            &'a mut self,
+            _cmd: &'a Pipeline,
+            _offset: usize,
+            _count: usize,
+        ) -> RedisFuture<'a, Vec<RedisRawValue>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn get_db(&self) -> i64 {
+            0
+        }
+    }
+
+    fn tracked_command_count(commands: &Arc<StdMutex<Vec<String>>>, command: &str) -> usize {
+        let needle = format!("\r\n{command}\r\n");
+        commands.lock().unwrap().iter().filter(|packed| packed.contains(&needle)).count()
     }
 
     fn bulk(value: &str) -> RedisRawValue {
@@ -2468,6 +3283,49 @@ mod tests {
         RedisRawValue::Array(vec![bulk(cursor), RedisRawValue::Array(entries)])
     }
 
+    fn text_blob(value: &str) -> RedisBlob {
+        redis_blob_from_bytes(value.as_bytes())
+    }
+
+    fn redis_value(redis_type: &str, data: RedisValueData) -> RedisValue {
+        RedisValue {
+            key_display: "test:key".to_string(),
+            key_raw: redis_key_bytes_to_raw(b"test:key"),
+            ttl: -1,
+            redis_type: redis_type.to_string(),
+            data,
+        }
+    }
+
+    fn string_value(value: &str) -> RedisValue {
+        redis_value("string", RedisValueData::String { content: text_blob(value) })
+    }
+
+    fn hash_value(entries: &[(&str, &str)]) -> RedisValue {
+        redis_value(
+            "hash",
+            RedisValueData::Hash {
+                items: entries
+                    .iter()
+                    .map(|(field, value)| RedisHashItem { field: text_blob(field), value: text_blob(value) })
+                    .collect(),
+                total: entries.len() as u64,
+                scan_cursor: None,
+            },
+        )
+    }
+
+    fn set_value(entries: &[&str]) -> RedisValue {
+        redis_value(
+            "set",
+            RedisValueData::Set {
+                items: entries.iter().map(|value| RedisSetItem { member: text_blob(value) }).collect(),
+                total: entries.len() as u64,
+                scan_cursor: None,
+            },
+        )
+    }
+
     #[test]
     fn parses_stream_entries() {
         let raw = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
@@ -2479,15 +3337,13 @@ mod tests {
 
         assert_eq!(
             parsed,
-            serde_json::json!([
-                {
-                    "id": "1714470000000-0",
-                    "fields": {
-                        "event": "login",
-                        "user_id": "42"
-                    }
-                }
-            ])
+            vec![RedisStreamEntry {
+                id: "1714470000000-0".to_string(),
+                fields: vec![
+                    RedisStreamField { field: "event".to_string(), value: "login".to_string() },
+                    RedisStreamField { field: "user_id".to_string(), value: "42".to_string() },
+                ],
+            }]
         );
     }
 
@@ -2505,15 +3361,265 @@ mod tests {
 
         assert_eq!(
             parsed,
-            serde_json::json!([
-                {
-                    "id": "1714470000001-0",
-                    "fields": {
-                        "event": "logout"
-                    }
-                }
-            ])
+            vec![RedisStreamEntry {
+                id: "1714470000001-0".to_string(),
+                fields: vec![RedisStreamField { field: "event".to_string(), value: "logout".to_string() }],
+            }]
         );
+    }
+
+    #[test]
+    fn parses_stream_groups_with_binary_names_and_compatible_optional_fields() {
+        let raw = RedisRawValue::Array(vec![
+            RedisRawValue::Array(vec![
+                bulk("name"),
+                RedisRawValue::BulkString(vec![0xFF, b'g']),
+                bulk("consumers"),
+                RedisRawValue::Int(2),
+                bulk("pending"),
+                bulk("3"),
+                bulk("last-delivered-id"),
+                bulk("1714470000000-0"),
+                bulk("entries-read"),
+                RedisRawValue::Int(11),
+                bulk("lag"),
+                RedisRawValue::Nil,
+                bulk("future-field"),
+                bulk("ignored"),
+            ]),
+            RedisRawValue::Array(vec![
+                bulk("name"),
+                bulk("legacy-group"),
+                bulk("consumers"),
+                RedisRawValue::Int(0),
+                bulk("pending"),
+                RedisRawValue::Int(0),
+                bulk("last-delivered-id"),
+                bulk("0-0"),
+            ]),
+        ]);
+
+        let parsed = parse_stream_groups(raw);
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, redis_blob_from_bytes(&[0xFF, b'g']));
+        assert_eq!(
+            parsed[0],
+            RedisStreamGroup {
+                name: redis_blob_from_bytes(&[0xFF, b'g']),
+                consumers: 2,
+                pending: 3,
+                last_delivered_id: "1714470000000-0".to_string(),
+                entries_read: Some(11),
+                lag: None,
+            }
+        );
+        assert_eq!(
+            parsed[1],
+            RedisStreamGroup {
+                name: text_blob("legacy-group"),
+                consumers: 0,
+                pending: 0,
+                last_delivered_id: "0-0".to_string(),
+                entries_read: None,
+                lag: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_stream_consumers_and_pending_entries() {
+        let consumers = parse_stream_consumers(RedisRawValue::Array(vec![
+            RedisRawValue::Array(vec![
+                bulk("name"),
+                bulk("worker-a"),
+                bulk("pending"),
+                RedisRawValue::Int(4),
+                bulk("idle"),
+                bulk("1200"),
+                bulk("inactive"),
+                RedisRawValue::Int(800),
+            ]),
+            RedisRawValue::Array(vec![
+                bulk("name"),
+                bulk("legacy-worker"),
+                bulk("pending"),
+                RedisRawValue::Int(0),
+                bulk("idle"),
+                RedisRawValue::Int(0),
+            ]),
+        ]));
+        let pending = parse_stream_pending_entries(RedisRawValue::Array(vec![
+            RedisRawValue::Array(vec![
+                bulk("1714470000000-0"),
+                RedisRawValue::BulkString(vec![0xFE, b'c']),
+                RedisRawValue::Int(2_400),
+                bulk("3"),
+            ]),
+            RedisRawValue::Array(vec![bulk("malformed")]),
+        ]));
+
+        assert_eq!(
+            consumers,
+            vec![
+                RedisStreamConsumer { name: text_blob("worker-a"), pending: 4, idle_ms: 1_200, inactive_ms: Some(800) },
+                RedisStreamConsumer { name: text_blob("legacy-worker"), pending: 0, idle_ms: 0, inactive_ms: None },
+            ]
+        );
+        assert_eq!(
+            pending,
+            vec![RedisStreamPendingEntry {
+                id: "1714470000000-0".to_string(),
+                consumer: redis_blob_from_bytes(&[0xFE, b'c']),
+                idle_ms: 2_400,
+                deliveries: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn serializes_stream_metrics_without_losing_javascript_precision() {
+        let unsafe_value = super::JS_MAX_SAFE_INTEGER + 1;
+        let group = RedisStreamGroup {
+            name: text_blob("payments"),
+            consumers: unsafe_value,
+            pending: 2,
+            last_delivered_id: "1714470000000-0".to_string(),
+            entries_read: Some(unsafe_value),
+            lag: None,
+        };
+        let consumer = RedisStreamConsumer {
+            name: text_blob("worker-a"),
+            pending: 2,
+            idle_ms: unsafe_value,
+            inactive_ms: Some(unsafe_value),
+        };
+        let entry = RedisStreamPendingEntry {
+            id: "1714470000000-0".to_string(),
+            consumer: text_blob("worker-a"),
+            idle_ms: 2,
+            deliveries: unsafe_value,
+        };
+
+        let group_json = serde_json::to_value(group).unwrap();
+        let consumer_json = serde_json::to_value(consumer).unwrap();
+        let entry_json = serde_json::to_value(entry).unwrap();
+
+        assert_eq!(group_json["consumers"], unsafe_value.to_string());
+        assert_eq!(group_json["pending"].as_u64(), Some(2));
+        assert_eq!(group_json["entries_read"], unsafe_value.to_string());
+        assert!(group_json.get("lag").is_none());
+        assert_eq!(consumer_json["idle_ms"], unsafe_value.to_string());
+        assert_eq!(consumer_json["inactive_ms"], unsafe_value.to_string());
+        assert_eq!(entry_json["deliveries"], unsafe_value.to_string());
+    }
+
+    #[tokio::test]
+    async fn stream_monitoring_commands_are_read_only_and_pending_pagination_supports_redis_5() {
+        let groups = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
+            bulk("name"),
+            bulk("payments"),
+            bulk("consumers"),
+            RedisRawValue::Int(1),
+            bulk("pending"),
+            RedisRawValue::Int(101),
+            bulk("last-delivered-id"),
+            bulk("1714470000000-0"),
+        ])]);
+        let consumers = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
+            bulk("name"),
+            bulk("worker-a"),
+            bulk("pending"),
+            RedisRawValue::Int(101),
+            bulk("idle"),
+            RedisRawValue::Int(10),
+        ])]);
+        let pending = RedisRawValue::Array(
+            (17..=118)
+                .map(|index| {
+                    RedisRawValue::Array(vec![
+                        bulk(&format!("1714470000000-{index}")),
+                        bulk("worker-a"),
+                        RedisRawValue::Int(index),
+                        RedisRawValue::Int(1),
+                    ])
+                })
+                .collect(),
+        );
+        let mut con = FakeRedisConnection::new(vec![groups, consumers, pending]);
+
+        let groups = super::get_stream_groups(&mut con, b"orders").await.unwrap();
+        let consumers = super::get_stream_consumers(&mut con, b"orders", b"payments").await.unwrap();
+        let page = super::get_stream_pending_page(&mut con, b"orders", b"payments", Some("1714470000000-17"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(page.entries.len(), 100);
+        assert_eq!(page.entries.first().map(|entry| entry.id.as_str()), Some("1714470000000-18"));
+        assert_eq!(page.entries.last().map(|entry| entry.id.as_str()), Some("1714470000000-117"));
+        assert_eq!(page.next_cursor.as_deref(), Some("1714470000000-117"));
+        assert_eq!(con.command_count("XINFO"), 2);
+        assert_eq!(con.command_count("XPENDING"), 1);
+        assert_eq!(con.command_count("XGROUP"), 0);
+        assert_eq!(con.command_count("XACK"), 0);
+        assert_eq!(con.command_count("XCLAIM"), 0);
+        assert!(con.commands[0].contains("\r\nGROUPS\r\n"));
+        assert!(con.commands[1].contains("\r\nCONSUMERS\r\n"));
+        assert!(con.commands[2].contains("\r\n1714470000000-17\r\n"));
+        assert!(!con.commands[2].contains("\r\n(1714470000000-17\r\n"));
+        assert!(con.commands[2].contains("\r\n102\r\n"));
+    }
+
+    #[tokio::test]
+    async fn stream_pending_pagination_keeps_the_first_entry_when_cursor_is_acknowledged() {
+        let pending = RedisRawValue::Array(
+            (18..=118)
+                .map(|index| {
+                    RedisRawValue::Array(vec![
+                        bulk(&format!("1714470000000-{index}")),
+                        bulk("worker-a"),
+                        RedisRawValue::Int(index),
+                        RedisRawValue::Int(1),
+                    ])
+                })
+                .collect(),
+        );
+        let mut con = FakeRedisConnection::new(vec![pending]);
+
+        let page = super::get_stream_pending_page(&mut con, b"orders", b"payments", Some("1714470000000-17"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(page.entries.len(), 100);
+        assert_eq!(page.entries.first().map(|entry| entry.id.as_str()), Some("1714470000000-18"));
+        assert_eq!(page.entries.last().map(|entry| entry.id.as_str()), Some("1714470000000-117"));
+        assert_eq!(page.next_cursor.as_deref(), Some("1714470000000-117"));
+        assert!(con.commands[0].contains("\r\n1714470000000-17\r\n"));
+        assert!(!con.commands[0].contains("\r\n(1714470000000-17\r\n"));
+        assert!(con.commands[0].contains("\r\n102\r\n"));
+    }
+
+    #[tokio::test]
+    async fn stream_pending_filters_by_consumer_server_side() {
+        let pending = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
+            bulk("1714470000000-0"),
+            bulk("worker-a"),
+            RedisRawValue::Int(2_400),
+            RedisRawValue::Int(1),
+        ])]);
+        let mut con = FakeRedisConnection::new(vec![pending]);
+
+        let page =
+            super::get_stream_pending_page(&mut con, b"orders", b"payments", None, Some(b"worker-a")).await.unwrap();
+
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(con.command_count("XPENDING"), 1);
+        assert!(con.commands[0].contains("\r\n-\r\n"));
+        assert!(con.commands[0].contains("\r\n+\r\n"));
+        assert!(con.commands[0].contains("\r\n101\r\n"));
+        assert!(con.commands[0].contains("\r\nworker-a\r\n"));
     }
 
     #[test]
@@ -2546,6 +3652,127 @@ mod tests {
         let encoded = redis_key_bytes_to_raw(bytes);
 
         assert_eq!(redis_key_raw_to_bytes(&encoded).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn set_string_uses_keepttl_when_no_ttl_is_specified() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Okay]);
+
+        super::set_string(&mut con, b"session", "updated", None).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nSET\r\n"));
+        assert!(con.commands[0].contains("\r\nKEEPTTL\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_string_with_explicit_no_expiry_uses_plain_set() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Okay]);
+
+        super::set_string(&mut con, b"settings", "updated", Some(-1)).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nSET\r\n"));
+        assert!(!con.commands[0].contains("\r\nKEEPTTL\r\n"));
+        assert!(!con.commands[0].contains("\r\nEXPIRE\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_expire_at_uses_expireat_with_the_unix_timestamp() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+
+        super::set_expire_at(&mut con, b"session", 1_735_689_600).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nEXPIREAT\r\n"));
+        assert!(con.commands[0].contains("\r\n1735689600\r\n"));
+        assert_eq!(con.command_count("EVAL"), 0);
+    }
+
+    #[tokio::test]
+    async fn set_expire_at_reports_when_the_key_disappears_before_expiration_is_applied() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::set_expire_at(&mut con, b"session", 1_735_689_600).await.unwrap_err();
+
+        assert!(error.contains("EXPIREAT was not applied"));
+    }
+
+    #[tokio::test]
+    async fn set_ttl_reports_when_positive_expiration_is_not_applied() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::set_ttl(&mut con, b"session", 60).await.unwrap_err();
+
+        assert!(error.contains("EXPIRE was not applied"));
+    }
+
+    #[tokio::test]
+    async fn persist_is_idempotent_for_an_already_persistent_key() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        super::set_ttl(&mut con, b"session", 0).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(con.command_count("PERSIST"), 1);
+        assert_eq!(con.command_count("EXISTS"), 0);
+        assert_eq!(con.command_count("EVAL"), 0);
+    }
+
+    #[tokio::test]
+    async fn set_string_falls_back_to_pttl_and_px_when_keepttl_is_unsupported() {
+        let unsupported = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "syntax error".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Err(unsupported),
+            Ok(RedisRawValue::Int(4_200)),
+            Ok(RedisRawValue::Okay),
+        ]);
+
+        super::set_string(&mut con, b"session", "updated", None).await.unwrap();
+
+        assert_eq!(con.commands.len(), 3);
+        assert!(con.commands[0].contains("\r\nKEEPTTL\r\n"));
+        assert!(con.commands[1].contains("\r\nPTTL\r\n"));
+        assert!(con.commands[2].contains("\r\nPX\r\n$4\r\n4200\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_string_fallback_keeps_persistent_keys_persistent() {
+        let unsupported = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "syntax error".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Err(unsupported),
+            Ok(RedisRawValue::Int(-1)),
+            Ok(RedisRawValue::Okay),
+        ]);
+
+        super::set_string(&mut con, b"settings", "updated", None).await.unwrap();
+
+        assert_eq!(con.commands.len(), 3);
+        assert!(!con.commands[2].contains("\r\nPX\r\n"));
+        assert!(!con.commands[2].contains("\r\nKEEPTTL\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_string_does_not_fallback_for_unrelated_errors() {
+        let read_only = redis::RedisError::from((
+            redis::ErrorKind::ReadOnly,
+            "The server is read-only",
+            "You can't write against a read only replica".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![Err(read_only)]);
+
+        let error = super::set_string(&mut con, b"session", "updated", None).await.unwrap_err();
+
+        assert!(error.contains("read-only"));
+        assert_eq!(con.commands.len(), 1);
     }
 
     #[test]
@@ -2599,18 +3826,485 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filtered_hash_load_more_keeps_scan_cursor_instead_of_full_iteration() {
+    async fn cluster_key_batch_reuses_node_connections_across_scan_iterations() {
+        let sessions = tokio::sync::Mutex::new(super::RedisClusterScanSessions::default());
+        let masters = vec![
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let logs: Vec<_> = (0..masters.len()).map(|_| Arc::new(StdMutex::new(Vec::new()))).collect();
+        let mut connections = HashMap::from([
+            (
+                masters[0].clone(),
+                TrackedRedisConnection::new(
+                    vec![RedisRawValue::Int(100), scan_response("7", vec![]), scan_response("0", vec![])],
+                    logs[0].clone(),
+                ),
+            ),
+            (
+                masters[1].clone(),
+                TrackedRedisConnection::new(
+                    vec![
+                        RedisRawValue::Int(200),
+                        scan_response("9", vec![]),
+                        scan_response("0", vec!["membership:saas:base:token:match"]),
+                    ],
+                    logs[1].clone(),
+                ),
+            ),
+            (masters[2].clone(), TrackedRedisConnection::new(vec![RedisRawValue::Int(300)], logs[2].clone())),
+        ]);
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector_count = connect_count.clone();
+        let topology_count = Arc::new(AtomicUsize::new(0));
+        let discovery_count = topology_count.clone();
+        let discovered_masters = masters.clone();
+
+        let result = super::scan_cluster_keys_batch_with(
+            &sessions,
+            move || {
+                discovery_count.fetch_add(1, Ordering::Relaxed);
+                ready(Ok(discovered_masters.clone()))
+            },
+            move |endpoint| {
+                connector_count.fetch_add(1, Ordering::Relaxed);
+                ready(connections.remove(&endpoint).ok_or_else(|| format!("unexpected reconnect to {}", endpoint.host)))
+            },
+            0,
+            "membership:saas:base:token:*",
+            1000,
+            4,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.total_keys, 600);
+        assert_eq!(result.keys.len(), 1);
+        assert!(result.cursor > 0);
+        assert!(result.cursor <= super::MAX_SAFE_INTEGER_CURSOR);
+        assert_eq!(topology_count.load(Ordering::Relaxed), 1);
+        assert_eq!(connect_count.load(Ordering::Relaxed), 3);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "DBSIZE")).sum::<usize>(), 3);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "SCAN")).sum::<usize>(), 4);
+        assert_eq!(sessions.lock().await.entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_continuation_skips_dbsize_and_advances_masters() {
+        let pattern = "membership:saas:base:token:*";
+        let masters = vec![
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let mut saved_session = super::RedisClusterKeyScanSession::new(masters.clone(), pattern);
+        saved_session.node_index = 1;
+        saved_session.node_cursor = 7;
+        let mut saved_sessions = super::RedisClusterScanSessions::default();
+        let cursor = saved_sessions.insert(None, saved_session);
+        let sessions = tokio::sync::Mutex::new(saved_sessions);
+        let logs: Vec<_> = (0..masters.len()).map(|_| Arc::new(StdMutex::new(Vec::new()))).collect();
+        let mut connections = HashMap::from([
+            (masters[1].clone(), TrackedRedisConnection::new(vec![scan_response("0", vec![])], logs[1].clone())),
+            (
+                masters[2].clone(),
+                TrackedRedisConnection::new(
+                    vec![scan_response("0", vec!["membership:saas:base:token:last"])],
+                    logs[2].clone(),
+                ),
+            ),
+        ]);
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector_count = connect_count.clone();
+        let topology_count = Arc::new(AtomicUsize::new(0));
+        let discovery_count = topology_count.clone();
+
+        let result = super::scan_cluster_keys_batch_with(
+            &sessions,
+            move || {
+                discovery_count.fetch_add(1, Ordering::Relaxed);
+                ready(Err("continuation must not rediscover topology".to_string()))
+            },
+            move |endpoint| {
+                connector_count.fetch_add(1, Ordering::Relaxed);
+                ready(
+                    connections.remove(&endpoint).ok_or_else(|| format!("unexpected connection to {}", endpoint.host)),
+                )
+            },
+            cursor,
+            pattern,
+            1000,
+            2,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor, 0);
+        assert_eq!(result.total_keys, 0);
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(topology_count.load(Ordering::Relaxed), 0);
+        assert_eq!(connect_count.load(Ordering::Relaxed), 2);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "DBSIZE")).sum::<usize>(), 0);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "SCAN")).sum::<usize>(), 2);
+        assert!(sessions.lock().await.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_refreshes_healthy_cached_masters_before_scanning() {
+        let pattern = "membership:saas:base:token:*";
+        let cached_masters = [
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+        ];
+        let current_masters = [
+            cached_masters[0].clone(),
+            cached_masters[1].clone(),
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let sessions = tokio::sync::Mutex::new(super::RedisClusterScanSessions::default());
+        let logs: Vec<_> = (0..current_masters.len()).map(|_| Arc::new(StdMutex::new(Vec::new()))).collect();
+        let mut connections = HashMap::from([
+            (
+                current_masters[0].clone(),
+                TrackedRedisConnection::new(vec![RedisRawValue::Int(100), scan_response("0", vec![])], logs[0].clone()),
+            ),
+            (
+                current_masters[1].clone(),
+                TrackedRedisConnection::new(vec![RedisRawValue::Int(200), scan_response("0", vec![])], logs[1].clone()),
+            ),
+            (
+                current_masters[2].clone(),
+                TrackedRedisConnection::new(
+                    vec![RedisRawValue::Int(300), scan_response("0", vec!["membership:saas:base:token:new-master"])],
+                    logs[2].clone(),
+                ),
+            ),
+        ]);
+        let discovered_masters = vec![
+            current_masters[2].clone(),
+            current_masters[0].clone(),
+            current_masters[1].clone(),
+            current_masters[2].clone(),
+        ];
+        let topology_count = Arc::new(AtomicUsize::new(0));
+        let discovery_count = topology_count.clone();
+
+        let result = super::scan_cluster_keys_batch_with(
+            &sessions,
+            move || {
+                discovery_count.fetch_add(1, Ordering::Relaxed);
+                ready(Ok(discovered_masters.clone()))
+            },
+            move |endpoint| {
+                ready(connections.remove(&endpoint).ok_or_else(|| format!("unexpected reconnect to {}", endpoint.host)))
+            },
+            0,
+            pattern,
+            1000,
+            3,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor, 0);
+        assert_eq!(result.total_keys, 600);
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(result.keys[0].key_display, "membership:saas:base:token:new-master");
+        assert_eq!(topology_count.load(Ordering::Relaxed), 1);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "DBSIZE")).sum::<usize>(), 3);
+        assert_eq!(logs.iter().map(|log| tracked_command_count(log, "SCAN")).sum::<usize>(), 3);
+        assert!(sessions.lock().await.entries.is_empty());
+    }
+
+    #[test]
+    fn cluster_scan_routes_discovered_advertised_endpoint_through_existing_mapping() {
+        let advertised = RedisNodeEndpoint { host: "redis.internal".to_string(), port: 7000 };
+        let forwarded = RedisNodeEndpoint { host: "127.0.0.1".to_string(), port: 17_000 };
+        let pool = super::RedisClusterPool {
+            connection: None,
+            seed_nodes: vec![advertised.clone()],
+            seed_routes: Vec::new(),
+            slot_ranges: Vec::new(),
+            node_routes: vec![RedisNodeRoute { advertised: advertised.clone(), connect: forwarded.clone() }],
+            tls: false,
+            tls_insecure: false,
+            username: String::new(),
+            password: String::new(),
+            scan_sessions: Box::new(tokio::sync::Mutex::new(super::RedisClusterScanSessions::default())),
+        };
+
+        assert_eq!(super::mapped_cluster_endpoint(&pool, &advertised), forwarded);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_continuation_uses_stable_node_identity_without_rediscovery() {
+        let pattern = "membership:*";
+        let masters = vec![
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let mut saved_session = super::RedisClusterKeyScanSession::new(masters.clone(), pattern);
+        saved_session.node_index = 1;
+        saved_session.node_cursor = 7;
+        let mut saved_sessions = super::RedisClusterScanSessions::default();
+        let cursor = saved_sessions.insert(None, saved_session);
+        let sessions = tokio::sync::Mutex::new(saved_sessions);
+        let commands = Arc::new(StdMutex::new(Vec::new()));
+        let mut connections = HashMap::from([(
+            masters[1].clone(),
+            TrackedRedisConnection::new(vec![scan_response("9", vec!["membership:stable-node"])], commands.clone()),
+        )]);
+
+        let result = super::scan_cluster_keys_batch_with(
+            &sessions,
+            || ready(Err("continuation must not rediscover topology".to_string())),
+            move |endpoint| {
+                ready(
+                    connections.remove(&endpoint).ok_or_else(|| format!("unexpected connection to {}", endpoint.host)),
+                )
+            },
+            cursor,
+            pattern,
+            1,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor, cursor);
+        assert_eq!(result.total_keys, 0);
+        assert_eq!(result.keys[0].key_display, "membership:stable-node");
+        assert_eq!(tracked_command_count(&commands, "DBSIZE"), 0);
+        assert_eq!(tracked_command_count(&commands, "SCAN"), 1);
+        let continued = sessions.lock().await.take(cursor).unwrap();
+        assert_eq!(continued.master_nodes[continued.node_index], masters[1]);
+        assert_eq!(continued.node_cursor, 9);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_continuation_restores_original_position_after_failure() {
+        let pattern = "membership:*";
+        let masters = vec![
+            RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 },
+            RedisNodeEndpoint { host: "node-b".to_string(), port: 7001 },
+            RedisNodeEndpoint { host: "node-c".to_string(), port: 7002 },
+        ];
+        let mut saved_session = super::RedisClusterKeyScanSession::new(masters.clone(), pattern);
+        saved_session.node_index = 1;
+        saved_session.node_cursor = 7;
+        let mut saved_sessions = super::RedisClusterScanSessions::default();
+        let cursor = saved_sessions.insert(None, saved_session);
+        let sessions = tokio::sync::Mutex::new(saved_sessions);
+        let commands = Arc::new(StdMutex::new(Vec::new()));
+        let connected_nodes = Arc::new(StdMutex::new(Vec::new()));
+        let first_connected_nodes = connected_nodes.clone();
+        let first_commands = commands.clone();
+        let first_master = masters[1].clone();
+        let failed_master = masters[2].clone();
+        let mut first_connection = Some(TrackedRedisConnection::new(
+            vec![scan_response("0", vec!["membership:before-failure"])],
+            first_commands,
+        ));
+
+        let error = super::scan_cluster_keys_batch_with(
+            &sessions,
+            || ready(Err("continuation must not rediscover topology".to_string())),
+            move |endpoint| {
+                first_connected_nodes.lock().unwrap().push(endpoint.clone());
+                ready(if endpoint == first_master {
+                    first_connection.take().ok_or_else(|| "unexpected reconnect".to_string())
+                } else if endpoint == failed_master {
+                    Err("temporary node failure".to_string())
+                } else {
+                    Err(format!("unexpected connection to {}", endpoint.host))
+                })
+            },
+            cursor,
+            pattern,
+            1000,
+            2,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "temporary node failure");
+        let restored = sessions.lock().await.entries.get(&cursor).unwrap().clone();
+        assert_eq!(restored.master_nodes[restored.node_index], masters[1]);
+        assert_eq!(restored.node_cursor, 7);
+
+        let retry_connected_nodes = connected_nodes.clone();
+        let retry_commands = commands.clone();
+        let retry_master = masters[1].clone();
+        let mut retry_connection =
+            Some(TrackedRedisConnection::new(vec![scan_response("9", vec!["membership:retried"])], retry_commands));
+        let result = super::scan_cluster_keys_batch_with(
+            &sessions,
+            || ready(Err("continuation must not rediscover topology".to_string())),
+            move |endpoint| {
+                retry_connected_nodes.lock().unwrap().push(endpoint.clone());
+                ready(if endpoint == retry_master {
+                    retry_connection.take().ok_or_else(|| "unexpected reconnect".to_string())
+                } else {
+                    Err(format!("unexpected connection to {}", endpoint.host))
+                })
+            },
+            cursor,
+            pattern,
+            1,
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor, cursor);
+        assert_eq!(result.total_keys, 0);
+        assert_eq!(result.keys[0].key_display, "membership:retried");
+        assert_eq!(tracked_command_count(&commands, "DBSIZE"), 0);
+        assert_eq!(tracked_command_count(&commands, "SCAN"), 2);
+        assert!(commands.lock().unwrap()[1].contains("\r\n7\r\n"));
+        assert_eq!(*connected_nodes.lock().unwrap(), vec![masters[1].clone(), masters[2].clone(), masters[1].clone()]);
+        let continued = sessions.lock().await.take(cursor).unwrap();
+        assert_eq!(continued.master_nodes[continued.node_index], masters[1]);
+        assert_eq!(continued.node_cursor, 9);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_rejects_an_unknown_continuation_cursor() {
+        let sessions = tokio::sync::Mutex::new(super::RedisClusterScanSessions::default());
+        let topology_count = Arc::new(AtomicUsize::new(0));
+        let discovery_count = topology_count.clone();
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        let connector_count = connect_count.clone();
+
+        let error = super::scan_cluster_keys_batch_with::<TrackedRedisConnection, _, _, _, _>(
+            &sessions,
+            move || {
+                discovery_count.fetch_add(1, Ordering::Relaxed);
+                ready(Err("continuation must not rediscover topology".to_string()))
+            },
+            move |_| {
+                connector_count.fetch_add(1, Ordering::Relaxed);
+                ready(Err("continuation must not connect".to_string()))
+            },
+            999,
+            "membership:*",
+            1000,
+            1,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, super::INVALID_CLUSTER_SCAN_CURSOR_ERROR);
+        assert_eq!(topology_count.load(Ordering::Relaxed), 0);
+        assert_eq!(connect_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_rejects_an_expired_continuation_cursor() {
+        let master = RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 };
+        let mut saved_sessions = super::RedisClusterScanSessions::default();
+        let cursor = saved_sessions.insert(None, super::RedisClusterKeyScanSession::new(vec![master], "membership:*"));
+        saved_sessions.entries.get_mut(&cursor).unwrap().last_used =
+            std::time::Instant::now() - super::CLUSTER_SCAN_SESSION_TTL - std::time::Duration::from_secs(1);
+        let sessions = tokio::sync::Mutex::new(saved_sessions);
+
+        let error = super::scan_cluster_keys_batch_with::<TrackedRedisConnection, _, _, _, _>(
+            &sessions,
+            || ready(Err("continuation must not rediscover topology".to_string())),
+            |_| ready(Err("continuation must not connect".to_string())),
+            cursor,
+            "membership:*",
+            1000,
+            1,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, super::INVALID_CLUSTER_SCAN_CURSOR_ERROR);
+        assert!(sessions.lock().await.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cluster_key_batch_reports_new_scan_topology_failure() {
+        let sessions = tokio::sync::Mutex::new(super::RedisClusterScanSessions::default());
+
+        let error = super::scan_cluster_keys_batch_with::<TrackedRedisConnection, _, _, _, _>(
+            &sessions,
+            || ready(Err("topology unavailable".to_string())),
+            |_| ready(Err("scan connection must not be opened".to_string())),
+            0,
+            "membership:*",
+            1000,
+            1,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "topology unavailable");
+        assert!(sessions.lock().await.entries.is_empty());
+    }
+
+    #[test]
+    fn cluster_scan_sessions_expire_and_remain_bounded() {
+        let master = RedisNodeEndpoint { host: "node-a".to_string(), port: 7000 };
+        let mut sessions = super::RedisClusterScanSessions::default();
+        let expired_cursor = sessions.insert(None, super::RedisClusterKeyScanSession::new(vec![master.clone()], "*"));
+        sessions.entries.get_mut(&expired_cursor).unwrap().last_used =
+            std::time::Instant::now() - super::CLUSTER_SCAN_SESSION_TTL - std::time::Duration::from_secs(1);
+
+        for index in 0..=super::CLUSTER_SCAN_SESSION_LIMIT {
+            sessions
+                .insert(None, super::RedisClusterKeyScanSession::new(vec![master.clone()], &format!("key:{index}:*")));
+        }
+
+        assert!(!sessions.entries.contains_key(&expired_cursor));
+        assert_eq!(sessions.entries.len(), super::CLUSTER_SCAN_SESSION_LIMIT);
+        assert!(sessions.entries.keys().all(|cursor| *cursor > 0 && *cursor <= super::MAX_SAFE_INTEGER_CURSOR));
+    }
+
+    #[tokio::test]
+    async fn filtered_hash_load_more_matches_fields_and_keeps_scan_cursor() {
         let mut con = FakeRedisConnection::new(vec![
             hscan_response("512", vec![("user:1", "Ada")]),
             hscan_response("0", vec![("user:2", "Bob")]),
         ]);
 
-        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 1, Some("*user*")).await.unwrap();
+        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 1, Some("user")).await.unwrap();
 
-        assert_eq!(result.scan_cursor, Some(512));
-        assert_eq!(result.value, serde_json::json!([{ "field": "user:1", "value": "Ada" }]));
+        let RedisCollectionPage::Hash { items, scan_cursor } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(scan_cursor, Some(512));
+        assert_eq!(items, vec![RedisHashItem { field: text_blob("user:1"), value: text_blob("Ada") }]);
         assert_eq!(con.command_count("HSCAN"), 1);
-        assert!(con.commands[0].contains("\r\nMATCH\r\n"));
+        assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
+    }
+
+    #[tokio::test]
+    async fn filtered_hash_load_more_matches_values() {
+        let mut con =
+            FakeRedisConnection::new(vec![hscan_response("0", vec![("status", "Ada Lovelace"), ("name", "Bob")])]);
+
+        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("lovelace")).await.unwrap();
+
+        let RedisCollectionPage::Hash { items, scan_cursor } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items, vec![RedisHashItem { field: text_blob("status"), value: text_blob("Ada Lovelace") }]);
+        assert_eq!(con.command_count("HSCAN"), 1);
+        assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
     }
 
     #[tokio::test]
@@ -2620,28 +4314,30 @@ mod tests {
             .collect();
         let mut con = FakeRedisConnection::new(responses);
 
-        let result =
-            super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("*missing*")).await.unwrap();
+        let result = super::load_more_collection(&mut con, b"hash-key", "hash", 0, 20, Some("missing")).await.unwrap();
 
-        assert_eq!(result.scan_cursor, Some(super::HASH_FILTER_SCAN_MAX_ITERATIONS as u64));
-        assert_eq!(result.value, serde_json::json!([]));
+        let RedisCollectionPage::Hash { items, scan_cursor } = result else {
+            panic!("expected hash collection page");
+        };
+        assert_eq!(scan_cursor, Some(super::HASH_FILTER_SCAN_MAX_ITERATIONS as u64));
+        assert!(items.is_empty());
         assert_eq!(con.command_count("HSCAN"), super::HASH_FILTER_SCAN_MAX_ITERATIONS);
-    }
-
-    #[test]
-    fn formats_binary_string_values_like_rdm() {
-        let raw = RedisRawValue::BulkString(vec![0xAC, 0xED, 0x00, 0x05, b's', b'r']);
-
-        let value = redis_raw_to_json(raw);
-
-        assert_eq!(value, serde_json::Value::String("\\xac\\xed\\x00\\x05sr".to_string()));
     }
 
     #[test]
     fn does_not_treat_utf8_with_backslashes_as_binary() {
         let raw = RedisRawValue::BulkString(br#"C:\Users\path"#.to_vec());
 
-        assert!(!redis_value_contains_binary(&raw));
+        let blob = redis_value_to_bytes(raw).map(|bytes| redis_blob_from_bytes(&bytes)).unwrap();
+        assert_eq!(blob.encoding, RedisBlobEncoding::Utf8);
+    }
+
+    #[test]
+    fn preserves_non_ascii_utf8_as_utf8() {
+        let raw = RedisRawValue::BulkString("你好，redis".as_bytes().to_vec());
+
+        let blob = redis_value_to_bytes(raw).map(|bytes| redis_blob_from_bytes(&bytes)).unwrap();
+        assert_eq!(blob.encoding, RedisBlobEncoding::Utf8);
     }
 
     #[test]
@@ -2652,16 +4348,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_quoted_and_escaped_command_names_before_classification() {
+        for command_text in [r#""JSON.SET" user:1 $ {}"#, r#"JSON\.SET user:1 $ {}"#] {
+            let argv = parse_command_argv(command_text).unwrap();
+            assert_eq!(classify_command(&argv[0]), RedisCommandSafety::Write);
+        }
+    }
+
+    #[test]
     fn rejects_empty_command_text() {
         assert_eq!(parse_command_argv("   ").unwrap_err(), "Redis command is empty");
     }
 
+    #[tokio::test]
+    async fn raw_command_execution_fails_closed_before_sending_invalid_or_unknown_commands() {
+        let mut con = FakeRedisConnection::new(Vec::new());
+
+        let unknown = super::execute_command(&mut con, "VENDOR.WRITE key value", false).await.unwrap_err();
+        assert!(unknown.contains("blocked for safety"));
+
+        let malformed = super::execute_command(&mut con, r#"GET "unterminated"#, true).await.unwrap_err();
+        assert_eq!(malformed, "Redis command has an unterminated quote");
+        assert!(con.commands.is_empty());
+    }
+
     #[test]
     fn matches_redis_values_case_insensitively() {
-        assert!(redis_value_matches_query(&serde_json::json!("Hello Redis"), "redis"));
-        assert!(redis_value_matches_query(&serde_json::json!({"field": "Ada Lovelace"}), "lovelace"));
-        assert!(!redis_value_matches_query(&serde_json::json!("Hello Redis"), ""));
-        assert!(!redis_value_matches_query(&serde_json::json!("Hello Redis"), "mysql"));
+        assert!(redis_value_matches_query(&string_value("Hello Redis"), "redis"));
+        assert!(redis_value_matches_query(&hash_value(&[("field", "Ada Lovelace")]), "lovelace"));
+        assert!(!redis_value_matches_query(&string_value("Hello Redis"), ""));
+        assert!(!redis_value_matches_query(&string_value("Hello Redis"), "mysql"));
     }
 
     #[test]
@@ -2673,34 +4389,45 @@ mod tests {
     }
 
     #[test]
+    fn sparse_key_scan_continues_after_empty_iterations() {
+        assert!(super::should_continue_key_scan(0, 1000, 8, 50));
+    }
+
+    #[test]
+    fn key_scan_stops_when_result_page_is_full() {
+        assert!(!super::should_continue_key_scan(1000, 1000, 3, 50));
+        assert!(!super::should_continue_key_scan(1200, 1000, 3, 50));
+    }
+
+    #[test]
+    fn key_scan_respects_iteration_budget() {
+        assert!(!super::should_continue_key_scan(0, 1000, 50, 50));
+        assert!(!super::should_continue_key_scan(0, 0, 1, 1));
+    }
+
+    #[test]
     fn matches_hash_field_name_in_value_search() {
-        let hash_value = serde_json::json!([
-            {"field": "name", "value": "Alice"},
-            {"field": "email", "value": "alice@example.com"},
-        ]);
+        let hash_value = hash_value(&[("name", "Alice"), ("email", "alice@example.com")]);
         assert!(redis_value_matches_query(&hash_value, "name"));
         assert!(redis_value_matches_query(&hash_value, "email"));
     }
 
     #[test]
     fn matches_hash_field_value_in_value_search() {
-        let hash_value = serde_json::json!([
-            {"field": "name", "value": "Alice"},
-            {"field": "email", "value": "alice@example.com"},
-        ]);
+        let hash_value = hash_value(&[("name", "Alice"), ("email", "alice@example.com")]);
         assert!(redis_value_matches_query(&hash_value, "alice"));
         assert!(redis_value_matches_query(&hash_value, "example"));
     }
 
     #[test]
     fn empty_hash_does_not_match() {
-        let empty_hash = serde_json::json!([]);
+        let empty_hash = hash_value(&[]);
         assert!(!redis_value_matches_query(&empty_hash, "anything"));
     }
 
     #[test]
     fn non_hash_array_unaffected() {
-        let set_value = serde_json::json!(["member1", "member2", "hello"]);
+        let set_value = set_value(&["member1", "member2", "hello"]);
         assert!(redis_value_matches_query(&set_value, "member1"));
         assert!(redis_value_matches_query(&set_value, "hello"));
         assert!(!redis_value_matches_query(&set_value, "nonexistent"));
@@ -2709,11 +4436,54 @@ mod tests {
     #[test]
     fn classifies_safe_confirmed_and_blocked_commands() {
         assert_eq!(classify_command("GET"), RedisCommandSafety::Allowed);
-        assert_eq!(classify_command("set"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.GET"), RedisCommandSafety::Allowed);
+        assert_eq!(classify_command("set"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("hset"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("JSON.SET"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("GETEX"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("XREADGROUP"), RedisCommandSafety::Write);
+        assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.DEL"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.FORGET"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.CLEAR"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("KEYS"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("flushall"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("eval"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("FCALL"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("XGROUP"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("VENDOR.WRITE"), RedisCommandSafety::Blocked);
+    }
+
+    // Regression for review feedback: an unknown command (e.g. FCALL) inside a
+    // multi-statement batch must still raise the batch to Blocked regardless
+    // of its position, so "DEL victim\nFCALL wipe 0" cannot execute the
+    // destructive command after the frontend scan would otherwise have
+    // stopped the run.
+    #[test]
+    fn classify_command_batch_blocks_on_any_unknown_member() {
+        for batch in [
+            // destructive first, unknown second
+            ["DEL victim", "FCALL wipe 0"],
+            // unknown first, destructive second
+            ["FCALL wipe 0", "DEL victim"],
+        ] {
+            let mut highest = RedisCommandSafety::Allowed;
+            for cmd in batch.iter() {
+                let safety = classify_command(cmd);
+                if matches!(safety, RedisCommandSafety::Blocked) {
+                    highest = safety;
+                    break;
+                }
+                if matches!(safety, RedisCommandSafety::Confirm) && !matches!(highest, RedisCommandSafety::Blocked) {
+                    highest = safety;
+                }
+            }
+            assert!(
+                matches!(highest, RedisCommandSafety::Blocked),
+                "batch {batch:?} must be Blocked because it contains FCALL, got {highest:?}"
+            );
+        }
     }
 
     #[test]
@@ -2821,22 +4591,61 @@ mod tests {
     }
 
     #[test]
+    fn standalone_connection_infos_cover_no_auth_acl_fallback_tls_and_database() {
+        let mut config = redis_test_connection_config();
+        let no_auth = standalone_connection_infos(&config, "127.0.0.1", 6379);
+        assert_eq!(no_auth.len(), 1);
+        assert_eq!(no_auth[0].redis.username, None);
+        assert_eq!(no_auth[0].redis.password, None);
+        assert_eq!(no_auth[0].redis.db, 0);
+
+        config.username = "app-user".to_string();
+        config.password = "secret".to_string();
+        config.database = Some("4".to_string());
+        config.ssl = true;
+        config.url_params = Some("tls_insecure=true".to_string());
+        let infos = standalone_connection_infos(&config, "cache.example.com", 6380);
+
+        assert_eq!(infos.len(), 2);
+        assert!(matches!(infos[0].addr, ConnectionAddr::TcpTls { port: 6380, insecure: true, .. }));
+        assert_eq!(infos[0].redis.username.as_deref(), Some("app-user"));
+        assert_eq!(infos[0].redis.password.as_deref(), Some("secret"));
+        assert_eq!(infos[0].redis.db, 4);
+        assert_eq!(infos[1].redis.username, None);
+        assert_eq!(infos[1].redis.password.as_deref(), Some("app-user@secret"));
+        assert_eq!(infos[1].redis.db, 4);
+    }
+
+    #[test]
     fn redis_database_index_uses_numeric_database_only() {
-        let mut config = ConnectionConfig {
+        let mut config = redis_test_connection_config();
+        config.database = Some("4".to_string());
+
+        assert_eq!(redis_database_index(&config), 4);
+        config.database = Some("not-a-number".to_string());
+        assert_eq!(redis_database_index(&config), 0);
+    }
+
+    fn redis_test_connection_config() -> ConnectionConfig {
+        ConnectionConfig {
             id: "redis".to_string(),
             name: "Redis".to_string(),
+            note: String::new(),
             db_type: crate::models::connection::DatabaseType::Redis,
             driver_profile: None,
             driver_label: None,
             url_params: None,
+            agent_java_options: Vec::new(),
             host: "cache.example.com".to_string(),
             port: 6379,
             username: String::new(),
             password: String::new(),
-            database: Some("4".to_string()),
+            database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
+            init_script: None,
             color: None,
             transport_layers: Vec::new(),
             connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
@@ -2867,11 +4676,10 @@ mod tests {
             jdbc_driver_paths: Vec::new(),
             one_time: false,
             read_only: false,
-        };
-
-        assert_eq!(redis_database_index(&config), 4);
-        config.database = Some("not-a-number".to_string());
-        assert_eq!(redis_database_index(&config), 0);
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+        }
     }
 
     #[test]
@@ -2929,37 +4737,50 @@ mod tests {
     }
 
     #[test]
-    fn parses_redis_json_get_bulk_string() {
-        let raw = bulk(r#"{"id":1,"embedding":[0.1,0.2],"meta":{"source":"test"}}"#);
+    fn preserves_raw_redis_json_text_without_parsing_numbers_for_js() {
+        let raw_text =
+            r#"{"id":2326645729978441729,"fraction":0.123456789012345678901234,"scientific":1.234567890123456789e20}"#;
 
-        assert_eq!(
-            redis_json_raw_to_json(raw).unwrap(),
-            serde_json::json!({
-                "id": 1,
-                "embedding": [0.1, 0.2],
-                "meta": { "source": "test" }
-            })
-        );
+        assert_eq!(super::redis_json_raw_to_text(bulk(raw_text)).unwrap(), raw_text);
+        assert_eq!(super::redis_json_raw_to_text(RedisRawValue::Nil).unwrap_err(), "RedisJSON key no longer exists");
+        assert!(super::redis_json_raw_to_text(RedisRawValue::BulkString(vec![0xff])).is_err());
     }
 
-    #[test]
-    fn parses_redis_json_unsafe_int64_as_string_for_js() {
-        let raw = bulk(r#"{"id":2326645729978441729,"nested":[1,2326645729978441728]}"#);
+    #[tokio::test]
+    async fn returns_lossless_value_text_for_native_redis_json_values() {
+        let value_text = r#"{"id":2326645729978441729,"fraction":0.123456789012345678901234,"name":"Ada"}"#;
+        let mut con = FakeRedisConnection::new(vec![bulk("ReJSON-RL"), RedisRawValue::Int(-1), bulk(value_text)]);
 
-        assert_eq!(
-            redis_json_raw_to_json(raw).unwrap(),
-            serde_json::json!({
-                "id": "2326645729978441729",
-                "nested": [1, "2326645729978441728"]
-            })
-        );
+        let value = super::get_value(&mut con, b"json:key").await.unwrap();
+        let response = serde_json::to_value(&value).unwrap();
+        let RedisValueData::Json { value: returned } = value.data else {
+            panic!("expected RedisJSON value");
+        };
+        assert_eq!(returned, value_text);
+        assert_eq!(con.command_count("JSON.GET"), 1);
+
+        assert_eq!(response["data"]["value"], value_text);
+        assert!(response["data"].get("raw_text").is_none());
     }
 
-    #[test]
-    fn builds_compact_redis_json_value_preview() {
-        let value = serde_json::json!({ "id": 1, "embedding": [0.1, 0.2] });
+    #[tokio::test]
+    async fn rejects_a_native_redis_json_key_deleted_after_type_lookup() {
+        let mut con = FakeRedisConnection::new(vec![bulk("ReJSON-RL"), RedisRawValue::Int(-1), RedisRawValue::Nil]);
 
-        assert_eq!(redis_json_value_preview(&value), r#"{"id":1,"embedding":[0.1,0.2]}"#);
+        let error = super::get_value(&mut con, b"json:key").await.unwrap_err();
+
+        assert_eq!(error, "RedisJSON key no longer exists");
+    }
+
+    #[tokio::test]
+    async fn redis_json_set_keeps_lossless_numeric_literals_in_the_command() {
+        let raw_text = r#"{"id":2326645729978441729,"fraction":0.123456789012345678901234}"#;
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Okay]);
+
+        super::json_set(&mut con, b"json:key", raw_text, None).await.unwrap();
+
+        assert_eq!(con.command_count("JSON.SET"), 1);
+        assert!(con.commands[0].contains(raw_text));
     }
 
     #[test]

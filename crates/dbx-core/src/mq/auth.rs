@@ -16,22 +16,16 @@ use super::util::truncate;
 /// project's encrypted connection-secrets / keychain path and are never logged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Default)]
 pub enum MqAuth {
+    #[default]
     None,
     /// Pulsar JWT bearer token.
-    Token {
-        token: String,
-    },
+    Token { token: String },
     /// HTTP Basic auth.
-    Basic {
-        username: String,
-        password: String,
-    },
+    Basic { username: String, password: String },
     /// Arbitrary API key header, e.g. `Authorization: <value>` or a custom header.
-    ApiKey {
-        header: String,
-        value: String,
-    },
+    ApiKey { header: String, value: String },
     /// OAuth2 client-credentials flow (Pulsar's `oauth2` auth plugin).
     OAuth2 {
         issuer_url: String,
@@ -42,12 +36,6 @@ pub enum MqAuth {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
     },
-}
-
-impl Default for MqAuth {
-    fn default() -> Self {
-        MqAuth::None
-    }
 }
 
 /// Caches an OAuth2 access token with its expiry so repeated requests reuse it.

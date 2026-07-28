@@ -18,7 +18,7 @@ pub async fn read_keychain_password(service: String, account: Option<String>) ->
 
 #[cfg(target_os = "macos")]
 fn read_keychain_password_blocking(service: String, account: Option<String>) -> Result<String, String> {
-    let mut cmd = std::process::Command::new("security");
+    let mut cmd = dbx_core::process::new_std_command("security");
     cmd.args(["find-generic-password", "-s", &service, "-w"]);
     if let Some(ref acct) = account {
         cmd.args(["-a", acct]);

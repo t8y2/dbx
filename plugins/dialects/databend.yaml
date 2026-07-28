@@ -1,0 +1,99 @@
+dialect:
+  name: "Databend"
+  display_name: "Databend"
+  versions:
+    - version: "1"
+      status: "RECOMMENDED"
+
+types:
+  - name: "TINYINT"
+    category: "INTEGER"
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INT"
+    category: "INTEGER"
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "DOUBLE"
+    category: "FLOAT"
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+  - name: "STRING"
+    category: "STRING"
+  - name: "BOOLEAN"
+    category: "BOOLEAN"
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+  - name: "ARRAY"
+    category: "ARRAY"
+    semantic_fidelity_base: 0.5
+  - name: "VARIANT"
+    category: "JSON"
+  - name: "MAP"
+    category: "MAP"
+    semantic_fidelity_base: 0.4
+  - name: "BITMAP"
+    category: "BITMAP"
+    semantic_fidelity_base: 0.2
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  if_not_exists: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} MODIFY COLUMN {column} TYPE {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+
+online_safety:
+  add_column:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 4096
+  max_query_size_bytes: 268435456
+  supports_json_type: true
+
+identifier_rules:
+  quote_char: "`"
+  case_sensitive: false
+  max_length: 256
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT name FROM system.tables WHERE database = '{schema}'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT name, type FROM system.columns WHERE database = '{schema}' AND table = '{table}'"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT name FROM system.tables WHERE database = '{schema}'"
+    depth_support: 0
+    performance_profile: "LIGHT"

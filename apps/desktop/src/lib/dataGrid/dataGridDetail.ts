@@ -176,12 +176,32 @@ function detailColumnType(typeByColumn: ReadonlyMap<string, string> | undefined,
   return resultColumnTypes?.[columnIndex]?.trim() ?? "";
 }
 
-export function dataGridRowDetailJson(detail: DataGridRowDetail): string {
+export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocument?: unknown): string {
+  if (originalDocument !== undefined) return JSON.stringify(jsonDetailDisplayValue(originalDocument), null, 2);
   const row: Record<string, CellValue> = {};
   detail.fields.forEach((field) => {
     row[field.column] = field.value;
   });
-  return JSON.stringify(row, null, 2);
+  return JSON.stringify(jsonDetailDisplayValue(row), null, 2);
+}
+
+export function jsonDetailDisplayValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return jsonDetailDisplayValue(JSON.parse(trimmed));
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(jsonDetailDisplayValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, jsonDetailDisplayValue(item)]));
+  }
+  return value;
 }
 
 export function dataGridRowDetailTsv(detail: DataGridRowDetail): string {

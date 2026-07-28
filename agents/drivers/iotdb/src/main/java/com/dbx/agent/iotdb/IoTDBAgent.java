@@ -3,7 +3,7 @@ package com.dbx.agent.iotdb;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -41,6 +41,6 @@ public final class IoTDBAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new IoTDBAgent()).run();
+        new MultiSessionJsonRpcServer(IoTDBAgent::new).run();
     }
 }

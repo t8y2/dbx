@@ -16,11 +16,14 @@ pub fn is_single_connection_pool(db_type: &DatabaseType) -> bool {
             | DatabaseType::DuckDb
             | DatabaseType::Rqlite
             | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
             | DatabaseType::MongoDb
+            | DatabaseType::Hbase
             | DatabaseType::Oracle
             | DatabaseType::Dameng
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
             | DatabaseType::Goldendb
             | DatabaseType::Yashandb
@@ -43,6 +46,7 @@ pub fn skips_tcp_probe(db_type: &DatabaseType) -> bool {
         DatabaseType::Sqlite
             | DatabaseType::DuckDb
             | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
             | DatabaseType::Jdbc
             | DatabaseType::MessageQueue
     ) || is_agent_type(db_type)
@@ -75,6 +79,13 @@ mod tests {
         assert!(!is_local_file_db_type(&DatabaseType::Redis));
         assert!(!is_local_file_db_type(&DatabaseType::MongoDb));
         assert!(!is_local_file_db_type(&DatabaseType::Turso));
+        assert!(!is_local_file_db_type(&DatabaseType::CloudflareD1));
         assert!(!is_local_file_db_type(&DatabaseType::Rqlite));
+    }
+
+    #[test]
+    fn cloudflare_d1_uses_a_single_http_pool_without_tcp_probe() {
+        assert!(is_single_connection_pool(&DatabaseType::CloudflareD1));
+        assert!(skips_tcp_probe(&DatabaseType::CloudflareD1));
     }
 }

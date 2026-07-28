@@ -14,6 +14,12 @@ test("没有默认数据库且无候选项时返回空字符串", () => {
   assert.equal(resolveDefaultDatabase({ database: undefined }, []), "");
 });
 
+test("Cloudflare D1 使用 SQLite main 命名空间而不是连接凭据中的 Database ID", () => {
+  assert.equal(resolveDefaultDatabase({ db_type: "cloudflare-d1", database: "d1-database-uuid" }, []), "main");
+  assert.equal(isDefaultDatabase({ db_type: "cloudflare-d1", database: "d1-database-uuid" }, "main"), true);
+  assert.equal(isDefaultDatabase({ db_type: "cloudflare-d1", database: "d1-database-uuid" }, "d1-database-uuid"), false);
+});
+
 test("判断当前数据库是否为默认数据库", () => {
   assert.equal(isDefaultDatabase({ database: "analytics" }, "analytics"), true);
   assert.equal(isDefaultDatabase({ database: "analytics" }, "app"), false);

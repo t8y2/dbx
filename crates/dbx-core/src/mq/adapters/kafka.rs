@@ -21,7 +21,7 @@ use crate::mq::config::MqAdminConfig;
 use crate::mq::port::MessageQueueAdmin;
 use crate::mq::types::*;
 
-/// Kafka capabilities — no tenants/namespaces, supports topics, consumer groups,
+/// Kafka capabilities - no tenants/namespaces, supports topics, consumer groups,
 /// ACLs, retention, and message production.
 const KAFKA_CAPABILITIES: MqCapabilities = MqCapabilities {
     supports_tenants: false,
@@ -42,6 +42,14 @@ const KAFKA_CAPABILITIES: MqCapabilities = MqCapabilities {
     supports_token_management: false,
     supports_raw_admin_api: false,
     supports_send_message: true,
+    supports_message_query: false,
+    supports_dlq: false,
+    supports_message_trace: false,
+    supports_exchanges: false,
+    supports_client_connections: false,
+    supports_user_permissions: false,
+    supports_policies: false,
+    supports_cluster_monitoring: false,
 };
 
 pub struct KafkaAdmin {
@@ -180,6 +188,9 @@ impl MessageQueueAdmin for KafkaAdmin {
                     partitioned: partitions.map(|p| p > 1).unwrap_or(false),
                     partitions,
                     persistent: true,
+                    internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
+                    message_type: None,
+                    namespace: None,
                 }
             })
             .collect())
@@ -308,39 +319,47 @@ impl MessageQueueAdmin for KafkaAdmin {
         options: PeekMessagesOptions,
     ) -> Result<Vec<PeekedMessage>, String> {
         let conn_params = build_connection_params(&self.config);
-        let result: serde_json::Value = self
-            .call(
-                "mq_peek_messages",
-                serde_json::json!({
-                    "topic": topic.topic,
-                    "partition": options.partition.unwrap_or(0),
-                    "offset": options.offset.unwrap_or(0),
-                    "count": count,
-                    "connection": conn_params,
-                }),
-            )
-            .await?;
+        let mut params = serde_json::json!({
+            "topic": topic.topic,
+            "count": count,
+            "connection": conn_params,
+        });
+        // Omit partition/offset so the agent defaults to all partitions + earliest.
+        // Do not coerce missing values to 0 — that forced PARTITION 0 OFFSET 0 UX.
+        if let Some(partition) = options.partition {
+            params["partition"] = serde_json::json!(partition);
+        }
+        if let Some(offset) = options.offset {
+            params["offset"] = serde_json::json!(offset);
+        }
+        let result: serde_json::Value = self.call("mq_peek_messages", params).await?;
 
         let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         Ok(messages
             .into_iter()
             .enumerate()
-            .map(|(idx, m)| PeekedMessage {
-                position: (idx + 1) as u32,
-                message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                key: m.get("key").and_then(|v| v.as_str()).map(String::from),
-                publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                event_time: None,
-                properties: HashMap::new(),
-                headers: m
-                    .get("headers")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| {
-                        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
-                    })
-                    .unwrap_or_default(),
-                payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+            .map(|(idx, m)| {
+                let mut properties = HashMap::new();
+                if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
+                    properties.insert("partition".to_string(), partition.to_string());
+                }
+                PeekedMessage {
+                    position: (idx + 1) as u32,
+                    message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                    key: m.get("key").and_then(|v| v.as_str()).map(String::from),
+                    publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                    event_time: None,
+                    properties,
+                    headers: m
+                        .get("headers")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| {
+                            obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
+                        })
+                        .unwrap_or_default(),
+                    payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+                }
             })
             .collect())
     }
@@ -394,7 +413,7 @@ impl MessageQueueAdmin for KafkaAdmin {
     }
 
     async fn unload_topic(&self, _topic: &TopicRef) -> Result<(), String> {
-        Err("Kafka 不支持卸载主题".to_string())
+        Err("Kafka does not support unloading topics".to_string())
     }
 
     // ---- Rate limits / quotas / retention ----
@@ -576,6 +595,7 @@ impl MessageQueueAdmin for KafkaAdmin {
                             host: node.get("host")?.as_str()?.to_string(),
                             port: node.get("port")?.as_i64()? as i32,
                             rack: node.get("rack").and_then(|v| v.as_str()).map(String::from),
+                            ..Default::default()
                         })
                     })
                     .collect()
@@ -648,11 +668,13 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
     } else {
         "PLAINTEXT"
     });
+    let zookeeper_connect_string = extra_str(extra, "zookeeperServers").unwrap_or("");
     let properties =
         extra.get("properties").filter(|value| value.is_object()).cloned().unwrap_or_else(|| serde_json::json!({}));
 
     serde_json::json!({
         "bootstrap_servers": bootstrap_servers(cfg),
+        "zookeeper_connect_string": zookeeper_connect_string,
         "security_protocol": security_protocol,
         "sasl_mechanism": sasl_mechanism,
         "sasl_username": sasl_username,
@@ -725,6 +747,7 @@ fn kafka_subscription_for_topic(
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,
         consumers: Vec::new(),
+        ..Default::default()
     })
 }
 
@@ -790,6 +813,91 @@ mod tests {
     }
 
     #[test]
+    fn connection_params_preserve_kafka_gssapi_properties() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "bootstrapServers": "broker:9093",
+                "securityProtocol": "SASL_SSL",
+                "saslMechanism": "GSSAPI",
+                "properties": {
+                    "sasl.jaas.config": "com.sun.security.auth.module.Krb5LoginModule required useKeyTab=true keyTab=\"/tmp/user.keytab\" principal=\"user@EXAMPLE.COM\";",
+                    "sasl.kerberos.service.name": "kafka",
+                    "java.security.krb5.conf": "/tmp/krb5.conf"
+                }
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("security_protocol").and_then(|v| v.as_str()), Some("SASL_SSL"));
+        assert_eq!(params.get("sasl_mechanism").and_then(|v| v.as_str()), Some("GSSAPI"));
+        assert_eq!(params.pointer("/properties/sasl.kerberos.service.name").and_then(|v| v.as_str()), Some("kafka"));
+        assert_eq!(
+            params.pointer("/properties/java.security.krb5.conf").and_then(|v| v.as_str()),
+            Some("/tmp/krb5.conf")
+        );
+    }
+
+    #[test]
+    fn connection_params_pass_zookeeper_discovery_without_fake_bootstrap_servers() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "connectionSource": "zookeeper",
+                "zookeeperServers": "zk-1:2181,zk-2:2181/kafka",
+                "securityProtocol": "PLAINTEXT"
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("bootstrap_servers").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(params.get("zookeeper_connect_string").and_then(|v| v.as_str()), Some("zk-1:2181,zk-2:2181/kafka"));
+        assert_eq!(params.get("security_protocol").and_then(|v| v.as_str()), Some("PLAINTEXT"));
+    }
+
+    #[test]
+    fn connection_params_preserve_zookeeper_sasl_and_tls_properties() {
+        let cfg = kafka_config(
+            serde_json::json!({
+                "connectionSource": "zookeeper",
+                "zookeeperServers": "zk-secure:2281/kafka",
+                "securityProtocol": "SASL_SSL",
+                "properties": {
+                    "zookeeper.sasl.client": "true",
+                    "zookeeper.sasl.clientconfig": "DbxZooKeeperClient",
+                    "zookeeper.client.secure": "true",
+                    "zookeeper.clientCnxnSocket": "org.apache.zookeeper.ClientCnxnSocketNetty",
+                    "zookeeper.ssl.trustStore.location": "/etc/dbx/zookeeper-truststore.p12"
+                }
+            }),
+            MqAuth::None,
+            false,
+        );
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("zookeeper_connect_string").and_then(|v| v.as_str()), Some("zk-secure:2281/kafka"));
+        assert_eq!(params.pointer("/properties/zookeeper.sasl.client").and_then(|v| v.as_str()), Some("true"));
+        assert_eq!(
+            params.pointer("/properties/zookeeper.sasl.clientconfig").and_then(|v| v.as_str()),
+            Some("DbxZooKeeperClient")
+        );
+        assert_eq!(params.pointer("/properties/zookeeper.client.secure").and_then(|v| v.as_str()), Some("true"));
+        assert_eq!(
+            params.pointer("/properties/zookeeper.clientCnxnSocket").and_then(|v| v.as_str()),
+            Some("org.apache.zookeeper.ClientCnxnSocketNetty")
+        );
+        assert_eq!(
+            params.pointer("/properties/zookeeper.ssl.trustStore.location").and_then(|v| v.as_str()),
+            Some("/etc/dbx/zookeeper-truststore.p12")
+        );
+    }
+
+    #[test]
     fn reset_cursor_params_preserve_timestamp_position() {
         let topic = TopicRef {
             tenant: "_kafka".to_string(),
@@ -797,6 +905,8 @@ mod tests {
             topic: "events".to_string(),
             persistent: true,
             partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
         };
 
         let params = reset_cursor_params(&topic, "group-a", ResetPosition::Timestamp { timestamp_ms: 1710000000000 })
@@ -816,6 +926,8 @@ mod tests {
             topic: "events".to_string(),
             persistent: true,
             partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
         };
 
         let err = reset_cursor_params(&topic, "group-a", ResetPosition::MessageId { ledger_id: 1, entry_id: 2 })

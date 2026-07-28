@@ -1,4 +1,4 @@
-import type { DatabaseObjectType, DatabaseType } from "@/types/database";
+import type { ColumnInfo, DatabaseObjectType, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
 export interface DropObjectSqlOptions {
@@ -6,12 +6,14 @@ export interface DropObjectSqlOptions {
   objectType: DatabaseObjectType;
   schema?: string | null;
   name: string;
+  signature?: string | null;
 }
 
 export interface TableAdminSqlOptions {
   databaseType?: DatabaseType;
   schema?: string | null;
   tableName: string;
+  cascade?: boolean;
 }
 
 export type TableChildObjectType = "COLUMN" | "INDEX" | "FOREIGN_KEY" | "TRIGGER";
@@ -38,11 +40,29 @@ export interface SchemaCommentSqlOptions extends SchemaNameSqlOptions {
   comment: string;
 }
 
+export interface DatabasePropertyEditSqlOptions {
+  databaseType?: DatabaseType;
+  driverProfile?: string | null;
+  target: "database" | "schema";
+  name: string;
+  charset?: string;
+  collation?: string;
+  comment?: string;
+}
+
 export interface DuplicateTableStructureSqlOptions {
   databaseType?: DatabaseType;
   schema?: string | null;
   sourceName: string;
   targetName: string;
+  columnComments?: Array<{ name: string; comment: string }>;
+}
+
+export function collectDuplicateTableColumnComments(columns: readonly Pick<ColumnInfo, "name" | "comment">[]): Array<{ name: string; comment: string }> {
+  return columns.flatMap((column) => {
+    const comment = column.comment;
+    return comment?.trim() ? [{ name: column.name, comment }] : [];
+  });
 }
 
 export interface CopyTableDataSqlOptions {
@@ -75,6 +95,17 @@ export function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<st
   return api.buildTruncateTableSql(options);
 }
 
+const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];
+const TRUNCATE_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];
+
+export function supportsDropTableCascade(databaseType?: DatabaseType): boolean {
+  return !!databaseType && DROP_TABLE_CASCADE_DATABASE_TYPES.includes(databaseType);
+}
+
+export function supportsTruncateTableCascade(databaseType?: DatabaseType): boolean {
+  return !!databaseType && TRUNCATE_TABLE_CASCADE_DATABASE_TYPES.includes(databaseType);
+}
+
 export function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {
   return api.buildDropDatabaseSql(options);
 }
@@ -88,7 +119,18 @@ export function buildDropSchemaSql(options: SchemaNameSqlOptions): Promise<strin
 }
 
 export function supportsSchemaComment(databaseType?: DatabaseType): boolean {
-  return databaseType === "postgres";
+  return ["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "yashandb"].includes(databaseType || "");
+}
+
+export function buildUpdateDatabasePropertiesSql(options: DatabasePropertyEditSqlOptions): Promise<string> {
+  return api.buildUpdateDatabasePropertiesSql(options);
+}
+
+export function buildGetDatabaseCommentSql(options: DatabaseNameSqlOptions): string {
+  if (!supportsSchemaComment(options.databaseType)) {
+    throw new Error("Database comments are not supported by this database");
+  }
+  return ["SELECT pg_catalog.shobj_description(db.oid, 'pg_database') AS comment", "FROM pg_catalog.pg_database db", `WHERE db.datname = ${quoteSqlLiteral(options.name)};`].join("\n");
 }
 
 export function buildGetSchemaCommentSql(options: SchemaNameSqlOptions): string {
@@ -121,4 +163,25 @@ function quotePostgresIdentifier(value: string): string {
 
 function quoteSqlLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+export function buildCreateExtensionSql(name: string, schema?: string | null): string {
+  const extName = quotePostgresIdentifier(name);
+  if (schema) {
+    return `CREATE EXTENSION ${extName} WITH SCHEMA ${quotePostgresIdentifier(schema)};`;
+  }
+  return `CREATE EXTENSION ${extName};`;
+}
+
+export function buildDropExtensionSql(name: string, cascade = false): string {
+  const extName = quotePostgresIdentifier(name);
+  return cascade ? `DROP EXTENSION ${extName} CASCADE;` : `DROP EXTENSION ${extName};`;
+}
+
+export function buildListAvailableExtensionsSql(schema?: string | null): string {
+  // pg_available_extensions shows extensions available for installation
+  if (schema) {
+    return `SELECT name, default_version, comment FROM pg_catalog.pg_available_extensions WHERE installed_version IS NULL ORDER BY name`;
+  }
+  return `SELECT name, default_version, comment FROM pg_catalog.pg_available_extensions WHERE installed_version IS NULL ORDER BY name`;
 }

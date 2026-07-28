@@ -88,6 +88,8 @@ pub async fn ai_agent_stream(
     mode: Option<String>,
     allow_write_sql: Option<bool>,
     confirmed_write_sql: Option<String>,
+    confirmed_connection_id: Option<String>,
+    confirmed_database: Option<String>,
 ) -> Result<String, String> {
     let request = resolve_cli_provider_request(request);
 
@@ -111,6 +113,18 @@ pub async fn ai_agent_stream(
         log::warn!("Failed to load max_agent_turns setting, using default: {err}");
         dbx_core::agent_loop::DEFAULT_MAX_AGENT_TURNS
     });
+    // Reject the confirmed-write grant when the connection or database changed
+    // between the user's confirmation and this backend request.  The frontend
+    // also verifies this synchronously, but this backend check provides
+    // defense-in-depth for CLI-provider and API-driven paths.
+    let (allow_write_sql, confirmed_write_sql) = dbx_core::agent_tools::verify_confirmed_target(
+        allow_write_sql,
+        confirmed_write_sql,
+        confirmed_connection_id,
+        confirmed_database,
+        &connection_id,
+        &database,
+    );
     // Explicit confirmation grants write access only to this agent run, never to
     // production.  Writes are only allowed when a specific SQL statement was
     // confirmed — an empty confirmed_write_sql is treated as "no confirmation"
@@ -197,4 +211,84 @@ pub async fn load_ai_conversations(state: State<'_, Arc<AppState>>) -> Result<Ve
 #[tauri::command]
 pub async fn delete_ai_conversation(state: State<'_, Arc<AppState>>, id: String) -> Result<(), String> {
     state.storage.delete_ai_conversation(&id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_confirmed_target_allows_matching_connection_and_database() {
+        let (allow, confirmed) = dbx_core::agent_tools::verify_confirmed_target(
+            Some(true),
+            Some("DELETE FROM users WHERE id = 1".to_string()),
+            Some("conn-1".to_string()),
+            Some("app".to_string()),
+            "conn-1",
+            "app",
+        );
+        assert_eq!(allow, Some(true));
+        assert_eq!(confirmed, Some("DELETE FROM users WHERE id = 1".to_string()));
+    }
+
+    #[test]
+    fn verify_confirmed_target_rejects_mismatched_connection() {
+        let (allow, confirmed) = dbx_core::agent_tools::verify_confirmed_target(
+            Some(true),
+            Some("DELETE FROM users WHERE id = 1".to_string()),
+            Some("conn-staging".to_string()),
+            Some("app".to_string()),
+            "conn-production",
+            "app",
+        );
+        assert_eq!(allow, Some(false));
+        assert_eq!(confirmed, None);
+    }
+
+    #[test]
+    fn verify_confirmed_target_rejects_mismatched_database() {
+        let (allow, confirmed) = dbx_core::agent_tools::verify_confirmed_target(
+            Some(true),
+            Some("DELETE FROM users WHERE id = 1".to_string()),
+            Some("conn-1".to_string()),
+            Some("staging".to_string()),
+            "conn-1",
+            "production",
+        );
+        assert_eq!(allow, Some(false));
+        assert_eq!(confirmed, None);
+    }
+
+    #[test]
+    fn verify_confirmed_target_passes_through_when_no_sql_confirmed() {
+        // Without a confirmed SQL, no target verification is needed — the
+        // grant has no write permission to protect.
+        let (allow, confirmed) = dbx_core::agent_tools::verify_confirmed_target(
+            Some(false),
+            None,
+            Some("conn-staging".to_string()),
+            Some("staging".to_string()),
+            "conn-production",
+            "production",
+        );
+        assert_eq!(allow, Some(false));
+        assert_eq!(confirmed, None);
+    }
+
+    #[test]
+    fn verify_confirmed_target_rejects_when_no_snapshot_provided() {
+        // When confirmed_connection_id is None (e.g. older frontend that
+        // doesn't send snapshots), the target cannot be verified, so the
+        // grant must be rejected — fail-closed.
+        let (allow, confirmed) = dbx_core::agent_tools::verify_confirmed_target(
+            Some(true),
+            Some("DELETE FROM users WHERE id = 1".to_string()),
+            None,
+            None,
+            "conn-1",
+            "app",
+        );
+        assert_eq!(allow, Some(false));
+        assert_eq!(confirmed, None);
+    }
 }

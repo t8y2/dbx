@@ -1138,12 +1138,14 @@ export async function aiAgentStream(
   mode?: string,
   allowWriteSql = false,
   confirmedWriteSql?: string,
+  confirmedConnectionId?: string,
+  confirmedDatabase?: string,
   signal?: AbortSignal,
 ): Promise<string> {
   const res = await fetch(apiUrl("/api/ai/agent-stream"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, request, connectionId, database, dbType, mode: mode || "ask", allowWriteSql, confirmedWriteSql }),
+    body: JSON.stringify({ sessionId, request, connectionId, database, dbType, mode: mode || "ask", allowWriteSql, confirmedWriteSql, confirmedConnectionId, confirmedDatabase }),
     signal,
   });
   if (!res.ok) throw new Error(await res.text());

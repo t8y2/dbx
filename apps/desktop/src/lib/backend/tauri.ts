@@ -389,7 +389,20 @@ export type AgentEvent =
   | { type: "context_compacted"; summary: string; summary_tokens: number; compacted_messages: number; estimated_before: number; estimated_after: number }
   | { type: "error"; message: string };
 
-export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: AgentEvent) => void, mode?: string, allowWriteSql = false, confirmedWriteSql?: string, _signal?: AbortSignal): Promise<string> {
+export async function aiAgentStream(
+  sessionId: string,
+  request: AiCompletionRequest,
+  connectionId: string,
+  database: string,
+  dbType: string,
+  onEvent: (event: AgentEvent) => void,
+  mode?: string,
+  allowWriteSql = false,
+  confirmedWriteSql?: string,
+  confirmedConnectionId?: string,
+  confirmedDatabase?: string,
+  _signal?: AbortSignal,
+): Promise<string> {
   const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
     onEvent(event.payload);
     if (event.payload.type === "agent_end" || event.payload.type === "error") {
@@ -397,7 +410,7 @@ export async function aiAgentStream(sessionId: string, request: AiCompletionRequ
     }
   });
   try {
-    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType, mode, allowWriteSql, confirmedWriteSql });
+    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType, mode, allowWriteSql, confirmedWriteSql, confirmedConnectionId, confirmedDatabase });
   } catch (e) {
     unlisten();
     throw e;

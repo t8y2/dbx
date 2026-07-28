@@ -97,6 +97,9 @@ export interface AiRequestInput {
   allowWriteSql?: boolean;
   /** When allowWriteSql is true, the specific write SQL the user confirmed. */
   confirmedWriteSql?: string;
+  /** Connection/database snapshot at confirmation time; verified at backend. */
+  confirmedConnectionId?: string;
+  confirmedDatabase?: string;
 }
 
 export interface CustomPromptContext {
@@ -190,6 +193,8 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     input.mode || "ask",
     input.allowWriteSql || false,
     input.confirmedWriteSql,
+    input.confirmedConnectionId,
+    input.confirmedDatabase,
   );
 }
 

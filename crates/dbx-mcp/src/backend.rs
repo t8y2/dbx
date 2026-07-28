@@ -58,9 +58,13 @@ fn effective_mcp_policy_with_legacy_allow_writes(
     state: McpGlobalPolicyState,
     legacy_allow_writes: Option<bool>,
 ) -> McpGlobalPolicy {
-    let configured = state.configured;
     let mut policy = state.policy();
-    if !configured && legacy_allow_writes == Some(false) {
+    // When DBX_MCP_ALLOW_WRITES is explicitly set to false by the CLI agent
+    // for an unconfirmed run, force read-only regardless of the configured
+    // persistent MCP policy. Run-scoped CLI restrictions must override the
+    // persistent policy, otherwise a user with a writable configured policy
+    // can execute unconfirmed writes through CLI providers.
+    if legacy_allow_writes == Some(false) {
         policy.read_only = true;
     }
     policy
@@ -1419,11 +1423,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_read_only_only_restricts_an_unconfigured_policy() {
+    fn legacy_read_only_overrides_configured_and_unconfigured_policies() {
+        // DBX_MCP_ALLOW_WRITES=0 always forces read_only, even when the
+        // persistent MCP policy is configured as writable.
         assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(false, false), Some(false)).read_only);
         assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(false, false), Some(true)).read_only);
-        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(false)).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(false)).read_only);
+        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(true)).read_only);
+        // Configured read_only is a hard upper bound — env var cannot relax it.
         assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), Some(true)).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), Some(false)).read_only);
+        // Unset env var leaves the policy as-is.
+        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), None).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), None).read_only);
     }
 
     #[test]

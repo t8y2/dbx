@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
@@ -61,7 +61,7 @@ import { ACTIVE_TEMPLATES_TOTAL_MAX, promptTemplateCharacterCount } from "@/type
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
-import { extractFirstSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
@@ -568,6 +568,19 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
 let allowWriteSqlForNextRun = false;
 /** The specific write SQL embedded in the confirmed proposal, for binding to the agent run. */
 let confirmedWriteSqlText: string | undefined = undefined;
+/** Connection/database snapshot captured at confirmation time, verified at send time
+ *  to prevent a database change between confirmation and execution. */
+let confirmedConnectionId: string | undefined = undefined;
+let confirmedDatabase: string | undefined = undefined;
+
+/** Clear all pending write-confirmation state. Call on every early-return
+ *  and failure path so a stale grant cannot leak into a subsequent send(). */
+function clearPendingWriteGrant() {
+  allowWriteSqlForNextRun = false;
+  confirmedWriteSqlText = undefined;
+  confirmedConnectionId = undefined;
+  confirmedDatabase = undefined;
+}
 
 const productionContext = computed(() => productionContextForDatabase(props.connection, props.tab?.database));
 
@@ -587,9 +600,11 @@ function sendProposalReply(positive: boolean) {
   const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
   prompt.value = isZh ? replyZh : replyEn;
   if (positive && assistantMode.value === "agent" && looksLikeWriteSqlProposal(target.content)) {
-    confirmedWriteSqlText = extractFirstSqlCodeBlock(target.content);
+    confirmedWriteSqlText = extractSingleSqlCodeBlock(target.content);
     if (confirmedWriteSqlText) {
       allowWriteSqlForNextRun = true;
+      confirmedConnectionId = props.connection?.id;
+      confirmedDatabase = props.tab?.database || "";
     }
     // When no SQL code block is found in the proposal, treat the
     // confirmation as rejected — we cannot bind the agent to a
@@ -1468,8 +1483,16 @@ async function send() {
   const text = prompt.value.trim();
   if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length) || isGenerating.value) return;
 
-  if (!props.connection || !props.tab) return;
+  // Snapshot the target connection/database before any async work so that
+  // awaits during context loading cannot cause a TOCTOU target switch.
+  const connection = props.connection;
+  const tab = props.tab;
+  if (!connection || !tab) {
+    clearPendingWriteGrant();
+    return;
+  }
   if (!settings.isConfigured) {
+    clearPendingWriteGrant();
     toast(t("ai.noConfig"));
     return;
   }
@@ -1478,6 +1501,7 @@ async function send() {
   // resume into concurrent agent runs.
   isGenerating.value = true;
   if (!(await promptTemplateStore.ensureLoaded())) {
+    clearPendingWriteGrant();
     isGenerating.value = false;
     toast(t("ai.customInstructionsLoadFailed"), 5000);
     return;
@@ -1529,7 +1553,9 @@ async function send() {
         const msg = messages.value[i];
         if (msg.kind === "contextSummary") continue;
         if (msg.role === "assistant" && msg.content) {
-          confirmedWriteSqlText = extractFirstSqlCodeBlock(msg.content);
+          confirmedWriteSqlText = extractSingleSqlCodeBlock(msg.content);
+          confirmedConnectionId = connection.id;
+          confirmedDatabase = tab.database || "";
           break;
         }
         if (msg.role === "user") break;
@@ -1539,11 +1565,26 @@ async function send() {
       }
     }
   }
+  // Verify the connection/database haven't changed since the user confirmed
+  // the write operation. If the user switched connections or databases between
+  // confirmation and execution, the grant is void.
+  if (allowWriteSqlForNextRun && confirmedWriteSqlText) {
+    if (confirmedConnectionId !== connection.id || confirmedDatabase !== (tab.database || "")) {
+      allowWriteSqlForNextRun = false;
+      confirmedWriteSqlText = undefined;
+    }
+  }
   // Agent confirmation cannot grant autonomous writes while the active database is production.
   const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
   const confirmedWriteSql = allowWriteSql ? confirmedWriteSqlText : undefined;
+  // Capture the confirmed target snapshot before clearing the one-shot grant
+  // state, so the values survive to be passed through to the backend.
+  const confirmedTargetConnId = allowWriteSql ? confirmedConnectionId : undefined;
+  const confirmedTargetDb = allowWriteSql ? confirmedDatabase : undefined;
   allowWriteSqlForNextRun = false;
   confirmedWriteSqlText = undefined;
+  confirmedConnectionId = undefined;
+  confirmedDatabase = undefined;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
@@ -1552,7 +1593,7 @@ async function send() {
   agentTokens.value = null;
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
-    const context = await buildAiContext(props.tab, props.connection, {
+    const context = await buildAiContext(tab, connection, {
       mentionedTables,
       sqlFiles,
     });
@@ -1566,6 +1607,8 @@ async function send() {
         context,
         allowWriteSql,
         confirmedWriteSql,
+        confirmedConnectionId: confirmedTargetConnId,
+        confirmedDatabase: confirmedTargetDb,
       },
       history,
       (event: AgentEvent) => {
@@ -1629,8 +1672,8 @@ async function send() {
         action: requestedAction,
         instruction: modelInstruction,
         assistantContent: msg?.content || "",
-        connection: props.connection,
-        database: props.tab?.database,
+        connection: connection,
+        database: tab.database,
       });
       if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
       if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);

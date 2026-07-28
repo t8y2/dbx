@@ -55,6 +55,40 @@ pub fn confirmed_write_sql_permissions(
     }
 }
 
+/// Verify that the confirmed connection/database snapshot matches the actual
+/// target. Returns `(allow_write_sql, confirmed_write_sql)` — when the target
+/// does not match, the grant is voided (allow=false, confirmed=None).
+///
+/// This is defense-in-depth: the frontend also verifies synchronously, but
+/// this backend check protects CLI-provider and API-driven paths.
+pub fn verify_confirmed_target(
+    allow_write_sql: Option<bool>,
+    confirmed_write_sql: Option<String>,
+    confirmed_connection_id: Option<String>,
+    confirmed_database: Option<String>,
+    actual_connection_id: &str,
+    actual_database: &str,
+) -> (Option<bool>, Option<String>) {
+    let Some(ref confirmed_sql) = confirmed_write_sql else {
+        return (allow_write_sql, confirmed_write_sql);
+    };
+    // Only verify when a write SQL was actually confirmed.
+    let target_mismatch = confirmed_connection_id.as_deref() != Some(actual_connection_id)
+        || confirmed_database.as_deref() != Some(actual_database);
+    if target_mismatch {
+        log::warn!(
+            "Write-SQL grant voided: confirmed target (conn={:?}, db={:?}) does not match actual (conn={}, db={}). Confirmed SQL: {}",
+            confirmed_connection_id,
+            confirmed_database,
+            actual_connection_id,
+            actual_database,
+            confirmed_sql,
+        );
+        return (Some(false), None);
+    }
+    (allow_write_sql, confirmed_write_sql)
+}
+
 fn sql_risk_allowed(risk: SqlRisk, permissions: AgentSqlPermissions) -> bool {
     match risk {
         SqlRisk::ReadOnly => true,

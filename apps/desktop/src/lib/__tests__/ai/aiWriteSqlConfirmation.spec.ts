@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { containsWriteSql, looksLikeActionProposal, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative, type WriteSqlGrantParams } from "@/lib/ai/aiProposalDetect";
 import { aiSkillForAction } from "@/lib/ai/aiSkills";
-import { extractFirstSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock, countSqlCodeBlocks } from "@/lib/ai/aiSqlExecutionPolicy";
 
 // ── looksLikeWriteSqlProposal ──────────────────────────────────────────────
 
@@ -299,5 +299,70 @@ describe("extractFirstSqlCodeBlock", () => {
   it("extracts SQL from a code block without language tag", () => {
     const content = "Here is the SQL:\n```\nDROP TABLE old;\n```\nShould I execute it?";
     expect(extractFirstSqlCodeBlock(content)).toBe("DROP TABLE old;");
+  });
+});
+
+// ── countSqlCodeBlocks ──────────────────────────────────────────────────────
+
+describe("countSqlCodeBlocks", () => {
+  it("counts zero when there are no code blocks", () => {
+    expect(countSqlCodeBlocks("需要我执行 CREATE TABLE users 吗？")).toBe(0);
+  });
+
+  it("counts one code block", () => {
+    expect(countSqlCodeBlocks("```sql\nSELECT 1;\n```")).toBe(1);
+  });
+
+  it("counts two code blocks", () => {
+    const content = "```sql\nDELETE FROM old;\n```\n```sql\nDELETE FROM new;\n```";
+    expect(countSqlCodeBlocks(content)).toBe(2);
+  });
+
+  it("counts three code blocks", () => {
+    const content = "```sql\nA\n```\n```\nB\n```\n```sql\nC\n```";
+    expect(countSqlCodeBlocks(content)).toBe(3);
+  });
+
+  it("counts zero for inline code spans", () => {
+    expect(countSqlCodeBlocks("Use `SELECT 1` to test.")).toBe(0);
+  });
+});
+
+// ── extractSingleSqlCodeBlock (regression: ambiguous multi-block proposals) ──
+
+describe("extractSingleSqlCodeBlock (multi-block safety)", () => {
+  it("extracts SQL when exactly one code block exists", () => {
+    const content = "以下是建表 SQL：\n```sql\nCREATE TABLE users (id INT);\n```\n需要我执行这条吗？";
+    expect(extractSingleSqlCodeBlock(content)).toBe("CREATE TABLE users (id INT);");
+  });
+
+  it("returns undefined when there are zero code blocks", () => {
+    const content = "需要我执行 CREATE TABLE users 吗？";
+    expect(extractSingleSqlCodeBlock(content)).toBeUndefined();
+  });
+
+  it("returns undefined when there are multiple code blocks (fail-closed)", () => {
+    // Regression: a message with "do not execute" DELETE first, then a
+    // recommended DELETE second. extractFirstSqlCodeBlock would return the
+    // first (dangerous) block, but extractSingleSqlCodeBlock rightly refuses.
+    const content = ["I found two approaches:", "```sql", "DELETE FROM users; -- do NOT execute this", "```", "```sql", "DELETE FROM users WHERE id = 7; -- recommended", "```", "Should I execute the recommended SQL?"].join("\n");
+    expect(extractFirstSqlCodeBlock(content)).toBe("DELETE FROM users; -- do NOT execute this");
+    expect(extractSingleSqlCodeBlock(content)).toBeUndefined();
+  });
+
+  it("returns undefined when multiple blocks have different language tags", () => {
+    const content = "```sql\nSELECT 1;\n```\n```postgresql\nSELECT 2;\n```";
+    expect(extractSingleSqlCodeBlock(content)).toBeUndefined();
+  });
+
+  it("returns undefined when multiple blocks have no language tags", () => {
+    const content = "```\nblock A\n```\n```\nblock B\n```";
+    expect(extractSingleSqlCodeBlock(content)).toBeUndefined();
+  });
+
+  it("counts code blocks case-insensitively for language tags", () => {
+    const content = "```SQL\nDELETE FROM a;\n```\n```Sql\nDELETE FROM b;\n```";
+    expect(countSqlCodeBlocks(content)).toBe(2);
+    expect(extractSingleSqlCodeBlock(content)).toBeUndefined();
   });
 });

@@ -114,7 +114,7 @@ fn default_agent_mode() -> String {
 }
 
 fn reject_web_unsupported_ai_provider(config: &AiConfig) -> Result<(), AppError> {
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
         return Err(AppError::bad_request("CLI providers are only supported in DBX Desktop."));
     }
     Ok(())
@@ -479,13 +479,17 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         }
     }
 
     #[test]
-    fn rejects_codex_cli_single() {
-        let config = make_config(AiProvider::CodexCli);
-        assert!(reject_web_unsupported_ai_provider(&config).is_err());
+    fn rejects_local_cli_providers_single() {
+        for provider in [AiProvider::CodexCli, AiProvider::ClaudeCodeCli, AiProvider::PiAgentCli] {
+            let config = make_config(provider);
+            assert!(reject_web_unsupported_ai_provider(&config).is_err());
+        }
     }
 
     #[test]

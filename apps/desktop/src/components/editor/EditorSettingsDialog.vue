@@ -2195,7 +2195,7 @@ async function saveMaxAgentTurnsSetting() {
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
-const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli"]);
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "pi-agent-cli", "codex-cli"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
@@ -2215,6 +2215,8 @@ const aiEditCodexCliPath = ref("");
 const aiEditCodexCliEnvRows = ref<AiEnvRow[]>([]);
 const aiEditClaudeCodeCliPath = ref("");
 const aiEditClaudeCodeCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditPiAgentCliPath = ref("");
+const aiEditPiAgentCliEnvRows = ref<AiEnvRow[]>([]);
 
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 
@@ -2243,21 +2245,40 @@ const aiTestErrorPresentation = computed(() => {
 const aiTestErrorDisplay = computed(() => [aiTestErrorPresentation.value.summary, aiTestErrorPresentation.value.detail].filter(Boolean).join(" "));
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
+const aiIsPiAgentCli = computed(() => aiEditProvider.value === "pi-agent-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
-const aiCliCommandName = computed(() => (aiIsClaudeCodeCli.value ? "claude" : "codex"));
-const aiCliLoginCommand = computed(() => (aiIsClaudeCodeCli.value ? "claude auth login" : "codex login"));
+const aiCliCommandName = computed(() => {
+  if (aiIsClaudeCodeCli.value) return "claude";
+  if (aiIsPiAgentCli.value) return "pi";
+  return "codex";
+});
+const aiCliLoginCommand = computed(() => {
+  if (aiIsClaudeCodeCli.value) return "claude auth login";
+  if (aiIsPiAgentCli.value) return "pi";
+  return "codex login";
+});
 const aiEditCliPath = computed({
-  get: () => (aiIsClaudeCodeCli.value ? aiEditClaudeCodeCliPath.value : aiEditCodexCliPath.value),
+  get: () => {
+    if (aiIsClaudeCodeCli.value) return aiEditClaudeCodeCliPath.value;
+    if (aiIsPiAgentCli.value) return aiEditPiAgentCliPath.value;
+    return aiEditCodexCliPath.value;
+  },
   set: (value: string) => {
     if (aiIsClaudeCodeCli.value) {
       aiEditClaudeCodeCliPath.value = value;
+    } else if (aiIsPiAgentCli.value) {
+      aiEditPiAgentCliPath.value = value;
     } else {
       aiEditCodexCliPath.value = value;
     }
   },
 });
-const aiEditCliEnvRows = computed(() => (aiIsClaudeCodeCli.value ? aiEditClaudeCodeCliEnvRows.value : aiEditCodexCliEnvRows.value));
+const aiEditCliEnvRows = computed(() => {
+  if (aiIsClaudeCodeCli.value) return aiEditClaudeCodeCliEnvRows.value;
+  if (aiIsPiAgentCli.value) return aiEditPiAgentCliEnvRows.value;
+  return aiEditCodexCliEnvRows.value;
+});
 watch(aiIsCliProvider, (isCliProvider) => {
   if (isCliProvider) void ensureCliMcpStatus();
 });
@@ -2325,7 +2346,10 @@ function cliEnvValidationError(): string {
   for (const row of aiEditCliEnvRows.value) {
     const key = row.key.trim();
     if (key && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return t("ai.cliEnvInvalidName", { name: key });
-    if (key.toUpperCase().startsWith("DBX_MCP_")) return t("ai.cliEnvReservedName", { name: key });
+    const upper = key.toUpperCase();
+    if (upper.startsWith("DBX_MCP_") || (aiIsPiAgentCli.value && upper.startsWith("DBX_PI_"))) {
+      return t("ai.cliEnvReservedName", { name: key });
+    }
   }
   return "";
 }
@@ -2337,6 +2361,8 @@ function addCliEnvRow() {
 function removeCliEnvRow(id: string) {
   if (aiIsClaudeCodeCli.value) {
     aiEditClaudeCodeCliEnvRows.value = aiEditClaudeCodeCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsPiAgentCli.value) {
+    aiEditPiAgentCliEnvRows.value = aiEditPiAgentCliEnvRows.value.filter((row) => row.id !== id);
   } else {
     aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
   }
@@ -2363,6 +2389,8 @@ function currentAiEditConfig() {
     codexCliEnv: aiIsCodexCli.value ? cliEnvFromRows(aiEditCodexCliEnvRows.value) : {},
     claudeCodeCliPath: aiEditClaudeCodeCliPath.value.trim() || undefined,
     claudeCodeCliEnv: aiIsClaudeCodeCli.value ? cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value) : {},
+    piAgentCliPath: aiEditPiAgentCliPath.value.trim() || undefined,
+    piAgentCliEnv: aiIsPiAgentCli.value ? cliEnvFromRows(aiEditPiAgentCliEnvRows.value) : {},
   };
 }
 
@@ -2430,6 +2458,8 @@ function aiEnterEditMode(configId?: string) {
       aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(config.codexCliEnv);
       aiEditClaudeCodeCliPath.value = config.claudeCodeCliPath ?? "";
       aiEditClaudeCodeCliEnvRows.value = aiEnvRowsFromConfig(config.claudeCodeCliEnv);
+      aiEditPiAgentCliPath.value = config.piAgentCliPath ?? "";
+      aiEditPiAgentCliEnvRows.value = aiEnvRowsFromConfig(config.piAgentCliEnv);
     }
   } else {
     aiEditConfigName.value = "";
@@ -2449,6 +2479,8 @@ function aiEnterEditMode(configId?: string) {
     aiEditCodexCliEnvRows.value = [];
     aiEditClaudeCodeCliPath.value = "";
     aiEditClaudeCodeCliEnvRows.value = [];
+    aiEditPiAgentCliPath.value = "";
+    aiEditPiAgentCliEnvRows.value = [];
   }
 }
 

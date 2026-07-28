@@ -4917,6 +4917,8 @@ mod tests {
                 codex_cli_env: std::collections::HashMap::new(),
                 claude_code_cli_path: None,
                 claude_code_cli_env: std::collections::HashMap::new(),
+                pi_agent_cli_path: None,
+                pi_agent_cli_env: std::collections::HashMap::new(),
             },
         }
     }

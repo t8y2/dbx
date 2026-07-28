@@ -63,6 +63,8 @@ pub enum AiProvider {
     CodexCli,
     #[serde(rename = "claude-code-cli")]
     ClaudeCodeCli,
+    #[serde(rename = "pi-agent-cli")]
+    PiAgentCli,
     Custom,
 }
 
@@ -77,6 +79,7 @@ impl AiProvider {
             AiProvider::Ollama => "ollama",
             AiProvider::OpenaiCompatible => "openai-compatible",
             AiProvider::ClaudeCodeCli => "claude-code-cli",
+            AiProvider::PiAgentCli => "pi-agent-cli",
             AiProvider::CodexCli => "codex-cli",
             AiProvider::Custom => "custom",
         }
@@ -345,6 +348,10 @@ pub struct AiConfig {
     pub claude_code_cli_path: Option<String>,
     #[serde(default)]
     pub claude_code_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub pi_agent_cli_path: Option<String>,
+    #[serde(default)]
+    pub pi_agent_cli_env: HashMap<String, String>,
 }
 
 fn default_enable_thinking() -> bool {
@@ -554,7 +561,11 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
                 format!("{base}/chat/completions")
             }
         }
-        AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::Gemini => unreachable!(),
+        AiProvider::Claude
+        | AiProvider::CodexCli
+        | AiProvider::ClaudeCodeCli
+        | AiProvider::PiAgentCli
+        | AiProvider::Gemini => unreachable!(),
     }
 }
 
@@ -976,7 +987,7 @@ fn normalized_api_key(config: &AiConfig) -> &str {
 
 fn validate_config(config: &AiConfig) -> Result<(), String> {
     crate::ai_effort::validate_runtime_effort(config)?;
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
         return Ok(());
     }
     if provider_requires_api_key(&config.provider) && config.api_key.trim().is_empty() {
@@ -992,7 +1003,7 @@ fn validate_config(config: &AiConfig) -> Result<(), String> {
 }
 
 fn validate_model_list_config(config: &AiConfig) -> Result<(), String> {
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
         return Ok(());
     }
     if provider_requires_api_key(&config.provider) && config.api_key.trim().is_empty() {
@@ -1336,6 +1347,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
     let mut models = match config.provider {
         AiProvider::CodexCli => crate::ai_codex_cli::list_codex_models(config).await?,
         AiProvider::ClaudeCodeCli => crate::ai_claude_code_cli::list_claude_code_models(config).await?,
+        AiProvider::PiAgentCli => crate::ai_pi_agent_cli::list_pi_agent_models(config).await?,
         _ => {
             validate_model_list_config(config)?;
             let client = build_ai_http_client(config, 30)?;
@@ -1356,7 +1368,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                         list_openai_compatible_models(&client, config).await?
                     }
                 }
-                AiProvider::CodexCli | AiProvider::ClaudeCodeCli => unreachable!(),
+                AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
             }
         }
     };
@@ -1371,7 +1383,7 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
         return Err("Model is required".to_string());
     }
 
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
         let models = list_models_core(config).await?;
         return Ok(models
             .into_iter()
@@ -1850,6 +1862,9 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     if matches!(config.provider, AiProvider::ClaudeCodeCli) {
         return crate::ai_claude_code_cli::test_claude_code_connection(config).await;
     }
+    if matches!(config.provider, AiProvider::PiAgentCli) {
+        return crate::ai_pi_agent_cli::test_pi_agent_connection(config).await;
+    }
     validate_config(config)?;
 
     let client = build_ai_http_client(config, 15)?;
@@ -2028,7 +2043,7 @@ fn classify_error(msg: &str) -> &'static str {
 pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
     validate_config(&request.config)?;
 
-    if matches!(request.config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(request.config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
         return Err("CLI providers are only supported in DBX AI agent mode".to_string());
     }
 
@@ -2037,7 +2052,7 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
     match request.config.provider {
         AiProvider::Claude => call_claude(&client, request.clone()).await,
         AiProvider::Gemini => call_gemini(&client, request.clone()).await,
-        AiProvider::CodexCli | AiProvider::ClaudeCodeCli => unreachable!(),
+        AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -2073,7 +2088,7 @@ pub async fn stream(
 ) -> Result<(), String> {
     validate_config(&request.config)?;
 
-    if matches!(request.config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(request.config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
         return Err("CLI providers are only supported in DBX AI agent mode".to_string());
     }
 
@@ -2083,7 +2098,7 @@ pub async fn stream(
     match request.config.provider {
         AiProvider::Claude => stream_claude(&client, session_id, request, cancelled, &on_chunk).await,
         AiProvider::Gemini => stream_gemini(&client, session_id, request, cancelled, &on_chunk).await,
-        AiProvider::CodexCli | AiProvider::ClaudeCodeCli => unreachable!(),
+        AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -3194,7 +3209,7 @@ pub async fn stream_with_tools(
     on_chunk: impl Fn(AiStreamChunk),
 ) -> Result<(Vec<crate::agent_events::ToolCall>, Option<TokenUsage>), String> {
     validate_config(config)?;
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
         return Err("CLI providers are only supported through the DBX AI agent loop".to_string());
     }
 
@@ -3390,6 +3405,8 @@ mod tests {
                 codex_cli_env: Default::default(),
                 claude_code_cli_path: None,
                 claude_code_cli_env: Default::default(),
+                pi_agent_cli_path: None,
+                pi_agent_cli_env: Default::default(),
             },
             system_prompt: "Be concise.".to_string(),
             messages: vec![AiMessage {
@@ -3682,6 +3699,8 @@ mod tests {
         assert!(config.claude_code_cli_path.is_none());
         assert!(config.claude_code_cli_env.is_empty());
         assert!(config.codex_cli_env.is_empty());
+        assert!(config.pi_agent_cli_path.is_none());
+        assert!(config.pi_agent_cli_env.is_empty());
     }
 
     #[test]
@@ -3704,6 +3723,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         let err = build_ai_http_client(&config, 1).unwrap_err();
@@ -3731,6 +3752,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -3756,6 +3779,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -3781,6 +3806,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         assert_eq!(
@@ -3810,6 +3837,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
@@ -3836,6 +3865,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         for provider in [AiProvider::Ollama, AiProvider::OpenaiCompatible, AiProvider::Custom] {
@@ -3874,6 +3905,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&openai).unwrap(), "https://api.openai.com/v1/models");
 
@@ -3895,6 +3928,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
     }
@@ -3919,6 +3954,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         assert!(uses_anthropic_messages_api(&config));
@@ -3967,6 +4004,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         assert_eq!(resolve_endpoint(&config), "https://api.example.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
@@ -4027,6 +4066,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         assert_eq!(resolve_endpoint(&config), "https://api.openai.com/v1/responses");
@@ -4059,6 +4100,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         let api_key_headers = claude_headers(&config).unwrap();
@@ -4171,6 +4214,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         assert_eq!(resolve_ollama_show_endpoint(&config).unwrap(), "http://localhost:11434/api/show");
 
@@ -4200,6 +4245,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         assert_eq!(ollama_selected_model_tool_support(&config).await.unwrap(), Some(true));
@@ -4278,6 +4325,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         let models = vec![
             AiModelInfo::new("qwen3:0.6b", None),
@@ -4536,6 +4585,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
 
         let mut body = serde_json::json!({
@@ -4666,6 +4717,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,
@@ -4700,6 +4753,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -4740,6 +4795,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -4774,6 +4831,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -4835,6 +4894,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         let request = AiCompletionRequest {
             config: config.clone(),
@@ -4890,6 +4951,8 @@ mod tests {
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,

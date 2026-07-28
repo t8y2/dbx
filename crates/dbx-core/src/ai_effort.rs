@@ -79,7 +79,7 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         AiProvider::OpenaiCompatible | AiProvider::Custom => {
             Some(AiEffortCapability::FreeText { placeholder: None, source: AiCapabilitySource::Custom })
         }
-        AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli => None,
+        AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => None,
     }
 }
 
@@ -181,6 +181,7 @@ pub fn registry_source_url(provider: &AiProvider) -> Option<&'static str> {
         | AiProvider::OpenaiCompatible
         | AiProvider::CodexCli
         | AiProvider::ClaudeCodeCli
+        | AiProvider::PiAgentCli
         | AiProvider::Custom => None,
     }
 }
@@ -193,7 +194,10 @@ pub fn validate_runtime_effort(config: &AiConfig) -> Result<(), String> {
         return Ok(());
     }
 
-    if matches!(config.provider, AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+    if matches!(
+        config.provider,
+        AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli
+    ) {
         return match selection {
             AiEffortSelection::Enum(value) if !value.trim().is_empty() => Ok(()),
             _ => Err("Invalid effort selection for dynamic provider".to_string()),
@@ -244,7 +248,7 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
                 apply_openai_effort(object, &config.api_style, selection);
             }
         }
-        AiProvider::CodexCli | AiProvider::ClaudeCodeCli => {}
+        AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => {}
     }
 }
 
@@ -383,6 +387,8 @@ mod tests {
             codex_cli_env: HashMap::new(),
             claude_code_cli_path: None,
             claude_code_cli_env: HashMap::new(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         }
     }
 

@@ -1097,6 +1097,8 @@ mod tests {
                 codex_cli_env: Default::default(),
                 claude_code_cli_path: None,
                 claude_code_cli_env: Default::default(),
+                pi_agent_cli_path: None,
+                pi_agent_cli_env: Default::default(),
             },
         }
     }

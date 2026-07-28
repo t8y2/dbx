@@ -210,6 +210,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "pi-agent-cli": {
+    label: "Pi Coding Agent",
+    iconSlug: "pi",
+    provider: "pi-agent-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   custom: {
     label: "Custom",
     provider: "custom",
@@ -264,6 +274,8 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     codexCliEnv: normalizeAiEnv(config?.codexCliEnv),
     claudeCodeCliPath: config?.claudeCodeCliPath?.trim() || undefined,
     claudeCodeCliEnv: normalizeAiEnv(config?.claudeCodeCliEnv),
+    piAgentCliPath: config?.piAgentCliPath?.trim() || undefined,
+    piAgentCliEnv: normalizeAiEnv(config?.piAgentCliEnv),
   };
 }
 
@@ -1257,7 +1269,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 

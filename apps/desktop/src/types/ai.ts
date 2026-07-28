@@ -1,4 +1,4 @@
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "claude-code-cli" | "codex-cli" | "custom";
+export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "claude-code-cli" | "pi-agent-cli" | "codex-cli" | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
 export type AiAuthMethod = "api-key" | "bearer";
 export type AiEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
@@ -44,6 +44,8 @@ export interface AiConfig {
   codexCliEnv?: Record<string, string>;
   claudeCodeCliPath?: string | null;
   claudeCodeCliEnv?: Record<string, string>;
+  piAgentCliPath?: string | null;
+  piAgentCliEnv?: Record<string, string>;
   runtimeEffort?: AiEffortSelection | null;
 }
 

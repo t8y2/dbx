@@ -56,6 +56,7 @@ function configSignature(config: AiConfigItem): string {
     contextWindow: config.contextWindow ?? null,
     codexCliPath: config.codexCliPath ?? null,
     claudeCodeCliPath: config.claudeCodeCliPath ?? null,
+    piAgentCliPath: config.piAgentCliPath ?? null,
     connectionFingerprint: fingerprint(
       JSON.stringify({
         apiKey: config.apiKey,
@@ -63,6 +64,7 @@ function configSignature(config: AiConfigItem): string {
         proxyUrl: config.proxyUrl ?? "",
         codexCliEnv: sortedRecord(config.codexCliEnv),
         claudeCodeCliEnv: sortedRecord(config.claudeCodeCliEnv),
+        piAgentCliEnv: sortedRecord(config.piAgentCliEnv),
       }),
     ),
   });

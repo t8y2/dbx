@@ -1,6 +1,6 @@
 import type { AiConfig } from "@/types/ai";
 
-const CLI_PROVIDERS = new Set<AiConfig["provider"]>(["codex-cli", "claude-code-cli"]);
+const CLI_PROVIDERS = new Set<AiConfig["provider"]>(["codex-cli", "claude-code-cli", "pi-agent-cli"]);
 
 export function isAiConfigModelCandidate(config: AiConfig, requiresApiKey: boolean): boolean {
   // CLI providers resolve their model and credentials externally, so keep the existing eligibility bypass.

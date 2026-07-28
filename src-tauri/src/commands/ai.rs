@@ -195,6 +195,7 @@ fn resolve_cli_provider_config(mut config: AiConfig) -> AiConfig {
     let (path_slot, default_command) = match config.provider {
         AiProvider::CodexCli => (&mut config.codex_cli_path, "codex"),
         AiProvider::ClaudeCodeCli => (&mut config.claude_code_cli_path, "claude"),
+        AiProvider::PiAgentCli => (&mut config.pi_agent_cli_path, "pi"),
         _ => return config,
     };
     let command = path_slot.as_deref().map(str::trim).filter(|path| !path.is_empty()).unwrap_or(default_command);
@@ -209,7 +210,7 @@ fn resolve_cli_provider_config(mut config: AiConfig) -> AiConfig {
 }
 
 fn is_cli_provider(provider: &AiProvider) -> bool {
-    matches!(provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli)
+    matches!(provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli)
 }
 
 fn is_explicit_cli_path(command: &str) -> bool {

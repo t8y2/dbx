@@ -11,6 +11,16 @@ const taggedAiCliErrorKeys: Record<string, string> = {
   claudeCodeMcpStartupFailed: "ai.cliErrors.claudeCodeMcpStartupFailed",
   claudeCodeCommandLineTooLong: "ai.cliErrors.claudeCodeCommandLineTooLong",
   claudeCodeRunFailed: "ai.cliErrors.claudeCodeRunFailed",
+  piAgentNotInstalled: "ai.cliErrors.piAgentNotInstalled",
+  piAgentCliPathInvalid: "ai.cliErrors.piAgentCliPathInvalid",
+  piAgentEnvInvalid: "ai.cliErrors.piAgentEnvInvalid",
+  piAgentEnvReserved: "ai.cliErrors.piAgentEnvReserved",
+  piAgentNotAuthenticated: "ai.cliErrors.piAgentNotAuthenticated",
+  piAgentMcpStartupFailed: "ai.cliErrors.piAgentMcpStartupFailed",
+  piAgentTimeout: "ai.cliErrors.piAgentTimeout",
+  piAgentProtocolError: "ai.cliErrors.piAgentProtocolError",
+  piAgentModelInvalid: "ai.cliErrors.piAgentModelInvalid",
+  piAgentRunFailed: "ai.cliErrors.piAgentRunFailed",
 };
 
 const patterns: [RegExp, string][] = [

@@ -117,7 +117,7 @@ import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableI
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
-import { cacheObjectBrowserRows, getCachedObjectBrowserRows, type ObjectBrowserRowsCacheScope } from "@/lib/table/objectBrowserRowsCache";
+import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
 
 type ObjectFilter = ObjectBrowserFilter;
@@ -2207,6 +2207,7 @@ async function loadObjects(options?: { allowCached?: boolean }) {
   error.value = "";
   const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
   const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
+  const cacheWriteToken = createObjectBrowserRowsCacheWriteToken(request.scope);
   if (options?.allowCached) {
     const cachedRows = getCachedObjectBrowserRows(request.scope);
     if (cachedRows) {
@@ -2228,8 +2229,8 @@ async function loadObjects(options?: { allowCached?: boolean }) {
       rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
     });
     applyObjectBrowserRows(nextRows);
-    cacheObjectBrowserRows(request.scope, nextRows);
-    void loadObjectStatistics(request);
+    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
+    void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     error.value = e?.message || String(e);
@@ -2238,18 +2239,18 @@ async function loadObjects(options?: { allowCached?: boolean }) {
   }
 }
 
-async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle) {
+async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   if (!rows.value.some((row) => row.type === "TABLE")) return;
   try {
     const stats = await api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema);
     if (!objectBrowserRowsLoadGuard.isCurrent(request) || stats.length === 0) return;
-    mergeObjectStatistics(stats, request.scope.schema, request.scope);
+    mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, cachedAt);
   } catch (e) {
     console.debug("[ObjectBrowser] table statistics unavailable", e);
   }
 }
 
-function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheScope: ObjectBrowserRowsCacheScope) {
+function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
   rows.value = rows.value.map((row) => {
     if (row.type !== "TABLE") return row;
@@ -2261,7 +2262,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
     };
   });
-  cacheObjectBrowserRows(cacheScope, rows.value);
+  cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {

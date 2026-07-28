@@ -6119,6 +6119,25 @@ test("duplicating a table structure tab clones its unsaved draft", () => {
   assert.equal(tab.structureDraft.columns[0]!.name, "draft_name");
 });
 
+test("duplicateTab does not inherit savedSqlId or externalSqlPath", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  const tabId = store.createTab("conn-1", "db", "A", "query");
+  const tab = store.tabs.find((t) => t.id === tabId)!;
+  tab.savedSqlId = "saved-sql-1";
+  tab.externalSqlPath = "/path/to/sql";
+  tab.sql = "SELECT 1;";
+
+  store.duplicateTab(tabId);
+
+  const copy = store.tabs.find((item) => item.id !== tabId)!;
+  assert.equal(copy.savedSqlId, undefined);
+  assert.equal(copy.externalSqlPath, undefined);
+  assert.equal(copy.originalSql, "");
+  assert.equal(store.isTabDirty(copy), true);
+});
+
 test("reorderTab keeps pinned tabs before unpinned tabs after reorder", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();

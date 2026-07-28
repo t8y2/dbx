@@ -129,8 +129,12 @@ function startRenameTab(tab: QueryTab) {
   editingTitle.value = tab.title;
   nextTick(() => {
     const input = document.querySelector<HTMLInputElement>(`[data-tab-title-input="${tab.id}"]`);
-    input?.focus();
-    input?.select();
+    if (input) {
+      input.focus();
+      const dotIndex = input.value.lastIndexOf(".");
+      const selectEnd = dotIndex > 0 ? dotIndex : input.value.length;
+      input.setSelectionRange(0, selectEnd);
+    }
   });
 }
 

@@ -263,6 +263,8 @@ export default {
     damengSslProtocol: "SSL protocol",
     damengSslProtocolPlaceholder: "Optional, e.g. TLSv1.2",
     damengSslVerificationHint: "Certificate verification is controlled by the DM8 server ENABLE_ENCRYPT setting. Mode 5 verifies the server certificate; mode 4 encrypts without certificate verification.",
+    damengJvmOptions: "JVM Options",
+    damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
     redisTlsInsecure: "Skip certificate verification",
     redisTlsInsecureHint: "Equivalent to redis-cli --tls --insecure, for self-signed certificates or private CAs.",
     mysqlTlsMode: "TLS Mode",

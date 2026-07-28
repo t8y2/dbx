@@ -532,6 +532,7 @@ const hiveKrb5ConfPath = ref("");
 const hiveJaasConfigPath = ref("");
 const hiveUseSubjectCredsOnlyFalse = ref(false);
 const hiveExtraJavaOptions = ref("");
+const damengJvmOptions = ref("");
 const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
@@ -1177,6 +1178,14 @@ function resetHiveKerberosFields(config?: Pick<ConnectionConfig, "url_params" | 
   hiveJaasConfigPath.value = kerberos.jaasConfigPath;
   hiveUseSubjectCredsOnlyFalse.value = kerberos.useSubjectCredsOnlyFalse;
   hiveExtraJavaOptions.value = kerberos.extraJavaOptions;
+}
+
+function resetDamengJvmOptions(config?: Pick<ConnectionConfig, "agent_java_options">) {
+  if (config?.agent_java_options?.length) {
+    damengJvmOptions.value = config.agent_java_options.join("\n");
+  } else {
+    damengJvmOptions.value = "";
+  }
 }
 
 function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
@@ -1849,6 +1858,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     form.value.username = profile.user;
     form.value.url_params = profile.urlParams || "";
     form.value.agent_java_options = [];
+    damengJvmOptions.value = "";
     if (profile.host) {
       form.value.host = profile.host;
     }
@@ -2012,6 +2022,7 @@ watch(
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
       resetHiveKerberosFields(config.db_type === "hive" ? config : undefined);
+      resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
       selectedTransportLayerId.value = form.value.transport_layers?.[0]?.id || null;
@@ -2049,6 +2060,7 @@ watch(
       resetInfluxDbFields();
       resetElasticsearchProxyFields();
       resetHiveKerberosFields();
+      resetDamengJvmOptions();
       oceanbaseSubMode.value = "mysql";
       h2ConnectionMode.value = "file";
       dremioConnectionMode.value = "legacy";
@@ -3133,6 +3145,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     });
     config.url_params = hiveKerberos.urlParams;
     config.agent_java_options = hiveKerberos.agentJavaOptions;
+  } else if (config.db_type === "dameng") {
+    config.agent_java_options = damengJvmOptions.value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
   } else if (!(config.db_type === "jdbc" && config.driver_profile === JDBCX_DRIVER_PROFILE)) {
     config.agent_java_options = undefined;
   }
@@ -6074,6 +6091,15 @@ function openExternalUrl(url: string) {
                         {{ t("connection.localInfilePathHint") }}
                       </p>
                     </div>
+                  </div>
+
+                  <div v-if="form.db_type === 'dameng'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.damengJvmOptions") }}</Label>
+                    <textarea
+                      v-model="damengJvmOptions"
+                      class="col-span-3 min-h-16 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      :placeholder="t('connection.damengJvmOptionsPlaceholder')"
+                    />
                   </div>
 
                   <template v-if="isPrestoSqlConnection">

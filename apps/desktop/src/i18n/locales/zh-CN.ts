@@ -265,6 +265,8 @@ export default withEnglishFallback({
     damengSslProtocol: "SSL 协议",
     damengSslProtocolPlaceholder: "可选，例如 TLSv1.2",
     damengSslVerificationHint: "证书验证方式由 DM8 服务端 ENABLE_ENCRYPT 决定：模式 5 验证服务端证书，模式 4 仅加密而不验证证书。",
+    damengJvmOptions: "JVM 参数",
+    damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
     redisTlsInsecure: "跳过证书验证",
     redisTlsInsecureHint: "等价于 redis-cli --tls --insecure，适用于自签名证书或私有 CA。",
     mysqlTlsMode: "TLS 模式",

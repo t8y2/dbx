@@ -33,7 +33,7 @@ import { PRESTOSQL_DRIVER_DB_TYPE, prestoSqlBuiltinDriverRow, prestoSqlMavenBund
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { isOfflineDriverPackage, webDriverImportAccept } from "@/lib/driverStore/driverImportSelection";
 import { DRIVER_CATEGORIES, getCategoryForAgentDriver, assertAgentDriverCategoriesComplete } from "@/lib/connection/driver-category-definitions";
-import { selectUpdatableDrivers, selectStableDrivers } from "@/lib/connection/driverListFilter";
+import { selectUpdatableDrivers, selectStableDrivers, hasAnyUpdatableDriverMatching } from "@/lib/connection/driverListFilter";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -824,6 +824,20 @@ const categoryFilteredDrivers = computed(() => {
 // Global updatable drivers — always shown above category navigation, regardless of filter.
 const globalUpdatableDrivers = computed(() => selectUpdatableDrivers(builtinDriverRows.value));
 
+// Whether any global updatable driver matches the current search query or
+// selected category.  Used to decide whether the empty‑state message should be
+// suppressed: the global update section always renders *all* updatable drivers
+// (unfiltered), so the empty‑state must only be hidden when at least one of
+// those drivers is actually relevant to the user's current view.
+const hasMatchingUpdatableDrivers = computed(() =>
+  hasAnyUpdatableDriverMatching(globalUpdatableDrivers.value, {
+    searchQuery: driverSearchQuery.value,
+    selectedCategory: selectedDriverCategory.value,
+    driverMatchesSearch: (driver, query) => [driver.label, driver.db_type, driver.version, driver.installed_version, driverRequiresJavaRuntime(driver) ? driver.jre : "", driverCategoryLabel(driver.db_type)].filter(Boolean).join(" ").toLowerCase().includes(query),
+    driverCategory: (driver) => getCategoryForAgentDriver(driver.db_type),
+  }),
+);
+
 // Category-filtered drivers, excluding those already shown in the global update banner.
 const categoryStableDrivers = computed(() => selectStableDrivers(categoryFilteredDrivers.value));
 
@@ -1503,12 +1517,12 @@ watch(driverStoreTab, (tab) => {
                 <div v-if="drivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
                   {{ t("common.loading") }}
                 </div>
-                <!-- Empty: no search results (suppressed when updatable drivers appear above) -->
-                <div v-else-if="isDriverSearchActive && searchedDrivers.length === 0 && globalUpdatableDrivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
+                <!-- Empty: no search results (suppressed when updatable drivers match the search) -->
+                <div v-else-if="isDriverSearchActive && searchedDrivers.length === 0 && !hasMatchingUpdatableDrivers" class="py-12 text-center text-sm text-muted-foreground">
                   {{ t("driverStore.noMatchingDrivers") }}
                 </div>
-                <!-- Empty: no drivers in selected category (suppressed when updatable drivers appear above) -->
-                <div v-else-if="!isDriverSearchActive && categoryFilteredDrivers.length === 0 && globalUpdatableDrivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
+                <!-- Empty: no drivers in selected category (suppressed when updatable drivers match the category) -->
+                <div v-else-if="!isDriverSearchActive && categoryFilteredDrivers.length === 0 && !hasMatchingUpdatableDrivers" class="py-12 text-center text-sm text-muted-foreground">
                   {{ t("driverStore.noMatchingDrivers") }}
                 </div>
 

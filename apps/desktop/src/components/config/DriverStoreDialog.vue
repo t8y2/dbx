@@ -786,11 +786,14 @@ function driverCategoryLabel(dbType: string): string {
   return catDef ? t(catDef.titleKey) : t("driverStore.driverCategoryAll");
 }
 
-// Filter all drivers through search (or pass all through if no search)
+// Search only stable drivers — updatable drivers already appear in the global update section.
+const stableBuiltinDrivers = computed(() => selectStableDrivers(builtinDriverRows.value));
+
+// Filter stable drivers through search (or pass all through if no search)
 const searchedDrivers = computed(() => {
   const query = driverSearchQuery.value;
-  if (!query) return builtinDriverRows.value;
-  return builtinDriverRows.value.filter((driver) => [driver.label, driver.db_type, driver.version, driver.installed_version, driverRequiresJavaRuntime(driver) ? driver.jre : "", driverCategoryLabel(driver.db_type)].filter(Boolean).join(" ").toLowerCase().includes(query));
+  if (!query) return stableBuiltinDrivers.value;
+  return stableBuiltinDrivers.value.filter((driver) => [driver.label, driver.db_type, driver.version, driver.installed_version, driverRequiresJavaRuntime(driver) ? driver.jre : "", driverCategoryLabel(driver.db_type)].filter(Boolean).join(" ").toLowerCase().includes(query));
 });
 
 // When search is active: group by category

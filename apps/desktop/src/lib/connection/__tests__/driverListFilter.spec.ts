@@ -78,3 +78,17 @@ describe("partition invariant", () => {
     expect(updatable.length + stable.length).toBe(drivers.length);
   });
 });
+
+describe("search deduplication", () => {
+  it("updatable drivers are excluded from stable so they only appear in the global update section", () => {
+    const drivers: AgentDriverInfo[] = [driver({ db_type: "neo4j", label: "Neo4j", update_available: true }), driver({ db_type: "oracle", label: "Oracle", update_available: true }), driver({ db_type: "postgres", label: "PostgreSQL", update_available: false })];
+
+    const stable = selectStableDrivers(drivers);
+
+    // Searching for "Neo4j" in stable should produce no results — the driver
+    // already appears in the global update section above and must not be
+    // duplicated in the category-filtered search results below.
+    const searchHit = stable.some((d) => d.db_type === "neo4j");
+    expect(searchHit).toBe(false);
+  });
+});

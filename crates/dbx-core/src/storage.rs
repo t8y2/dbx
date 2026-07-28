@@ -2067,6 +2067,54 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     persist_nacos_auth_secrets_in_tx(tx, &config)
 }
 
+fn preserve_unreadable_connections_for_replacement(
+    tx: &rusqlite::Transaction<'_>,
+    replacement_ids: &HashSet<String>,
+) -> Result<Vec<String>, String> {
+    let unreadable_rows = {
+        let mut stmt = tx.prepare("SELECT id, config_json FROM connections").map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|(id, json)| {
+                serde_json::from_str::<ConnectionConfig>(&json).err().map(|error| (id, json, error.to_string()))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    tx.execute("DELETE FROM connections", []).map_err(|e| e.to_string())?;
+
+    let mut preserved_ids = Vec::new();
+    for (id, json, error) in unreadable_rows {
+        if replacement_ids.contains(&id) {
+            continue;
+        }
+        warn!("Preserving unreadable saved connection '{}' during connection list update: {}", id, error);
+        tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![id, json])
+            .map_err(|e| e.to_string())?;
+        preserved_ids.push(id);
+    }
+    Ok(preserved_ids)
+}
+
+fn delete_unreferenced_connection_secrets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    retained_ids: &[String],
+) -> Result<(), String> {
+    if retained_ids.is_empty() {
+        tx.execute("DELETE FROM connection_secrets", []).map_err(|e| e.to_string())?;
+    } else {
+        let placeholders = vec!["?"; retained_ids.len()].join(",");
+        let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({placeholders})");
+        let ids = retained_ids.iter().map(|id| id as &dyn ToSql);
+        tx.execute(&sql, params_from_iter(ids)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 impl Storage {
     pub async fn save_connection_metadata_preserving_secrets(
         &self,
@@ -2075,7 +2123,8 @@ impl Storage {
         let configs = configs.to_vec();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM connections", []).map_err(|e| e.to_string())?;
+            let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+            let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
 
             for config in &configs {
                 let config = config.canonicalized();
@@ -2095,14 +2144,8 @@ impl Storage {
                     .map_err(|e| e.to_string())?;
             }
 
-            if configs.is_empty() {
-                tx.execute("DELETE FROM connection_secrets", []).map_err(|e| e.to_string())?;
-            } else {
-                let placeholders = vec!["?"; configs.len()].join(",");
-                let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({placeholders})");
-                let ids = configs.iter().map(|config| &config.id as &dyn ToSql);
-                tx.execute(&sql, params_from_iter(ids)).map_err(|e| e.to_string())?;
-            }
+            retained_ids.extend(configs.iter().map(|config| config.id.clone()));
+            delete_unreferenced_connection_secrets_in_tx(&tx, &retained_ids)?;
 
             tx.commit().map_err(|e| e.to_string())
         })
@@ -2113,20 +2156,15 @@ impl Storage {
         let configs = configs.to_vec();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM connections", []).map_err(|e| e.to_string())?;
+            let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+            let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
 
             for config in &configs {
                 persist_connection_in_tx(&tx, config)?;
             }
 
-            if configs.is_empty() {
-                tx.execute("DELETE FROM connection_secrets", []).map_err(|e| e.to_string())?;
-            } else {
-                let placeholders = vec!["?"; configs.len()].join(",");
-                let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({placeholders})");
-                let ids = configs.iter().map(|config| &config.id as &dyn ToSql);
-                tx.execute(&sql, params_from_iter(ids)).map_err(|e| e.to_string())?;
-            }
+            retained_ids.extend(configs.iter().map(|config| config.id.clone()));
+            delete_unreferenced_connection_secrets_in_tx(&tx, &retained_ids)?;
 
             tx.commit().map_err(|e| e.to_string())
         })
@@ -2199,7 +2237,13 @@ impl Storage {
 
         let mut configs = Vec::new();
         for (id, json) in rows {
-            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            let mut config: ConnectionConfig = match serde_json::from_str(&json) {
+                Ok(config) => config,
+                Err(error) => {
+                    warn!("Skipping unreadable saved connection '{}': {}", id, error);
+                    continue;
+                }
+            };
             config.password = self.get_secret(&id, "password").await?.unwrap_or_default();
             for index in 0..config.transport_layers.len() {
                 let layer_for_key = config.transport_layers[index].clone();
@@ -4012,6 +4056,55 @@ mod tests {
         let loaded = storage.load_connections().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(mq_token(&loaded[0]), Some("mq-token-secret"));
+    }
+
+    #[tokio::test]
+    async fn unreadable_saved_connections_do_not_block_loading_or_get_deleted_by_list_saves() {
+        let path = temp_db_path("unreadable-connection-preservation");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut known = mq_connection("known", "known-secret");
+        storage.save_connections(std::slice::from_ref(&known)).await.unwrap();
+
+        let future_json = serde_json::json!({
+            "id": "future",
+            "name": "Future database",
+            "db_type": "future_database"
+        })
+        .to_string();
+        let inserted_json = future_json.clone();
+        storage
+            .with_conn(move |conn| {
+                let tx = conn.transaction().map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT INTO connections (id, config_json) VALUES (?1, ?2)",
+                    rusqlite::params!["future", inserted_json],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?1, ?2, ?3)",
+                    rusqlite::params!["future", "password", "future-secret"],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.commit().map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "known");
+
+        known.name = "Known updated".to_string();
+        storage.save_connection_metadata_preserving_secrets(std::slice::from_ref(&known)).await.unwrap();
+        assert_eq!(raw_connection_json(&storage, "future").await, future_json);
+        assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
+
+        storage.save_connections(&[]).await.unwrap();
+        assert!(storage.load_connections().await.unwrap().is_empty());
+        assert_eq!(raw_connection_json(&storage, "future").await, future_json);
+        assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

@@ -86,6 +86,14 @@ pub struct AiAgentStreamRequest {
     pub mode: String,
     #[serde(default)]
     pub allow_write_sql: bool,
+    /// When allow_write_sql is true, the specific SQL the user confirmed.
+    #[serde(default)]
+    pub confirmed_write_sql: Option<String>,
+    /// Connection/database snapshot at confirmation time; verified at this boundary.
+    #[serde(default)]
+    pub confirmed_connection_id: Option<String>,
+    #[serde(default)]
+    pub confirmed_database: Option<String>,
 }
 
 fn default_agent_mode() -> String {
@@ -336,16 +344,31 @@ pub async fn ai_agent_stream(
         log::warn!("Failed to load max_agent_turns setting, using default: {err}");
         dbx_core::agent_loop::DEFAULT_MAX_AGENT_TURNS
     });
+    // Reject the confirmed-write grant when the connection or database changed
+    // between the user's confirmation and this backend request (defense-in-depth).
+    let (allow_write_sql, confirmed_write_sql) = dbx_core::agent_tools::verify_confirmed_target(
+        Some(body.allow_write_sql),
+        body.confirmed_write_sql,
+        body.confirmed_connection_id,
+        body.confirmed_database,
+        &body.connection_id,
+        &body.database,
+    );
+    // Writes are only allowed when a specific SQL statement was confirmed —
+    // an empty confirmed_write_sql is treated as "no confirmation" so the
+    // agent cannot execute arbitrary write/DDL statements.
+    let sql_permissions = dbx_core::agent_tools::confirmed_write_sql_permissions(
+        production_database,
+        allow_write_sql.unwrap_or(false),
+        confirmed_write_sql,
+    );
     let agent_ctx = AgentLoopContext {
         state: state.app.clone(),
         connection_id: body.connection_id,
         database: body.database,
         db_type: parsed_db_type,
         cli_mcp_server_command: None,
-        sql_permissions: dbx_core::agent_tools::AgentSqlPermissions {
-            allow_writes: !production_database && body.allow_write_sql,
-            allow_dangerous: !production_database && body.allow_write_sql,
-        },
+        sql_permissions,
         max_agent_turns,
     };
 

@@ -42,8 +42,8 @@ const peekAdvancedExpanded = ref(false);
 const peekLoading = ref(false);
 const peekError = ref<string>();
 const peekMessages = ref<PeekedMessage[]>([]);
-const peekPartition = ref("");
-const peekOffset = ref("");
+const peekPartition = ref<string | number>("");
+const peekOffset = ref<string | number>("");
 const peekCount = ref(20);
 
 let successTimer: ReturnType<typeof setTimeout> | undefined;
@@ -196,11 +196,6 @@ async function sendMessage() {
       if (sendNamespace) req.namespace = sendNamespace;
     }
     success.value = await mqSendMessage(props.connectionId, req);
-    if (canBrowseMessages.value) {
-      peekPartition.value = String(success.value.partition);
-      peekOffset.value = String(success.value.offset);
-      void loadMessages();
-    }
     messageValue.value = "";
     messageKey.value = "";
     clearSuccessLater();
@@ -223,8 +218,8 @@ async function loadMessages() {
     const count = Math.max(1, Math.min(100, Number(peekCount.value) || 20));
     peekCount.value = count;
     const options: { partition?: number; offset?: number } = {};
-    const partitionText = peekPartition.value.trim();
-    const offsetText = peekOffset.value.trim();
+    const partitionText = String(peekPartition.value).trim();
+    const offsetText = String(peekOffset.value).trim();
     if (partitionText !== "") {
       const partition = parseNonNegativeSafeInteger(partitionText);
       if (partition == null) {

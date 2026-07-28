@@ -159,7 +159,7 @@ watch([policyKey, () => groups.value.allowed.length], () => {
         :tabindex="scopeMode === 'all' ? 0 : -1"
         variant="outline"
         class="settings-choice-card h-auto justify-center border p-3"
-        :class="[scopeMode === 'all' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : '', disabled ? 'cursor-not-allowed opacity-50' : '']"
+        :class="[scopeMode === 'all' ? 'dbx-choice-selected' : '', disabled ? 'cursor-not-allowed opacity-50' : '']"
         @click="setScopeMode('all')"
         @keydown="onScopeModeKeydown($event, 'all')"
       >
@@ -177,7 +177,7 @@ watch([policyKey, () => groups.value.allowed.length], () => {
         :tabindex="scopeMode === 'selected' ? 0 : -1"
         variant="outline"
         class="settings-choice-card h-auto justify-center border p-3"
-        :class="[scopeMode === 'selected' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : '', disabled ? 'cursor-not-allowed opacity-50' : '']"
+        :class="[scopeMode === 'selected' ? 'dbx-choice-selected' : '', disabled ? 'cursor-not-allowed opacity-50' : '']"
         @click="setScopeMode('selected')"
         @keydown="onScopeModeKeydown($event, 'selected')"
       >

@@ -27,6 +27,12 @@ export type ActiveTabSidebarTarget =
       collectionName: string;
     }
   | {
+      type: "hbase-table";
+      connectionId: string;
+      namespace: string;
+      tableName: string;
+    }
+  | {
       type: "etcd-root";
       connectionId: string;
     }
@@ -112,6 +118,16 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     };
   }
 
+  if (tab.mode === "hbase") {
+    if (!tab.sql) return null;
+    return {
+      type: "hbase-table",
+      connectionId: tab.connectionId,
+      namespace: tab.database,
+      tableName: tab.sql || tab.title,
+    };
+  }
+
   if (tab.mode === "etcd") {
     return { type: "etcd-root", connectionId: tab.connectionId };
   }
@@ -174,6 +190,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "vector-collection") {
     return node.type === "vector-collection" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.collectionName;
+  }
+
+  if (target.type === "hbase-table") {
+    return node.type === "table" && node.connectionId === target.connectionId && node.database === target.namespace && node.label === target.tableName;
   }
 
   if (target.type === "query-context") {

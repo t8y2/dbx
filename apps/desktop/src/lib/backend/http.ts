@@ -121,6 +121,7 @@ import type {
   MongoGridFsFileInfo,
   AppSupportInfo,
   PromptTemplate,
+  SshPromptResolution,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
@@ -318,6 +319,10 @@ export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<voi
 
 export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
   return post("/api/tunnel-profiles/test", profile);
+}
+
+export async function resolveSshPrompt(resolution: SshPromptResolution): Promise<void> {
+  await post("/api/ssh/prompts/resolve", resolution);
 }
 
 export async function readKeychainPassword(_service: string): Promise<string> {
@@ -1137,11 +1142,24 @@ function isAgentEvent(v: unknown): v is import("@/lib/backend/tauri").AgentEvent
   return typeof v === "object" && v !== null && "type" in v && typeof (v as Record<string, unknown>).type === "string";
 }
 
-export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: import("@/lib/backend/tauri").AgentEvent) => void, mode?: string, allowWriteSql = false, signal?: AbortSignal): Promise<string> {
+export async function aiAgentStream(
+  sessionId: string,
+  request: AiCompletionRequest,
+  connectionId: string,
+  database: string,
+  dbType: string,
+  onEvent: (event: import("@/lib/backend/tauri").AgentEvent) => void,
+  mode?: string,
+  allowWriteSql = false,
+  confirmedWriteSql?: string,
+  confirmedConnectionId?: string,
+  confirmedDatabase?: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const res = await fetch(apiUrl("/api/ai/agent-stream"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, request, connectionId, database, dbType, mode: mode || "ask", allowWriteSql }),
+    body: JSON.stringify({ sessionId, request, connectionId, database, dbType, mode: mode || "ask", allowWriteSql, confirmedWriteSql, confirmedConnectionId, confirmedDatabase }),
     signal,
   });
   if (!res.ok) throw new Error(await res.text());
@@ -2293,6 +2311,38 @@ export async function nacosGetDashboard(connectionId: string, query: NacosDashbo
 
 export async function nacosRawRequest(connectionId: string, req: NacosRawRequest): Promise<NacosRawResponse> {
   return post("/api/nacos/raw", { connectionId, req });
+}
+
+// ---------------------------------------------------------------------------
+// HBase
+// ---------------------------------------------------------------------------
+
+export async function hbaseGetTableSchema(connectionId: string, namespace: string, table: string): Promise<import("@/types/hbase").HBaseTableSchema> {
+  return post("/api/hbase/table-schema", { connectionId, namespace, table });
+}
+
+export async function hbaseScanRows(connectionId: string, namespace: string, table: string, rowKeyPrefix: string | undefined, limit: number): Promise<import("@/types/hbase").HBaseScanResult> {
+  return post("/api/hbase/scan-rows", { connectionId, namespace, table, rowKeyPrefix, limit });
+}
+
+export async function hbaseGetRow(connectionId: string, namespace: string, table: string, rowKey: string, rowKeyEncoding?: import("@/types/hbase").HBaseValueEncoding): Promise<import("@/types/hbase").HBaseRow | null> {
+  return post("/api/hbase/get-row", { connectionId, namespace, table, rowKey, rowKeyEncoding });
+}
+
+export async function hbasePutRow(connectionId: string, namespace: string, table: string, input: import("@/types/hbase").HBasePutRowInput): Promise<void> {
+  return post("/api/hbase/put-row", { connectionId, namespace, table, input });
+}
+
+export async function hbaseDeleteRow(connectionId: string, namespace: string, table: string, rowKey: string, rowKeyEncoding?: import("@/types/hbase").HBaseValueEncoding): Promise<void> {
+  return post("/api/hbase/delete-row", { connectionId, namespace, table, rowKey, rowKeyEncoding });
+}
+
+export async function hbaseCreateTable(connectionId: string, namespace: string, table: string, columnFamilies: string[]): Promise<void> {
+  return post("/api/hbase/create-table", { connectionId, namespace, table, columnFamilies });
+}
+
+export async function hbaseDeleteTable(connectionId: string, namespace: string, table: string): Promise<void> {
+  return post("/api/hbase/delete-table", { connectionId, namespace, table });
 }
 
 // ---------------------------------------------------------------------------

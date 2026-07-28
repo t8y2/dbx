@@ -28,6 +28,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   mongodb: { connection: "special" },
   oracle: { deferred: "Oracle schemas are users; database creation is not a normal connected DDL action" },
   elasticsearch: { deferred: "index creation is not modeled as database creation" },
+  hbase: { deferred: "namespace creation needs dedicated HBase namespace options" },
   qdrant: { deferred: "collection creation is separate from database creation" },
   milvus: { deferred: "collection/database lifecycle needs a dedicated vector workflow" },
   weaviate: { deferred: "collection creation is separate from database creation" },

@@ -455,6 +455,7 @@ pub enum DatabaseType {
     Oracle,
     #[serde(rename = "elasticsearch")]
     Elasticsearch,
+    Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
     #[serde(rename = "milvus")]
@@ -1005,6 +1006,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -1154,6 +1156,7 @@ impl ConnectionConfig {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -2775,6 +2778,20 @@ mod tests {
         config.ssl = false;
         config.url_params = Some("secure=true".to_string());
         assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+    }
+
+    #[test]
+    fn hbase_rest_url_uses_http_or_https_without_embedding_credentials() {
+        let mut config = mysql_config("hbase-user", "secret", None);
+        config.db_type = DatabaseType::Hbase;
+        config.port = 8080;
+
+        assert_eq!(config.connection_url(), "http://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "http://10.1.2.3:8080");
+
+        config.ssl = true;
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "https://10.1.2.3:8080");
     }
 
     #[test]

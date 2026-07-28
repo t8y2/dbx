@@ -1124,6 +1124,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
+        PoolKind::HBase(client) => db::hbase_driver::list_namespaces(client).await,
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             let con = con.lock().map_err(|e| e.to_string())?;
@@ -2472,6 +2473,9 @@ async fn list_tables_once(
         PoolKind::Elasticsearch(client) => db::elasticsearch_driver::list_indices(client)
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
+        PoolKind::HBase(client) => db::hbase_driver::list_tables(client, database)
+            .await
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::VectorDb(client) => db::vector_driver::list_collections(client)
             .await
@@ -5214,6 +5218,9 @@ pub async fn get_columns_core_for_session(
                 .map(deduplicate_column_infos),
             PoolKind::Elasticsearch(client) => {
                 db::elasticsearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
+            PoolKind::HBase(client) => {
+                db::hbase_driver::get_columns(client, database, table).await.map(deduplicate_column_infos)
             }
             _ => Ok(vec![]),
         }

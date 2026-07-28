@@ -1697,6 +1697,7 @@ pub async fn do_execute(
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
+        PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
     };
     result.map(normalize_query_result_for_js)
 }
@@ -2594,6 +2595,7 @@ pub async fn execute_statements_in_transaction_on_pool(
             | PoolKind::SqlServer(_)
             | PoolKind::Agent(_) => TxPath::Explicit,
             PoolKind::MessageQueue | PoolKind::Mqtt(_) | PoolKind::Nacos => TxPath::None,
+            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
             #[cfg(feature = "duckdb-bundled")]
             PoolKind::DuckDb(_)
             | PoolKind::DuckDbWorker(_)

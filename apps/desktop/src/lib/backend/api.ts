@@ -67,6 +67,7 @@ export const loadConnections = forward("loadConnections");
 export const loadTunnelProfiles = forward("loadTunnelProfiles");
 export const saveTunnelProfiles = forward("saveTunnelProfiles");
 export const testTunnelProfile = forward("testTunnelProfile");
+export const resolveSshPrompt = forward("resolveSshPrompt");
 export const readKeychainPassword = forward("readKeychainPassword");
 export const readKeychainPasswords = forward("readKeychainPasswords");
 export const decryptConfig = forward("decryptConfig");
@@ -423,6 +424,15 @@ export const zookeeperListPrefix = forward("zookeeperListPrefix");
 export const zookeeperGet = forward("zookeeperGet");
 export const zookeeperPut = forward("zookeeperPut");
 export const zookeeperDelete = forward("zookeeperDelete");
+
+// HBase
+export const hbaseGetTableSchema = forward("hbaseGetTableSchema");
+export const hbaseScanRows = forward("hbaseScanRows");
+export const hbaseGetRow = forward("hbaseGetRow");
+export const hbasePutRow = forward("hbasePutRow");
+export const hbaseDeleteRow = forward("hbaseDeleteRow");
+export const hbaseCreateTable = forward("hbaseCreateTable");
+export const hbaseDeleteTable = forward("hbaseDeleteTable");
 
 // Message Queue
 export const mqTestConnection = forward("mqTestConnection");

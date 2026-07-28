@@ -74,6 +74,13 @@ import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql"
 import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 
+export interface SshPromptResolution {
+  id: string;
+  action: "accept" | "reject" | "secret";
+  remember?: boolean;
+  secret?: string;
+}
+
 export interface AgentDriverInfo {
   db_type: string;
   label: string;
@@ -390,7 +397,20 @@ export type AgentEvent =
   | { type: "context_compacted"; summary: string; summary_tokens: number; compacted_messages: number; estimated_before: number; estimated_after: number }
   | { type: "error"; message: string };
 
-export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: AgentEvent) => void, mode?: string, allowWriteSql = false, _signal?: AbortSignal): Promise<string> {
+export async function aiAgentStream(
+  sessionId: string,
+  request: AiCompletionRequest,
+  connectionId: string,
+  database: string,
+  dbType: string,
+  onEvent: (event: AgentEvent) => void,
+  mode?: string,
+  allowWriteSql = false,
+  confirmedWriteSql?: string,
+  confirmedConnectionId?: string,
+  confirmedDatabase?: string,
+  _signal?: AbortSignal,
+): Promise<string> {
   const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
     onEvent(event.payload);
     if (event.payload.type === "agent_end" || event.payload.type === "error") {
@@ -398,7 +418,7 @@ export async function aiAgentStream(sessionId: string, request: AiCompletionRequ
     }
   });
   try {
-    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType, mode, allowWriteSql });
+    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType, mode, allowWriteSql, confirmedWriteSql, confirmedConnectionId, confirmedDatabase });
   } catch (e) {
     unlisten();
     throw e;
@@ -1267,6 +1287,10 @@ export async function testTunnelProfile(profile: TunnelProfile): Promise<string>
   return invoke("test_tunnel_profile", { profile });
 }
 
+export async function resolveSshPrompt(resolution: SshPromptResolution): Promise<void> {
+  await invoke("resolve_ssh_prompt", { resolution });
+}
+
 export async function readKeychainPassword(service: string): Promise<string> {
   return invoke("read_keychain_password", { service, account: null });
 }
@@ -2062,6 +2086,35 @@ export async function zookeeperDelete(connectionId: string, key: string): Promis
   return invoke("zookeeper_delete", { connectionId, key });
 }
 
+// --- HBase ---
+export async function hbaseGetTableSchema(connectionId: string, namespace: string, table: string): Promise<import("@/types/hbase").HBaseTableSchema> {
+  return invoke("hbase_get_table_schema", { connectionId, namespace, table });
+}
+
+export async function hbaseScanRows(connectionId: string, namespace: string, table: string, rowKeyPrefix: string | undefined, limit: number): Promise<import("@/types/hbase").HBaseScanResult> {
+  return invoke("hbase_scan_rows", { connectionId, namespace, table, rowKeyPrefix, limit });
+}
+
+export async function hbaseGetRow(connectionId: string, namespace: string, table: string, rowKey: string, rowKeyEncoding?: import("@/types/hbase").HBaseValueEncoding): Promise<import("@/types/hbase").HBaseRow | null> {
+  return invoke("hbase_get_row", { connectionId, namespace, table, rowKey, rowKeyEncoding });
+}
+
+export async function hbasePutRow(connectionId: string, namespace: string, table: string, input: import("@/types/hbase").HBasePutRowInput): Promise<void> {
+  return invoke("hbase_put_row", { connectionId, namespace, table, input });
+}
+
+export async function hbaseDeleteRow(connectionId: string, namespace: string, table: string, rowKey: string, rowKeyEncoding?: import("@/types/hbase").HBaseValueEncoding): Promise<void> {
+  return invoke("hbase_delete_row", { connectionId, namespace, table, rowKey, rowKeyEncoding });
+}
+
+export async function hbaseCreateTable(connectionId: string, namespace: string, table: string, columnFamilies: string[]): Promise<void> {
+  return invoke("hbase_create_table", { connectionId, namespace, table, columnFamilies });
+}
+
+export async function hbaseDeleteTable(connectionId: string, namespace: string, table: string): Promise<void> {
+  return invoke("hbase_delete_table", { connectionId, namespace, table });
+}
+
 // --- Document stores ---
 export interface DocumentQueryResult {
   documents: any[];
@@ -2472,6 +2525,7 @@ export interface TransferProgress {
   status: "running" | "tableDone" | "done" | "error" | "cancelled";
   error: string | null;
   terminal: boolean;
+  transferFailuresOmitted?: number;
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {

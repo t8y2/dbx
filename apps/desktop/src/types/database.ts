@@ -12,6 +12,7 @@ export type DatabaseType =
   | "mongodb"
   | "oracle"
   | "elasticsearch"
+  | "hbase"
   | "qdrant"
   | "milvus"
   | "weaviate"
@@ -910,6 +911,31 @@ export interface QueryTab {
   completionContextVersion?: number;
   mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "mqtt" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
   mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "etcd-dashboard" | "zookeeper" | "mq" | "nacos" | "nacos-dashboard" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
+  mode:
+    | "data"
+    | "query"
+    | "redis"
+    | "redis-dashboard"
+    | "mongo"
+    | "mongo-gridfs"
+    | "mongo-bucket"
+    | "vector"
+    | "hbase"
+    | "etcd"
+    | "etcd-dashboard"
+    | "zookeeper"
+    | "mq"
+    | "nacos"
+    | "nacos-dashboard"
+    | "objects"
+    | "structure"
+    | "users"
+    | "dameng-jobs"
+    | "processlist"
+    | "mysql-dashboard"
+    | "postgres-dashboard";
+  /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
+  hbaseCreateTableOnOpen?: boolean;
   mqTenant?: string;
   mqInitialTab?: "topics";
   mqttInitialTopic?: string;

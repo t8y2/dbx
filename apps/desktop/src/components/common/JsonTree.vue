@@ -209,13 +209,13 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
 
 <style>
 .json-tree {
-  --json-tree-key: #1d4ed8;
-  --json-tree-string: #15803d;
-  --json-tree-number: #b45309;
-  --json-tree-boolean: #7c3aed;
-  --json-tree-null: #64748b;
+  --json-tree-key: var(--info);
+  --json-tree-string: var(--success);
+  --json-tree-number: var(--warning);
+  --json-tree-boolean: color-mix(in srgb, var(--primary) 70%, var(--info));
+  --json-tree-null: var(--muted-foreground);
 
-  color: hsl(var(--foreground));
+  color: var(--foreground);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -245,7 +245,7 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
 }
 
 .json-tree-row:hover {
-  background: hsl(var(--muted) / 0.5);
+  background: color-mix(in srgb, var(--muted) 50%, transparent);
 }
 
 .json-tree-toggle {
@@ -257,16 +257,16 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
   align-items: center;
   justify-content: center;
   border-radius: 3px;
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
 }
 
 .json-tree-toggle:hover {
-  background: hsl(var(--accent));
-  color: hsl(var(--foreground));
+  background: var(--accent);
+  color: var(--foreground);
 }
 
 .json-tree-toggle:focus-visible {
-  outline: 2px solid hsl(var(--ring));
+  outline: 2px solid var(--ring);
   outline-offset: 1px;
 }
 
@@ -299,11 +299,11 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
 .json-tree-index,
 .json-tree-punctuation,
 .json-tree-summary {
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
 }
 
 .json-tree-bracket {
-  color: hsl(var(--foreground));
+  color: var(--foreground);
   font-weight: 650;
 }
 

@@ -71,7 +71,6 @@ import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference"
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
-import { dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
@@ -139,7 +138,7 @@ import { canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridP
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
-import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG } from "@/lib/dataGrid/dataGridPaintTheme";
+import { DATA_GRID_DARK_ROW_NUMBER_BG, DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
@@ -4374,16 +4373,16 @@ function isNull(value: unknown): boolean {
 
 function rowNumberStatusClass(item: RowItem): string {
   if (item.status === "draft") {
-    return "border-muted-foreground/20 bg-muted/20 font-semibold text-muted-foreground";
+    return "data-grid-row-number--status-draft font-semibold";
   }
   if (item.status === "new") {
-    return "border-emerald-500/40 bg-emerald-500/15 font-semibold text-emerald-700 dark:text-emerald-300";
+    return "data-grid-row-number--status-new font-semibold";
   }
   if (item.status === "edited") {
-    return "border-amber-500/40 bg-amber-500/15 font-semibold text-amber-700 dark:text-amber-300";
+    return "data-grid-row-number--status-edited font-semibold";
   }
   if (item.status === "deleted") {
-    return "border-destructive/40 bg-destructive/15 font-semibold text-destructive line-through";
+    return "data-grid-row-number--status-deleted font-semibold line-through";
   }
   return "text-muted-foreground";
 }
@@ -4394,53 +4393,27 @@ function rowCellsUseSelectionVisual(rowId: number): boolean {
 
 function dataGridRowStyle(item: RowItem): CSSProperties {
   const dark = isDark.value || (typeof document !== "undefined" && document.documentElement.classList.contains("dark"));
-  const activeRowBg = dataGridActiveRowBackground(dark);
-  const rowBg = item.isDeleted
-    ? dark
-      ? "rgb(55, 31, 32)"
-      : "rgb(255, 244, 244)"
+  const deletedBg = "var(--color-error-bg, color-mix(in srgb, var(--destructive) 12%, transparent))";
+  const newBg = "var(--success-bg, color-mix(in srgb, var(--success) 12%, transparent))";
+  const editedBg = "var(--warning-bg, color-mix(in srgb, var(--warning) 14%, transparent))";
+  const activeBg = `var(--data-grid-cell-active-bg, ${dataGridActiveRowBackground(dark)})`;
+  const resolvedRowBg = item.isDeleted
+    ? deletedBg
     : isRowActive(item.displayIndex)
-      ? activeRowBg
-      : item.isNew
-        ? dark
-          ? "rgb(51, 51, 55)"
-          : "rgb(243, 243, 243)"
-        : item.isDraft
-          ? dark
-            ? "rgb(51, 51, 55)"
-            : "rgb(243, 243, 243)"
-          : item.displayIndex % 2 === 1
-            ? `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
-            : dark
-              ? "rgb(19, 20, 22)"
-              : "rgb(255, 255, 255)";
-  const rowNumberBg =
-    item.status === "new"
-      ? dark
-        ? "rgb(33, 45, 40)"
-        : "rgb(219, 244, 233)"
-      : item.status === "edited"
-        ? dark
-          ? "rgb(48, 41, 28)"
-          : "rgb(253, 241, 219)"
-        : item.status === "deleted"
-          ? dark
-            ? "rgb(55, 31, 32)"
-            : "rgb(255, 244, 244)"
-          : isRowActive(item.displayIndex) && !item.isDeleted
-            ? activeRowBg
-            : dark
-              ? "rgb(35, 37, 42)"
-              : "rgb(255, 255, 255)";
+      ? activeBg
+      : item.isNew || item.isDraft
+        ? "color-mix(in srgb, var(--muted) 80%, var(--background))"
+        : item.displayIndex % 2 === 1
+          ? `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
+          : "var(--background)";
+  const rowNumberBg = item.status === "new" ? newBg : item.status === "edited" ? editedBg : item.status === "deleted" ? deletedBg : isRowActive(item.displayIndex) && !item.isDeleted ? activeBg : dark ? DATA_GRID_DARK_ROW_NUMBER_BG : "var(--background)";
   return {
-    "--data-grid-cell-bg": rowBg,
+    "--data-grid-cell-bg": resolvedRowBg,
     "--data-grid-row-number-bg": rowNumberBg,
-    "--data-grid-cell-selected-bg": dark ? "rgb(20, 40, 60)" : "rgb(239, 246, 255)",
-    "--data-grid-cell-selected-single-bg": dark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)",
-    "--data-grid-cell-selected-dirty-bg": dark ? "rgb(76, 66, 38)" : "rgb(235, 224, 184)",
-    "--data-grid-cell-selected-border": dark ? "rgb(96, 165, 250)" : "rgb(59, 130, 246)",
-    "--data-grid-row-number-active-bg": activeRowBg,
-    "--data-grid-row-number-selected-bg": dark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)",
+    // Keep selection fill/border from [data-grid-root] tokens (primary/ring mix).
+    // Do not flatten them to --accent/--border — that erases outline contrast.
+    "--data-grid-cell-selected-dirty-bg": editedBg,
+    "--data-grid-row-number-active-bg": activeBg,
   } as CSSProperties;
 }
 
@@ -7989,8 +7962,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <div
                       class="sticky left-0 z-10 flex shrink-0 items-center border-r border-border bg-background px-3 py-0 font-medium truncate"
                       :class="{
-                        'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
-                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
+                        'cell-search-match': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
+                        'cell-current-search-match': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
                       }"
                       :style="{ width: `${transposePinnedWidth}px` }"
                       :title="item.column"
@@ -8009,11 +7982,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                         'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
-                        'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
-                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(cell.recordIndex, cell.valueIndex),
+                        'cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                        'cell-search-match': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
+                        'cell-current-search-match': cellIsCurrentMatch(cell.recordIndex, cell.valueIndex),
                         'cursor-text': !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex),
-                        'hover:bg-gray-200 dark:hover:bg-gray-800':
+                        'hover:bg-accent':
                           !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                       }"
                       :style="{ width: `${getTransposeRecordWidth(cell.recordIndex)}px` }"
@@ -8661,17 +8634,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         'data-grid-cell--frozen-separator': frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1,
                         'text-right': columnAligns[col.visibleColIdx] === 'right',
                         'text-muted-foreground italic': isNull(item.data[col.actualColIdx]),
-                        'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
+                        'cell-dirty': item.isDirtyCol[col.actualColIdx],
                         'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
                         'cell-selected-dirty': cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
                         'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
                         'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
                         'cell-search-match': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
                         'cell-current-search-match': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
-                        'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
-                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
                         'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
-                        'cursor-text hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx),
+                        'cursor-text hover:bg-accent': !isScrolling && canEditCellItem(item, col.actualColIdx),
                         'line-through': item.isDeleted,
                         'overflow-visible z-20 border-r-transparent': editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx,
                         'overflow-hidden': !(editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx),
@@ -8928,8 +8899,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <div class="min-w-0 flex-1">
                       <div class="font-medium truncate">{{ index.name }}</div>
                       <div class="mt-1 flex flex-wrap gap-1">
-                        <span v-if="index.is_primary" class="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600">PK</span>
-                        <span v-if="index.is_unique" class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600">UNIQUE</span>
+                        <span v-if="index.is_primary" class="rounded bg-warning-bg px-1.5 py-0.5 text-warning">PK</span>
+                        <span v-if="index.is_unique" class="rounded bg-success-bg px-1.5 py-0.5 text-success">UNIQUE</span>
                         <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{ index.index_type }}</span>
                       </div>
                       <div class="mt-2 font-mono text-[11px] text-muted-foreground break-all">
@@ -9323,74 +9294,32 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 @reference "../../styles/globals.css";
 
 [data-grid-root] {
-  --data-grid-row-muted-bg: rgb(240, 240, 240);
-  --data-grid-row-new-bg: rgb(243, 243, 243);
-  --data-grid-row-deleted-bg: rgb(255, 244, 244);
-  --data-grid-cell-active-bg: rgb(244, 248, 255);
-  --data-grid-cell-dirty-bg: rgb(255, 248, 230);
-  --data-grid-cell-selected-bg: rgb(239, 246, 255);
-  --data-grid-cell-selected-single-bg: rgb(191, 219, 254);
-  --data-grid-cell-selected-dirty-bg: rgb(235, 224, 184);
-  --data-grid-cell-selected-border: rgb(59, 130, 246);
-  --data-grid-cell-hover-bg: rgb(245, 245, 245);
-  --data-grid-cell-search-bg: rgb(253, 245, 184);
-  --data-grid-cell-current-search-bg: rgba(253, 224, 71, 0.52);
-  --data-grid-cell-current-search-border: rgba(234, 179, 8, 0.82);
-  --data-grid-row-number-default-bg: rgb(255, 255, 255);
-  --data-grid-row-number-new-bg: rgb(219, 244, 233);
-  --data-grid-row-number-edited-bg: rgb(253, 241, 219);
-  --data-grid-row-number-deleted-bg: rgb(255, 244, 244);
-  --data-grid-row-number-active-bg: rgb(244, 248, 255);
-  --data-grid-row-number-selected-bg: rgb(191, 219, 254);
-  --data-grid-scrollbar-thumb: color-mix(in oklch, var(--foreground) 30%, transparent);
-  --data-grid-scrollbar-thumb-hover: color-mix(in oklch, var(--foreground) 48%, transparent);
+  /* Status / selection chrome — derived from theme tokens so palettes stay in sync. */
+  --data-grid-row-muted-bg: color-mix(in srgb, var(--muted) 92%, var(--foreground));
+  --data-grid-row-new-bg: color-mix(in srgb, var(--muted) 80%, var(--background));
+  --data-grid-row-deleted-bg: var(--color-error-bg, color-mix(in srgb, var(--destructive) 12%, transparent));
+  --data-grid-cell-active-bg: color-mix(in srgb, var(--info) 10%, var(--background));
+  --data-grid-cell-dirty-bg: var(--warning-bg, color-mix(in srgb, var(--warning) 14%, transparent));
+  --data-grid-cell-selected-bg: color-mix(in srgb, var(--primary) 12%, var(--accent));
+  --data-grid-cell-selected-single-bg: color-mix(in srgb, var(--primary) 22%, var(--accent));
+  --data-grid-cell-selected-dirty-bg: color-mix(in srgb, var(--warning) 22%, var(--accent));
+  /* Prefer ring/primary so the outline stays visible on the selected fill. */
+  --data-grid-cell-selected-border: color-mix(in srgb, var(--ring) 55%, var(--primary));
+  --data-grid-cell-selected-single-border: var(--primary);
+  --data-grid-cell-hover-bg: var(--accent);
+  --data-grid-cell-search-bg: var(--warning-bg, color-mix(in srgb, var(--warning) 18%, transparent));
+  --data-grid-cell-current-search-bg: color-mix(in srgb, var(--warning) 35%, transparent);
+  --data-grid-cell-current-search-border: var(--warning);
+  --data-grid-row-number-default-bg: var(--background);
+  --data-grid-row-number-new-bg: var(--success-bg, color-mix(in srgb, var(--success) 12%, transparent));
+  --data-grid-row-number-edited-bg: var(--warning-bg, color-mix(in srgb, var(--warning) 14%, transparent));
+  --data-grid-row-number-deleted-bg: var(--color-error-bg, color-mix(in srgb, var(--destructive) 12%, transparent));
+  --data-grid-row-number-active-bg: var(--data-grid-cell-active-bg);
+  --data-grid-row-number-selected-bg: var(--data-grid-cell-selected-single-bg);
+  --data-grid-scrollbar-thumb: color-mix(in srgb, var(--foreground) 30%, transparent);
+  --data-grid-scrollbar-thumb-hover: color-mix(in srgb, var(--foreground) 48%, transparent);
   --data-grid-scrollbar-track: transparent;
-  background-color: rgb(255, 255, 255);
-}
-
-[data-grid-root].data-grid--dark,
-:global(.dark) [data-grid-root] {
-  --data-grid-row-muted-bg: rgb(40, 40, 43);
-  --data-grid-row-new-bg: rgb(51, 51, 55);
-  --data-grid-row-deleted-bg: rgb(55, 31, 32);
-  --data-grid-cell-active-bg: rgb(25, 34, 46);
-  --data-grid-cell-dirty-bg: rgb(94, 75, 26);
-  --data-grid-cell-selected-bg: rgb(20, 40, 60);
-  --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
-  --data-grid-cell-selected-dirty-bg: rgb(76, 66, 38);
-  --data-grid-cell-selected-border: rgb(96, 165, 250);
-  --data-grid-cell-hover-bg: rgb(46, 47, 51);
-  --data-grid-cell-search-bg: rgb(72, 57, 8);
-  --data-grid-cell-current-search-bg: rgb(116, 87, 0);
-  --data-grid-cell-current-search-border: rgb(239, 177, 0);
-  --data-grid-row-number-default-bg: rgb(35, 37, 42);
-  --data-grid-row-number-new-bg: rgb(33, 45, 40);
-  --data-grid-row-number-edited-bg: rgb(48, 41, 28);
-  --data-grid-row-number-deleted-bg: rgb(55, 31, 32);
-  --data-grid-row-number-active-bg: rgb(25, 34, 46);
-  --data-grid-row-number-selected-bg: rgb(30, 64, 96);
-  --data-grid-scrollbar-thumb: rgb(82, 82, 91);
-  --data-grid-scrollbar-thumb-hover: rgb(113, 113, 122);
-  --data-grid-scrollbar-track: rgb(24, 24, 27);
-  background-color: rgb(19, 20, 22);
-}
-
-@supports (background: color-mix(in oklab, white 50%, transparent)) {
-  [data-grid-root] {
-    --data-grid-row-muted-bg: color-mix(in oklab, var(--muted) 99%, var(--foreground));
-    --data-grid-row-new-bg: color-mix(in oklab, var(--primary) 5%, transparent);
-    --data-grid-row-deleted-bg: color-mix(in oklab, var(--destructive) 5%, transparent);
-    --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
-    --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 12%, var(--background));
-    --data-grid-cell-selected-single-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
-    --data-grid-cell-selected-dirty-bg: color-mix(in oklab, rgb(234 181 50) 30%, color-mix(in oklab, rgb(59 130 246) 18%, var(--background)));
-    --data-grid-cell-selected-border: color-mix(in oklab, rgb(59 130 246) 75%, transparent);
-    --data-grid-cell-hover-bg: color-mix(in oklab, var(--accent) 50%, transparent);
-    --data-grid-row-number-new-bg: color-mix(in oklab, rgb(16 185 129) 15%, var(--background));
-    --data-grid-row-number-edited-bg: color-mix(in oklab, rgb(245 158 11) 15%, var(--background));
-    --data-grid-row-number-deleted-bg: color-mix(in oklab, var(--destructive) 15%, var(--background));
-    --data-grid-row-number-selected-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
-  }
+  background-color: var(--background);
 }
 
 .data-grid-header-shell {
@@ -9400,34 +9329,26 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .data-grid-header-cell {
-  background-color: rgb(239, 239, 239);
+  background-color: color-mix(in srgb, var(--muted) 88%, var(--background));
 }
 
 [data-grid-root].data-grid--dark .data-grid-header-cell,
 :global(.dark) [data-grid-root] .data-grid-header-cell {
-  background-color: rgb(32, 32, 34) !important;
+  background-color: color-mix(in srgb, var(--muted) 70%, var(--background));
 }
 
 [data-grid-root].data-grid--dark .data-grid-header-row,
 :global(.dark) [data-grid-root] .data-grid-header-row {
-  color: rgb(215, 215, 219);
+  color: var(--foreground);
 }
 
 [data-grid-root].data-grid--dark .data-grid-header-cell:hover,
 :global(.dark) [data-grid-root] .data-grid-header-cell:hover {
-  background-color: rgb(46, 47, 51) !important;
+  background-color: var(--accent);
 }
 
 .data-grid-header-cell--selected {
   background-color: var(--data-grid-cell-selected-single-bg) !important;
-}
-
-:global(.dark) [data-grid-root] {
-  --data-grid-cell-selected-bg: rgb(20, 40, 60);
-  --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
-  --data-grid-cell-selected-dirty-bg: rgb(76, 66, 38);
-  --data-grid-cell-selected-border: rgb(96, 165, 250);
-  --data-grid-row-number-selected-bg: rgb(30, 64, 96);
 }
 
 [data-grid-root].data-grid--dark .data-grid-header-cell--selected,
@@ -9437,7 +9358,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 :global(.dark) [data-grid-root] .transpose-record-header-selected,
 :global(.dark) [data-grid-root] .transpose-record-header-active {
   background-color: var(--data-grid-cell-selected-single-bg) !important;
-  color: rgb(244, 244, 245) !important;
+  color: var(--foreground) !important;
 }
 
 .data-grid-row {
@@ -9450,12 +9371,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 /* 冻结列：不透明背景遮挡滚动的非冻结列；状态 class 的 !important 会覆盖此项 */
 .data-grid-cell--frozen {
-  background-color: var(--data-grid-cell-bg, rgb(255, 255, 255)) !important;
+  background-color: var(--data-grid-cell-bg, var(--background)) !important;
 }
 
 /* 冻结列分隔线：与 Canvas 模式和列头一致（2px 深色右边框） */
 .data-grid-cell--frozen-separator {
-  border-right: 2px solid rgb(100, 116, 139) !important;
+  border-right: 2px solid color-mix(in srgb, var(--border) 80%, var(--foreground)) !important;
 }
 
 .data-grid-row-number {
@@ -9908,16 +9829,28 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   background-color: var(--data-grid-cell-selected-dirty-bg) !important;
 }
 
-.data-grid-row-number.bg-emerald-500\/15 {
+.data-grid-row-number--status-draft {
+  border: 1px solid color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+  background-color: color-mix(in srgb, var(--muted) 20%, transparent);
+  color: var(--muted-foreground);
+}
+
+.data-grid-row-number--status-new {
+  border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
   background-color: var(--data-grid-row-number-new-bg);
+  color: var(--success);
 }
 
-.data-grid-row-number.bg-amber-500\/15 {
+.data-grid-row-number--status-edited {
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
   background-color: var(--data-grid-row-number-edited-bg);
+  color: var(--warning);
 }
 
-.data-grid-row-number.bg-destructive\/15 {
+.data-grid-row-number--status-deleted {
+  border: 1px solid color-mix(in srgb, var(--destructive) 40%, transparent);
   background-color: var(--data-grid-row-number-deleted-bg);
+  color: var(--destructive);
 }
 
 .active-row > .data-grid-row-number {
@@ -9931,35 +9864,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 }
 
 .cell-selected {
-  color: hsl(var(--foreground));
+  color: var(--foreground);
   background-color: var(--data-grid-cell-selected-single-bg) !important;
-}
-
-.cell-selected {
-  @apply outline outline-primary -outline-offset-1;
-}
-
-:global(.dark) [data-grid-root] .cell-selected,
-:global(.dark) [data-grid-root] .row-cell-selected {
-  color: rgb(244, 244, 245) !important;
-}
-
-:global(.dark) [data-grid-root] .cell-selected {
-  background-color: var(--data-grid-cell-selected-single-bg) !important;
-}
-
-:global(.dark) [data-grid-root] .row-cell-selected {
-  background-color: var(--data-grid-cell-selected-bg) !important;
-}
-
-:global(.dark) [data-grid-root] .cell-selected-dirty,
-:global(.dark) [data-grid-root] .row-cell-selected-dirty {
-  background-color: var(--data-grid-cell-selected-dirty-bg) !important;
-}
-
-:global(.dark) [data-grid-root] .cell-selected,
-:global(.dark) [data-grid-root] .cell-selected-dirty {
-  outline-color: var(--data-grid-cell-selected-border) !important;
+  outline: 1px solid var(--data-grid-cell-selected-border);
+  outline-offset: -1px;
 }
 
 .ddl-code :deep(.ddl-kw) {

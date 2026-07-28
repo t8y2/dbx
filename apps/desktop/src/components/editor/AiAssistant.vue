@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
@@ -61,7 +61,7 @@ import { ACTIVE_TEMPLATES_TOTAL_MAX, promptTemplateCharacterCount } from "@/type
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
-import { extractFirstSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
@@ -79,7 +79,7 @@ import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } fr
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
-import { looksLikeActionProposal, containsChinese } from "@/lib/ai/aiProposalDetect";
+import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 
@@ -566,19 +566,30 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
 });
 
 let allowWriteSqlForNextRun = false;
+/** The specific write SQL embedded in the confirmed proposal, for binding to the agent run. */
+let confirmedWriteSqlText: string | undefined = undefined;
+/** Connection/database snapshot captured at confirmation time, verified at send time
+ *  to prevent a database change between confirmation and execution. */
+let confirmedConnectionId: string | undefined = undefined;
+let confirmedDatabase: string | undefined = undefined;
+
+/** Clear all pending write-confirmation state. Call on every early-return
+ *  and failure path so a stale grant cannot leak into a subsequent send(). */
+function clearPendingWriteGrant() {
+  allowWriteSqlForNextRun = false;
+  confirmedWriteSqlText = undefined;
+  confirmedConnectionId = undefined;
+  confirmedDatabase = undefined;
+}
 
 const productionContext = computed(() => productionContextForDatabase(props.connection, props.tab?.database));
-
-function proposalContainsWriteSql(content: string) {
-  return /\b(insert|update|delete|replace|merge|create|alter|drop|truncate|rename|grant|revoke)\b/i.test(content);
-}
 
 function sendProposalReply(positive: boolean) {
   // Disable while a stream is in flight or no proposal is currently active.
   if (isGenerating.value) return;
   const target = proposalConfirmMessage.value;
   if (!target) return;
-  if (positive && productionContext.value.active && proposalContainsWriteSql(target.content)) {
+  if (positive && productionContext.value.active && looksLikeWriteSqlProposal(target.content)) {
     const sql = extractFirstSqlCodeBlock(target.content);
     if (sql) emit("replaceSql", sql);
     toast(t("production.aiReviewRequired"), 5000);
@@ -588,7 +599,17 @@ function sendProposalReply(positive: boolean) {
   const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
   const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
   prompt.value = isZh ? replyZh : replyEn;
-  allowWriteSqlForNextRun = positive && assistantMode.value === "agent" && proposalContainsWriteSql(target.content);
+  if (positive && assistantMode.value === "agent" && looksLikeWriteSqlProposal(target.content)) {
+    confirmedWriteSqlText = extractSingleSqlCodeBlock(target.content);
+    if (confirmedWriteSqlText) {
+      allowWriteSqlForNextRun = true;
+      confirmedConnectionId = props.connection?.id;
+      confirmedDatabase = props.tab?.database || "";
+    }
+    // When no SQL code block is found in the proposal, treat the
+    // confirmation as rejected — we cannot bind the agent to a
+    // specific SQL statement, so we must not grant blanket write access.
+  }
   // Use the existing send pipeline so the message is added to history, persisted, etc.
   send();
 }
@@ -1462,8 +1483,16 @@ async function send() {
   const text = prompt.value.trim();
   if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length) || isGenerating.value) return;
 
-  if (!props.connection || !props.tab) return;
+  // Snapshot the target connection/database before any async work so that
+  // suspension points during context loading cannot cause a TOCTOU target switch.
+  const connection = props.connection;
+  const tab = props.tab;
+  if (!connection || !tab) {
+    clearPendingWriteGrant();
+    return;
+  }
   if (!settings.isConfigured) {
+    clearPendingWriteGrant();
     toast(t("ai.noConfig"));
     return;
   }
@@ -1472,6 +1501,7 @@ async function send() {
   // resume into concurrent agent runs.
   isGenerating.value = true;
   if (!(await promptTemplateStore.ensureLoaded())) {
+    clearPendingWriteGrant();
     isGenerating.value = false;
     toast(t("ai.customInstructionsLoadFailed"), 5000);
     return;
@@ -1503,9 +1533,58 @@ async function send() {
 
   const requestedAction = activeAction.value;
   const requestedMode = assistantMode.value;
+  // Detect user-typed short confirmation (e.g. "可以"/"go ahead") as an alternative
+  // path to the proposal ✅ button. Delegates to the shared pure function so the
+  // component and its unit tests share the same gating logic.
+  if (!allowWriteSqlForNextRun) {
+    allowWriteSqlForNextRun = shouldGrantWriteSqlOnShortAffirmative({
+      mode: requestedMode,
+      alreadyGranted: false,
+      isProduction: productionContext.value.active,
+      userText: text,
+      // Pass the history BEFORE the just-pushed user message so the function skips it.
+      messages: messages.value.slice(0, -1),
+    });
+    if (allowWriteSqlForNextRun) {
+      // Extract the confirmed SQL from the assistant's proposal message.
+      // If no SQL code block is found, treat the confirmation as rejected —
+      // we cannot bind the agent to a specific SQL statement.
+      for (let i = messages.value.length - 2; i >= 0; i--) {
+        const msg = messages.value[i];
+        if (msg.kind === "contextSummary") continue;
+        if (msg.role === "assistant" && msg.content) {
+          confirmedWriteSqlText = extractSingleSqlCodeBlock(msg.content);
+          confirmedConnectionId = connection.id;
+          confirmedDatabase = tab.database || "";
+          break;
+        }
+        if (msg.role === "user") break;
+      }
+      if (!confirmedWriteSqlText) {
+        allowWriteSqlForNextRun = false;
+      }
+    }
+  }
+  // Verify the connection/database haven't changed since the user confirmed
+  // the write operation. If the user switched connections or databases between
+  // confirmation and execution, the grant is void.
+  if (allowWriteSqlForNextRun && confirmedWriteSqlText) {
+    if (confirmedConnectionId !== connection.id || confirmedDatabase !== (tab.database || "")) {
+      allowWriteSqlForNextRun = false;
+      confirmedWriteSqlText = undefined;
+    }
+  }
   // Agent confirmation cannot grant autonomous writes while the active database is production.
   const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
+  const confirmedWriteSql = allowWriteSql ? confirmedWriteSqlText : undefined;
+  // Capture the confirmed target snapshot before clearing the one-shot grant
+  // state, so the values survive to be passed through to the backend.
+  const confirmedTargetConnId = allowWriteSql ? confirmedConnectionId : undefined;
+  const confirmedTargetDb = allowWriteSql ? confirmedDatabase : undefined;
   allowWriteSqlForNextRun = false;
+  confirmedWriteSqlText = undefined;
+  confirmedConnectionId = undefined;
+  confirmedDatabase = undefined;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
@@ -1514,7 +1593,7 @@ async function send() {
   agentTokens.value = null;
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
-    const context = await buildAiContext(props.tab, props.connection, {
+    const context = await buildAiContext(tab, connection, {
       mentionedTables,
       sqlFiles,
     });
@@ -1527,6 +1606,9 @@ async function send() {
         instruction: modelInstruction,
         context,
         allowWriteSql,
+        confirmedWriteSql,
+        confirmedConnectionId: confirmedTargetConnId,
+        confirmedDatabase: confirmedTargetDb,
       },
       history,
       (event: AgentEvent) => {
@@ -1590,8 +1672,8 @@ async function send() {
         action: requestedAction,
         instruction: modelInstruction,
         assistantContent: msg?.content || "",
-        connection: props.connection,
-        database: props.tab?.database,
+        connection: connection,
+        database: tab.database,
       });
       if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
       if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
@@ -2424,24 +2506,24 @@ async function openExternalUrl(url: string) {
   font-weight: 600;
 }
 .ai-markdown :deep(a) {
-  color: hsl(var(--primary));
+  color: var(--primary);
   text-decoration: underline;
 }
 .ai-markdown :deep(blockquote) {
-  border-left: 2px solid hsl(var(--muted-foreground) / 0.3);
+  border-left: 2px solid color-mix(in srgb, var(--muted-foreground) 30%, transparent);
   padding-left: 0.75em;
   margin: 0.3em 0;
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
 }
 .ai-markdown :deep(code) {
   border-radius: 0.25rem;
-  background: hsl(var(--muted));
+  background: var(--muted);
   padding: 0.125rem 0.375rem;
   font-size: 11px;
   font-family: ui-monospace, monospace;
 }
 .ai-markdown :deep(pre) {
-  background: hsl(var(--muted));
+  background: var(--muted);
   border-radius: 0.375rem;
   padding: 0.5em 0.75em;
   margin: 0.3em 0;
@@ -2464,7 +2546,7 @@ async function openExternalUrl(url: string) {
   max-width: 100%;
   margin: 0.3em 0;
   border-radius: 0.375rem;
-  border: 1px solid hsl(var(--border));
+  border: 1px solid var(--border);
 }
 .ai-markdown :deep(.ai-markdown-table-wrap table) {
   border: none;
@@ -2472,14 +2554,14 @@ async function openExternalUrl(url: string) {
 }
 .ai-markdown :deep(th),
 .ai-markdown :deep(td) {
-  border: 1px solid hsl(var(--border));
+  border: 1px solid var(--border);
   padding: 0.25em 0.5em;
   text-align: left;
   white-space: nowrap;
 }
 .ai-markdown :deep(th) {
   font-weight: 600;
-  background: hsl(var(--muted));
+  background: var(--muted);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -2496,11 +2578,11 @@ async function openExternalUrl(url: string) {
   height: 4px;
   width: 100%;
   cursor: ns-resize;
-  background-color: hsl(var(--border));
+  background-color: var(--border);
   transition: background-color 0.15s ease;
 }
 
 .resize-handle:hover {
-  background-color: hsl(var(--foreground) / 0.2);
+  background-color: color-mix(in srgb, var(--foreground) 20%, transparent);
 }
 </style>

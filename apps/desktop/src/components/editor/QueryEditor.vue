@@ -3307,7 +3307,7 @@ onMounted(async () => {
       textUnderlineOffset: "3px",
     },
     ".cm-sql-semantic-warning": {
-      textDecoration: "underline wavy hsl(var(--warning, 38 92% 50%))",
+      textDecoration: "underline wavy var(--warning)",
       textUnderlineOffset: "3px",
     },
   });

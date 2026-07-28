@@ -10,6 +10,7 @@ use super::triggers::build_trigger_sql;
 use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{clean, format_default_for_sql, normalize_default, qualified_table, quote_ident, quote_string};
 use super::validation::{validate_columns, validate_dameng_identity};
+use crate::models::connection::DatabaseType;
 
 pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
     options.table_name = clean(&options.table_name);
@@ -49,7 +50,7 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
     for column in &active_columns {
         let data_type = column_data_type(dialect, column);
         let mut parts = vec![quote_ident(dialect, &column.name), data_type];
-        if dialect == StructureDialect::Mysql && is_mysql_character_data_type(&column.data_type) {
+        if options.database_type == Some(DatabaseType::Mysql) && is_mysql_character_data_type(&column.data_type) {
             if !column.character_set.trim().is_empty() {
                 parts.push(format!("CHARACTER SET {}", quote_ident(dialect, &column.character_set)));
             }

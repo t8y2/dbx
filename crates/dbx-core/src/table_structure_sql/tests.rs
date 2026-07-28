@@ -2786,6 +2786,32 @@ fn mysql_create_table_keeps_column_charset_collation_and_comment() {
 }
 
 #[test]
+fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
+    for database_type in [DatabaseType::StarRocks, DatabaseType::Databend, DatabaseType::Gbase] {
+        let mut name = column("name");
+        name.data_type = "varchar(255)".to_string();
+        name.character_set = "utf8mb4".to_string();
+        name.collation = "utf8mb4_bin".to_string();
+
+        let result = build_create_table_sql(TableStructureSqlOptions {
+            database_type: Some(database_type),
+            schema: None,
+            table_name: "users".to_string(),
+            columns: vec![name],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            table_comment: None,
+            original_table_comment: None,
+        });
+
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert!(!result.statements[0].contains("CHARACTER SET"));
+        assert!(!result.statements[0].contains("COLLATE"));
+    }
+}
+
+#[test]
 fn mysql_create_table_with_on_update_current_timestamp() {
     let mut col = column("updated_at");
     col.data_type = "timestamp".to_string();

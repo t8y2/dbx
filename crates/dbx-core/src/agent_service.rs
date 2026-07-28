@@ -1724,15 +1724,100 @@ fn db_type_for_jar_offline_entry(registry: &AgentRegistry, name: &str) -> Option
 }
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    let status = crate::process::new_std_command("tar")
-        .args(["xzf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy(), "--strip-components=1"])
-        .status()
-        .map_err(|e| format!("Failed to extract archive: {e}"))?;
-    if !status.success() {
-        return Err("Failed to extract JRE archive".to_string());
+    let parent = dest.parent().ok_or_else(|| format!("Invalid JRE destination: {}", dest.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create JRE directory: {e}"))?;
+
+    let staging = tempfile::Builder::new()
+        .prefix(".jre-extract-")
+        .tempdir_in(parent)
+        .map_err(|e| format!("Failed to create JRE extraction directory: {e}"))?;
+    let file = std::fs::File::open(archive).map_err(|e| format!("Failed to open JRE archive: {e}"))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    tar::Archive::new(decoder).unpack(staging.path()).map_err(|e| format!("Failed to extract JRE archive: {e}"))?;
+
+    let mut roots = std::fs::read_dir(staging.path())
+        .map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?;
+    if roots.len() != 1 {
+        return Err("Invalid JRE archive: expected a single top-level directory".to_string());
+    }
+
+    let root = roots.pop().expect("root count checked above");
+    if !root.file_type().map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?.is_dir() {
+        return Err("Invalid JRE archive: expected a top-level directory".to_string());
+    }
+
+    std::fs::create_dir_all(dest).map_err(|e| format!("Failed to create JRE directory: {e}"))?;
+    for entry in std::fs::read_dir(root.path()).map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))? {
+        let entry = entry.map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?;
+        std::fs::rename(entry.path(), dest.join(entry.file_name()))
+            .map_err(|e| format!("Failed to install extracted JRE: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod jre_archive_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn append_file(
+        builder: &mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>,
+        path: &str,
+        data: &[u8],
+        mode: u32,
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(mode);
+        header.set_cksum();
+        builder.append_data(&mut header, path, Cursor::new(data)).unwrap();
+    }
+
+    #[test]
+    fn extracts_jre_archive_without_system_tools_and_strips_top_level_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("jre.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        append_file(&mut builder, "jdk-21/bin/java", b"java", 0o755);
+        append_file(&mut builder, "jdk-21/conf/release", b"JAVA_VERSION=21", 0o644);
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = temp.path().join("managed-jre");
+        extract_tar_gz(&archive_path, &dest).unwrap();
+
+        assert_eq!(std::fs::read(dest.join("bin/java")).unwrap(), b"java");
+        assert_eq!(std::fs::read(dest.join("conf/release")).unwrap(), b"JAVA_VERSION=21");
+        assert!(!dest.join("jdk-21").exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(dest.join("bin/java")).unwrap().permissions().mode() & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn rejects_jre_archive_without_a_single_top_level_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("jre.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        append_file(&mut builder, "jdk-21/bin/java", b"java", 0o755);
+        append_file(&mut builder, "unexpected/readme.txt", b"unexpected", 0o644);
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let error = extract_tar_gz(&archive_path, &temp.path().join("managed-jre")).unwrap_err();
+        assert!(error.contains("single top-level directory"), "unexpected error: {error}");
+    }
 }
 
 pub async fn import_agent_driver(am: &AgentManager, db_type: &str, source_path: &Path) -> Result<(), String> {
@@ -2143,13 +2228,10 @@ mod agent_registry_install_tests {
         let java_path = payload.join(relative_java_path);
         std::fs::create_dir_all(java_path.parent().unwrap()).unwrap();
         std::fs::write(java_path, b"java").unwrap();
-        let archive = archive_root.join("runtime.tar.gz");
-        let status = crate::process::new_std_command("tar")
-            .args(["czf", &archive.to_string_lossy(), "-C", &archive_root.to_string_lossy(), "payload"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        std::fs::read(archive).unwrap()
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder.append_dir_all("payload", &payload).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
     }
 
     fn write_cached_jre_download(am: &AgentManager, jre_key: &str, version: &str, url: &str, archive: &[u8]) {

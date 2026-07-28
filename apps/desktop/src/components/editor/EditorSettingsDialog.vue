@@ -2378,7 +2378,7 @@ function currentAiEditConfig() {
   const reasoningLevel = aiIsClaudeCodeCli.value ? normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value) : aiEditReasoningLevel.value;
   return {
     provider: aiEditProvider.value,
-    apiKey: aiEditApiKey.value,
+    apiKey: aiEditApiKey.value.trim(),
     authMethod: aiEditAuthMethod.value,
     endpoint: aiEditEndpoint.value,
     model: aiEditModel.value,
@@ -2503,7 +2503,7 @@ async function aiFetchModelList() {
   try {
     const models = await aiListModels({
       provider: aiEditProvider.value,
-      apiKey: aiEditApiKey.value,
+      apiKey: aiEditApiKey.value.trim(),
       endpoint: aiEditEndpoint.value,
       model: aiEditModel.value,
       authMethod: aiEditAuthMethod.value,

@@ -250,9 +250,9 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
   const provider = config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
   return {
     ...defaultConfigs[provider],
-    apiKey: config?.apiKey ?? "",
     ...config,
     provider,
+    apiKey: (config?.apiKey ?? "").trim(),
     apiStyle: config?.apiStyle ?? defaultConfigs[provider].apiStyle,
     authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
@@ -265,6 +265,10 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     claudeCodeCliPath: config?.claudeCodeCliPath?.trim() || undefined,
     claudeCodeCliEnv: normalizeAiEnv(config?.claudeCodeCliEnv),
   };
+}
+
+function normalizeAiConfigItem(config: AiConfigItem): AiConfigItem {
+  return { ...config, ...normalizeAiConfig(config) };
 }
 
 function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined): AiProvider {
@@ -1087,7 +1091,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const newConfigs = await api.loadAiConfigs();
 
     if (newConfigs.length > 0) {
-      aiConfigs.value = newConfigs;
+      aiConfigs.value = newConfigs.map(normalizeAiConfigItem);
     } else {
       // 迁移旧格式
       await migrateToMultiConfig();
@@ -1146,17 +1150,18 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   async function createAiConfig(config: AiConfigItem): Promise<void> {
-    await api.saveAiConfigItem(config);
-    aiConfigs.value.push(config);
+    const normalized = normalizeAiConfigItem(config);
+    await api.saveAiConfigItem(normalized);
+    aiConfigs.value.push(normalized);
     if (aiConfigs.value.length === 1) {
-      activeModel.value = { configId: config.id, modelId: config.model };
+      activeModel.value = { configId: normalized.id, modelId: normalized.model };
     }
   }
 
   async function updateAiConfigItem(id: string, config: Partial<AiConfigItem>): Promise<void> {
     const index = aiConfigs.value.findIndex((c) => c.id === id);
     if (index !== -1) {
-      const updated = { ...aiConfigs.value[index], ...config };
+      const updated = normalizeAiConfigItem({ ...aiConfigs.value[index], ...config });
       await api.saveAiConfigItem(updated);
       aiConfigs.value[index] = updated;
     }

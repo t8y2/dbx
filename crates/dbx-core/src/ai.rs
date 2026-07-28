@@ -814,6 +814,10 @@ fn provider_requires_api_key(provider: &AiProvider) -> bool {
     )
 }
 
+fn normalized_api_key(config: &AiConfig) -> &str {
+    config.api_key.trim()
+}
+
 fn validate_config(config: &AiConfig) -> Result<(), String> {
     if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
         return Ok(());
@@ -843,11 +847,9 @@ fn validate_model_list_config(config: &AiConfig) -> Result<(), String> {
 pub fn maybe_bearer_headers(config: &AiConfig) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    if !config.api_key.trim().is_empty() {
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", config.api_key)).map_err(|e| e.to_string())?,
-        );
+    let api_key = normalized_api_key(config);
+    if !api_key.is_empty() {
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| e.to_string())?);
     }
     Ok(headers)
 }
@@ -855,16 +857,17 @@ pub fn maybe_bearer_headers(config: &AiConfig) -> Result<HeaderMap, String> {
 pub fn claude_headers(config: &AiConfig) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    if !config.api_key.trim().is_empty() {
+    let api_key = normalized_api_key(config);
+    if !api_key.is_empty() {
         match config.auth_method {
             AiAuthMethod::Bearer => {
                 headers.insert(
                     AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Bearer {}", config.api_key)).map_err(|e| e.to_string())?,
+                    HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| e.to_string())?,
                 );
             }
             AiAuthMethod::ApiKey => {
-                headers.insert("x-api-key", HeaderValue::from_str(&config.api_key).map_err(|e| e.to_string())?);
+                headers.insert("x-api-key", HeaderValue::from_str(api_key).map_err(|e| e.to_string())?);
             }
         }
     }
@@ -1120,7 +1123,7 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
 
     let res = client
         .post(resolve_endpoint(&request.config))
-        .query(&[("key", request.config.api_key.as_str())])
+        .query(&[("key", normalized_api_key(&request.config))])
         .header(CONTENT_TYPE, "application/json")
         .json(&body)
         .send()
@@ -1374,7 +1377,8 @@ async fn categorized_http_error(response: reqwest::Response, provider: &str, api
                 body.trim().to_string()
             }
         });
-    let detail = if api_key.trim().is_empty() { detail } else { detail.replace(api_key, "***") };
+    let api_key = api_key.trim();
+    let detail = if api_key.is_empty() { detail } else { detail.replace(api_key, "***") };
     let detail = truncate_diagnostic(&detail, 500);
     let diagnostic = format!("HTTP {}: {detail}", status.as_u16());
     format!("[{}] {provider} API error ({diagnostic})", classify_error(&diagnostic))
@@ -1488,7 +1492,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
             let res = client
                 .post(&ep)
                 .header(CONTENT_TYPE, "application/json")
-                .query(&[("key", config.api_key.as_str()), ("alt", "sse")])
+                .query(&[("key", normalized_api_key(config)), ("alt", "sse")])
                 .json(&json!({
                     "contents": [{ "parts": [{ "text": TEST_PROMPT }], "role": "user" }],
                     "generationConfig": { "maxOutputTokens": 256 },
@@ -1982,7 +1986,7 @@ async fn stream_gemini(
 
     let res = client
         .post(resolve_gemini_stream_endpoint(&request.config))
-        .query(&[("key", request.config.api_key.as_str()), ("alt", "sse")])
+        .query(&[("key", normalized_api_key(&request.config)), ("alt", "sse")])
         .header(CONTENT_TYPE, "application/json")
         .json(&body)
         .send()
@@ -2674,7 +2678,7 @@ async fn stream_gemini_with_tools(
 
     let res = client
         .post(resolve_gemini_stream_endpoint(&request.config))
-        .query(&[("key", request.config.api_key.as_str()), ("alt", "sse")])
+        .query(&[("key", normalized_api_key(&request.config)), ("alt", "sse")])
         .header(CONTENT_TYPE, "application/json")
         .json(&body)
         .send()
@@ -3496,7 +3500,7 @@ mod tests {
     fn claude_headers_support_api_key_and_bearer_auth() {
         let mut config = AiConfig {
             provider: AiProvider::Claude,
-            api_key: "secret".to_string(),
+            api_key: " \tsecret\r\n".to_string(),
             auth_method: AiAuthMethod::ApiKey,
             endpoint: "https://api.anthropic.com/v1/messages".to_string(),
             model: "claude-sonnet-4-20250514".to_string(),
@@ -3517,6 +3521,9 @@ mod tests {
         assert_eq!(api_key_headers.get("x-api-key").unwrap(), "secret");
         assert!(api_key_headers.get(AUTHORIZATION).is_none());
         assert!(api_key_headers.get("anthropic-beta").is_none());
+
+        let compatible_headers = maybe_bearer_headers(&config).unwrap();
+        assert_eq!(compatible_headers.get(AUTHORIZATION).unwrap(), "Bearer secret");
 
         config.auth_method = AiAuthMethod::Bearer;
         let bearer_headers = claude_headers(&config).unwrap();

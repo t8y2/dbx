@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { enforceRightSidebarPanelExclusivity, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, transitionRightSidebarPanels, type RightSidebarPanelState } from "@/stores/settingsStore";
+import { enforceRightSidebarPanelExclusivity, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, transitionRightSidebarPanels, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { createPinia, setActivePinia } from "pinia";
 import { isProxy } from "vue";
 import type { AiConfigItem } from "@/types/ai";
@@ -317,6 +317,31 @@ function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiCo
     ...overrides,
   } as AiConfigItem;
 }
+
+describe("settingsStore AI API key normalization", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("trims API keys before persisting new configurations", async () => {
+    const saveAiConfigItem = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ saveAiConfigItem }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    const config = makeTestConfig({ id: "trimmed-key", apiKey: " \tsecret\r\n" });
+
+    await store.createAiConfig(config);
+
+    expect(saveAiConfigItem).toHaveBeenCalledWith(expect.objectContaining({ apiKey: "secret" }));
+    expect(store.aiConfigs[0].apiKey).toBe("secret");
+  });
+
+  it("trims API keys when normalizing loaded configurations", () => {
+    expect(normalizeAiConfig({ provider: "openai", apiKey: "  secret  " }).apiKey).toBe("secret");
+  });
+});
 
 describe("settingsStore MCP policy persistence", () => {
   beforeEach(() => {

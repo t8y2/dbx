@@ -672,6 +672,14 @@ export function buildNacosConfigDeleteConfirm(item: NacosConfigItem, fallbackNam
   return formatNacosConfigIdentity(item, fallbackNamespace);
 }
 
+export function formatNacosHistoryTime(value?: string | null): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return "-";
+  const match = trimmed.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/);
+  if (!match) return trimmed;
+  return `${match[1]} ${match[2]}`;
+}
+
 export function buildNacosConfigHistoryRollbackConfirm(item: NacosConfigHistoryItem, fallbackNamespace = ""): string {
   return [`namespace=${item.namespace || fallbackNamespace || "public"}`, `dataId=${item.dataId}`, `group=${item.group || "DEFAULT_GROUP"}`, item.lastModifiedTime ? `historyTime=${item.lastModifiedTime}` : "", item.operator ? `operator=${item.operator}` : ""].filter(Boolean).join("\n");
 }

@@ -13,6 +13,7 @@ import {
   createNacosConfigDeleteSnapshot,
   createNacosConfigSaveSnapshot,
   createNacosLatestRequestGuard,
+  formatNacosHistoryTime,
   isNacosRawMutation,
   isNacosErrorCode,
   isNacosConfigSaveSnapshotCurrent,
@@ -96,6 +97,14 @@ describe("nacosAdmin helpers", () => {
     expect(isNacosErrorCode(new Error("NACOS_ERROR[stalePreview]: preview again"), "stalePreview")).toBe(true);
     expect(isNacosErrorCode("NACOS_ERROR[authFailed]: forbidden", "stalePreview")).toBe(false);
     expect(isNacosErrorCode(new Error("stalePreview"), "stalePreview")).toBe(false);
+  });
+
+  it("formats Nacos history timestamps for display", () => {
+    expect(formatNacosHistoryTime("2026-07-27T18:16:36.000+08:00")).toBe("2026-07-27 18:16:36");
+    expect(formatNacosHistoryTime("2026-07-27T18:16:36Z")).toBe("2026-07-27 18:16:36");
+    expect(formatNacosHistoryTime("2026-07-27 18:16:36")).toBe("2026-07-27 18:16:36");
+    expect(formatNacosHistoryTime("")).toBe("-");
+    expect(formatNacosHistoryTime("not-a-time")).toBe("not-a-time");
   });
 
   it("redirects r-nacos console settings to the compatible OpenAPI endpoint", () => {

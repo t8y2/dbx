@@ -2398,7 +2398,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, viewport: undefined };
   }
 
-function updateCatalog(id: string, catalog: string | undefined) {
+  function updateCatalog(id: string, catalog: string | undefined) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.catalog === catalog) return;
     rollbackTabTransaction(tab);

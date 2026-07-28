@@ -128,7 +128,7 @@ test("adds JDBC plugin metadata to latest.json without disturbing updater fields
     }),
     jdbcVersion: "0.1.3",
     protocolVersion: 1,
-    url: "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip",
+    url: "https://github.com/sorchk/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip",
   });
   const parsed = JSON.parse(result);
 
@@ -137,6 +137,6 @@ test("adds JDBC plugin metadata to latest.json without disturbing updater fields
   assert.deepEqual(parsed.jdbc_plugin, {
     version: "0.1.3",
     protocol_version: 1,
-    url: "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip",
+    url: "https://github.com/sorchk/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip",
   });
 });

@@ -67,7 +67,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const updateReady = ref(false);
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
   const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
-  const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
+  const latestReleaseUrl = "https://github.com/sorchk/dbx/releases/latest";
 
   function openUrl(url: string) {
     if (isTauriRuntime()) {

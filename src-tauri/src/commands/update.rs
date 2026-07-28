@@ -13,11 +13,11 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 const OFFICIAL_UPDATE_ENDPOINTS: [&str; 2] = [
     "https://dl.dbxio.com/releases/latest/latest.json",
-    "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+    "https://github.com/sorchk/dbx/releases/latest/download/latest.json",
 ];
 const R2_LATEST_RELEASE_DOWNLOAD_PREFIX: &str = "https://dl.dbxio.com/releases/latest/";
 const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
-const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
+const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/sorchk/dbx/releases/download/";
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
 const MAX_PORTABLE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_PORTABLE_SIGNATURE_BYTES: usize = 64 * 1024;
@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn rewrites_github_asset_url_to_cnb() {
         let download_url = UpdateDownloadSource::Cnb
-            .rewrite_download_url("https://github.com/t8y2/dbx/releases/download/v0.5.39/DBX_0.5.39_aarch64.dmg")
+            .rewrite_download_url("https://github.com/sorchk/dbx/releases/download/v0.5.39/DBX_0.5.39_aarch64.dmg")
             .unwrap()
             .unwrap();
         assert_eq!(download_url, "https://cnb.cool/dbxio.com/dbx/-/releases/download/v0.5.39/DBX_0.5.39_aarch64.dmg");

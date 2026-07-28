@@ -68,7 +68,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
               update_available: true,
               portable_mode: state.portableMode,
               release_name: "DBX v0.5.61",
-              release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
+              release_url: "https://github.com/sorchk/dbx/releases/tag/v0.5.61",
               release_notes: "",
             },
             updateCheckMessage: "",

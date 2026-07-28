@@ -75,7 +75,7 @@ pub mod update;
 pub mod xlsx_export;
 
 pub const R2_CDN_BASE: &str = "https://dl.dbxio.com/";
-pub const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releases/download/";
+pub const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/sorchk/dbx/releases/download/";
 pub const CNB_RELEASE_DOWNLOAD_PREFIX: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
 
 #[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq, Eq, Hash)]
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn download_candidates_exclude_third_party_github_proxy() {
         let urls = download_candidate_urls(
-            "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+            "https://github.com/sorchk/dbx/releases/latest/download/latest.json",
             "releases/latest/latest.json",
         );
 
@@ -181,14 +181,14 @@ mod tests {
             urls,
             vec![
                 "https://dl.dbxio.com/releases/latest/latest.json",
-                "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+                "https://github.com/sorchk/dbx/releases/latest/download/latest.json",
             ]
         );
     }
 
     #[test]
     fn mirror_download_candidates_prefer_stable_registry_metadata() {
-        let github_url = "https://github.com/t8y2/dbx/releases/download/agents-latest/agent-registry.json";
+        let github_url = "https://github.com/sorchk/dbx/releases/download/agents-latest/agent-registry.json";
         assert_eq!(
             DownloadSource::Cnb.download_candidate_urls(github_url, "agents/agent-registry.json").unwrap(),
             vec![

@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-const LATEST_JSON_GITHUB_PATH: &str = "https://github.com/t8y2/dbx/releases/latest/download/latest.json";
+const LATEST_JSON_GITHUB_PATH: &str = "https://github.com/sorchk/dbx/releases/latest/download/latest.json";
 const LATEST_JSON_R2_PATH: &str = "releases/latest/latest.json";
 const LATEST_JSON_CNB_PATH: &str = "https://cnb.cool/dbxio.com/dbx/-/releases/latest/download/latest.json";
 const LATEST_EN_NOTES_R2_PATH: &str = "changelog/latest-en.json";
-const GITHUB_RELEASE_API_PREFIX: &str = "https://api.github.com/repos/t8y2/dbx/releases/tags/v";
-const RELEASE_URL_PREFIX: &str = "https://github.com/t8y2/dbx/releases/tag/v";
+const GITHUB_RELEASE_API_PREFIX: &str = "https://api.github.com/repos/sorchk/dbx/releases/tags/v";
+const RELEASE_URL_PREFIX: &str = "https://github.com/sorchk/dbx/releases/tag/v";
 
 #[derive(Debug, Deserialize)]
 pub struct TauriRelease {
@@ -433,7 +433,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
               "jdbc_plugin": {
                 "version": "0.1.3",
                 "protocol_version": 1,
-                "url": "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip"
+                "url": "https://github.com/sorchk/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip"
               },
               "platforms": {}
             }"#,
@@ -444,7 +444,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
 
         assert_eq!(jdbc.version, "0.1.3");
         assert_eq!(jdbc.protocol_version, 1);
-        assert_eq!(jdbc.url, "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip");
+        assert_eq!(jdbc.url, "https://github.com/sorchk/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip");
     }
 
     #[test]
@@ -455,7 +455,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             jdbc_plugin: None,
             github: Some(GithubReleaseMetadata {
                 name: Some("DBX v0.5.3".to_string()),
-                html_url: Some("https://github.com/t8y2/dbx/releases/tag/v0.5.3".to_string()),
+                html_url: Some("https://github.com/sorchk/dbx/releases/tag/v0.5.3".to_string()),
                 body: Some("### 新功能\n\n真实发布说明".to_string()),
             }),
             notes_en: None,
@@ -464,7 +464,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
         let info = build_update_info(release, "0.5.2");
 
         assert_eq!(info.release_name, "DBX v0.5.3");
-        assert_eq!(info.release_url, "https://github.com/t8y2/dbx/releases/tag/v0.5.3");
+        assert_eq!(info.release_url, "https://github.com/sorchk/dbx/releases/tag/v0.5.3");
         assert_eq!(info.release_notes, "### 新功能\n\n真实发布说明");
         assert!(!info.portable_mode);
     }
@@ -478,7 +478,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             jdbc_plugin: None,
             github: Some(GithubReleaseMetadata {
                 name: Some("DBX v0.5.3".to_string()),
-                html_url: Some("https://github.com/t8y2/dbx/releases/tag/v0.5.3".to_string()),
+                html_url: Some("https://github.com/sorchk/dbx/releases/tag/v0.5.3".to_string()),
                 body: Some("### 新功能\n\n真实发布说明".to_string()),
             }),
             notes_en: Some("### New Features\n\nReal release notes".to_string()),
@@ -510,7 +510,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             super::update_check_candidates(crate::DownloadSource::Official),
             vec![
                 "https://dl.dbxio.com/releases/latest/latest.json",
-                "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+                "https://github.com/sorchk/dbx/releases/latest/download/latest.json",
             ]
         );
         assert_eq!(
@@ -518,7 +518,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
             vec![
                 "https://cnb.cool/dbxio.com/dbx/-/releases/latest/download/latest.json",
                 "https://dl.dbxio.com/releases/latest/latest.json",
-                "https://github.com/t8y2/dbx/releases/latest/download/latest.json",
+                "https://github.com/sorchk/dbx/releases/latest/download/latest.json",
             ]
         );
     }

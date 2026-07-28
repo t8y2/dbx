@@ -42,7 +42,7 @@ export function changelogWebsiteUrl(lang: ChangelogLang): string {
 }
 
 export function changelogReleaseUrl(tag: string): string {
-  return `https://github.com/t8y2/dbx/releases/tag/${encodeURIComponent(tag)}`;
+  return `https://github.com/sorchk/dbx/releases/tag/${encodeURIComponent(tag)}`;
 }
 
 export async function fetchChangelog(lang: ChangelogLang, options: { force?: boolean } = {}): Promise<ChangelogData> {

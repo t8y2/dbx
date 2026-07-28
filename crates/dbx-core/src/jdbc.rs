@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const JDBC_PLUGIN_DOWNLOAD_URL: &str =
-    "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
+    "https://github.com/sorchk/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
 const JDBC_PLUGIN_R2_PATH: &str = "releases/latest/dbx-jdbc-plugin-latest.zip";
 pub const PRESTOSQL_JDBC_DRIVER_VERSION: &str = "350";
 pub const PRESTOSQL_JDBC_DRIVER_COORDINATE: &str = "io.prestosql:presto-jdbc:350";

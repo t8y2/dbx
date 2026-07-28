@@ -21,6 +21,25 @@ class DamengAgentUrlTest {
         Assertions.assertEquals("jdbc:dm://127.0.0.1:5236/MAIN", url);
     }
 
+    @Test
+    void appendsDmJdbcUrlParameters() throws Exception {
+        String url = invokeBuildUrl(new ConnectParams(
+            "127.0.0.1",
+            5236,
+            "",
+            "SYSDBA",
+            "pwd",
+            "?sslFilesPath=/Users/test/dmcert&sslkeystorePass=secret",
+            "",
+            false
+        ));
+
+        Assertions.assertEquals(
+            "jdbc:dm://127.0.0.1:5236?sslFilesPath=/Users/test/dmcert&sslkeystorePass=secret",
+            url
+        );
+    }
+
     private static String invokeBuildUrl(ConnectParams params) throws Exception {
         Method method = DamengAgent.class.getDeclaredMethod("buildUrl", ConnectParams.class);
         method.setAccessible(true);

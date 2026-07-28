@@ -16,14 +16,19 @@ export interface SqlSemanticCompletionScope {
 export function sqlSemanticReferencedTables(model: SqlSemanticModel): SqlCompletionReferencedTable[] {
   return model.rowSources
     .filter((source) => source.kind !== "unknown")
-    .map((source) => ({
-      name: source.name,
-      database: source.metadataTarget?.database,
-      schema: source.qualifierParts[source.qualifierParts.length - 1],
-      alias: source.alias,
-      columns: source.columns,
-      columnAliases: source.columnAliases,
-    }));
+    .map((source) => {
+      const identifierParts = source.qualifiedName?.parts ?? [];
+      return {
+        name: source.name,
+        nameQuoted: !!identifierParts[identifierParts.length - 1]?.quote,
+        database: source.metadataTarget?.database,
+        schema: source.qualifierParts[source.qualifierParts.length - 1],
+        schemaQuoted: source.qualifierParts.length > 0 ? !!identifierParts[identifierParts.length - 2]?.quote : undefined,
+        alias: source.alias,
+        columns: source.columns,
+        columnAliases: source.columnAliases,
+      };
+    });
 }
 
 export function sqlSemanticLocalColumnsByTable(model: SqlSemanticModel): Map<string, SqlCompletionColumn[]> {

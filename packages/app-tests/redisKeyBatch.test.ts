@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { collectUniqueRedisKeys } from "../../apps/desktop/src/lib/redis/redisKeyBatch.ts";
+import { chunkRedisKeyRaws, collectUniqueRedisKeys, REDIS_DELETE_KEY_BATCH_SIZE } from "../../apps/desktop/src/lib/redis/redisKeyBatch.ts";
 import type { RedisKeyInfo } from "../../apps/desktop/src/lib/backend/api.ts";
 
 function makeKey(key: string): RedisKeyInfo {
@@ -39,4 +39,15 @@ test("collectUniqueRedisKeys handles large batches without changing key objects"
   assert.equal(keys.length, input.length);
   assert.equal(keys[0], input[0]);
   assert.equal(keys.at(-1), input.at(-1));
+});
+
+test("chunkRedisKeyRaws bounds large delete payloads without changing key order", () => {
+  const keyRaws = Array.from({ length: REDIS_DELETE_KEY_BATCH_SIZE * 2 + 1 }, (_, index) => `key:${index}`);
+  const batches = [...chunkRedisKeyRaws(keyRaws)];
+
+  assert.deepEqual(
+    batches.map((batch) => batch.length),
+    [REDIS_DELETE_KEY_BATCH_SIZE, REDIS_DELETE_KEY_BATCH_SIZE, 1],
+  );
+  assert.deepEqual(batches.flat(), keyRaws);
 });

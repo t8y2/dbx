@@ -99,11 +99,6 @@ pub struct SyncSnapshot {
     pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
     pub sidebar_layout: Option<serde_json::Value>,
     pub pinned_tree_node_ids: Vec<String>,
-    /// Structured favorites state (groups + items). `None` means the snapshot
-    /// predates the favorites feature — applying it leaves local favorites
-    /// untouched. New snapshots always include the field (possibly empty).
-    #[serde(default)]
-    pub favorites_state: Option<serde_json::Value>,
     pub saved_sql: SavedSqlLibrary,
     pub desktop_settings: DesktopSettings,
     pub editor_settings: Option<serde_json::Value>,
@@ -205,7 +200,6 @@ pub async fn build_sync_snapshot(
         tunnel_profiles: Some(tunnel_profiles),
         sidebar_layout: storage.load_sidebar_layout().await?,
         pinned_tree_node_ids: storage.load_pinned_tree_node_ids().await?,
-        favorites_state: storage.load_favorites_state().await?,
         saved_sql: storage.load_saved_sql_library().await?,
         desktop_settings: storage.load_desktop_settings().await?,
         editor_settings,
@@ -256,9 +250,6 @@ pub async fn apply_sync_snapshot(
         storage.save_sidebar_layout(layout).await?;
     }
     storage.save_pinned_tree_node_ids(&snapshot.pinned_tree_node_ids).await?;
-    if let Some(favorites) = &snapshot.favorites_state {
-        storage.save_favorites_state(favorites).await?;
-    }
     storage.replace_saved_sql_library(&snapshot.saved_sql).await?;
     storage.save_desktop_settings(&snapshot.desktop_settings).await?;
     if let Some(payload) = &sensitive_payload {

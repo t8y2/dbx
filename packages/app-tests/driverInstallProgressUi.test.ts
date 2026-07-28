@@ -16,13 +16,13 @@ test("returns null when install progress has no measurable total", () => {
 });
 
 test("targets only the row currently installing or upgrading", () => {
-  assert.equal(isDriverInstallProgressTarget("mysql", { installing: "mysql", upgradingAll: false, progress: null }), true);
-  assert.equal(isDriverInstallProgressTarget("postgres", { installing: "mysql", upgradingAll: false, progress: null }), false);
+  assert.equal(isDriverInstallProgressTarget("mysql", { installing: "mysql", upgradingAll: false, progressMap: {} }), true);
+  assert.equal(isDriverInstallProgressTarget("postgres", { installing: "mysql", upgradingAll: false, progressMap: {} }), false);
   assert.equal(
     isDriverInstallProgressTarget("postgres", {
       installing: null,
       upgradingAll: true,
-      progress: { step: "driver", db_type: "postgres", downloaded: 1, total: 2 },
+      progressMap: { postgres: { step: "driver", db_type: "postgres", downloaded: 1, total: 2 } },
     }),
     true,
   );

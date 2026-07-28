@@ -41,8 +41,8 @@ impl std::fmt::Display for SqlRisk {
 /// Mirrors the logic in `sql_analysis::normalize_dialect`.
 fn normalize_dialect(dialect: &str) -> &'static str {
     match dialect.to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "kingbase" | "highgo" | "vastbase"
-        | "kwdb" => "postgres",
+        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "kingbase" | "highgo" | "uxdb"
+        | "vastbase" | "kwdb" => "postgres",
         "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql",
         "sqlite" => "sqlite",
         "sqlserver" | "mssql" => "sqlserver",
@@ -766,6 +766,7 @@ fn supports_select_into_table_creation(database_type: DatabaseType) -> bool {
             | DatabaseType::OpenGauss
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
             | DatabaseType::Kwdb
             | DatabaseType::SqlServer

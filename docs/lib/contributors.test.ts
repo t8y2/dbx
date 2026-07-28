@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { dedupeContributors, type Contributor } from "./contributors";
+import { contributorsFromActivity, dedupeContributors, type Contributor } from "./contributors";
 
 const contributor = (login: string): Contributor => ({
   login,
@@ -19,4 +19,28 @@ test("dedupeContributors preserves the original contributor order", () => {
   const contributors = [contributor("first"), contributor("second"), contributor("third")];
 
   assert.deepEqual(dedupeContributors(contributors), contributors);
+});
+
+test("contributorsFromActivity strips snapshot-only fields from landing data", () => {
+  assert.deepEqual(
+    contributorsFromActivity([
+      {
+        login: "builder",
+        avatarUrl: "https://avatars.githubusercontent.com/u/1",
+        profileUrl: "https://github.com/builder",
+        commits: 42,
+        mergedPullRequests: 7,
+        firstContributionAt: "2026-01-01T00:00:00Z",
+        latestContributionAt: "2026-07-01T00:00:00Z",
+      },
+    ]),
+    [
+      {
+        login: "builder",
+        avatar_url: "https://avatars.githubusercontent.com/u/1",
+        html_url: "https://github.com/builder",
+        contributions: 42,
+      },
+    ],
+  );
 });

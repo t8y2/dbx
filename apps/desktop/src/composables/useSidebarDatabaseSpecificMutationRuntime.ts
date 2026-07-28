@@ -5,6 +5,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import type { TreeNode } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { notifyNacosNamespacesChanged } from "@/lib/nacos/nacosNamespaceCache";
 import { findSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { isRenamableMongoCollection, mongoCollectionKindFromNode, mongoDropAllIndexesPreview, mongoDropCollectionPreview, mongoDropDatabasePreview, mongoDropIndexPreview, mongoRenameCollectionPreview } from "@/lib/sidebar/mongoCollectionMutation";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
@@ -170,6 +171,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
         namespaceName,
         namespaceDesc: createNacosNamespaceDesc.value.trim() || namespaceName,
       });
+      notifyNacosNamespacesChanged(node.connectionId);
       showCreateNacosNamespaceDialog.value = false;
       await connectionStore.loadNacosNamespaces(node.connectionId, { force: true });
       const liveNode = findSidebarActionTarget(connectionStore.treeNodes, node);

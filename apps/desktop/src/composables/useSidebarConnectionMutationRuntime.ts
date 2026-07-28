@@ -225,8 +225,6 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   }
 
   const isPinned = computed(() => activeNode.value.pinned || connectionStore.isTreeNodePinned(activeNode.value));
-  const isFavorited = computed(() => connectionStore.isTreeNodeFavorited(activeNode.value));
-  const isFavoritable = computed(() => activeNode.value.type === "table" || activeNode.value.type === "view" || activeNode.value.type === "materialized_view");
   const isNodeDefaultDatabase = computed(
     () => (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
   );
@@ -247,10 +245,6 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   function togglePin() {
     connectionStore.toggleTreeNodePin(activeNode.value);
-  }
-
-  function toggleFavorite() {
-    connectionStore.toggleTreeNodeFavorite(activeNode.value);
   }
 
   function openVisibleDatabasesDialog() {
@@ -314,8 +308,6 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     cancelConnectionAttempt,
     closeDatabaseConnection,
     isPinned,
-    isFavorited,
-    isFavoritable,
     isNodeDefaultDatabase,
     isConnected,
     isConnecting,
@@ -324,7 +316,6 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     canConfigureVisibleSchemas,
     canCopyFinalProxyPort,
     togglePin,
-    toggleFavorite,
     openVisibleDatabasesDialog,
     openVisibleSchemasDialog,
     startRenameGroup,

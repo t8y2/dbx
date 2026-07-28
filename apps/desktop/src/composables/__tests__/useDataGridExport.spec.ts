@@ -56,13 +56,24 @@ function row(data: unknown[]) {
   };
 }
 
-function createMongoExportState(options: { columns: string[]; item: ReturnType<typeof row> & { sourceIndex: number }; mongoDocuments: unknown[]; selectedCellMatrix?: CellSelectionMatrix }) {
+function createMongoExportState(options: {
+  columns: string[];
+  item: ReturnType<typeof row> & { sourceIndex: number };
+  items?: Array<ReturnType<typeof row> & { sourceIndex: number }>;
+  mongoDocuments: unknown[];
+  selectedCellMatrix?: CellSelectionMatrix;
+  selectedRowIds?: Set<number>;
+  mongoUpdateTarget?: false;
+}) {
+  const items = options.items ?? [options.item];
+  const selectedRowIds = options.selectedRowIds ?? new Set<number>();
   const state: UseDataGridExportOptions = {
     columns: computed(() => options.columns),
-    displayItems: computed(() => [options.item]),
+    displayItems: computed(() => items),
     sql: computed(() => undefined),
     tableMeta: computed(() => undefined),
     copyInsertTargetLabel: computed(() => "documents"),
+    mongoUpdateTarget: computed(() => (options.mongoUpdateTarget === false ? undefined : { collection: "documents", idColumn: "_id" })),
     databaseType: computed(() => "mongodb"),
     connectionId: computed(() => "connection-1"),
     database: computed(() => "dbx"),
@@ -78,9 +89,9 @@ function createMongoExportState(options: { columns: string[]; item: ReturnType<t
     selectedCellMatrix: computed(() => options.selectedCellMatrix ?? null),
     selectedRange: computed(() => null),
     contextCell: ref({ rowId: options.item.id, rowIndex: 0, col: -1 }),
-    getRowItem: (rowId) => (rowId === options.item.id ? options.item : undefined),
-    selectedRowIds: ref(new Set<number>()),
-    hasRowSelection: computed(() => false),
+    getRowItem: (rowId) => items.find((item) => item.id === rowId),
+    selectedRowIds: ref(selectedRowIds),
+    hasRowSelection: computed(() => selectedRowIds.size > 0),
   };
   return useDataGridExport(state);
 }
@@ -335,6 +346,84 @@ describe("useDataGridExport prepared row statements", () => {
   },
   "lastUpdatedDate": ISODate("2025-05-06T08:35:32Z")
 });`);
+  });
+
+  it("copies a Mongo row as updateOne while preserving BSON types and missing fields", async () => {
+    const item = {
+      ...row(["507f1f77bcf86cd799439011", "123", 'NumberLong("9007199254740993")', null, null, '{"role":"maintainer"}', "12.34", "AQI="]),
+      sourceIndex: 0,
+    };
+    item.isDirtyCol = [false, false, false, false, false, true, false, false];
+    const state = createMongoExportState({
+      columns: ["_id", "numericText", "counter", "nullable", "missing", "profile", "decimal", "payload"],
+      item,
+      mongoDocuments: [
+        {
+          _id: { $oid: "507f1f77bcf86cd799439011" },
+          numericText: "123",
+          counter: { $numberLong: "9007199254740993" },
+          nullable: null,
+          profile: { role: "admin" },
+          decimal: { $numberDecimal: "12.34" },
+          payload: { $binary: { base64: "AQI=", subType: "00" } },
+        },
+      ],
+    });
+
+    expect(state.canCopyRowAsUpdate.value).toBe(true);
+    await state.copyRowAsUpdate();
+
+    expect(buildDataGridCopyUpdateStatements).not.toHaveBeenCalled();
+    const copied = vi.mocked(copyToClipboard).mock.calls[0]?.[0] ?? "";
+    expect(copied).toContain('db.getCollection("documents")');
+    expect(copied).toContain(".updateOne(");
+    expect(copied).toContain('"_id": ObjectId("507f1f77bcf86cd799439011")');
+    expect(copied).toContain('"numericText": "123"');
+    expect(copied).toContain('"counter": NumberLong("9007199254740993")');
+    expect(copied).toContain('"nullable": null');
+    expect(copied).toContain('"profile":');
+    expect(copied).toContain('"role": "maintainer"');
+    expect(copied).toContain('"decimal": EJSON.deserialize(');
+    expect(copied).toContain('"$numberDecimal": "12.34"');
+    expect(copied).toContain('"payload": EJSON.deserialize(');
+    expect(copied).toContain('"$binary":');
+    expect(copied).toContain('"$unset":');
+    expect(copied).toContain('"missing": ""');
+  });
+
+  it("does not expose Mongo UPDATE copy without an explicit data-list target", async () => {
+    const item = { ...row(["507f1f77bcf86cd799439011", "Alice"]), sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns: ["_id", "name"],
+      item,
+      mongoDocuments: [{ _id: { $oid: "507f1f77bcf86cd799439011" }, name: "Alice" }],
+      mongoUpdateTarget: false,
+    });
+
+    expect(state.canCopyRowAsUpdate.value).toBe(false);
+    await state.copyRowAsUpdate();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it("copies selected Mongo rows as separate updates using each sorted source document", async () => {
+    const first = { ...row(["second-id", "Second"]), id: 1, sourceIndex: 1 };
+    const second = { ...row(["first-id", "First"]), id: 2, sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns: ["_id", "name"],
+      item: first,
+      items: [first, second],
+      mongoDocuments: [
+        { _id: "first-id", name: "First" },
+        { _id: "second-id", name: "Second" },
+      ],
+      selectedRowIds: new Set([1, 2]),
+    });
+
+    await state.copyRowAsUpdate();
+
+    const copied = vi.mocked(copyToClipboard).mock.calls[0]?.[0] ?? "";
+    expect(copied.match(/\.updateOne\(/g)).toHaveLength(2);
+    expect(copied.indexOf('"_id": "second-id"')).toBeLessThan(copied.indexOf('"_id": "first-id"'));
   });
 
   it("preserves original Mongo types while limiting INSERT to the selected fields", async () => {

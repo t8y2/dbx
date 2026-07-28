@@ -22,8 +22,7 @@ use crate::query_result_sql::{
 use crate::table_export::TableExportProgress;
 use crate::transfer::keyset_pagination_sql;
 use crate::xlsx_export::{
-    finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_trailing_sheets, StreamingXlsxWriter,
-    XlsxWorksheetData,
+    finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options, StreamingXlsxWriter, XlsxWorksheetData,
 };
 use serde_json::Value;
 use sqlparser::ast::{
@@ -155,7 +154,14 @@ fn start_query_result_xlsx_workbook<W: Write + Seek>(
     column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
     let trailing_sheets = query_sql_worksheets(request);
-    start_streaming_xlsx_workbook_with_trailing_sheets(writer, Some("Result"), columns, column_types, &trailing_sheets)
+    start_streaming_xlsx_workbook_with_options(
+        writer,
+        Some("Result"),
+        columns,
+        column_types,
+        &trailing_sheets,
+        request.date_time_format.as_deref(),
+    )
 }
 
 fn progress(

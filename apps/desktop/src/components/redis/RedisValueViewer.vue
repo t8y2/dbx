@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
+import { computed, ref, shallowRef, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
+import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
@@ -8,7 +9,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import DateTimePicker from "@/components/ui/date-time-picker/DateTimePicker.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
@@ -20,7 +23,7 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { createShikiJsonHighlighter, type JsonHighlighter } from "@/lib/common/shikiJsonHighlighter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatTtl } from "@/lib/common/ttlFormat";
-import { computeAutoRefreshTick, computeDisplayTtl, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
+import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
 import {
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
@@ -45,8 +48,10 @@ import {
 import { canFullHighlightRedisText, findRedisTextMatches, nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, renderRedisTextSearchHtml, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import { formatJsonSource } from "@/lib/common/safeJsonFormat";
+import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
+import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { toast } = useToast();
 const { isDark } = useTheme();
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
@@ -59,7 +64,12 @@ const props = defineProps<{
   metadata?: RedisKeyInfo | null;
 }>();
 
-const emit = defineEmits<{ deleted: []; loaded: [value: RedisValue] }>();
+const redisExpiryTransport = {
+  setTtl: api.redisSetTtl,
+  setExpireAt: api.redisSetExpireAt,
+};
+
+const emit = defineEmits<{ deleted: [keyRaw: string]; loaded: [value: RedisValue] }>();
 
 const REDIS_JSON_WRAP_STORAGE_KEY = "dbx-redis-json-word-wrap";
 const REDIS_VALUE_FORMAT_STORAGE_KEY = "dbx-redis-value-format";
@@ -79,12 +89,19 @@ const newScore = ref("");
 const showDeleteConfirm = ref(false);
 const showMemberDetail = ref(false);
 const editingTtl = ref(false);
+const savingTtl = ref(false);
+const ttlExpiryMode = ref<RedisExpiryMode>("none");
 const ttlInput = ref("");
+const ttlExpireAt = shallowRef<CalendarDateTime | null>(null);
 const ttlInputEl = ref<InstanceType<typeof Input>>();
 const editTtlWrapper = ref<HTMLElement>();
-onClickOutside(editTtlWrapper, () => {
-  if (editingTtl.value) cancelEditTtl();
-});
+onClickOutside(
+  editTtlWrapper,
+  () => {
+    if (editingTtl.value && !savingTtl.value) cancelEditTtl();
+  },
+  { ignore: ["[data-date-time-picker-content]", "[data-redis-expiry-mode-content]"] },
+);
 const collectionItems = ref<RedisCollectionItem[]>([]);
 const scanCursor = ref<number | undefined>(undefined);
 const selectedMemberTitle = ref("");
@@ -595,7 +612,28 @@ async function load(options: { selectDefaultMember?: boolean; preserveDraft?: bo
   loading.value = true;
   try {
     const loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
-    if (requestId !== loadRequestId || (options.preserveDraft && hasUnsavedRedisDraft.value)) return false;
+    if (requestId !== loadRequestId) return false;
+
+    // Redis reports a key that expired between refreshes as a `none` value.
+    // Tell the browser to remove it instead of rendering a stale detail shell.
+    if (loadedValue.redis_type === "none") {
+      data.value = null;
+      collectionItems.value = [];
+      scanCursor.value = undefined;
+      stopAutoRefresh();
+      emit("deleted", props.keyRaw);
+      return true;
+    }
+
+    if (options.preserveDraft && hasUnsavedRedisDraft.value) {
+      const currentValue = data.value;
+      if (currentValue) {
+        const preservedValue = { ...currentValue, ttl: loadedValue.ttl };
+        data.value = preservedValue;
+        emit("loaded", preservedValue);
+      }
+      return false;
+    }
 
     if (hashSearchTimer) clearTimeout(hashSearchTimer);
     hashSearchTimer = null;
@@ -718,7 +756,7 @@ function discardRedisJsonEdit() {
 
 async function applyDeleteKey() {
   await api.redisDeleteKey(props.connectionId, props.db, props.keyRaw);
-  emit("deleted");
+  emit("deleted", props.keyRaw);
 }
 
 function requestDeleteKey() {
@@ -1151,27 +1189,108 @@ function requestZsetRemove(member: string | null) {
 }
 
 // TTL
-function startEditTtl() {
-  if (!data.value) return;
-  ttlInput.value = data.value.ttl > 0 ? String(data.value.ttl) : "";
-  editingTtl.value = true;
-  void nextTick(() => ttlInputEl.value?.$el?.focus());
+function currentEditableTtl(): number {
+  if (!data.value) return -1;
+  return computeTtlForExpiryEdit(autoRefreshEnabled.value, countdownTtl.value, data.value.ttl);
 }
 
+function expiryValidationMessage(reason: "ttl" | "date" | "past"): string {
+  if (reason === "ttl") return t("redis.expiryTtlInvalid");
+  if (reason === "date") return t("redis.expiryDateRequired");
+  return t("redis.expiryDatePast");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRedisMissingKeyError(error: unknown): boolean {
+  return /^Redis(?:JSON)? key no longer exists(?:;|$)/.test(errorMessage(error));
+}
+
+async function refreshTtlState(missingSignal?: unknown): Promise<unknown | null> {
+  try {
+    await load({ preserveDraft: true });
+    return null;
+  } catch (error) {
+    // RedisJSON can lose a key between TYPE and JSON.GET. Retry that specific
+    // race, but do not remove a key based only on an earlier command result.
+    if (!isRedisMissingKeyError(missingSignal) && !isRedisMissingKeyError(error)) return error;
+    try {
+      await load({ preserveDraft: true });
+      return null;
+    } catch (retryError) {
+      if (isRedisMissingKeyError(retryError)) {
+        emit("deleted", props.keyRaw);
+        return null;
+      }
+      return retryError;
+    }
+  }
+}
+
+function focusTtlExpiryControl(mode = ttlExpiryMode.value) {
+  void nextTick(() => {
+    if (!editingTtl.value) return;
+    if (mode === "ttl") {
+      ttlInputEl.value?.$el?.focus();
+      return;
+    }
+
+    const selector = mode === "at" ? "[data-date-time-picker-trigger]" : "[data-slot='select-trigger']";
+    editTtlWrapper.value?.querySelector<HTMLElement>(selector)?.focus();
+  });
+}
+
+function startEditTtl() {
+  if (!data.value || savingTtl.value) return;
+  const ttl = currentEditableTtl();
+  ttlExpiryMode.value = redisExpiryModeForTtl(ttl);
+  ttlInput.value = ttl > 0 ? String(ttl) : "";
+  ttlExpireAt.value = null;
+  editingTtl.value = true;
+  focusTtlExpiryControl();
+}
+
+watch(ttlExpiryMode, (mode, previousMode) => {
+  const ttl = currentEditableTtl();
+  if (mode === "at" && previousMode !== "at" && ttl > 0) {
+    // Convert the live TTL at the moment of switching, not the stale fetched value.
+    ttlExpireAt.value = unixSecondsToCalendarDateTime(Math.ceil(Date.now() / 1_000) + ttl);
+  }
+  if (editingTtl.value && mode !== previousMode) focusTtlExpiryControl(mode);
+});
+
 async function saveTtl() {
-  const val = ttlInput.value.trim();
-  const ttl = val === "" || val === "-1" ? -1 : parseInt(val, 10);
-  if (isNaN(ttl)) {
-    toast(t("redis.ttlInvalid"), 3000);
+  if (savingTtl.value) return;
+  const validation = validateRedisExpiry(ttlExpiryMode.value, ttlInput.value, ttlExpireAt.value);
+  if (!validation.valid) {
+    const message = expiryValidationMessage(validation.reason);
+    toast(message, 3000);
     return;
   }
-  await api.redisSetTtl(props.connectionId, props.db, props.keyRaw, ttl);
-  editingTtl.value = false;
-  await load();
+  savingTtl.value = true;
+  try {
+    try {
+      await applyRedisExpiryPolicy(redisExpiryTransport, props.connectionId, props.db, props.keyRaw, validation.policy);
+    } catch (error) {
+      // The expiry command may have raced with a deletion or succeeded before a transport error.
+      await refreshTtlState(error);
+      toast(errorMessage(error), 3000);
+      return;
+    }
+    editingTtl.value = false;
+    const refreshError = await refreshTtlState();
+    if (refreshError) toast(errorMessage(refreshError), 3000);
+  } finally {
+    savingTtl.value = false;
+  }
 }
 
 function cancelEditTtl() {
+  if (savingTtl.value) return;
   editingTtl.value = false;
+  ttlExpireAt.value = null;
 }
 
 // Hash
@@ -1453,12 +1572,27 @@ defineExpose({ focusSearch });
           <Badge variant="secondary" class="dbx-editor-font-family text-xs uppercase">{{ data.redis_type }}</Badge>
           <Badge v-if="metadataSizeLabel" variant="outline" class="text-xs text-muted-foreground"> {{ t("redis.columnSize") }}: {{ metadataSizeLabel }} </Badge>
           <template v-if="!editingTtl">
-            <Badge v-if="data.ttl > 0" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent" @click="startEditTtl">TTL: {{ formatTtl(computeDisplayTtl(autoRefreshEnabled, countdownTtl, data.ttl), t) }}</Badge>
-            <Badge v-else-if="data.ttl === -1" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent" @click="startEditTtl">{{ t("redis.noExpiry") }}</Badge>
+            <Badge v-if="data.ttl > 0" as="button" type="button" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50" :disabled="savingTtl" :aria-label="t('redis.expiry')" @click="startEditTtl">
+              TTL: {{ formatTtl(computeDisplayTtl(autoRefreshEnabled, countdownTtl, data.ttl), t) }}
+            </Badge>
+            <Badge v-else-if="data.ttl === -1" as="button" type="button" variant="outline" class="text-xs cursor-pointer text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50" :disabled="savingTtl" :aria-label="t('redis.expiry')" @click="startEditTtl">
+              {{ t("redis.noExpiry") }}
+            </Badge>
           </template>
-          <div ref="editTtlWrapper" v-else class="flex items-center gap-1">
-            <Input ref="ttlInputEl" v-model="ttlInput" class="h-6 w-20 text-xs" placeholder="seconds (-1=no expiry)" @keydown.enter="saveTtl" @keydown.escape="cancelEditTtl" />
-            <Button variant="ghost" size="icon" class="h-6 w-6" @click="saveTtl"><Save class="h-3 w-3" /></Button>
+          <div ref="editTtlWrapper" v-else class="flex min-w-0 max-w-full flex-wrap items-center gap-1">
+            <Select v-model="ttlExpiryMode" :disabled="savingTtl">
+              <SelectTrigger size="sm" class="h-6 max-w-[min(100%,14rem)] shrink-0 gap-1 py-0 pl-2 pr-1.5 text-[11px]" :aria-label="t('redis.expiry')">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent data-redis-expiry-mode-content class="min-w-[12rem]">
+                <SelectItem value="none">{{ t("redis.expiryNone") }}</SelectItem>
+                <SelectItem value="ttl">{{ t("redis.expiryTtl") }}</SelectItem>
+                <SelectItem value="at">{{ t("redis.expiryAt") }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input v-if="ttlExpiryMode === 'ttl'" ref="ttlInputEl" v-model="ttlInput" class="h-6 w-28 shrink-0 text-xs" :disabled="savingTtl" inputmode="numeric" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="saveTtl" @keydown.escape="cancelEditTtl" />
+            <DateTimePicker v-else-if="ttlExpiryMode === 'at'" v-model="ttlExpireAt" compact :locale="locale" :disabled="savingTtl" />
+            <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="savingTtl" :title="t('grid.save')" :aria-label="t('grid.save')" @click="saveTtl"><Save class="h-3 w-3" /></Button>
           </div>
           <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :class="{ 'text-primary bg-accent': autoRefreshEnabled }" :title="t('redis.autoRefresh')" @click="toggleAutoRefresh">
             <Clock class="h-3.5 w-3.5" />

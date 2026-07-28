@@ -7,7 +7,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
+import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError } from "@/lib/table/objectSourceEditor";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
@@ -169,8 +169,8 @@ async function saveSource() {
     toast(t("objects.sourceSaved"));
     emit("saved");
     await loadSource(false);
-  } catch (e: any) {
-    saveError.value = e?.message || String(e);
+  } catch (e: unknown) {
+    saveError.value = formatObjectSourceSaveError(e, databaseType, props.objectType, t("objects.postgresViewColumnChangeHint"));
   } finally {
     saving.value = false;
   }
@@ -213,7 +213,7 @@ function closeDialog() {
           hide-execution-controls
           @save="saveSource"
         />
-        <div v-if="saveError" class="shrink-0 border-t px-3 py-2 text-xs text-destructive">
+        <div v-if="saveError" class="shrink-0 whitespace-pre-wrap break-words border-t px-3 py-2 text-xs text-destructive">
           {{ saveError }}
         </div>
       </div>

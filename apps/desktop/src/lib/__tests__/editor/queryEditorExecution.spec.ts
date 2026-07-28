@@ -2,11 +2,21 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
+const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
 
 describe("QueryEditor execution routing", () => {
   it("routes the execution shortcut through the shared execution-mode contract while bypassing the picker", () => {
     expect(queryEditorSource).toContain("binding(shortcuts.executeSql, () => requestExecute({ bypassPicker: true }))");
     expect(queryEditorSource).not.toContain("forceCurrent");
+  });
+
+  it("routes the new-result-tab shortcut through the same target selection contract", () => {
+    expect(queryEditorSource).toContain("binding(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab)");
+    expect(queryEditorSource).toContain('emit("executeInNewResultTab", source)');
+    expect(queryEditorSource).toContain("requestExecute({ bypassPicker: true, openInNewResultTab: true })");
+    expect(contentAreaSource).toContain('const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs")');
+    expect(contentAreaSource).toContain("!!props.activeTab.resultRuns?.length");
+    expect(contentAreaSource).toContain('role="tablist" :aria-label="t(\'tabs.resultRuns\')"');
   });
 
   it("keeps selection priority and the configured current/all target choice", () => {

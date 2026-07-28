@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Cursor, Seek, Write};
 
+use crate::temporal_format::{excel_temporal_serial, ExcelTemporalKind};
+
+const XLSX_DATE_STYLE: usize = 2;
+const XLSX_DATETIME_STYLE: usize = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XlsxWorksheetData {
@@ -21,6 +26,7 @@ pub struct StreamingXlsxWriter<W: Write + Seek> {
     column_types: Vec<String>,
     next_row_number: usize,
     trailing_sheets: Vec<XlsxWorksheetData>,
+    date_time_format: Option<String>,
 }
 
 /// Estimate column widths from header names only (used by the streaming path
@@ -53,13 +59,25 @@ pub(crate) fn header_row_xml(columns: &[String]) -> String {
     )
 }
 
-/// Build a single `<row>` XML fragment for a data row.
-pub(crate) fn data_row_xml(row_number: usize, columns: &[String], column_types: &[String], row: &[Value]) -> String {
+fn data_row_xml_with_date_time_format(
+    row_number: usize,
+    columns: &[String],
+    column_types: &[String],
+    row: &[Value],
+    date_time_format: Option<&str>,
+) -> String {
     let cells = columns
         .iter()
         .enumerate()
         .map(|(col_index, _)| {
-            typed_cell_xml(row.get(col_index), column_types.get(col_index), row_number - 1, col_index, None)
+            typed_cell_xml(
+                row.get(col_index),
+                column_types.get(col_index),
+                row_number - 1,
+                col_index,
+                None,
+                date_time_format,
+            )
         })
         .collect::<String>();
     format!("<row r=\"{row_number}\">{cells}</row>")
@@ -87,15 +105,27 @@ pub(crate) fn start_streaming_xlsx_workbook<W: Write + Seek>(
     columns: &[String],
     column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    start_streaming_xlsx_workbook_with_trailing_sheets(writer, sheet_name, columns, column_types, &[])
+    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], None)
 }
 
+#[cfg(test)]
 pub(crate) fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek>(
     writer: W,
     sheet_name: Option<&str>,
     columns: &[String],
     column_types: &[String],
     trailing_sheets: &[XlsxWorksheetData],
+) -> Result<StreamingXlsxWriter<W>, String> {
+    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, trailing_sheets, None)
+}
+
+pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
+    writer: W,
+    sheet_name: Option<&str>,
+    columns: &[String],
+    column_types: &[String],
+    trailing_sheets: &[XlsxWorksheetData],
+    date_time_format: Option<&str>,
 ) -> Result<StreamingXlsxWriter<W>, String> {
     let primary_sheet = XlsxWorksheetData {
         sheet_name: sheet_name.map(str::to_string),
@@ -113,7 +143,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek
     write_zip_entry(&mut zip, "_rels/.rels", root_rels_xml())?;
     write_zip_entry(&mut zip, "xl/workbook.xml", &workbook_xml_for_sheets(&sheet_names))?;
     write_zip_entry(&mut zip, "xl/_rels/workbook.xml.rels", &workbook_rels_xml_for_sheet_count(sheet_count))?;
-    write_zip_entry(&mut zip, "xl/styles.xml", styles_xml())?;
+    write_zip_entry(&mut zip, "xl/styles.xml", &styles_xml(date_time_format))?;
 
     // Begin the sheet1.xml entry with header, frozen pane, column widths and
     // the header row.
@@ -142,6 +172,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek
         column_types: column_types.to_vec(),
         next_row_number: 2,
         trailing_sheets: trailing_sheets.to_vec(),
+        date_time_format: date_time_format.map(str::to_string),
     })
 }
 
@@ -149,7 +180,16 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
     /// Append a single data row to the worksheet.
     pub fn write_row(&mut self, row: &[Value]) -> Result<(), String> {
         self.zip
-            .write_all(data_row_xml(self.next_row_number, &self.columns, &self.column_types, row).as_bytes())
+            .write_all(
+                data_row_xml_with_date_time_format(
+                    self.next_row_number,
+                    &self.columns,
+                    &self.column_types,
+                    row,
+                    self.date_time_format.as_deref(),
+                )
+                .as_bytes(),
+            )
             .map_err(|err| err.to_string())?;
         self.next_row_number += 1;
         Ok(())
@@ -345,7 +385,20 @@ fn typed_cell_xml(
     row_index: usize,
     col_index: usize,
     style: Option<usize>,
+    date_time_format: Option<&str>,
 ) -> String {
+    if let Some(Value::String(value)) = value {
+        if let Some((serial, temporal_kind)) =
+            excel_temporal_serial(value, column_type.map(String::as_str), date_time_format)
+        {
+            let reference = cell_ref(row_index, col_index);
+            let style = match temporal_kind {
+                ExcelTemporalKind::Date => XLSX_DATE_STYLE,
+                ExcelTemporalKind::DateTime => XLSX_DATETIME_STYLE,
+            };
+            return format!("<c r=\"{reference}\" s=\"{style}\"><v>{serial}</v></c>");
+        }
+    }
     if is_numeric_column_type(column_type) {
         if let Some(Value::String(value)) = value {
             if let Some(number) = safe_excel_number(value) {
@@ -391,7 +444,14 @@ fn worksheet_xml(data: &XlsxWorksheetData) -> String {
                 .iter()
                 .enumerate()
                 .map(|(col_index, _)| {
-                    typed_cell_xml(row.get(col_index), data.column_types.get(col_index), excel_row - 1, col_index, None)
+                    typed_cell_xml(
+                        row.get(col_index),
+                        data.column_types.get(col_index),
+                        excel_row - 1,
+                        col_index,
+                        None,
+                        None,
+                    )
                 })
                 .collect::<String>();
             format!("<row r=\"{excel_row}\">{cells}</row>")
@@ -490,17 +550,96 @@ fn workbook_rels_xml_for_sheet_count(sheet_count: usize) -> String {
     )
 }
 
-fn styles_xml() -> &'static str {
-    concat!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
-        "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
-        "<fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>",
-        "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>",
-        "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>",
-        "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>",
-        "<cellXfs count=\"2\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/></cellXfs>",
-        "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>",
-        "</styleSheet>"
+fn dayjs_to_excel_number_format(pattern: &str) -> Option<(String, bool, bool)> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() || pattern.len() > 100 || pattern.contains('%') {
+        return None;
+    }
+    let tokens = [
+        ("YYYY", "yyyy", true, false),
+        ("SSS", "000", false, true),
+        ("ZZ", "", false, true),
+        ("MM", "mm", true, false),
+        ("DD", "dd", true, false),
+        ("HH", "hh", false, true),
+        ("mm", "mm", false, true),
+        ("ss", "ss", false, true),
+        ("M", "m", true, false),
+        ("D", "d", true, false),
+        ("H", "h", false, true),
+        ("m", "m", false, true),
+        ("s", "s", false, true),
+        ("Z", "", false, true),
+    ];
+    let mut output = String::with_capacity(pattern.len());
+    let mut has_date = false;
+    let mut has_time = false;
+    let mut index = 0;
+    while index < pattern.len() {
+        let remaining = &pattern[index..];
+        if remaining.starts_with('[') {
+            let close = remaining.find(']')?;
+            let literal = &remaining[1..close];
+            output.push('"');
+            output.push_str(&literal.replace('"', "\"\""));
+            output.push('"');
+            index += close + 1;
+            continue;
+        }
+        if let Some((token, replacement, is_date, is_time)) =
+            tokens.iter().find(|(token, ..)| remaining.starts_with(token))
+        {
+            if replacement.is_empty() {
+                return None;
+            }
+            output.push_str(replacement);
+            has_date |= *is_date;
+            has_time |= *is_time;
+            index += token.len();
+            continue;
+        }
+        let character = remaining.chars().next()?;
+        if character.is_ascii_alphabetic() {
+            // Keep the accepted Day.js token set aligned with temporal_format.rs;
+            // unsupported tokens must not silently alter the exported display.
+            return None;
+        }
+        output.push(character);
+        index += character.len_utf8();
+    }
+    (has_date && !output.is_empty()).then_some((output, has_date, has_time))
+}
+
+fn styles_xml(date_time_format: Option<&str>) -> String {
+    let default_date = "yyyy-mm-dd".to_string();
+    let default_datetime = "yyyy-mm-dd hh:mm:ss".to_string();
+    let (date_format, datetime_format) = date_time_format
+        .and_then(dayjs_to_excel_number_format)
+        .map(|(format, has_date, has_time)| {
+            if has_time {
+                (default_date.clone(), format)
+            } else if has_date {
+                (format.clone(), format)
+            } else {
+                (default_date.clone(), default_datetime.clone())
+            }
+        })
+        .unwrap_or((default_date, default_datetime));
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
+            "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
+            "<numFmts count=\"2\"><numFmt numFmtId=\"164\" formatCode=\"{}\"/><numFmt numFmtId=\"165\" formatCode=\"{}\"/></numFmts>",
+            "<fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>",
+            "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>",
+            "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>",
+            "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>",
+            "<cellXfs count=\"4\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/></cellXfs>",
+            "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>",
+            "</styleSheet>"
+        ),
+        escape_xml(&date_format),
+        escape_xml(&datetime_format)
     )
 }
 
@@ -535,7 +674,7 @@ pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>
         ("_rels/.rels", root_rels_xml().to_string()),
         ("xl/workbook.xml", workbook_xml_for_sheets(&sheet_names)),
         ("xl/_rels/workbook.xml.rels", workbook_rels_xml_for_sheet_count(sheets.len())),
-        ("xl/styles.xml", styles_xml().to_string()),
+        ("xl/styles.xml", styles_xml(None)),
     ];
 
     let cursor = Cursor::new(Vec::<u8>::new());
@@ -559,7 +698,8 @@ pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>
 mod tests {
     use super::{
         build_xlsx_workbook, build_xlsx_workbook_multi, start_streaming_xlsx_workbook,
-        start_streaming_xlsx_workbook_with_trailing_sheets, XlsxWorksheetData,
+        start_streaming_xlsx_workbook_with_options, start_streaming_xlsx_workbook_with_trailing_sheets,
+        XlsxWorksheetData,
     };
     use calamine::{open_workbook_auto, Reader};
     use serde_json::json;
@@ -628,6 +768,49 @@ mod tests {
         assert!(sheet.contains("<c r=\"A2\"><v>1.00000</v></c>"));
         assert!(sheet.contains("<c r=\"B2\"><v>2800.000000</v></c>"));
         assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>00123</t></is></c>"));
+    }
+
+    #[test]
+    fn writes_temporal_columns_as_excel_dates_without_retyping_other_values() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Typed values".to_string()),
+            columns: vec![
+                "day".to_string(),
+                "created_at".to_string(),
+                "label".to_string(),
+                "invalid_day".to_string(),
+                "amount".to_string(),
+                "zoned_at".to_string(),
+            ],
+            column_types: vec![
+                "date".to_string(),
+                "timestamp without time zone".to_string(),
+                "text".to_string(),
+                "date".to_string(),
+                "numeric".to_string(),
+                "timestamp with time zone".to_string(),
+            ],
+            rows: vec![vec![
+                json!("2024-02-25"),
+                json!("2024-02-25 13:02:15"),
+                json!("2024-02-25"),
+                json!("not-a-date"),
+                json!("2800.000000"),
+                json!("2024-02-25T13:02:15+08:00"),
+            ]],
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        let styles = read_zip_entry(&workbook, "xl/styles.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"2\"><v>45347</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"3\"><v>45347.543229166666</v></c>"));
+        assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>2024-02-25</t></is></c>"));
+        assert!(sheet.contains("<c r=\"D2\" t=\"inlineStr\"><is><t>not-a-date</t></is></c>"));
+        assert!(sheet.contains("<c r=\"E2\"><v>2800.000000</v></c>"));
+        assert!(sheet.contains("<c r=\"F2\" t=\"inlineStr\"><is><t>2024-02-25T13:02:15+08:00</t></is></c>"));
+        assert!(styles.contains("numFmtId=\"164\" formatCode=\"yyyy-mm-dd\""));
+        assert!(styles.contains("numFmtId=\"165\" formatCode=\"yyyy-mm-dd hh:mm:ss\""));
     }
 
     #[test]
@@ -779,6 +962,34 @@ mod tests {
         assert!(sheet.contains("<c r=\"A2\"><v>42</v></c>"));
         assert!(sheet.contains("<c r=\"B2\"><v>123.5</v></c>"));
         assert!(sheet.contains("<c r=\"C2\"><v>2800.000000</v></c>"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn streaming_temporal_cells_keep_the_configured_excel_display_format() {
+        let path = std::env::temp_dir().join(format!("dbx-temporal-stream-test-{}.xlsx", uuid::Uuid::new_v4()));
+        {
+            let file = fs::File::create(&path).expect("create temp xlsx");
+            let columns = ["created_at".to_string()];
+            let column_types = ["timestamp without time zone".to_string()];
+            let mut writer = start_streaming_xlsx_workbook_with_options(
+                file,
+                Some("Temporal"),
+                &columns,
+                &column_types,
+                &[],
+                Some("YYYY/MM/DD HH:mm:ss.SSS"),
+            )
+            .expect("start workbook");
+            writer.write_row(&[json!("2024/02/25 13:02:15.125")]).expect("write temporal row");
+            drop(writer.finish().expect("finish workbook"));
+        }
+
+        let bytes = fs::read(&path).expect("read workbook");
+        let sheet = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
+        let styles = read_zip_entry(&bytes, "xl/styles.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"3\"><v>"), "sheet={sheet}");
+        assert!(styles.contains("numFmtId=\"165\" formatCode=\"yyyy/mm/dd hh:mm:ss.000\""));
         let _ = fs::remove_file(&path);
     }
 

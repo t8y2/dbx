@@ -26,6 +26,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres like
   ["kingbase", POSTGRES_LIKE_OBJECTS],
   ["highgo", POSTGRES_LIKE_OBJECTS],
+  ["uxdb", POSTGRES_LIKE_OBJECTS],
   ["vastbase", POSTGRES_LIKE_OBJECTS],
   ["redshift", POSTGRES_LIKE_OBJECTS],
   // oracle

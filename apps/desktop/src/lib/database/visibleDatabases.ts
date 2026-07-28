@@ -14,6 +14,7 @@ const SYSTEM_DATABASE_RULES: Partial<Record<DatabaseType, ReadonlySet<string>>> 
   questdb: new Set(["template0", "template1"]),
   kingbase: new Set(["template0", "template1"]),
   highgo: new Set(["template0", "template1"]),
+  uxdb: new Set(["template0", "template1"]),
   vastbase: new Set(["template0", "template1"]),
   redshift: new Set(["template0", "template1"]),
   clickhouse: new Set(["information_schema", "system"]),

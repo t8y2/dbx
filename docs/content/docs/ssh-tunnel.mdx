@@ -26,7 +26,7 @@ SSH tunnels are built in. You do not need to create a manual terminal port forwa
 | SSH User        | Username for SSH authentication                                               |
 | Connect Timeout | Maximum time DBX waits while opening the SSH connection; default is 5 seconds |
 
-<Tabs groupId="ssh-auth" items={['Private Key (Recommended)', 'Password']}>
+<Tabs groupId="ssh-auth" items={['Private Key (Recommended)', 'Private Key + Password', 'Password']}>
   <Tab value="Private Key (Recommended)">
     Select a private key file (for example `~/.ssh/id_rsa` or `~/.ssh/id_ed25519`):
 
@@ -35,6 +35,15 @@ SSH tunnels are built in. You do not need to create a manual terminal port forwa
 
     Key authentication is more secure than password authentication.
 
+  </Tab>
+  <Tab value="Private Key + Password">
+    Use a private key as the primary credential with password as a fallback. DBX tries key authentication first; if the server rejects the key and continues to offer password authentication, it automatically falls back to password authentication.
+
+    - **Key Path** — Browse and select your key file.
+    - **Key Passphrase** — Enter the passphrase if your key is encrypted.
+    - **Password** — Enter your SSH password as a fallback.
+
+    This is useful when a key may be temporarily revoked or when different hops in a multi-hop tunnel require different methods.
   </Tab>
   <Tab value="Password">
     Enter your SSH password directly. This works on servers that allow password authentication.

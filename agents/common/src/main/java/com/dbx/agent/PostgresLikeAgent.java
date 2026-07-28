@@ -136,7 +136,9 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     public List<DatabaseInfo> listDatabases() {
         return unchecked(() -> {
             List<DatabaseInfo> result = new ArrayList<>();
-            try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement("SELECT datname FROM pg_catalog.pg_database WHERE datistemplate = false ORDER BY datname");
+            String sql = "SELECT datname FROM " + profile.catalogRelation("database") +
+                " WHERE datistemplate = false ORDER BY datname";
+            try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(sql);
                  ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(new DatabaseInfo(rs.getString("datname")));
@@ -152,10 +154,10 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             List<String> result = new ArrayList<>();
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(
                 "SELECT n.nspname AS schema_name " +
-                "FROM pg_catalog.pg_namespace n " +
-                "WHERE n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') " +
-                "AND n.nspname NOT LIKE 'pg_toast_temp_%' " +
-                "AND n.nspname NOT LIKE 'pg_temp_%' " +
+                "FROM " + profile.catalogRelation("namespace") + " n " +
+                "WHERE n.nspname NOT IN ('" + profile.getCatalogSchema() + "','information_schema','" + profile.getToastSchema() + "') " +
+                "AND n.nspname NOT LIKE '" + profile.getToastTemporarySchemaPrefix() + "%' " +
+                "AND n.nspname NOT LIKE '" + profile.getTemporarySchemaPrefix() + "%' " +
                 "ORDER BY n.nspname"
             ); ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
@@ -179,9 +181,9 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
                 "WHEN 'm' THEN 'MATERIALIZED VIEW' " +
                 "WHEN 'f' THEN 'FOREIGN TABLE' " +
                 "ELSE 'TABLE' END AS table_type, " +
-                "obj_description(c.oid) AS table_comment " +
-                "FROM pg_catalog.pg_class c " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+                profile.catalogBuiltinFunction("obj_description") + "(c.oid) AS table_comment " +
+                "FROM " + profile.catalogRelation("class") + " c " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
                 "WHERE n.nspname = ? AND c.relkind IN ('r','p','v','m','f') " +
                 "ORDER BY c.relname"
             )) {
@@ -207,8 +209,8 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(
                 "SELECT p.proname AS routine_name, " +
                 "CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS routine_type " +
-                "FROM pg_catalog.pg_proc p " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace " +
+                "FROM " + profile.catalogRelation("proc") + " p " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = p.pronamespace " +
                 "WHERE n.nspname = ? AND p.prokind IN ('p','f') " +
                 "ORDER BY p.proname"
             )) {
@@ -221,8 +223,8 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             }
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(
                 "SELECT c.relname AS sequence_name, 'SEQUENCE' AS object_type " +
-                "FROM pg_catalog.pg_class c " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+                "FROM " + profile.catalogRelation("class") + " c " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
                 "WHERE n.nspname = ? AND c.relkind = 'S' " +
                 "ORDER BY c.relname"
             )) {
@@ -286,9 +288,9 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     public String getTableComment(String schema, String table) {
         return unchecked(() -> {
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(
-                "SELECT obj_description(c.oid) AS table_comment " +
-                "FROM pg_catalog.pg_class c " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+                "SELECT " + profile.catalogBuiltinFunction("obj_description") + "(c.oid) AS table_comment " +
+                "FROM " + profile.catalogRelation("class") + " c " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
                 "WHERE n.nspname = ? AND c.relname = ? AND c.relkind IN ('r','m','f','p') " +
                 "LIMIT 1"
             )) {
@@ -308,10 +310,11 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     protected List<CheckConstraintInfo> listCheckConstraints(String schema, String table) {
         return unchecked(() -> {
             List<CheckConstraintInfo> result = new ArrayList<>();
-            String sql = "SELECT co.conname AS constraint_name, pg_catalog.pg_get_constraintdef(co.oid, true) AS constraint_definition " +
-                "FROM pg_catalog.pg_constraint co " +
-                "JOIN pg_catalog.pg_class c ON c.oid = co.conrelid " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+            String sql = "SELECT co.conname AS constraint_name, " +
+                profile.catalogPrefixedFunction("get_constraintdef") + "(co.oid, true) AS constraint_definition " +
+                "FROM " + profile.catalogRelation("constraint") + " co " +
+                "JOIN " + profile.catalogRelation("class") + " c ON c.oid = co.conrelid " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
                 "WHERE co.contype = 'c' AND n.nspname = ? AND c.relname = ? " +
                 "ORDER BY co.conname";
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
@@ -336,15 +339,18 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             String upperType = objectType.toUpperCase();
             String sql;
             if ("VIEW".equals(upperType) || "MATERIALIZED VIEW".equals(upperType)) {
-                sql = "SELECT pg_catalog.pg_get_viewdef(pg_catalog.to_regclass(?), true)";
+                sql = "SELECT " + profile.catalogPrefixedFunction("get_viewdef") + "(" +
+                    profile.catalogBuiltinFunction("to_regclass") + "(?), true)";
             } else if ("FUNCTION".equals(upperType)) {
-                sql = "SELECT pg_catalog.pg_get_functiondef(p.oid)\n" +
-                    "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n" +
+                sql = "SELECT " + profile.catalogPrefixedFunction("get_functiondef") + "(p.oid)\n" +
+                    "FROM " + profile.catalogRelation("proc") + " p JOIN " +
+                    profile.catalogRelation("namespace") + " n ON n.oid = p.pronamespace\n" +
                     "WHERE n.nspname = ? AND p.proname = ? AND p.prokind = 'f'\n" +
                     "ORDER BY p.oid LIMIT 1";
             } else if ("PROCEDURE".equals(upperType)) {
-                sql = "SELECT pg_catalog.pg_get_functiondef(p.oid)\n" +
-                    "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace\n" +
+                sql = "SELECT " + profile.catalogPrefixedFunction("get_functiondef") + "(p.oid)\n" +
+                    "FROM " + profile.catalogRelation("proc") + " p JOIN " +
+                    profile.catalogRelation("namespace") + " n ON n.oid = p.pronamespace\n" +
                     "WHERE n.nspname = ? AND p.proname = ? AND p.prokind = 'p'\n" +
                     "ORDER BY p.oid LIMIT 1";
             } else {
@@ -378,21 +384,21 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             Set<String> primaryKeys = primaryKeys(schema, table);
             List<ColumnInfo> result = new ArrayList<>();
             String sql = "SELECT a.attname AS column_name, " +
-                "format_type(a.atttypid, a.atttypmod) AS data_type, " +
+                profile.catalogBuiltinFunction("format_type") + "(a.atttypid, a.atttypmod) AS data_type, " +
                 "NOT a.attnotnull AS is_nullable, " +
-                "pg_get_expr(ad.adbin, ad.adrelid) AS column_default, " +
-                "col_description(a.attrelid, a.attnum) AS column_comment, " +
+                profile.catalogPrefixedFunction("get_expr") + "(ad.adbin, ad.adrelid) AS column_default, " +
+                profile.catalogBuiltinFunction("col_description") + "(a.attrelid, a.attnum) AS column_comment, " +
                 "CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 " +
                 "THEN ((a.atttypmod - 4) >> 16) & 65535 ELSE NULL END AS numeric_precision, " +
                 "CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 " +
                 "THEN (a.atttypmod - 4) & 65535 ELSE NULL END AS numeric_scale, " +
                 "CASE WHEN t.typname IN ('varchar', 'bpchar') AND a.atttypmod > 0 " +
                 "THEN a.atttypmod - 4 ELSE NULL END AS character_maximum_length " +
-                "FROM pg_catalog.pg_attribute a " +
-                "JOIN pg_catalog.pg_type t ON t.oid = a.atttypid " +
-                "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
-                "LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum " +
+                "FROM " + profile.catalogRelation("attribute") + " a " +
+                "JOIN " + profile.catalogRelation("type") + " t ON t.oid = a.atttypid " +
+                "JOIN " + profile.catalogRelation("class") + " c ON c.oid = a.attrelid " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
+                "LEFT JOIN " + profile.catalogRelation("attrdef") + " ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum " +
                 "WHERE n.nspname = ? AND c.relname = ? " +
                 "AND a.attnum > 0 AND NOT a.attisdropped " +
                 "ORDER BY a.attnum";
@@ -425,11 +431,11 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         return unchecked(() -> {
             Set<String> primaryKeys = new LinkedHashSet<>();
             String sql = "SELECT a.attname AS column_name " +
-                "FROM pg_catalog.pg_constraint co " +
-                "JOIN pg_catalog.pg_class c ON c.oid = co.conrelid " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+                "FROM " + profile.catalogRelation("constraint") + " co " +
+                "JOIN " + profile.catalogRelation("class") + " c ON c.oid = co.conrelid " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
                 "JOIN LATERAL (SELECT unnest(co.conkey) AS attnum, generate_series(1, array_length(co.conkey, 1)) AS ord) AS pk_cols ON true " +
-                "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = pk_cols.attnum " +
+                "JOIN " + profile.catalogRelation("attribute") + " a ON a.attrelid = c.oid AND a.attnum = pk_cols.attnum " +
                 "WHERE co.contype = 'p' " +
                 "AND n.nspname = ? " +
                 "AND c.relname = ? " +
@@ -454,13 +460,13 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
                 "ix.indisunique AS is_unique, ix.indisprimary AS is_primary, " +
                 "array_agg(a.attname ORDER BY k.n) AS columns " +
-                "FROM pg_catalog.pg_index ix " +
-                "JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid " +
-                "JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace " +
-                "JOIN pg_catalog.pg_am am ON am.oid = i.relam " +
+                "FROM " + profile.catalogRelation("index") + " ix " +
+                "JOIN " + profile.catalogRelation("class") + " t ON t.oid = ix.indrelid " +
+                "JOIN " + profile.catalogRelation("class") + " i ON i.oid = ix.indexrelid " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = t.relnamespace " +
+                "JOIN " + profile.catalogRelation("am") + " am ON am.oid = i.relam " +
                 "JOIN LATERAL (SELECT unnest(ix.indkey) AS attnum, generate_series(1, array_length(ix.indkey, 1)) AS n) AS k ON true " +
-                "JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum " +
+                "JOIN " + profile.catalogRelation("attribute") + " a ON a.attrelid = t.oid AND a.attnum = k.attnum " +
                 "WHERE n.nspname = ? AND t.relname = ? " +
                 "GROUP BY i.relname, am.amname, ix.indisunique, ix.indisprimary " +
                 "ORDER BY i.relname";
@@ -499,14 +505,14 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
                 "a.attname AS column_name, " +
                 "rc.relname AS ref_table, " +
                 "ra.attname AS ref_column " +
-                "FROM pg_catalog.pg_constraint co " +
-                "JOIN pg_catalog.pg_class c ON c.oid = co.conrelid " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
-                "JOIN pg_catalog.pg_class rc ON rc.oid = co.confrelid " +
+                "FROM " + profile.catalogRelation("constraint") + " co " +
+                "JOIN " + profile.catalogRelation("class") + " c ON c.oid = co.conrelid " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
+                "JOIN " + profile.catalogRelation("class") + " rc ON rc.oid = co.confrelid " +
                 "JOIN LATERAL (SELECT unnest(co.conkey) AS attnum, generate_series(1, array_length(co.conkey, 1)) AS ord) AS fk ON true " +
-                "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = fk.attnum " +
+                "JOIN " + profile.catalogRelation("attribute") + " a ON a.attrelid = c.oid AND a.attnum = fk.attnum " +
                 "JOIN LATERAL (SELECT unnest(co.confkey) AS attnum, generate_series(1, array_length(co.confkey, 1)) AS ord) AS pk ON pk.ord = fk.ord " +
-                "JOIN pg_catalog.pg_attribute ra ON ra.attrelid = rc.oid AND ra.attnum = pk.attnum " +
+                "JOIN " + profile.catalogRelation("attribute") + " ra ON ra.attrelid = rc.oid AND ra.attnum = pk.attnum " +
                 "WHERE co.contype = 'f' " +
                 "AND n.nspname = ? " +
                 "AND c.relname = ? " +
@@ -541,9 +547,9 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
                 "CASE WHEN (tg.tgtype & 32) <> 0 THEN 'TRUNCATE,' ELSE '' END" +
                 ")) AS event_manipulation, " +
                 "CASE WHEN (tg.tgtype & 2) <> 0 THEN 'BEFORE' ELSE 'AFTER' END AS action_timing " +
-                "FROM pg_catalog.pg_trigger tg " +
-                "JOIN pg_catalog.pg_class c ON c.oid = tg.tgrelid " +
-                "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+                "FROM " + profile.catalogRelation("trigger") + " tg " +
+                "JOIN " + profile.catalogRelation("class") + " c ON c.oid = tg.tgrelid " +
+                "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
                 "WHERE n.nspname = ? AND c.relname = ? AND NOT tg.tgisinternal " +
                 "ORDER BY tg.tgname";
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(sql)) {

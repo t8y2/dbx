@@ -14,6 +14,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | dameng | 达梦 DM8 | DM JDBC |
 | kingbase | 人大金仓 KingbaseES | gokb Go native agent |
 | vastbase | Vastbase | Vastbase JDBC |
+| uxdb | UXDB | UXDB JDBC |
 | goldendb | GoldenDB | MySQL Connector/J |
 | databend | Databend | Databend JDBC |
 | databricks | Databricks SQL | Databricks JDBC |

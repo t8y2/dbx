@@ -36,14 +36,19 @@ The query editor is where daily SQL work happens: writing queries, using complet
 
 ## Execute SQL
 
-| Action               | macOS                         | Windows / Linux                |
-| -------------------- | ----------------------------- | ------------------------------ |
-| Execute all SQL      | `Cmd+Enter`                   | `Ctrl+Enter`                   |
-| Execute selected SQL | Select text, then `Cmd+Enter` | Select text, then `Ctrl+Enter` |
+| Action                      | macOS                         | Windows / Linux                |
+| --------------------------- | ----------------------------- | ------------------------------ |
+| Execute all SQL             | `Cmd+Enter`                   | `Ctrl+Enter`                   |
+| Execute selected SQL        | Select text, then `Cmd+Enter` | Select text, then `Ctrl+Enter` |
+| Execute in a new result tab | `Cmd+\`                       | `Ctrl+\`                       |
 
 <Callout type="info">When text is selected, DBX executes only the selected SQL. When nothing is selected, it executes the full editor content.</Callout>
 
 After execution, the result area shows returned rows, duration, affected row count, or the error message. For multi-statement scripts, select the exact fragment you want to run to reduce mistakes.
+
+Regular execution replaces the active result. Use **Execute SQL in new result tab** when you need to keep the current result and compare it with another run. By default, DBX tiles every run as a horizontal result tab that you can switch or close directly. When many runs are retained, only the run-tab strip scrolls while the current table label stays fixed. You can switch retained runs to a compact list under **View options** in the result toolbar. The selected SQL and current-statement rules are the same for both execution actions.
+
+Both execution shortcuts are configurable under **Settings → Shortcuts**. DBX reports conflicts within the SQL editor scope and requires them to be resolved before applying shortcut changes.
 
 DBX also tracks query sessions so long-running result sets can be closed when you leave them, and active queries can be cancelled from the UI when the database driver supports cancellation.
 

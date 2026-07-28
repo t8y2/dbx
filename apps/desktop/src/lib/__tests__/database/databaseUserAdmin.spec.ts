@@ -59,6 +59,8 @@ describe("database user admin providers", () => {
     const provider = getDatabaseUserAdminProvider("doris");
 
     expect(provider?.listUsersSql()).toBe("SHOW ALL GRANTS;");
+    expect(provider?.fallbackListUsersSql?.()).toBe("SHOW GRANTS;");
+    expect(provider?.parseFallbackUsers).toBe(dorisUsersResult);
     expect(provider?.showGrantsSql({ user: "reporter", host: "%" })).toBe("SHOW GRANTS FOR 'reporter'@'%';");
     expect(provider?.alterPasswordSql?.({ user: "reporter", host: "%" }, "new'secret")).toBe("SET PASSWORD FOR 'reporter'@'%' = PASSWORD('new''secret');");
     expect(dorisPrivilegeTargetSql("analytics", "daily`rollup")).toBe("`internal`.`analytics`.`daily``rollup`");
@@ -113,6 +115,12 @@ describe("database user admin providers", () => {
     expect(sql).toContain("FROM sys_catalog.sys_auth_members m");
     expect(sql).toContain("CROSS JOIN sys_catalog.sys_database d");
     expect(sql).toContain("CROSS JOIN sys_catalog.sys_namespace n");
+    expect(sql).toContain("FROM information_schema.table_privileges");
+    expect(sql).toContain("CAST(privilege_type AS text)");
+    expect(sql).toContain("CAST(is_grantable AS text)");
+    expect(sql).toContain("concat('Table: '");
+    expect(sql).not.toContain(" || ");
+    expect(sql).not.toContain("role_table_grants");
     expect(sql).toContain("WHERE r.rolname = 'role''o'");
     expect(sql).not.toContain("pg_catalog");
     expect(sql).not.toContain("pg_roles");

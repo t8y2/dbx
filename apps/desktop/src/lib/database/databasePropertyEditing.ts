@@ -13,7 +13,7 @@ type PropertyEditConnection = Pick<ConnectionConfig, "db_type" | "driver_profile
 type DatabaseNode = Pick<{ type: TreeNodeType; database?: string | null }, "type" | "database">;
 type SchemaNode = Pick<{ type: TreeNodeType; database?: string | null; schema?: string | null }, "type" | "database" | "schema">;
 
-const POSTGRES_COMMENT_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss", "yashandb"]);
+const POSTGRES_COMMENT_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "yashandb"]);
 
 export const DATABASE_PROPERTY_EDITING_MATRIX = {
   mysql: { database: ["charsetCollation"] },
@@ -42,6 +42,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   gaussdb: { database: ["databaseComment"], schema: ["schemaComment"] },
   kingbase: { database: ["databaseComment"], schema: ["schemaComment"] },
   highgo: { database: ["databaseComment"], schema: ["schemaComment"] },
+  uxdb: { database: ["databaseComment"], schema: ["schemaComment"] },
   vastbase: { database: ["databaseComment"], schema: ["schemaComment"] },
   goldendb: { database: ["charsetCollation"] },
   kwdb: { database: ["databaseComment"], schema: ["schemaComment"] },

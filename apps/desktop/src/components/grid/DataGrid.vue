@@ -71,7 +71,6 @@ import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference"
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
-import { dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
@@ -4407,18 +4406,7 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
         : item.displayIndex % 2 === 1
           ? `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
           : "var(--background)";
-  const rowNumberBg =
-    item.status === "new"
-      ? newBg
-      : item.status === "edited"
-        ? editedBg
-        : item.status === "deleted"
-          ? deletedBg
-          : isRowActive(item.displayIndex) && !item.isDeleted
-            ? activeBg
-            : dark
-              ? DATA_GRID_DARK_ROW_NUMBER_BG
-              : "var(--background)";
+  const rowNumberBg = item.status === "new" ? newBg : item.status === "edited" ? editedBg : item.status === "deleted" ? deletedBg : isRowActive(item.displayIndex) && !item.isDeleted ? activeBg : dark ? DATA_GRID_DARK_ROW_NUMBER_BG : "var(--background)";
   return {
     "--data-grid-cell-bg": resolvedRowBg,
     "--data-grid-row-number-bg": rowNumberBg,

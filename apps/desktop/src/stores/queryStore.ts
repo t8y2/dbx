@@ -2398,19 +2398,23 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, viewport: undefined };
   }
 
-  function updateCatalog(id: string, catalog: string | undefined) {
+function updateCatalog(id: string, catalog: string | undefined) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.catalog === catalog) return;
+    rollbackTabTransaction(tab);
+    void closeResultSession(tab);
+    void closeClientConnectionSession(tab);
     tab.catalog = catalog;
     tab.database = "";
     tab.schema = undefined;
-    tab.tableMeta = undefined;
-    tab.completionContextVersion = (tab.completionContextVersion ?? 0) + 1;
+    tab.objectBrowser = undefined;
     clearResultPayload(tab);
     tab.lastExecutedSql = undefined;
     tab.resultBaseSql = undefined;
     tab.resultSortedSql = undefined;
     clearExplain(tab);
+    tab.tableMeta = undefined;
+    tab.completionContextVersion = (tab.completionContextVersion ?? 0) + 1;
   }
 
   function updateConnection(id: string, connectionId: string, database = "") {

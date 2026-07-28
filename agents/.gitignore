@@ -1,5 +1,6 @@
 **/libs/*.jar
 !drivers/oscar/libs/oscarJDBC8.jar
+!drivers/uxdb/libs/uxdbjdbc-2.1.2.3p.jre8.jar
 gradle.properties
 build/
 */bin/

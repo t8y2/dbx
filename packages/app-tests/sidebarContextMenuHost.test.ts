@@ -33,7 +33,7 @@ test("tree-level context menu opens with the current row items atomically", () =
   assert.match(connectionTree, /<CustomContextMenu ref="sidebarContextMenuRef"/);
   assert.match(contextMenu, /function onContextMenu\(event: MouseEvent, itemsOverride\?: ContextMenuItem\[\]\)/);
   assert.match(contextMenu, /const items = itemsOverride \?\?/);
-  assert.match(contextMenu, /defineExpose\(\{ close \}\)/);
+  assert.match(contextMenu, /defineExpose\(\{ close, menuRef, subRef \}\)/);
 });
 
 test("rare sidebar dialogs share module-level async wrappers with fallbacks", () => {
@@ -70,4 +70,17 @@ test("table copy menu uses the shared single and multi-selection clipboard path"
   assert.match(copySelectedNamesBody, /selectedNodes\.length > 1 && selectedNodes\.some\(\(node\) => node\.id === activeNode\.value\.id\) \? selectedNodes : \[activeNode\.value\]/);
   assert.match(copySelectedNamesBody, /updateTreeClipboardForNodes\(nodes\)/);
   assert.match(copySelectedNamesBody, /copyToClipboard\(nodes\.map\(copyNameForTreeNode\)\.join\("\\n"\)\)/);
+});
+
+test("batch table paste refreshes each object list after all tables are processed", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
+  const pasteLoopIndex = confirmPasteTableBody.indexOf("for (const entry of entries)");
+  const refreshLoopIndex = confirmPasteTableBody.indexOf("for (const refreshTarget of refreshTargets.values())");
+
+  assert.notEqual(pasteLoopIndex, -1);
+  assert.notEqual(refreshLoopIndex, -1);
+  assert.ok(refreshLoopIndex > pasteLoopIndex, "object-list refresh must run after the table paste loop");
+  assert.doesNotMatch(confirmPasteTableBody.slice(pasteLoopIndex, refreshLoopIndex), /refreshObjectListTreeNode/);
+  assert.match(confirmPasteTableBody.slice(refreshLoopIndex), /refreshObjectListTreeNode\(refreshTarget\.connectionId, refreshTarget\.database, refreshTarget\.schema\)/);
 });

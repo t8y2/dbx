@@ -5,6 +5,7 @@ import { generateId, getConfigKey, aiConfigToItem } from "@/lib/ai/aiConfigList"
 import { normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyExtractorId, normalizeDataGridExtractorOptions, type DataGridCopyExtractorId, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
@@ -16,9 +17,9 @@ import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
-import type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem } from "@/types/ai";
+import type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference } from "@/types/ai";
 
-export type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem };
+export type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem, AiChatSelectionState, AiEffortSelection };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -209,6 +210,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "pi-agent-cli": {
+    label: "Pi Coding Agent",
+    iconSlug: "pi",
+    provider: "pi-agent-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   custom: {
     label: "Custom",
     provider: "custom",
@@ -249,9 +260,9 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
   const provider = config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
   return {
     ...defaultConfigs[provider],
-    apiKey: config?.apiKey ?? "",
     ...config,
     provider,
+    apiKey: (config?.apiKey ?? "").trim(),
     apiStyle: config?.apiStyle ?? defaultConfigs[provider].apiStyle,
     authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
@@ -263,7 +274,13 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     codexCliEnv: normalizeAiEnv(config?.codexCliEnv),
     claudeCodeCliPath: config?.claudeCodeCliPath?.trim() || undefined,
     claudeCodeCliEnv: normalizeAiEnv(config?.claudeCodeCliEnv),
+    piAgentCliPath: config?.piAgentCliPath?.trim() || undefined,
+    piAgentCliEnv: normalizeAiEnv(config?.piAgentCliEnv),
   };
+}
+
+function normalizeAiConfigItem(config: AiConfigItem): AiConfigItem {
+  return { ...config, ...normalizeAiConfig(config) };
 }
 
 function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined): AiProvider {
@@ -311,6 +328,8 @@ const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
+const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
+export type ResultRunDisplayMode = (typeof RESULT_RUN_DISPLAY_MODES)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
 export const TABLE_FONT_SIZE_MAX = 16;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
@@ -394,6 +413,7 @@ export interface EditorSettings {
   showCurrentStatementFrame: boolean;
   showInsertValueHints: boolean;
   autoAliasTables: boolean;
+  insertSpaceAfterCompletion: boolean;
   wordWrap: boolean;
   vimModeEnabled: boolean;
   autoCloseBrackets: boolean;
@@ -417,9 +437,13 @@ export interface EditorSettings {
   dataGridQuickEntry: boolean;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
+  dataGridCopyExtractor: DataGridCopyExtractorId;
+  dataGridExtractorOptions: DataGridExtractorOptions;
+  resultRunDisplayMode: ResultRunDisplayMode;
   dataGridAutoTransposeSingleRow: boolean;
   dataGridMultiRowTranspose: boolean;
   dataGridHideNullColumns: boolean;
+  numericColumnRightAlign: boolean;
   tableFontFamily: string;
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
@@ -557,6 +581,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showCurrentStatementFrame: true,
   showInsertValueHints: true,
   autoAliasTables: true,
+  insertSpaceAfterCompletion: true,
   wordWrap: false,
   vimModeEnabled: false,
   autoCloseBrackets: true,
@@ -580,9 +605,13 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridQuickEntry: false,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
+  dataGridCopyExtractor: "tsv",
+  dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
+  resultRunDisplayMode: "tabs",
   dataGridAutoTransposeSingleRow: false,
   dataGridMultiRowTranspose: false,
   dataGridHideNullColumns: false,
+  numericColumnRightAlign: true,
   tableFontFamily: DEFAULT_DATA_GRID_FONT_FAMILY,
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
@@ -670,6 +699,10 @@ function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
 
 function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
   return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
+}
+
+function normalizeResultRunDisplayMode(value: unknown): ResultRunDisplayMode {
+  return RESULT_RUN_DISPLAY_MODES.includes(value as ResultRunDisplayMode) ? (value as ResultRunDisplayMode) : DEFAULT_EDITOR_SETTINGS.resultRunDisplayMode;
 }
 
 function normalizeTableFontSize(value: unknown): number {
@@ -835,6 +868,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
+    insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
@@ -858,9 +892,13 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
+    dataGridCopyExtractor: normalizeDataGridCopyExtractorId(settings.dataGridCopyExtractor),
+    dataGridExtractorOptions: normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions),
+    resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
     dataGridMultiRowTranspose: settings.dataGridMultiRowTranspose === true,
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
+    numericColumnRightAlign: typeof settings.numericColumnRightAlign === "boolean" ? settings.numericColumnRightAlign : DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign,
     tableFontFamily: normalizeFontFamily(settings.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily),
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
@@ -954,6 +992,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const settingsPageActive = ref(false);
   const settingsNavigationRequest = ref<SettingsNavigationRequest | null>(null);
   const activeModel = ref<{ configId: string; modelId: string } | null>(null);
+  const effortPreferences = ref<AiModelEffortPreference[]>([]);
   const isAiConfigLoaded = ref(false);
   const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
@@ -961,6 +1000,8 @@ export const useSettingsStore = defineStore("settings", () => {
   const isDesktopSettingsLoaded = ref(false);
   const isMcpGlobalPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
+  let pendingAiChatSelection: AiChatSelectionState | null = null;
+  let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
 
@@ -1065,17 +1106,24 @@ export const useSettingsStore = defineStore("settings", () => {
     const newConfigs = await api.loadAiConfigs();
 
     if (newConfigs.length > 0) {
-      aiConfigs.value = newConfigs;
+      aiConfigs.value = newConfigs.map(normalizeAiConfigItem);
     } else {
       // 迁移旧格式
+      aiConfigs.value = [];
       await migrateToMultiConfig();
     }
 
-    // 重置 activeModel 到默认配置是有意行为——activeModel 是本次运行 (run-scoped) 的末次使用选择，
-    // 应用启动和配置同步下载 (reloadAiConfigs) 两条路径均需丢弃会话内手动切换的模型、回到默认。
-    const defaultConfig = aiConfigs.value.find((c) => c.isDefault) || aiConfigs.value[0];
-    if (defaultConfig) {
-      activeModel.value = { configId: defaultConfig.id, modelId: defaultConfig.model };
+    const savedSelection = await api.loadAiChatSelection().catch(() => null);
+    effortPreferences.value = (savedSelection?.effortPreferences ?? []).filter((preference) => aiConfigs.value.some((config) => config.id === preference.configId));
+
+    const savedActive = savedSelection?.active;
+    const savedConfig = savedActive ? aiConfigs.value.find((config) => config.id === savedActive.configId) : undefined;
+    if (savedConfig && savedActive?.modelId.trim()) {
+      activeModel.value = { configId: savedConfig.id, modelId: savedActive.modelId.trim() };
+    } else {
+      const fallback = aiConfigs.value.find((config) => config.isDefault) || aiConfigs.value[0];
+      activeModel.value = fallback?.model.trim() ? { configId: fallback.id, modelId: fallback.model.trim() } : null;
+      if (activeModel.value) persistAiChatSelection();
     }
 
     isAiConfigLoaded.value = true;
@@ -1084,7 +1132,6 @@ export const useSettingsStore = defineStore("settings", () => {
   async function reloadAiConfigs(): Promise<void> {
     isAiConfigLoaded.value = false;
     await initAiConfigs();
-    if (aiConfigs.value.length === 0) activeModel.value = null;
   }
 
   async function migrateToMultiConfig(): Promise<void> {
@@ -1124,25 +1171,39 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   async function createAiConfig(config: AiConfigItem): Promise<void> {
-    await api.saveAiConfigItem(config);
-    aiConfigs.value.push(config);
-    if (aiConfigs.value.length === 1) {
-      activeModel.value = { configId: config.id, modelId: config.model };
+    const normalized = normalizeAiConfigItem(config);
+    await api.saveAiConfigItem(normalized);
+    aiConfigs.value.push(normalized);
+    if (aiConfigs.value.length === 1 && normalized.model.trim()) {
+      activeModel.value = { configId: normalized.id, modelId: normalized.model };
+      persistAiChatSelection();
     }
   }
 
   async function updateAiConfigItem(id: string, config: Partial<AiConfigItem>): Promise<void> {
     const index = aiConfigs.value.findIndex((c) => c.id === id);
     if (index !== -1) {
-      const updated = { ...aiConfigs.value[index], ...config };
+      const previous = aiConfigs.value[index];
+      const updated = normalizeAiConfigItem({ ...previous, ...config });
       await api.saveAiConfigItem(updated);
       aiConfigs.value[index] = updated;
+      if (previous.provider !== updated.provider) {
+        effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== id);
+        if (activeModel.value?.configId === id) activeModel.value = null;
+        persistAiChatSelection();
+      }
     }
   }
 
   async function deleteAiConfig(id: string): Promise<void> {
     await api.deleteAiConfig(id);
     aiConfigs.value = aiConfigs.value.filter((c) => c.id !== id);
+    effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== id);
+    if (activeModel.value?.configId === id) {
+      const fallback = aiConfigs.value.find((config) => config.isDefault) || aiConfigs.value[0];
+      activeModel.value = fallback?.model.trim() ? { configId: fallback.id, modelId: fallback.model.trim() } : null;
+    }
+    persistAiChatSelection();
   }
 
   async function setDefaultAiConfig(id: string): Promise<void> {
@@ -1150,15 +1211,57 @@ export const useSettingsStore = defineStore("settings", () => {
     aiConfigs.value.forEach((c) => {
       c.isDefault = c.id === id;
     });
-    const config = aiConfigs.value.find((c) => c.id === id);
-    if (config) {
-      // 修改默认配置时丢弃用户手动选择的模型，回到新默认——放在 await 之后确保后端持久化成功才执行
-      activeModel.value = { configId: config.id, modelId: config.model };
-    }
   }
 
   function updateActiveModel(model: { configId: string; modelId: string }) {
-    activeModel.value = model;
+    activeModel.value = { configId: model.configId, modelId: model.modelId.trim() };
+    persistAiChatSelection();
+  }
+
+  const activeEffort = computed<AiEffortSelection | null>(() => {
+    const active = activeModel.value;
+    if (!active) return null;
+    return effortPreferences.value.find((preference) => preference.configId === active.configId && preference.modelId === active.modelId)?.selection ?? null;
+  });
+
+  function updateActiveEffort(selection: AiEffortSelection | null) {
+    const active = activeModel.value;
+    if (!active) return;
+    effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== active.configId || preference.modelId !== active.modelId);
+    if (selection) {
+      effortPreferences.value.push({
+        configId: active.configId,
+        modelId: active.modelId,
+        selection,
+      });
+    }
+    persistAiChatSelection();
+  }
+
+  function persistAiChatSelection() {
+    pendingAiChatSelection = {
+      version: 1,
+      active: activeModel.value ? { ...activeModel.value } : undefined,
+      effortPreferences: effortPreferences.value.map((preference) => ({
+        ...preference,
+        selection: { ...preference.selection },
+      })),
+    };
+    if (!aiChatSelectionSaveRunning) void flushAiChatSelection();
+  }
+
+  async function flushAiChatSelection() {
+    aiChatSelectionSaveRunning = true;
+    try {
+      while (pendingAiChatSelection) {
+        const selection = pendingAiChatSelection;
+        pendingAiChatSelection = null;
+        await api.saveAiChatSelection(selection).catch(() => {});
+      }
+    } finally {
+      aiChatSelectionSaveRunning = false;
+      if (pendingAiChatSelection) void flushAiChatSelection();
+    }
   }
 
   const isConfigured = computed((): boolean => {
@@ -1166,7 +1269,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli" || config.provider === "claude-code-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 
@@ -1202,6 +1305,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showCurrentStatementFrame !== undefined) editorSettings.value.showCurrentStatementFrame = partial.showCurrentStatementFrame === true;
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
+    if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
@@ -1229,9 +1333,13 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
+    if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyExtractorId(partial.dataGridCopyExtractor);
+    if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
+    if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
     if (partial.dataGridMultiRowTranspose !== undefined) editorSettings.value.dataGridMultiRowTranspose = partial.dataGridMultiRowTranspose === true;
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
+    if (partial.numericColumnRightAlign !== undefined) editorSettings.value.numericColumnRightAlign = partial.numericColumnRightAlign === true;
     if (partial.tableFontFamily !== undefined) editorSettings.value.tableFontFamily = normalizeFontFamily(partial.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily);
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
@@ -1320,6 +1428,7 @@ export const useSettingsStore = defineStore("settings", () => {
     requestSettingsNavigation,
     clearSettingsNavigationRequest,
     activeModel,
+    activeEffort,
     isAiConfigLoaded,
     aiConfigs,
     initAiConfigs,
@@ -1330,6 +1439,7 @@ export const useSettingsStore = defineStore("settings", () => {
     deleteAiConfig,
     setDefaultAiConfig,
     updateActiveModel,
+    updateActiveEffort,
     isConfigured,
     isEditorSettingsLoaded,
     editorSettings,

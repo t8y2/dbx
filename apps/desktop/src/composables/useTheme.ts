@@ -18,6 +18,10 @@ import {
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
+function isLinuxTauriRuntime() {
+  return isTauriRuntime() && typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent);
+}
+
 const savedThemeMode = safeLocalStorageGet(APP_THEME_STORAGE_KEY);
 const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(savedThemeMode));
 const savedThemePalette = safeLocalStorageGet(APP_THEME_PALETTE_STORAGE_KEY);
@@ -67,19 +71,24 @@ function applyTheme() {
   // force reflow so the class toggle takes effect before re-enabling transitions
   doc.offsetHeight; // eslint-disable-line @typescript-eslint/no-unused-expressions
   requestAnimationFrame(() => doc.classList.remove("disable-transitions"));
-
   if (!isTauriRuntime()) return;
+
+  const tauriTheme = getTauriThemeForMode(themeMode.value);
+  // Tauri owns the Linux GTK preference. Calling setTheme(null) here forces it
+  // to light, so only skip the native system-theme write and keep explicit modes.
+  if (isLinuxTauriRuntime() && tauriTheme == null) return;
+
   if (cachedTauriWindow) {
     cachedTauriWindow
       .getCurrentWindow()
-      .setTheme(getTauriThemeForMode(themeMode.value))
+      .setTheme(tauriTheme)
       .catch(() => {});
   } else {
     import("@tauri-apps/api/window").then((mod) => {
       cachedTauriWindow = mod;
       mod
         .getCurrentWindow()
-        .setTheme(getTauriThemeForMode(themeMode.value))
+        .setTheme(tauriTheme)
         .catch(() => {});
     });
   }

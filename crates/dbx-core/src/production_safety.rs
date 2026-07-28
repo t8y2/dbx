@@ -402,6 +402,7 @@ fn schema_first_qualifier_type(db_type: &DatabaseType) -> bool {
             | DatabaseType::OpenGauss
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
             | DatabaseType::Yashandb
             | DatabaseType::Oracle
@@ -639,6 +640,7 @@ mod tests {
         ConnectionConfig {
             id: "conn".to_string(),
             name: "test".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,

@@ -24,6 +24,7 @@ export function sqlFormatDialectForDbType(dbType: string | null | undefined): Sq
     case "questdb":
     case "kingbase":
     case "highgo":
+    case "uxdb":
     case "vastbase":
     case "redshift":
       return "postgres";

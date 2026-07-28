@@ -7,6 +7,7 @@
 - `app`, `tabs`, `sidebar`, `connection`: shell, navigation, and connection UI state helpers.
 - `database`, `metadata`, `schema`, `table`: relational database metadata, capabilities, DDL, and table-object helpers.
 - `sql`, `sql/semantic`, `editor`, `query`, `history`, `savedSql`: SQL editing, execution, diagnostics, history, and saved SQL behavior.
+  Keep fixed SQL completion statements and their database-specific variants in `sql/sqlSnippetTemplates.ts`; cross-check row-limiting families against `crates/dbx-core/src/sql_dialect/capabilities.rs` and authoritative dialect documentation, and never replace a user-customized built-in body with a generated default.
 - `dataGrid`: result/grid rendering, editing, previews, pagination, and export helpers tied to the grid.
 - `ai`, `mcp`: AI assistant and MCP configuration helpers.
 - `redis`, `mongo`, `elasticsearch`, `etcd`, `kv`, `mq`, `nacos`, `zookeeper`, `webdav`: non-relational or service-specific helpers.

@@ -2,7 +2,7 @@ name: Update Contributors
 
 on:
   schedule:
-    - cron: "23 3 * * 1"
+    - cron: "0 18 * * *"
   workflow_dispatch:
 
 permissions:

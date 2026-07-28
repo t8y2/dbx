@@ -2,6 +2,7 @@
 node_modules/
 .claude/
 .codex/
+.workbuddy/
 .superpowers/
 .trellis/
 .worktrees/
@@ -63,4 +64,6 @@ DBX_*_x64-portable.zip
 .agents/skills
 .pnpm-store/*
 .dbx-web
+# Local devtest connections (contains credentials; do not commit)
+dbx-devtest-connections.json
 .npmrc

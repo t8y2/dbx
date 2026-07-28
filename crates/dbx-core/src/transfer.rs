@@ -213,6 +213,7 @@ async fn resolve_transfer_target_table_name(
         Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
         None,
         None,
+        None,
     )
     .await
     .unwrap_or_else(|error| {
@@ -231,6 +232,37 @@ async fn resolve_transfer_target_table_name(
 
 fn quote_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+pub(crate) fn quote_postgres_string_literal(value: &str) -> String {
+    if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
+        return quote_string_literal(value);
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x08' => escaped.push_str("\\b"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\'' => escaped.push_str("''"),
+            character if character.is_ascii_control() => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                let byte = character as u8;
+                escaped.push_str("\\x");
+                escaped.push(HEX[(byte >> 4) as usize] as char);
+                escaped.push(HEX[(byte & 0x0F) as usize] as char);
+            }
+            character => escaped.push(character),
+        }
+    }
+
+    // Escape string constants keep control characters out of the physical
+    // script and remain correct regardless of standard_conforming_strings.
+    format!("E'{escaped}'")
 }
 
 fn postgres_schema_exists_sql(schema: &str) -> String {
@@ -262,12 +294,45 @@ fn is_postgres_transfer_dialect(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Postgres | DatabaseType::Kingbase)
 }
 
-fn is_postgres_integer_like_type(data_type: &str) -> bool {
+fn postgres_integer_bounds(data_type: &str) -> Option<(i128, i128)> {
     let normalized = data_type.trim().to_ascii_lowercase();
-    matches!(
-        normalized.split(['(', ' ']).next().unwrap_or(""),
-        "smallint" | "integer" | "bigint" | "int2" | "int4" | "int8"
-    )
+    match normalized.split(['(', ' ']).next().unwrap_or("") {
+        "smallint" | "int2" => Some((i128::from(i16::MIN), i128::from(i16::MAX))),
+        "integer" | "int4" => Some((i128::from(i32::MIN), i128::from(i32::MAX))),
+        "bigint" | "int8" => Some((i128::from(i64::MIN), i128::from(i64::MAX))),
+        _ => None,
+    }
+}
+
+fn is_postgres_integer_like_type(data_type: &str) -> bool {
+    postgres_integer_bounds(data_type).is_some()
+}
+
+pub(crate) fn normalize_postgres_integer_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    let bounds = column_type.filter(|_| is_postgres_transfer_dialect(db_type)).and_then(postgres_integer_bounds)?;
+
+    // Excel numeric cells arrive as f64; normalize only an explicit zero fraction so real decimals,
+    // scientific notation, and values outside the target integer range stay untouched.
+    if value.bytes().any(|byte| matches!(byte, b'e' | b'E')) {
+        return None;
+    }
+    let (integer, fraction) = value.split_once('.')?;
+    if fraction.is_empty() || !fraction.bytes().all(|byte| byte == b'0') {
+        return None;
+    }
+    let digits = integer.strip_prefix('-').or_else(|| integer.strip_prefix('+')).unwrap_or(integer);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let parsed = integer.parse::<i128>().ok()?;
+    if parsed < bounds.0 || parsed > bounds.1 {
+        return None;
+    }
+    Some(integer.to_string())
 }
 
 fn is_postgres_sequence_default(default_value: Option<&str>) -> bool {
@@ -501,6 +566,7 @@ fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
             | DatabaseType::Redshift
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Kwdb
             | DatabaseType::Vastbase
     )
@@ -1048,17 +1114,25 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 }
             }
         },
-        serde_json::Value::Number(n) => match db_type {
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
-                if column_type.is_some_and(is_mysql_bit_type) {
-                    format!("b'{}'", n)
-                } else {
-                    n.to_string()
-                }
+        serde_json::Value::Number(n) => {
+            if let Some(integer_literal) = normalize_postgres_integer_literal(&n.to_string(), db_type, column_type) {
+                return integer_literal;
             }
-            _ => n.to_string(),
-        },
+            match db_type {
+                DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
+                    if column_type.is_some_and(is_mysql_bit_type) {
+                        format!("b'{}'", n)
+                    } else {
+                        n.to_string()
+                    }
+                }
+                _ => n.to_string(),
+            }
+        }
         serde_json::Value::String(s) => {
+            if let Some(integer_literal) = normalize_postgres_integer_literal(s, db_type, column_type) {
+                return integer_literal;
+            }
             if let Some(binary_literal) = format_postgres_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
@@ -1073,7 +1147,10 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
 
             let literal = format_literal_string(s, db_type, column_type);
-            let escaped = if is_postgres_family_target(db_type) {
+            if *db_type == DatabaseType::Postgres {
+                return quote_postgres_string_literal(&literal);
+            }
+            let escaped = if is_postgres_family_target(db_type) || *db_type == DatabaseType::SqlServer {
                 literal.replace('\'', "''")
             } else {
                 literal.replace('\\', "\\\\").replace('\'', "''")
@@ -2901,6 +2978,7 @@ async fn execute_on_pool_once(
                         truncated: false,
                         session_id: None,
                         has_more: false,
+                        elasticsearch_raw_body: None,
                     })
                 } else {
                     let affected = con.execute(&sql, []).map_err(|e| e.to_string())?;
@@ -2914,6 +2992,7 @@ async fn execute_on_pool_once(
                         truncated: false,
                         session_id: None,
                         has_more: false,
+                        elasticsearch_raw_body: None,
                     })
                 }
             })
@@ -4141,6 +4220,7 @@ where
         Some(1),
         None,
         None,
+        None,
     )
     .await
     .unwrap_or_default()
@@ -4843,6 +4923,7 @@ mod tests {
         crate::models::connection::ConnectionConfig {
             id: id.to_string(),
             name: id.to_string(),
+            note: String::new(),
             db_type: DatabaseType::DuckDb,
             driver_profile: None,
             driver_label: None,
@@ -4932,6 +5013,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         }
     }
 
@@ -6169,6 +6251,27 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_insert_preserves_backslashes_control_characters_quotes_and_unicode() {
+        let sql = generate_insert_typed(
+            &[String::from("escape_sequence"), String::from("line_break"), String::from("quote_and_unicode")],
+            &[
+                Some(String::from("nvarchar(max)")),
+                Some(String::from("nvarchar(max)")),
+                Some(String::from("nvarchar(max)")),
+            ],
+            &[vec![json!(r#"\n"#), json!("line1\r\nline2"), json!("O'Brien / Tiếng Việt")]],
+            "notes",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO [dbo].[notes] ([escape_sequence], [line_break], [quote_and_unicode]) VALUES\n(N'\\n', N'line1\r\nline2', N'O''Brien / Tiếng Việt')"
+        );
+    }
+
+    #[test]
     fn sqlserver_insert_formats_datetime_literals_with_supported_precision() {
         let sql = generate_insert_typed(
             &[String::from("id"), String::from("date1"), String::from("date2"), String::from("note")],
@@ -6259,7 +6362,7 @@ mod tests {
         assert_eq!(
             sql,
             r#"INSERT INTO "public"."events" ("payload") VALUES
-('{"message":"hello\nworld"}')"#
+(E'{"message":"hello\\nworld"}')"#
         );
     }
 
@@ -6277,7 +6380,7 @@ mod tests {
         assert_eq!(
             sql,
             r#"INSERT INTO "public"."files" ("path") VALUES
-('C:\tmp\file.txt')"#
+(E'C:\\tmp\\file.txt')"#
         );
     }
 
@@ -6356,6 +6459,80 @@ mod tests {
             r#"INSERT INTO `files` (`path`) VALUES
 ('C:\\tmp\\file.txt')"#
         );
+    }
+
+    #[test]
+    fn postgres_insert_escapes_control_characters_quotes_and_backslashes() {
+        let sql = generate_insert_typed(
+            &[
+                String::from("line_break"),
+                String::from("carriage_return"),
+                String::from("quote"),
+                String::from("path"),
+                String::from("plain"),
+            ],
+            &[
+                Some(String::from("text")),
+                Some(String::from("text")),
+                Some(String::from("text")),
+                Some(String::from("text")),
+                Some(String::from("text")),
+            ],
+            &[vec![json!("line1\nline2"), json!("line1\rline2"), json!("O'Hara"), json!(r"C:\tmp"), json!("plain")]],
+            "notes",
+            "public",
+            &DatabaseType::Postgres,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "public"."notes" ("line_break", "carriage_return", "quote", "path", "plain") VALUES
+(E'line1\nline2', E'line1\rline2', 'O''Hara', E'C:\\tmp', 'plain')"#
+        );
+    }
+
+    #[test]
+    fn postgres_insert_formats_whole_number_values_as_integer_literals() {
+        let sql = generate_insert_typed(
+            &[String::from("small_value"), String::from("integer_value"), String::from("big_value")],
+            &[Some(String::from("smallint")), Some(String::from("integer")), Some(String::from("bigint"))],
+            &[vec![json!(1.0), json!(-2.0), json!(3.0)]],
+            "numbers",
+            "public",
+            &DatabaseType::Postgres,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO \"public\".\"numbers\" (\"small_value\", \"integer_value\", \"big_value\") VALUES\n(1, -2, 3)"
+        );
+    }
+
+    #[test]
+    fn postgres_integer_literal_normalization_preserves_non_whole_and_out_of_range_values() {
+        let scientific: serde_json::Value = serde_json::from_str("1e20").unwrap();
+        let out_of_range: serde_json::Value = serde_json::from_str("9223372036854775808.0").unwrap();
+
+        assert_eq!(escape_value_typed(&json!("1.0"), &DatabaseType::Postgres, Some("smallint")), "1");
+        assert_eq!(escape_value_typed(&json!("-2.0"), &DatabaseType::Postgres, Some("integer")), "-2");
+        assert_eq!(escape_value_typed(&json!("3.0"), &DatabaseType::Postgres, Some("bigint")), "3");
+        assert_eq!(escape_value_typed(&json!(1.25), &DatabaseType::Postgres, Some("smallint")), "1.25");
+        assert_eq!(escape_value_typed(&json!("1.25"), &DatabaseType::Postgres, Some("smallint")), "'1.25'");
+        assert_eq!(escape_value_typed(&scientific, &DatabaseType::Postgres, Some("bigint")), "1e+20");
+        assert_eq!(escape_value_typed(&json!("1e3"), &DatabaseType::Postgres, Some("bigint")), "'1e3'");
+        assert_eq!(escape_value_typed(&out_of_range, &DatabaseType::Postgres, Some("bigint")), "9223372036854775808.0");
+        assert_eq!(
+            escape_value_typed(&json!("9223372036854775808.0"), &DatabaseType::Postgres, Some("bigint")),
+            "'9223372036854775808.0'"
+        );
+        assert_eq!(escape_value_typed(&json!("32768.0"), &DatabaseType::Postgres, Some("smallint")), "'32768.0'");
+        assert_eq!(
+            escape_value_typed(&json!("2147483648.0"), &DatabaseType::Postgres, Some("integer")),
+            "'2147483648.0'"
+        );
+        assert_eq!(escape_value_typed(&json!("1.0"), &DatabaseType::Postgres, Some("text")), "'1.0'");
+        assert_eq!(escape_value_typed(&json!("1.0"), &DatabaseType::Postgres, Some("numeric")), "'1.0'");
+        assert_eq!(escape_value_typed(&json!("1.0"), &DatabaseType::Postgres, None), "'1.0'");
     }
 
     #[test]

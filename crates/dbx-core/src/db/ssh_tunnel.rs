@@ -1,15 +1,19 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::path_utils::expand_tilde;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use russh::client::{self, Config, Handle};
+use russh::client::{self, AuthResult, Config, Handle};
 use russh::keys::agent::{client::AgentClient, AgentIdentity};
+use russh::keys::ssh_key::HashAlg;
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
+use russh::MethodKind;
+use russh::MethodSet;
 use russh::{kex, mac, ChannelMsg, Preferred};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -17,6 +21,8 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior};
 
+use crate::db::ssh_host_key::{HostKeyState, HostKeyVerifier};
+use crate::db::ssh_prompt;
 use crate::models::connection::SshTunnelConfig;
 
 use super::file_validator::validate_file_path;
@@ -31,17 +37,112 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 const IDLE_SESSION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// Maximum time to wait for an explicit SSH ping response.
 const IDLE_SESSION_PING_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time to wait for the UI to answer a host-key verification prompt
+/// (explicit TOFU). Fail-closed: if the UI does not answer in time, the host
+/// is rejected and no credential is sent.
+const TOFU_PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 
-struct SshClient;
+/// SSH client handler. Holds a host-key verifier so that
+/// [`client::Handler::check_server_key`] can reject untrusted/changed server
+/// keys *before* any credential is sent.
+struct SshClient {
+    host_key_verifier: Arc<HostKeyVerifier>,
+    host: String,
+    port: u16,
+}
 
 impl client::Handler for SshClient {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(true)
+        // Runs *before any credential authentication*. We first check the
+        // known-hosts stores (system + dbx-managed). A trusted key is accepted
+        // immediately; a *changed* key is rejected (MITM hardening); an unknown
+        // key triggers an explicit TOFU prompt so the user can confirm the host
+        // fingerprint before any password/key is sent.
+        match self.host_key_verifier.check(&self.host, self.port, server_public_key) {
+            Ok(HostKeyState::Trusted) => Ok(true),
+            Ok(HostKeyState::Unknown) => self.prompt_for_host_key(server_public_key).await,
+            Err(e) => {
+                // Changed host key => possible MITM. Surface it to the user as a
+                // clear notice (best-effort; never affects the fail-closed below).
+                let msg = e.to_string();
+                let _ =
+                    ssh_prompt::notify_host_key(ssh_prompt::SshHostKeyNoticeKind::Changed, &self.host, self.port, &msg);
+                Err(russh::Error::from(e))
+            }
+        }
+    }
+}
+
+impl SshClient {
+    /// Explicit TOFU: ask the UI to confirm an unknown host key. Fail-closed:
+    /// if no gateway is installed, or the user rejects, or the prompt times
+    /// out, the host is not trusted and the handshake is aborted — so no
+    /// credential is ever sent to an unverified endpoint.
+    async fn prompt_for_host_key(
+        &mut self,
+        server_public_key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<bool, russh::Error> {
+        let key_type = Some(server_public_key.algorithm().to_string());
+        let fingerprint = Some(server_public_key.fingerprint(HashAlg::Sha256).to_string());
+        let request = ssh_prompt::host_key_verify_request(&self.host, self.port, key_type, fingerprint);
+
+        let Some(responder_rx) = ssh_prompt::request_ssh_prompt(request) else {
+            log::warn!(
+                "No SSH prompt gateway installed; refusing to trust unknown host {}:{} (fail-closed)",
+                self.host,
+                self.port
+            );
+            return Ok(false);
+        };
+
+        let answer = tokio::time::timeout(TOFU_PROMPT_TIMEOUT, responder_rx).await;
+        match answer {
+            Ok(Ok(ssh_prompt::SshPromptAnswer::Accept { remember })) => {
+                if remember {
+                    if let Err(e) = self.host_key_verifier.learn(&self.host, self.port, server_public_key) {
+                        // Persistence failure does not by itself abort the
+                        // session — the host is simply trusted for this session
+                        // only. Still log it AND surface a notice so the UI can
+                        // warn the user (otherwise they will be silently
+                        // re-prompted on next connect with no explanation).
+                        let detail =
+                            format!("Could not persist host key for {}:{} to known_hosts: {e}", self.host, self.port);
+                        log::warn!("{detail}");
+                        let _ = ssh_prompt::notify_host_key(
+                            ssh_prompt::SshHostKeyNoticeKind::LearnFailed,
+                            &self.host,
+                            self.port,
+                            &detail,
+                        );
+                    }
+                }
+                Ok(true)
+            }
+            Ok(Ok(ssh_prompt::SshPromptAnswer::Reject)) => {
+                // User explicitly rejected -> tell them, then fail-closed.
+                let _ = ssh_prompt::notify_host_key(
+                    ssh_prompt::SshHostKeyNoticeKind::Rejected,
+                    &self.host,
+                    self.port,
+                    &format!("User rejected the host key for {}:{}.", self.host, self.port),
+                );
+                log::warn!("Host key for {}:{} was rejected by the user; aborting handshake", self.host, self.port);
+                Ok(false)
+            }
+            Ok(Ok(ssh_prompt::SshPromptAnswer::Secret(_))) | Ok(Err(_)) | Err(_) => {
+                log::warn!(
+                    "Host key for {}:{} was not accepted (prompt timed out or was cancelled); aborting handshake",
+                    self.host,
+                    self.port
+                );
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -67,10 +168,27 @@ fn ssh_client_config() -> Config {
     Config { nodelay: true, keepalive_interval: Some(Duration::from_secs(30)), preferred, ..Default::default() }
 }
 
+/// Returns `true` only when the server explicitly advertised `password` among
+/// the authentication methods that may continue the dialog.
+///
+/// Per RFC 4252 §5.1, the "authentications that can continue" name-list is the
+/// authoritative signal of what the server will accept next. A `partial_success`
+/// flag alone is NOT a license to send a password: it merely reports that the
+/// preceding step succeeded, and the next method may be something other than
+/// `password` (e.g. `keyboard-interactive`). Honoring only the advertised list
+/// prevents leaking the password to a server that never offered password auth
+/// (the MITM credential-harvest case), while still covering publickey+password
+/// MFA (where `password` IS present in the list).
+fn server_offers_password(remaining_methods: &MethodSet) -> bool {
+    remaining_methods.contains(&MethodKind::Password)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn connect_and_authenticate(
-    ssh_host: &str,
-    ssh_port: u16,
+    connect_host: &str,
+    connect_port: u16,
+    host_key_host: &str,
+    host_key_port: u16,
     ssh_user: &str,
     ssh_password: &str,
     ssh_key_path: &str,
@@ -79,15 +197,32 @@ async fn connect_and_authenticate(
     ssh_agent_sock_path: &str,
     auth_method: &str,
     connect_timeout_secs: u64,
+    known_hosts_path: &Path,
 ) -> Result<Handle<SshClient>, String> {
     let config = Arc::new(ssh_client_config());
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
 
-    let mut session =
-        tokio::time::timeout(connect_timeout, client::connect(config, (ssh_host, ssh_port), SshClient {}))
-            .await
-            .map_err(|_| format!("SSH connection timed out ({connect_timeout_secs}s)"))?
-            .map_err(|e| format!("SSH connection failed: {e}"))?;
+    // Verify the logical SSH server identity against known_hosts before sending
+    // credentials. For forwarded hops this identity intentionally differs from
+    // the temporary TCP endpoint. Unknown keys require explicit UI acceptance;
+    // changed keys, missing prompt gateways, timeouts, and rejection fail closed.
+    let host_key_verifier = Arc::new(HostKeyVerifier::new(known_hosts_path.to_path_buf()));
+
+    let mut session = tokio::time::timeout(
+        connect_timeout,
+        client::connect(
+            config,
+            (connect_host, connect_port),
+            SshClient {
+                host_key_verifier: host_key_verifier.clone(),
+                host: host_key_host.to_string(),
+                port: host_key_port,
+            },
+        ),
+    )
+    .await
+    .map_err(|_| format!("SSH connection timed out ({connect_timeout_secs}s)"))?
+    .map_err(|e| format!("SSH connection failed: {e}"))?;
 
     // Probe with "none" authentication first. Some SSH proxies and jump-hosts
     // accept connections without any credential, and this is also the standard
@@ -104,6 +239,75 @@ async fn connect_and_authenticate(
     // instead of falling back to other credential methods.
     if auth_method == "none" {
         return Err("SSH authentication failed: server rejected the connection without credentials".to_string());
+    }
+
+    // "key+password": try private key first, fall back to password on failure.
+    // Both credential fields are expected to be filled in by the UI.
+    if auth_method == "key+password" {
+        // Attempt the private key first (when supplied), then decide whether a
+        // password fallback is safe to attempt.
+        let try_password = if ssh_key_path.is_empty() {
+            // No key configured: only attempt password if the "none" probe
+            // showed the server advertises it — otherwise we would leak the
+            // password to any endpoint that rejected our (empty) key.
+            match &none_res {
+                AuthResult::Failure { remaining_methods, .. } => server_offers_password(remaining_methods),
+                _ => false,
+            }
+        } else {
+            validate_file_path(ssh_key_path, |_| false)?;
+
+            let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase) };
+            let key_pair =
+                load_ssh_private_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
+            let auth_res = tokio::time::timeout(
+                connect_timeout,
+                session.authenticate_publickey(
+                    ssh_user,
+                    PrivateKeyWithHashAlg::new(
+                        Arc::new(key_pair),
+                        session.best_supported_rsa_hash().await.ok().flatten().flatten(),
+                    ),
+                ),
+            )
+            .await
+            .map_err(|_| format!("SSH key auth timed out ({connect_timeout_secs}s)"))?
+            .map_err(|e| format!("SSH key auth failed: {e}"))?;
+
+            match auth_res {
+                AuthResult::Success => return Ok(session),
+                AuthResult::Failure { remaining_methods, partial_success } => {
+                    // Only fall back to password when the server still offers it.
+                    // This prevents sending the password to a server that never
+                    // advertised password auth — the MITM credential-harvest
+                    // case — and preserves the protocol state needed for
+                    // publickey+password MFA (where `password` IS in the list).
+                    if server_offers_password(&remaining_methods) {
+                        true
+                    } else {
+                        return Err(format!(
+                            "SSH key rejected and the server does not offer password authentication \
+                             (remaining_methods={remaining_methods:?}, partial_success={partial_success})"
+                        ));
+                    }
+                }
+            }
+        };
+
+        if try_password && !ssh_password.is_empty() {
+            let auth_res = tokio::time::timeout(connect_timeout, session.authenticate_password(ssh_user, ssh_password))
+                .await
+                .map_err(|_| format!("SSH password auth timed out ({connect_timeout_secs}s)"))?
+                .map_err(|e| format!("SSH password auth failed: {e}"))?;
+            match auth_res {
+                AuthResult::Success => return Ok(session),
+                AuthResult::Failure { partial_success, .. } => {
+                    return Err(format!("SSH password authentication failed (partial_success={partial_success})"));
+                }
+            }
+        }
+
+        return Err("SSH authentication failed: both key and password were rejected".to_string());
     }
 
     // "none" was rejected — fall back to the configured credential method.
@@ -163,11 +367,11 @@ async fn connect_and_authenticate(
 async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
-    ssh_agent_sock_path: &str,
+    _ssh_agent_sock_path: &str,
     connect_timeout: &Duration,
 ) -> Result<(), String> {
     #[cfg(unix)]
-    let mut agent = if ssh_agent_sock_path.is_empty() {
+    let mut agent = if _ssh_agent_sock_path.is_empty() {
         match AgentClient::connect_env().await {
             Ok(a) => a,
             Err(e) => {
@@ -175,12 +379,12 @@ async fn try_authenticate_with_agent(
             }
         }
     } else {
-        match AgentClient::connect_uds(ssh_agent_sock_path).await {
+        match AgentClient::connect_uds(_ssh_agent_sock_path).await {
             Ok(a) => a,
             Err(e) => {
                 return Err(format!(
                     "No SSH password or key provided, and ssh-agent at '{}' is unavailable: {e}",
-                    ssh_agent_sock_path
+                    _ssh_agent_sock_path
                 ));
             }
         }
@@ -478,6 +682,8 @@ async fn tunnel_reconnect_loop(
     mut session: Handle<SshClient>,
     connect_host: String,
     connect_port: u16,
+    host_key_host: String,
+    host_key_port: u16,
     ssh_user: String,
     ssh_password: String,
     ssh_key_path: String,
@@ -486,6 +692,7 @@ async fn tunnel_reconnect_loop(
     ssh_agent_sock_path: String,
     auth_method: String,
     connect_timeout_secs: u64,
+    known_hosts_path: PathBuf,
     listener: TcpListener,
     remote_host: String,
     remote_port: u16,
@@ -514,6 +721,8 @@ async fn tunnel_reconnect_loop(
             match connect_and_authenticate(
                 &connect_host,
                 connect_port,
+                &host_key_host,
+                host_key_port,
                 &ssh_user,
                 &ssh_password,
                 &ssh_key_path,
@@ -522,6 +731,7 @@ async fn tunnel_reconnect_loop(
                 &ssh_agent_sock_path,
                 &auth_method,
                 connect_timeout_secs,
+                &known_hosts_path,
             )
             .await
             {
@@ -560,31 +770,49 @@ struct TunnelEntry {
 struct PlannedTunnel {
     connect_host: String,
     connect_port: u16,
+    host_key_host: String,
+    host_key_port: u16,
     remote_host: String,
     remote_port: u16,
 }
 
 pub struct TunnelManager {
     tunnels: Mutex<HashMap<String, TunnelEntry>>,
+    start_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// dbx-managed known_hosts path (`<data_dir>/known_hosts`) threaded into
+    /// every SSH connection for host-key verification.
+    known_hosts_path: PathBuf,
 }
 
 impl Default for TunnelManager {
     fn default() -> Self {
-        Self::new()
+        Self::new(PathBuf::new())
     }
 }
 
 impl TunnelManager {
-    pub fn new() -> Self {
-        Self { tunnels: Mutex::new(HashMap::new()) }
+    pub fn new(data_dir: PathBuf) -> Self {
+        let known_hosts_path = data_dir.join("known_hosts");
+        Self { tunnels: Mutex::new(HashMap::new()), start_locks: Mutex::new(HashMap::new()), known_hosts_path }
+    }
+
+    async fn start_lock(&self, connection_id: &str) -> Arc<Mutex<()>> {
+        self.start_locks
+            .lock()
+            .await
+            .entry(connection_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn start_tunnel(
         &self,
         connection_id: &str,
-        ssh_host: &str,
-        ssh_port: u16,
+        connect_host: &str,
+        connect_port: u16,
+        host_key_host: &str,
+        host_key_port: u16,
         ssh_user: &str,
         ssh_password: &str,
         ssh_key_path: &str,
@@ -597,18 +825,28 @@ impl TunnelManager {
         remote_port: u16,
         expose_to_lan: bool,
     ) -> Result<u16, String> {
-        // Check cache under lock to avoid race with concurrent callers.
-        // Also evict stale entries whose background task has exited.
         {
             let mut tunnels = self.tunnels.lock().await;
             if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
                 return Ok(port);
             }
         }
-        // Slow SSH connection — do this outside the lock.
+
+        let start_lock = self.start_lock(connection_id).await;
+        let _start_guard = start_lock.lock().await;
+
+        // A concurrent caller may have completed while this task waited.
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
+        }
         let (handle, local_port) = spawn_tunnel(
-            ssh_host,
-            ssh_port,
+            connect_host,
+            connect_port,
+            host_key_host,
+            host_key_port,
             ssh_user,
             ssh_password,
             ssh_key_path,
@@ -617,20 +855,14 @@ impl TunnelManager {
             ssh_agent_sock_path,
             auth_method,
             connect_timeout_secs,
+            &self.known_hosts_path,
             remote_host,
             remote_port,
             expose_to_lan,
         )
         .await?;
 
-        // Re-check under lock: another caller may have beaten us.
-        let mut tunnels = self.tunnels.lock().await;
-        if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
-            // Another task already created a live tunnel; abort ours.
-            handle.abort();
-            return Ok(port);
-        }
-        tunnels.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
+        self.tunnels.lock().await.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
         Ok(local_port)
     }
 
@@ -655,7 +887,6 @@ impl TunnelManager {
         if hops.is_empty() {
             return Err("No SSH tunnel hops configured".to_string());
         }
-        // Check cache under lock; evict stale entries.
         {
             let mut tunnels = self.tunnels.lock().await;
             if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
@@ -663,6 +894,14 @@ impl TunnelManager {
             }
         }
 
+        let start_lock = self.start_lock(connection_id).await;
+        let _start_guard = start_lock.lock().await;
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
+        }
         let mut handles = Vec::new();
         let mut next_connect_endpoint: Option<(String, u16)> = None;
         let mut final_local_port = 0;
@@ -680,6 +919,8 @@ impl TunnelManager {
             let (handle, local_port) = spawn_tunnel(
                 &connect_host,
                 connect_port,
+                &hop.host,
+                hop.port,
                 &hop.user,
                 &hop.password,
                 &hop.key_path,
@@ -688,6 +929,7 @@ impl TunnelManager {
                 &hop.ssh_agent_sock_path,
                 &hop.auth_method,
                 effective_hop_timeout(hop),
+                &self.known_hosts_path,
                 &target_host,
                 target_port,
                 is_last && hop.expose_lan,
@@ -700,15 +942,10 @@ impl TunnelManager {
             next_connect_endpoint = Some(("127.0.0.1".to_string(), local_port));
         }
 
-        // Re-check under lock: another caller may have beaten us.
-        let mut tunnels = self.tunnels.lock().await;
-        if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
-            for handle in handles {
-                handle.abort();
-            }
-            return Ok(port);
-        }
-        tunnels.insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
+        self.tunnels
+            .lock()
+            .await
+            .insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
         Ok(final_local_port)
     }
 
@@ -717,22 +954,28 @@ impl TunnelManager {
     }
 
     pub async fn stop_tunnel(&self, connection_id: &str) {
+        let start_lock = self.start_lock(connection_id).await;
+        let _start_guard = start_lock.lock().await;
+
         if let Some(entry) = self.tunnels.lock().await.remove(connection_id) {
             for handle in entry.handles {
                 handle.abort();
             }
         }
+
+        let mut start_locks = self.start_locks.lock().await;
+        let is_idle = start_locks.get(connection_id).is_some_and(|current| Arc::ptr_eq(current, &start_lock))
+            && Arc::strong_count(&start_lock) == 2;
+        if is_idle {
+            start_locks.remove(connection_id);
+        }
     }
 
     pub async fn stop_tunnels_with_prefix(&self, connection_id_prefix: &str) {
-        let mut tunnels = self.tunnels.lock().await;
-        let keys: Vec<String> = tunnels.keys().filter(|key| key.starts_with(connection_id_prefix)).cloned().collect();
+        let keys: Vec<String> =
+            self.tunnels.lock().await.keys().filter(|key| key.starts_with(connection_id_prefix)).cloned().collect();
         for key in keys {
-            if let Some(entry) = tunnels.remove(&key) {
-                for handle in entry.handles {
-                    handle.abort();
-                }
-            }
+            self.stop_tunnel(&key).await;
         }
     }
 }
@@ -741,6 +984,8 @@ impl TunnelManager {
 async fn spawn_tunnel(
     connect_host: &str,
     connect_port: u16,
+    host_key_host: &str,
+    host_key_port: u16,
     ssh_user: &str,
     ssh_password: &str,
     ssh_key_path: &str,
@@ -749,6 +994,7 @@ async fn spawn_tunnel(
     ssh_agent_sock_path: &str,
     auth_method: &str,
     connect_timeout_secs: u64,
+    known_hosts_path: &Path,
     remote_host: &str,
     remote_port: u16,
     expose_to_lan: bool,
@@ -763,6 +1009,8 @@ async fn spawn_tunnel(
     let session = connect_and_authenticate(
         connect_host,
         connect_port,
+        host_key_host,
+        host_key_port,
         ssh_user,
         ssh_password,
         ssh_key_path,
@@ -771,6 +1019,7 @@ async fn spawn_tunnel(
         ssh_agent_sock_path,
         auth_method,
         connect_timeout_secs,
+        known_hosts_path,
     )
     .await?;
 
@@ -778,6 +1027,8 @@ async fn spawn_tunnel(
         session,
         connect_host.to_string(),
         connect_port,
+        host_key_host.to_string(),
+        host_key_port,
         ssh_user.to_string(),
         ssh_password.to_string(),
         ssh_key_path.to_string(),
@@ -786,6 +1037,7 @@ async fn spawn_tunnel(
         ssh_agent_sock_path.to_string(),
         auth_method.to_string(),
         connect_timeout_secs,
+        known_hosts_path.to_path_buf(),
         listener,
         remote_host.to_string(),
         remote_port,
@@ -801,6 +1053,12 @@ fn effective_hop_timeout(hop: &SshTunnelConfig) -> u64 {
         hop.connect_timeout_secs
     }
 }
+
+/// Serializes every test that mutates the process-global SSH prompt gateway so
+/// they cannot clobber each other's gateway (or the MITM fail-closed test,
+/// which relies on *no* gateway being installed). Test-only.
+#[cfg(test)]
+static PROMPT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 fn plan_chain(
@@ -820,7 +1078,14 @@ fn plan_chain(
         } else {
             (hops[index + 1].host.clone(), hops[index + 1].port)
         };
-        planned.push(PlannedTunnel { connect_host, connect_port, remote_host: target_host, remote_port: target_port });
+        planned.push(PlannedTunnel {
+            connect_host,
+            connect_port,
+            host_key_host: hop.host.clone(),
+            host_key_port: hop.port,
+            remote_host: target_host,
+            remote_port: target_port,
+        });
         if let Some(local_port) = local_ports.get(index) {
             next_connect_endpoint = Some(("127.0.0.1".to_string(), *local_port));
         }
@@ -830,11 +1095,26 @@ fn plan_chain(
 
 #[cfg(test)]
 mod tests {
+    use super::SshClient;
+    use super::PROMPT_TEST_LOCK;
     use super::{
-        effective_hop_timeout, openssh_padding_len, plan_chain, read_ssh_string,
-        sanitize_unencrypted_openssh_comment_bytes, ssh_client_config, PlannedTunnel, TunnelManager,
+        connect_and_authenticate, effective_hop_timeout, openssh_padding_len, plan_chain, read_ssh_string,
+        sanitize_unencrypted_openssh_comment_bytes, server_offers_password, ssh_client_config, HostKeyState,
+        HostKeyVerifier, PlannedTunnel, TunnelManager,
     };
+    use crate::db::ssh_prompt;
     use crate::models::connection::{default_ssh_connect_timeout_secs, SshTunnelConfig};
+    use russh::client;
+    use russh::client::Handler;
+    use russh::keys::decode_secret_key;
+    use russh::keys::ssh_key::PublicKey;
+    use russh::server::{self, Auth, Server};
+    use russh::MethodKind;
+    use russh::MethodSet;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
 
     fn push_u32(bytes: &mut Vec<u8>, value: u32) {
         bytes.extend_from_slice(&value.to_be_bytes());
@@ -900,12 +1180,16 @@ mod tests {
                 PlannedTunnel {
                     connect_host: "bastion-a".to_string(),
                     connect_port: 22,
+                    host_key_host: "bastion-a".to_string(),
+                    host_key_port: 22,
                     remote_host: "bastion-b".to_string(),
                     remote_port: 2200,
                 },
                 PlannedTunnel {
                     connect_host: "127.0.0.1".to_string(),
                     connect_port: 41001,
+                    host_key_host: "bastion-b".to_string(),
+                    host_key_port: 2200,
                     remote_host: "db.internal".to_string(),
                     remote_port: 5432,
                 },
@@ -966,9 +1250,441 @@ mod tests {
 
     #[tokio::test]
     async fn local_port_reuses_existing_chain_entry() {
-        let manager = TunnelManager::new();
+        let manager = TunnelManager::new(std::env::temp_dir().to_path_buf());
 
         assert_eq!(manager.local_port("missing").await, None);
         manager.stop_tunnel("missing").await;
+    }
+
+    // --- Host-key verification (MITM hardening) ---------------------------------
+
+    /// Builds the public key embedded in [`TEST_SERVER_KEY_PEM`]. The comment
+    /// is cleared so it matches the comment-less key parsed back from the
+    /// known_hosts file (real server keys presented during KEX carry no
+    /// comment, so this mirrors production behaviour).
+    fn test_server_public_key() -> PublicKey {
+        let mut key =
+            decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key").public_key().clone();
+        key.set_comment("");
+        key
+    }
+
+    #[test]
+    fn tofu_unknown_host_check_then_learn_records_it() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let verifier = HostKeyVerifier::new(path.clone());
+
+        let key = test_server_public_key();
+        // Unknown host -> candidate for explicit TOFU (not silently trusted).
+        assert_eq!(verifier.check("db.example.com", 22, &key).unwrap(), HostKeyState::Unknown);
+        // User accepts -> record it via learn().
+        verifier.learn("db.example.com", 22, &key).unwrap();
+        // Second contact with the same key is now trusted (read back from file).
+        assert_eq!(verifier.check("db.example.com", 22, &key).unwrap(), HostKeyState::Trusted);
+        // And the key really landed in the store.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("db.example.com"), "recorded host missing: {contents}");
+    }
+
+    #[test]
+    fn changed_host_key_is_rejected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        // Pre-seed the store with a *different* (valid) ed25519 key for the host.
+        std::fs::write(
+            &path,
+            "db.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G1sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X\n",
+        )
+        .unwrap();
+        let verifier = HostKeyVerifier::new(path);
+
+        // The server actually presents TEST_SERVER_KEY_PEM's key -> mismatch.
+        let key = test_server_public_key();
+        assert!(verifier.check("db.example.com", 22, &key).is_err(), "changed host key must be rejected (MITM)");
+    }
+
+    #[test]
+    fn unknown_host_without_persist_permission_is_rejected() {
+        let dir = tempdir().unwrap();
+        // Make the would-be parent a regular file so the store can never be
+        // created — this is the "no write permission" edge case.
+        let frozen = dir.path().join("frozen");
+        std::fs::write(&frozen, b"not a directory").unwrap();
+        let verifier = HostKeyVerifier::new(frozen.join("known_hosts"));
+
+        let key = test_server_public_key();
+        // Fail-closed: the unknown host is reported as a candidate, but it
+        // cannot be persisted (no write permission), so we must NOT trust it in
+        // memory — learn() must error rather than silently accept.
+        assert_eq!(verifier.check("db.example.com", 22, &key).unwrap(), HostKeyState::Unknown);
+        assert!(
+            verifier.learn("db.example.com", 22, &key).is_err(),
+            "learn must fail when the store is unwritable (fail-closed)"
+        );
+    }
+
+    // --- Explicit TOFU prompt bridge (HostKeyVerify) ---------------------------
+
+    /// Spawns a fake UI gateway that answers every prompt with `answer`.
+    fn install_fake_prompt_gateway(answer: ssh_prompt::SshPromptAnswer) {
+        let (tx, mut rx) = mpsc::channel::<ssh_prompt::SshPromptEnvelope>(8);
+        tokio::spawn(async move {
+            if let Some(env) = rx.recv().await {
+                let _ = env.responder.send(answer);
+            }
+        });
+        ssh_prompt::install_ssh_prompt_gateway(tx);
+    }
+
+    #[tokio::test]
+    async fn unknown_host_prompt_accept_learns_key() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let verifier = HostKeyVerifier::new(path.clone());
+        let key = test_server_public_key();
+
+        install_fake_prompt_gateway(ssh_prompt::SshPromptAnswer::Accept { remember: true });
+        let mut client =
+            SshClient { host_key_verifier: Arc::new(verifier), host: "db.example.com".to_string(), port: 22 };
+
+        let trusted = client.check_server_key(&key).await.unwrap();
+        assert!(trusted, "accepted host key should be trusted");
+        // The accepted key must be persisted when remember=true.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("db.example.com"), "accepted key should be learned: {contents}");
+        ssh_prompt::clear_ssh_prompt_gateway();
+    }
+
+    #[tokio::test]
+    async fn unknown_host_prompt_accept_without_remember_is_session_only() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let verifier = HostKeyVerifier::new(path.clone());
+        let key = test_server_public_key();
+
+        install_fake_prompt_gateway(ssh_prompt::SshPromptAnswer::Accept { remember: false });
+        let mut client =
+            SshClient { host_key_verifier: Arc::new(verifier), host: "db.example.com".to_string(), port: 22 };
+
+        let trusted = client.check_server_key(&key).await.unwrap();
+        assert!(trusted, "accepted host key should be trusted for the session");
+        // remember=false -> key is NOT persisted.
+        assert!(
+            !path.exists() || std::fs::read_to_string(&path).unwrap_or_default().is_empty(),
+            "key must not be persisted when remember=false"
+        );
+        ssh_prompt::clear_ssh_prompt_gateway();
+    }
+
+    #[tokio::test]
+    async fn unknown_host_prompt_reject_aborts_handshake() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let verifier = HostKeyVerifier::new(path.clone());
+        let key = test_server_public_key();
+
+        install_fake_prompt_gateway(ssh_prompt::SshPromptAnswer::Reject);
+        let mut client =
+            SshClient { host_key_verifier: Arc::new(verifier), host: "db.example.com".to_string(), port: 22 };
+
+        let trusted = client.check_server_key(&key).await.unwrap();
+        assert!(!trusted, "rejected host key must not be trusted");
+        // Rejected -> never persisted.
+        assert!(
+            !path.exists() || std::fs::read_to_string(&path).unwrap_or_default().is_empty(),
+            "rejected key must not be persisted"
+        );
+        ssh_prompt::clear_ssh_prompt_gateway();
+    }
+
+    #[tokio::test]
+    async fn unknown_host_without_gateway_fails_closed() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        // Ensure no gateway is installed so request_ssh_prompt returns None.
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let verifier = HostKeyVerifier::new(path);
+        let key = test_server_public_key();
+
+        let mut client =
+            SshClient { host_key_verifier: Arc::new(verifier), host: "db.example.com".to_string(), port: 22 };
+        let trusted = client.check_server_key(&key).await.unwrap();
+        // No UI to confirm -> fail-closed, host is not trusted.
+        assert!(!trusted, "without a gateway, an unknown host must be rejected (fail-closed)");
+    }
+
+    #[tokio::test]
+    async fn trusted_host_skips_prompt() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let verifier = HostKeyVerifier::new(path);
+        let key = test_server_public_key();
+        // Pre-seed the store so the host is already trusted.
+        verifier.learn("db.example.com", 22, &key).unwrap();
+
+        // No gateway installed, but the host is trusted so no prompt is needed.
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let mut client =
+            SshClient { host_key_verifier: Arc::new(verifier), host: "db.example.com".to_string(), port: 22 };
+        let trusted = client.check_server_key(&key).await.unwrap();
+        assert!(trusted, "a known-trusted host must be accepted without a prompt");
+    }
+
+    // --- key+password fallback policy ------------------------------------------
+
+    #[test]
+    fn password_fallback_only_when_server_offers_it() {
+        // Server offers only publickey: never leak the password.
+        let only_key = MethodSet::from(&[MethodKind::PublicKey][..]);
+        assert!(!server_offers_password(&only_key));
+
+        // Server offers password too: safe to fall back.
+        let with_pw = MethodSet::from(&[MethodKind::PublicKey, MethodKind::Password][..]);
+        assert!(server_offers_password(&with_pw));
+
+        // No methods advertised at all: do NOT send the password, even if a
+        // `partial_success` flag were present — we intentionally ignore it and
+        // rely solely on the advertised method list (RFC 4252 §5.1).
+        let empty = MethodSet::empty();
+        assert!(!server_offers_password(&empty));
+    }
+
+    // --- MITM hardening: a changed/unknown host never receives the password ---
+
+    const TEST_SERVER_KEY_PEM: &str = r#"-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACAVDlhwKBk+QMZN+WNAUKL6qLr3hf3S5p1TdSK4hMhLxwAAAJD9wI28/cCN
+vAAAAAtzc2gtZWQyNTUxOQAAACAVDlhwKBk+QMZN+WNAUKL6qLr3hf3S5p1TdSK4hMhLxw
+AAAEDxqdMQX37UdhziSi5Br3kyRM/Xrpo9ZcXoguYkeogq0hUOWHAoGT5Axk35Y0BQovqo
+uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
+-----END OPENSSH PRIVATE KEY-----"#;
+
+    struct AcceptNoneServer;
+
+    impl server::Server for AcceptNoneServer {
+        type Handler = AcceptNoneHandler;
+
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> AcceptNoneHandler {
+            AcceptNoneHandler
+        }
+    }
+
+    struct AcceptNoneHandler;
+
+    impl server::Handler for AcceptNoneHandler {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+            Ok(Auth::Accept)
+        }
+    }
+
+    async fn start_accept_none_server() -> (u16, tokio::task::JoinHandle<()>) {
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        let server_config = server::Config { keys: vec![server_key], ..Default::default() };
+        let port = portpicker::pick_unused_port().expect("no free port");
+        let mut server = AcceptNoneServer;
+        let task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", port)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        (port, task)
+    }
+
+    #[tokio::test]
+    async fn forwarded_connection_checks_logical_host_identity() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let (connect_port, server_task) = start_accept_none_server().await;
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        let (gateway_tx, mut gateway_rx) = mpsc::channel::<ssh_prompt::SshPromptEnvelope>(1);
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let envelope = gateway_rx.recv().await.expect("host-key prompt");
+            let _ = request_tx.send((envelope.request.host.clone(), envelope.request.port));
+            let _ = envelope.responder.send(ssh_prompt::SshPromptAnswer::Accept { remember: true });
+        });
+        ssh_prompt::install_ssh_prompt_gateway(gateway_tx);
+
+        let session = connect_and_authenticate(
+            "127.0.0.1",
+            connect_port,
+            "ssh-target.invalid",
+            2222,
+            "user",
+            "",
+            "",
+            "",
+            false,
+            "",
+            "none",
+            5,
+            &known_hosts_path,
+        )
+        .await
+        .expect("forwarded SSH connection should authenticate");
+
+        assert_eq!(request_rx.await.unwrap(), ("ssh-target.invalid".to_string(), 2222));
+        let known_hosts = std::fs::read_to_string(&known_hosts_path).unwrap();
+        assert!(known_hosts.contains("[ssh-target.invalid]:2222"));
+        assert!(!known_hosts.contains("127.0.0.1"));
+
+        drop(session);
+        ssh_prompt::clear_ssh_prompt_gateway();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_tunnel_starts_share_one_handshake() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let (connect_port, server_task) = start_accept_none_server().await;
+        let dir = tempdir().unwrap();
+        let manager = Arc::new(TunnelManager::new(dir.path().to_path_buf()));
+        let prompt_count = Arc::new(AtomicUsize::new(0));
+        let observed_count = prompt_count.clone();
+        let (gateway_tx, mut gateway_rx) = mpsc::channel::<ssh_prompt::SshPromptEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(envelope) = gateway_rx.recv().await {
+                observed_count.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = envelope.responder.send(ssh_prompt::SshPromptAnswer::Accept { remember: false });
+            }
+        });
+        ssh_prompt::install_ssh_prompt_gateway(gateway_tx);
+
+        let first = manager.start_tunnel(
+            "shared-layer",
+            "127.0.0.1",
+            connect_port,
+            "ssh-target.invalid",
+            2222,
+            "user",
+            "",
+            "",
+            "",
+            false,
+            "",
+            "none",
+            5,
+            "db.internal",
+            5432,
+            false,
+        );
+        let second = manager.start_tunnel(
+            "shared-layer",
+            "127.0.0.1",
+            connect_port,
+            "ssh-target.invalid",
+            2222,
+            "user",
+            "",
+            "",
+            "",
+            false,
+            "",
+            "none",
+            5,
+            "db.internal",
+            5432,
+            false,
+        );
+        let (first_port, second_port) = tokio::join!(first, second);
+
+        assert_eq!(first_port.unwrap(), second_port.unwrap());
+        assert_eq!(prompt_count.load(Ordering::SeqCst), 1);
+
+        manager.stop_tunnel("shared-layer").await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        server_task.abort();
+    }
+
+    /// Minimal SSH server used to prove the client never sends a password to a
+    /// host whose key does not match the known-hosts store. `auth_password`
+    /// flips `password_attempted` so the test can assert it was never called.
+    struct MitmServer {
+        password_attempted: Arc<AtomicBool>,
+    }
+
+    impl server::Server for MitmServer {
+        type Handler = MitmHandler;
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> MitmHandler {
+            MitmHandler { password_attempted: self.password_attempted.clone() }
+        }
+    }
+
+    struct MitmHandler {
+        password_attempted: Arc<AtomicBool>,
+    }
+
+    impl server::Handler for MitmHandler {
+        type Error = russh::Error;
+
+        async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
+            self.password_attempted.store(true, Ordering::SeqCst);
+            Ok(Auth::reject())
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_host_without_persist_permission_does_not_leak_password() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        // This test proves the client never sends a password to an untrusted
+        // host. It must run with NO prompt gateway installed so the handshake
+        // fails closed (no UI to confirm the key -> reject before auth).
+        ssh_prompt::clear_ssh_prompt_gateway();
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let password_attempted = Arc::new(AtomicBool::new(false));
+
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        // Advertise password auth so it *would* be attempted if the handshake
+        // ever reached the authentication phase.
+        let server_config = server::Config { keys: vec![server_key], methods: MethodSet::all(), ..Default::default() };
+
+        let port = portpicker::pick_unused_port().expect("no free port");
+        let mut server = MitmServer { password_attempted: password_attempted.clone() };
+        let server_task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", port)).await;
+        });
+        // Let the listener bind before the client connects.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Point the verifier at a path whose parent is a file, so the unknown
+        // host key can NEVER be persisted. dbx must fail-closed: abort the
+        // handshake and never send a password to an untrusted endpoint (the
+        // old store silently trusted it in memory — this must not happen).
+        let dir = tempdir().unwrap();
+        let frozen = dir.path().join("frozen");
+        std::fs::write(&frozen, b"not a directory").unwrap();
+        let verifier = HostKeyVerifier::new(frozen.join("known_hosts"));
+        let handler = SshClient { host_key_verifier: Arc::new(verifier), host: "127.0.0.1".to_string(), port };
+        let client_config = Arc::new(ssh_client_config());
+
+        let connect_result =
+            tokio::time::timeout(Duration::from_secs(10), client::connect(client_config, ("127.0.0.1", port), handler))
+                .await;
+
+        // The handshake must abort at the host-key check, so the server must
+        // never have been asked for a password.
+        assert!(
+            !password_attempted.load(Ordering::SeqCst),
+            "password auth must NOT be attempted for an untrusted host when the key cannot be persisted"
+        );
+        // And the connection itself must not succeed.
+        assert!(
+            connect_result.is_err() || connect_result.unwrap().is_err(),
+            "connection should fail when the host key cannot be verified/persisted"
+        );
+
+        server_task.abort();
     }
 }

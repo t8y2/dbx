@@ -1091,11 +1091,14 @@ mod tests {
                 proxy_url: String::new(),
                 enable_thinking: true,
                 reasoning_level: crate::ai::AiReasoningLevel::Default,
+                runtime_effort: None,
                 context_window: None,
                 codex_cli_path: None,
                 codex_cli_env: Default::default(),
                 claude_code_cli_path: None,
                 claude_code_cli_env: Default::default(),
+                pi_agent_cli_path: None,
+                pi_agent_cli_env: Default::default(),
             },
         }
     }
@@ -1117,6 +1120,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "Postgres".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,
@@ -1172,6 +1176,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -1264,6 +1269,7 @@ mod tests {
         let mut config = ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,

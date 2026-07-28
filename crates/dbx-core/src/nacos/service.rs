@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::nacos::types::*;
@@ -46,6 +48,24 @@ pub async fn nacos_list_configs_core(
 ) -> Result<NacosConfigList, String> {
     let admin = get_admin(state, conn_id).await?;
     admin.list_configs(query).await
+}
+
+pub async fn nacos_search_config_content_core<F, Fut>(
+    state: &AppState,
+    conn_id: &str,
+    request: NacosContentSearchRequest,
+    on_progress: F,
+) -> Result<NacosContentSearchResult, String>
+where
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
+{
+    let admin = get_admin(state, conn_id).await?;
+    crate::nacos::search::search_config_content(admin, request, on_progress).await
+}
+
+pub fn nacos_cancel_operation_core(operation_id: &str) -> bool {
+    crate::nacos::search::cancel_operation(operation_id)
 }
 
 pub async fn nacos_get_config_core(
@@ -142,6 +162,15 @@ pub async fn nacos_update_instance_core(
     admin.update_instance(req).await
 }
 
+pub async fn nacos_get_dashboard_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosDashboardQuery,
+) -> Result<NacosDashboardSnapshot, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.get_dashboard(query).await
+}
+
 pub async fn nacos_raw_request_core(
     state: &AppState,
     conn_id: &str,
@@ -155,7 +184,7 @@ pub async fn nacos_raw_request_core(
     admin.raw_request(req).await
 }
 
-async fn get_admin(
+pub(crate) async fn get_admin(
     state: &AppState,
     conn_id: &str,
 ) -> Result<std::sync::Arc<dyn crate::nacos::port::NacosAdmin>, String> {
@@ -167,7 +196,7 @@ async fn get_admin(
     state.nacos_registry.get_or_build_config(conn_id, admin_config).await
 }
 
-async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
+pub(crate) async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     if cfg.read_only {
         Err(format!("{action} is blocked because this connection is read-only"))
@@ -189,6 +218,7 @@ mod tests {
         let mut cfg = crate::models::connection::ConnectionConfig {
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -259,6 +289,7 @@ mod tests {
         let cfg = crate::models::connection::ConnectionConfig {
             id: "nacos-rollback".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,

@@ -761,8 +761,8 @@ watch(
 }
 
 .badge-info {
-  background: color-mix(in srgb, #3b82f6 18%, transparent);
-  color: #2563eb;
+  background: var(--color-info-alpha);
+  color: var(--color-info);
 }
 
 .badge-muted {

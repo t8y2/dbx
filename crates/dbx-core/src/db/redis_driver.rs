@@ -15,9 +15,11 @@ use tokio::sync::{Mutex, MutexGuard};
 use super::json_value_for_js;
 
 const STREAM_ENTRY_LIMIT: usize = 100;
+const STREAM_PENDING_PAGE_SIZE: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
 const HASH_FILTER_SCAN_MAX_ITERATIONS: usize = 10;
 const DEFAULT_REDIS_DATABASES: u32 = 16;
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const CLUSTER_CURSOR_NODE_BITS: u64 = 16;
 const CLUSTER_CURSOR_NODE_MASK: u64 = (1 << CLUSTER_CURSOR_NODE_BITS) - 1;
 const CLUSTER_CURSOR_SCAN_MASK: u64 = (1 << (64 - CLUSTER_CURSOR_NODE_BITS)) - 1;
@@ -120,6 +122,70 @@ pub struct RedisStreamField {
 pub struct RedisStreamEntry {
     pub id: String,
     pub fields: Vec<RedisStreamField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamGroup {
+    pub name: RedisBlob,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub consumers: u64,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub pending: u64,
+    pub last_delivered_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_optional_redis_u64_for_js")]
+    pub entries_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_optional_redis_u64_for_js")]
+    pub lag: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamConsumer {
+    pub name: RedisBlob,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub pending: u64,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub idle_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "serialize_optional_redis_u64_for_js")]
+    pub inactive_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamPendingEntry {
+    pub id: String,
+    pub consumer: RedisBlob,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub idle_ms: u64,
+    #[serde(serialize_with = "serialize_redis_u64_for_js")]
+    pub deliveries: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisStreamPendingPage {
+    pub entries: Vec<RedisStreamPendingEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+// JSON and Tauri IPC both deliver numbers to JavaScript, so preserve large Redis counters as text.
+fn serialize_redis_u64_for_js<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if *value > JS_MAX_SAFE_INTEGER {
+        serializer.serialize_str(&value.to_string())
+    } else {
+        serializer.serialize_u64(*value)
+    }
+}
+
+fn serialize_optional_redis_u64_for_js<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(value) => serialize_redis_u64_for_js(value, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1683,7 +1749,7 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
         | "SPOP" | "SREM" | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN"
         | "ZREMRANGEBYLEX" | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT"
         | "SDIFFSTORE" | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE"
-        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" => RedisCommandSafety::Confirm,
+        | "ZUNIONSTORE" | "PFMERGE" | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
         "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
         | "GETEX" | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX"
         | "SETRANGE" | "MSET" | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX"
@@ -1888,8 +1954,9 @@ fn redis_raw_value_to_command_arg(v: &RedisRawValue) -> Option<String> {
 /// Try to convert a RedisRawValue to a u64.
 fn redis_value_to_u64(v: &RedisRawValue) -> Option<u64> {
     match v {
-        RedisRawValue::Int(i) => Some(*i as u64),
+        RedisRawValue::Int(i) => u64::try_from(*i).ok(),
         RedisRawValue::BulkString(bytes) => std::str::from_utf8(bytes).ok().and_then(|s| s.parse().ok()),
+        RedisRawValue::SimpleString(value) => value.parse().ok(),
         _ => None,
     }
 }
@@ -2358,6 +2425,64 @@ where
     Ok(parse_stream_entries(raw))
 }
 
+pub async fn get_stream_groups<C>(con: &mut C, key: &[u8]) -> Result<Vec<RedisStreamGroup>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let raw: RedisRawValue =
+        redis::cmd("XINFO").arg("GROUPS").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+
+    Ok(parse_stream_groups(raw))
+}
+
+pub async fn get_stream_consumers<C>(con: &mut C, key: &[u8], group: &[u8]) -> Result<Vec<RedisStreamConsumer>, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let raw: RedisRawValue =
+        redis::cmd("XINFO").arg("CONSUMERS").arg(key).arg(group).query_async(con).await.map_err(|e| e.to_string())?;
+
+    Ok(parse_stream_consumers(raw))
+}
+
+pub async fn get_stream_pending_page<C>(
+    con: &mut C,
+    key: &[u8],
+    group: &[u8],
+    cursor: Option<&str>,
+    consumer: Option<&[u8]>,
+) -> Result<RedisStreamPendingPage, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let cursor = cursor.filter(|value| !value.is_empty());
+    let start = cursor.unwrap_or("-");
+    // Redis before 6.2 has no exclusive XPENDING ranges. A cursor page needs
+    // a duplicate candidate and a lookahead row to page without skipping IDs.
+    let requested_count = STREAM_PENDING_PAGE_SIZE + 1 + usize::from(cursor.is_some());
+    let mut command = redis::cmd("XPENDING");
+    command.arg(key).arg(group).arg(start).arg("+").arg(requested_count);
+    if let Some(consumer) = consumer {
+        command.arg(consumer);
+    }
+    let raw: RedisRawValue = command.query_async(con).await.map_err(|e| e.to_string())?;
+
+    let mut entries = parse_stream_pending_entries(raw);
+    if let Some(cursor) = cursor {
+        if entries.first().is_some_and(|entry| entry.id == cursor) {
+            entries.remove(0);
+        }
+    }
+    let next_cursor = if entries.len() > STREAM_PENDING_PAGE_SIZE {
+        entries.truncate(STREAM_PENDING_PAGE_SIZE);
+        entries.last().map(|entry| entry.id.clone())
+    } else {
+        None
+    };
+
+    Ok(RedisStreamPendingPage { entries, next_cursor })
+}
+
 fn parse_scan_keys(raw: RedisRawValue) -> Result<(u64, Vec<Vec<u8>>), String> {
     let RedisRawValue::Array(parts) = raw else {
         return Err("Invalid Redis SCAN response".to_string());
@@ -2415,6 +2540,81 @@ fn parse_stream_entry(entry: RedisRawValue) -> Option<RedisStreamEntry> {
     }
 
     Some(RedisStreamEntry { id, fields: parsed_fields })
+}
+
+fn parse_stream_groups(raw: RedisRawValue) -> Vec<RedisStreamGroup> {
+    match raw {
+        RedisRawValue::Array(groups) => groups.into_iter().filter_map(parse_stream_group).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_stream_group(group: RedisRawValue) -> Option<RedisStreamGroup> {
+    let mut attributes = parse_stream_info_attributes(group)?;
+    Some(RedisStreamGroup {
+        name: redis_value_to_blob(attributes.remove("name")?)?,
+        consumers: redis_value_to_u64(&attributes.remove("consumers")?)?,
+        pending: redis_value_to_u64(&attributes.remove("pending")?)?,
+        last_delivered_id: redis_value_to_string(attributes.remove("last-delivered-id")?)?,
+        entries_read: attributes.remove("entries-read").and_then(|value| redis_value_to_u64(&value)),
+        lag: attributes.remove("lag").and_then(|value| redis_value_to_u64(&value)),
+    })
+}
+
+fn parse_stream_consumers(raw: RedisRawValue) -> Vec<RedisStreamConsumer> {
+    match raw {
+        RedisRawValue::Array(consumers) => consumers.into_iter().filter_map(parse_stream_consumer).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_stream_consumer(consumer: RedisRawValue) -> Option<RedisStreamConsumer> {
+    let mut attributes = parse_stream_info_attributes(consumer)?;
+    Some(RedisStreamConsumer {
+        name: redis_value_to_blob(attributes.remove("name")?)?,
+        pending: redis_value_to_u64(&attributes.remove("pending")?)?,
+        idle_ms: redis_value_to_u64(&attributes.remove("idle")?)?,
+        inactive_ms: attributes.remove("inactive").and_then(|value| redis_value_to_u64(&value)),
+    })
+}
+
+fn parse_stream_pending_entries(raw: RedisRawValue) -> Vec<RedisStreamPendingEntry> {
+    match raw {
+        RedisRawValue::Array(entries) => entries.into_iter().filter_map(parse_stream_pending_entry).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_stream_pending_entry(entry: RedisRawValue) -> Option<RedisStreamPendingEntry> {
+    let mut parts = match entry {
+        RedisRawValue::Array(parts) if parts.len() == 4 => parts.into_iter(),
+        _ => return None,
+    };
+
+    Some(RedisStreamPendingEntry {
+        id: redis_value_to_string(parts.next()?)?,
+        consumer: redis_value_to_blob(parts.next()?)?,
+        idle_ms: redis_value_to_u64(&parts.next()?)?,
+        deliveries: redis_value_to_u64(&parts.next()?)?,
+    })
+}
+
+fn parse_stream_info_attributes(raw: RedisRawValue) -> Option<HashMap<String, RedisRawValue>> {
+    let RedisRawValue::Array(parts) = raw else {
+        return None;
+    };
+
+    let mut attributes = HashMap::new();
+    let mut parts = parts.into_iter();
+    while let Some(name) = parts.next() {
+        let value = parts.next()?;
+        attributes.insert(redis_value_to_string(name)?, value);
+    }
+    Some(attributes)
+}
+
+fn redis_value_to_blob(value: RedisRawValue) -> Option<RedisBlob> {
+    redis_value_to_bytes(value).map(|bytes| redis_blob_from_bytes(&bytes))
 }
 
 fn redis_value_to_string(value: RedisRawValue) -> Option<String> {
@@ -2689,9 +2889,31 @@ where
     C: ConnectionLike + Send + Sync + Unpin,
 {
     if ttl > 0 {
-        redis::cmd("EXPIRE").arg(key).arg(ttl).query_async::<()>(con).await.map_err(|e| e.to_string())
+        let applied =
+            redis::cmd("EXPIRE").arg(key).arg(ttl).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+        if applied == 1 {
+            Ok(())
+        } else {
+            Err("Redis key no longer exists; EXPIRE was not applied".to_string())
+        }
     } else {
+        // Redis treats PERSIST as idempotent: a zero reply also means the key
+        // was already persistent. Follow-up reads in the UI handle a key that
+        // disappeared concurrently without requiring an extra ACL permission.
         redis::cmd("PERSIST").arg(key).query_async::<()>(con).await.map_err(|e| e.to_string())
+    }
+}
+
+pub async fn set_expire_at<C>(con: &mut C, key: &[u8], expire_at: i64) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let applied =
+        redis::cmd("EXPIREAT").arg(key).arg(expire_at).query_async::<i64>(con).await.map_err(|e| e.to_string())?;
+    if applied == 1 {
+        Ok(())
+    } else {
+        Err("Redis key no longer exists; EXPIREAT was not applied".to_string())
     }
 }
 
@@ -2953,13 +3175,14 @@ mod tests {
     use super::{
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
         parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
-        parse_stream_entries, redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot,
-        redis_command_raw_to_json, redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw,
-        redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint,
-        redis_value_matches_query, redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob,
-        RedisBlobEncoding, RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem,
-        RedisNodeEndpoint, RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamEntry, RedisStreamField, RedisValue,
-        RedisValueData,
+        parse_stream_consumers, parse_stream_entries, parse_stream_groups, parse_stream_pending_entries,
+        redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot, redis_command_raw_to_json,
+        redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query,
+        redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint, redis_value_matches_query,
+        redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob, RedisBlobEncoding,
+        RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint,
+        RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry, RedisStreamField,
+        RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -3146,6 +3369,260 @@ mod tests {
     }
 
     #[test]
+    fn parses_stream_groups_with_binary_names_and_compatible_optional_fields() {
+        let raw = RedisRawValue::Array(vec![
+            RedisRawValue::Array(vec![
+                bulk("name"),
+                RedisRawValue::BulkString(vec![0xFF, b'g']),
+                bulk("consumers"),
+                RedisRawValue::Int(2),
+                bulk("pending"),
+                bulk("3"),
+                bulk("last-delivered-id"),
+                bulk("1714470000000-0"),
+                bulk("entries-read"),
+                RedisRawValue::Int(11),
+                bulk("lag"),
+                RedisRawValue::Nil,
+                bulk("future-field"),
+                bulk("ignored"),
+            ]),
+            RedisRawValue::Array(vec![
+                bulk("name"),
+                bulk("legacy-group"),
+                bulk("consumers"),
+                RedisRawValue::Int(0),
+                bulk("pending"),
+                RedisRawValue::Int(0),
+                bulk("last-delivered-id"),
+                bulk("0-0"),
+            ]),
+        ]);
+
+        let parsed = parse_stream_groups(raw);
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, redis_blob_from_bytes(&[0xFF, b'g']));
+        assert_eq!(
+            parsed[0],
+            RedisStreamGroup {
+                name: redis_blob_from_bytes(&[0xFF, b'g']),
+                consumers: 2,
+                pending: 3,
+                last_delivered_id: "1714470000000-0".to_string(),
+                entries_read: Some(11),
+                lag: None,
+            }
+        );
+        assert_eq!(
+            parsed[1],
+            RedisStreamGroup {
+                name: text_blob("legacy-group"),
+                consumers: 0,
+                pending: 0,
+                last_delivered_id: "0-0".to_string(),
+                entries_read: None,
+                lag: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_stream_consumers_and_pending_entries() {
+        let consumers = parse_stream_consumers(RedisRawValue::Array(vec![
+            RedisRawValue::Array(vec![
+                bulk("name"),
+                bulk("worker-a"),
+                bulk("pending"),
+                RedisRawValue::Int(4),
+                bulk("idle"),
+                bulk("1200"),
+                bulk("inactive"),
+                RedisRawValue::Int(800),
+            ]),
+            RedisRawValue::Array(vec![
+                bulk("name"),
+                bulk("legacy-worker"),
+                bulk("pending"),
+                RedisRawValue::Int(0),
+                bulk("idle"),
+                RedisRawValue::Int(0),
+            ]),
+        ]));
+        let pending = parse_stream_pending_entries(RedisRawValue::Array(vec![
+            RedisRawValue::Array(vec![
+                bulk("1714470000000-0"),
+                RedisRawValue::BulkString(vec![0xFE, b'c']),
+                RedisRawValue::Int(2_400),
+                bulk("3"),
+            ]),
+            RedisRawValue::Array(vec![bulk("malformed")]),
+        ]));
+
+        assert_eq!(
+            consumers,
+            vec![
+                RedisStreamConsumer { name: text_blob("worker-a"), pending: 4, idle_ms: 1_200, inactive_ms: Some(800) },
+                RedisStreamConsumer { name: text_blob("legacy-worker"), pending: 0, idle_ms: 0, inactive_ms: None },
+            ]
+        );
+        assert_eq!(
+            pending,
+            vec![RedisStreamPendingEntry {
+                id: "1714470000000-0".to_string(),
+                consumer: redis_blob_from_bytes(&[0xFE, b'c']),
+                idle_ms: 2_400,
+                deliveries: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn serializes_stream_metrics_without_losing_javascript_precision() {
+        let unsafe_value = super::JS_MAX_SAFE_INTEGER + 1;
+        let group = RedisStreamGroup {
+            name: text_blob("payments"),
+            consumers: unsafe_value,
+            pending: 2,
+            last_delivered_id: "1714470000000-0".to_string(),
+            entries_read: Some(unsafe_value),
+            lag: None,
+        };
+        let consumer = RedisStreamConsumer {
+            name: text_blob("worker-a"),
+            pending: 2,
+            idle_ms: unsafe_value,
+            inactive_ms: Some(unsafe_value),
+        };
+        let entry = RedisStreamPendingEntry {
+            id: "1714470000000-0".to_string(),
+            consumer: text_blob("worker-a"),
+            idle_ms: 2,
+            deliveries: unsafe_value,
+        };
+
+        let group_json = serde_json::to_value(group).unwrap();
+        let consumer_json = serde_json::to_value(consumer).unwrap();
+        let entry_json = serde_json::to_value(entry).unwrap();
+
+        assert_eq!(group_json["consumers"], unsafe_value.to_string());
+        assert_eq!(group_json["pending"].as_u64(), Some(2));
+        assert_eq!(group_json["entries_read"], unsafe_value.to_string());
+        assert!(group_json.get("lag").is_none());
+        assert_eq!(consumer_json["idle_ms"], unsafe_value.to_string());
+        assert_eq!(consumer_json["inactive_ms"], unsafe_value.to_string());
+        assert_eq!(entry_json["deliveries"], unsafe_value.to_string());
+    }
+
+    #[tokio::test]
+    async fn stream_monitoring_commands_are_read_only_and_pending_pagination_supports_redis_5() {
+        let groups = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
+            bulk("name"),
+            bulk("payments"),
+            bulk("consumers"),
+            RedisRawValue::Int(1),
+            bulk("pending"),
+            RedisRawValue::Int(101),
+            bulk("last-delivered-id"),
+            bulk("1714470000000-0"),
+        ])]);
+        let consumers = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
+            bulk("name"),
+            bulk("worker-a"),
+            bulk("pending"),
+            RedisRawValue::Int(101),
+            bulk("idle"),
+            RedisRawValue::Int(10),
+        ])]);
+        let pending = RedisRawValue::Array(
+            (17..=118)
+                .map(|index| {
+                    RedisRawValue::Array(vec![
+                        bulk(&format!("1714470000000-{index}")),
+                        bulk("worker-a"),
+                        RedisRawValue::Int(index),
+                        RedisRawValue::Int(1),
+                    ])
+                })
+                .collect(),
+        );
+        let mut con = FakeRedisConnection::new(vec![groups, consumers, pending]);
+
+        let groups = super::get_stream_groups(&mut con, b"orders").await.unwrap();
+        let consumers = super::get_stream_consumers(&mut con, b"orders", b"payments").await.unwrap();
+        let page = super::get_stream_pending_page(&mut con, b"orders", b"payments", Some("1714470000000-17"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(page.entries.len(), 100);
+        assert_eq!(page.entries.first().map(|entry| entry.id.as_str()), Some("1714470000000-18"));
+        assert_eq!(page.entries.last().map(|entry| entry.id.as_str()), Some("1714470000000-117"));
+        assert_eq!(page.next_cursor.as_deref(), Some("1714470000000-117"));
+        assert_eq!(con.command_count("XINFO"), 2);
+        assert_eq!(con.command_count("XPENDING"), 1);
+        assert_eq!(con.command_count("XGROUP"), 0);
+        assert_eq!(con.command_count("XACK"), 0);
+        assert_eq!(con.command_count("XCLAIM"), 0);
+        assert!(con.commands[0].contains("\r\nGROUPS\r\n"));
+        assert!(con.commands[1].contains("\r\nCONSUMERS\r\n"));
+        assert!(con.commands[2].contains("\r\n1714470000000-17\r\n"));
+        assert!(!con.commands[2].contains("\r\n(1714470000000-17\r\n"));
+        assert!(con.commands[2].contains("\r\n102\r\n"));
+    }
+
+    #[tokio::test]
+    async fn stream_pending_pagination_keeps_the_first_entry_when_cursor_is_acknowledged() {
+        let pending = RedisRawValue::Array(
+            (18..=118)
+                .map(|index| {
+                    RedisRawValue::Array(vec![
+                        bulk(&format!("1714470000000-{index}")),
+                        bulk("worker-a"),
+                        RedisRawValue::Int(index),
+                        RedisRawValue::Int(1),
+                    ])
+                })
+                .collect(),
+        );
+        let mut con = FakeRedisConnection::new(vec![pending]);
+
+        let page = super::get_stream_pending_page(&mut con, b"orders", b"payments", Some("1714470000000-17"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(page.entries.len(), 100);
+        assert_eq!(page.entries.first().map(|entry| entry.id.as_str()), Some("1714470000000-18"));
+        assert_eq!(page.entries.last().map(|entry| entry.id.as_str()), Some("1714470000000-117"));
+        assert_eq!(page.next_cursor.as_deref(), Some("1714470000000-117"));
+        assert!(con.commands[0].contains("\r\n1714470000000-17\r\n"));
+        assert!(!con.commands[0].contains("\r\n(1714470000000-17\r\n"));
+        assert!(con.commands[0].contains("\r\n102\r\n"));
+    }
+
+    #[tokio::test]
+    async fn stream_pending_filters_by_consumer_server_side() {
+        let pending = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
+            bulk("1714470000000-0"),
+            bulk("worker-a"),
+            RedisRawValue::Int(2_400),
+            RedisRawValue::Int(1),
+        ])]);
+        let mut con = FakeRedisConnection::new(vec![pending]);
+
+        let page =
+            super::get_stream_pending_page(&mut con, b"orders", b"payments", None, Some(b"worker-a")).await.unwrap();
+
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(con.command_count("XPENDING"), 1);
+        assert!(con.commands[0].contains("\r\n-\r\n"));
+        assert!(con.commands[0].contains("\r\n+\r\n"));
+        assert!(con.commands[0].contains("\r\n101\r\n"));
+        assert!(con.commands[0].contains("\r\nworker-a\r\n"));
+    }
+
+    #[test]
     fn parses_configured_database_count() {
         let value = RedisRawValue::Array(vec![
             RedisRawValue::BulkString(b"databases".to_vec()),
@@ -3198,6 +3675,48 @@ mod tests {
         assert!(con.commands[0].contains("\r\nSET\r\n"));
         assert!(!con.commands[0].contains("\r\nKEEPTTL\r\n"));
         assert!(!con.commands[0].contains("\r\nEXPIRE\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_expire_at_uses_expireat_with_the_unix_timestamp() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+
+        super::set_expire_at(&mut con, b"session", 1_735_689_600).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert!(con.commands[0].contains("\r\nEXPIREAT\r\n"));
+        assert!(con.commands[0].contains("\r\n1735689600\r\n"));
+        assert_eq!(con.command_count("EVAL"), 0);
+    }
+
+    #[tokio::test]
+    async fn set_expire_at_reports_when_the_key_disappears_before_expiration_is_applied() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::set_expire_at(&mut con, b"session", 1_735_689_600).await.unwrap_err();
+
+        assert!(error.contains("EXPIREAT was not applied"));
+    }
+
+    #[tokio::test]
+    async fn set_ttl_reports_when_positive_expiration_is_not_applied() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        let error = super::set_ttl(&mut con, b"session", 60).await.unwrap_err();
+
+        assert!(error.contains("EXPIRE was not applied"));
+    }
+
+    #[tokio::test]
+    async fn persist_is_idempotent_for_an_already_persistent_key() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0)]);
+
+        super::set_ttl(&mut con, b"session", 0).await.unwrap();
+
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(con.command_count("PERSIST"), 1);
+        assert_eq!(con.command_count("EXISTS"), 0);
+        assert_eq!(con.command_count("EVAL"), 0);
     }
 
     #[tokio::test]
@@ -3924,13 +4443,47 @@ mod tests {
         assert_eq!(classify_command("GETEX"), RedisCommandSafety::Write);
         assert_eq!(classify_command("XREADGROUP"), RedisCommandSafety::Write);
         assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
-        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Blocked);
+        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.DEL"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.FORGET"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("JSON.CLEAR"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("KEYS"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("flushall"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("eval"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("FCALL"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("XGROUP"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("VENDOR.WRITE"), RedisCommandSafety::Blocked);
+    }
+
+    // Regression for review feedback: an unknown command (e.g. FCALL) inside a
+    // multi-statement batch must still raise the batch to Blocked regardless
+    // of its position, so "DEL victim\nFCALL wipe 0" cannot execute the
+    // destructive command after the frontend scan would otherwise have
+    // stopped the run.
+    #[test]
+    fn classify_command_batch_blocks_on_any_unknown_member() {
+        for batch in [
+            // destructive first, unknown second
+            ["DEL victim", "FCALL wipe 0"],
+            // unknown first, destructive second
+            ["FCALL wipe 0", "DEL victim"],
+        ] {
+            let mut highest = RedisCommandSafety::Allowed;
+            for cmd in batch.iter() {
+                let safety = classify_command(cmd);
+                if matches!(safety, RedisCommandSafety::Blocked) {
+                    highest = safety;
+                    break;
+                }
+                if matches!(safety, RedisCommandSafety::Confirm) && !matches!(highest, RedisCommandSafety::Blocked) {
+                    highest = safety;
+                }
+            }
+            assert!(
+                matches!(highest, RedisCommandSafety::Blocked),
+                "batch {batch:?} must be Blocked because it contains FCALL, got {highest:?}"
+            );
+        }
     }
 
     #[test]
@@ -4077,6 +4630,7 @@ mod tests {
         ConnectionConfig {
             id: "redis".to_string(),
             name: "Redis".to_string(),
+            note: String::new(),
             db_type: crate::models::connection::DatabaseType::Redis,
             driver_profile: None,
             driver_label: None,

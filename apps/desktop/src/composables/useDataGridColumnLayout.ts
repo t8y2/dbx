@@ -14,7 +14,7 @@ import {
   saveTableDataGridColumnOrder,
   type TableDataGridColumnOrderChangedDetail,
 } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
-import { filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
+import { filterColumnVisibilityOptions, hiddenColumnIndexesForKeys, hiddenColumnIndexesWithAllNullColumns, hiddenColumnKeysForIndexes, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
 
 export type RenderedDataGridColumn = {
   visibleColIdx: number;
@@ -76,11 +76,13 @@ export function useDataGridColumnLayoutState(options: {
   columnOrderKeys: MaybeRefOrGetter<readonly string[]>;
   layoutScopeKey: MaybeRefOrGetter<string>;
   tableScopeKey: MaybeRefOrGetter<string>;
+  initialHiddenColumnKeys?: MaybeRefOrGetter<readonly string[] | undefined>;
   hideNullColumns?: MaybeRefOrGetter<boolean>;
+  onHiddenColumnKeysChange?: (keys: string[]) => void;
   onHideNullColumnsChange?: (value: boolean) => void;
   onRefreshMetrics?: () => void;
 }) {
-  const hiddenColumnIndexes = ref<Set<number>>(new Set());
+  const hiddenColumnIndexes = ref<Set<number>>(hiddenColumnIndexesForKeys(toValue(options.initialHiddenColumnKeys), toValue(options.columnOrderKeys), toValue(options.displayableColumnIndexes)));
   const localNullColumnsHidden = ref(false);
   const nullColumnsHidden = computed(() => (options.hideNullColumns === undefined ? localNullColumnsHidden.value : toValue(options.hideNullColumns)));
   const autoHiddenNullColumnIndexes = ref<Set<number>>(new Set());
@@ -103,14 +105,33 @@ export function useDataGridColumnLayoutState(options: {
   function isColumnVisible(columnIndex: number) {
     return !hiddenColumnIndexes.value.has(columnIndex);
   }
+  function persistHiddenColumnKeys() {
+    options.onHiddenColumnKeysChange?.(hiddenColumnKeysForIndexes(hiddenColumnIndexes.value, autoHiddenNullColumnIndexes.value, toValue(options.columnOrderKeys), toValue(options.displayableColumnIndexes)));
+  }
   function toggleColumnVisibility(columnIndex: number) {
     hiddenColumnIndexes.value = nextHiddenColumnIndexes({ columnIndex, hiddenIndexes: hiddenColumnIndexes.value, totalColumns: displayableColumnCount.value });
+    if (!hiddenColumnIndexes.value.has(columnIndex) && autoHiddenNullColumnIndexes.value.delete(columnIndex)) {
+      autoHiddenNullColumnIndexes.value = new Set(autoHiddenNullColumnIndexes.value);
+    }
+    persistHiddenColumnKeys();
   }
   function showAllColumns() {
     hiddenColumnIndexes.value = new Set();
+    autoHiddenNullColumnIndexes.value = new Set();
+    persistHiddenColumnKeys();
   }
   function invertColumnVisibility() {
     hiddenColumnIndexes.value = invertedHiddenColumnIndexes([...toValue(options.displayableColumnIndexes)], hiddenColumnIndexes.value);
+    autoHiddenNullColumnIndexes.value = new Set();
+    persistHiddenColumnKeys();
+  }
+  function showColumn(columnIndex: number) {
+    if (!hiddenColumnIndexes.value.has(columnIndex)) return;
+    hiddenColumnIndexes.value.delete(columnIndex);
+    hiddenColumnIndexes.value = new Set(hiddenColumnIndexes.value);
+    autoHiddenNullColumnIndexes.value.delete(columnIndex);
+    autoHiddenNullColumnIndexes.value = new Set(autoHiddenNullColumnIndexes.value);
+    persistHiddenColumnKeys();
   }
   function loadColumnOrder() {
     const tableScopeKey = toValue(options.tableScopeKey);
@@ -233,8 +254,8 @@ export function useDataGridColumnLayoutState(options: {
     if (options.onRefreshMetrics) nextTick(options.onRefreshMetrics);
   }
 
-  function resetColumnVisibility() {
-    hiddenColumnIndexes.value = new Set();
+  function resetColumnVisibility(hiddenColumnKeys: readonly string[] = []) {
+    hiddenColumnIndexes.value = hiddenColumnIndexesForKeys(hiddenColumnKeys, toValue(options.columnOrderKeys), toValue(options.displayableColumnIndexes));
     autoHiddenNullColumnIndexes.value = new Set();
     applyNullColumnVisibility(nullColumnsHidden.value);
   }
@@ -271,6 +292,7 @@ export function useDataGridColumnLayoutState(options: {
     toggleColumnVisibility,
     showAllColumns,
     invertColumnVisibility,
+    showColumn,
     persistColumnOrder,
     resetColumnOrder,
     toggleAllNullColumns,

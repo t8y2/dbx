@@ -5,10 +5,6 @@ import {
   columnSelectionRange,
   extractColumnsSelection,
   extractSelection,
-  formatSelectionAsCsv,
-  formatSelectionAsJson,
-  formatSelectionAsSqlInList,
-  formatSelectionAsTsv,
   isCellInSelection,
   normalizeSelectionRange,
   parseClipboardTable,
@@ -72,33 +68,6 @@ test("builds whole row, column, and table selection ranges", () => {
   assert.equal(rowSelectionRange(0, 0), null);
   assert.equal(columnSelectionRange(0, 0), null);
   assert.equal(allCellsSelectionRange(0, 2), null);
-});
-
-test("formats selected cells as TSV, CSV, JSON, and SQL values", () => {
-  const selection = {
-    columns: ["name", "note"],
-    rows: [
-      ["Ada", "math"],
-      ["Bob", 'quote "here"'],
-      ["O'Hara", null],
-    ],
-  };
-
-  assert.equal(formatSelectionAsTsv(selection), 'Ada\tmath\nBob\tquote "here"\nO\'Hara\tNULL');
-  assert.equal(formatSelectionAsCsv(selection), '"name","note"\n"Ada","math"\n"Bob","quote ""here"""\n"O\'Hara","NULL"');
-  assert.equal(
-    formatSelectionAsJson(selection),
-    JSON.stringify(
-      [
-        { name: "Ada", note: "math" },
-        { name: "Bob", note: 'quote "here"' },
-        { name: "O'Hara", note: null },
-      ],
-      null,
-      2,
-    ),
-  );
-  assert.equal(formatSelectionAsSqlInList(selection), "('Ada', 'math', 'Bob', 'quote \"here\"', 'O''Hara', NULL)");
 });
 
 test("parses clipboard table text with spreadsheet line endings", () => {

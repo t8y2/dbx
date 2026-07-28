@@ -4,7 +4,7 @@ use tauri::State;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
     classify_command, parse_command_argv, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
-    RedisDatabaseInfo, RedisScanResult, RedisValue,
+    RedisDatabaseInfo, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPendingPage, RedisValue,
 };
 
 #[tauri::command]
@@ -84,6 +84,49 @@ pub async fn redis_get_value(
     key_raw: String,
 ) -> Result<RedisValue, String> {
     dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_stream_groups(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+) -> Result<Vec<RedisStreamGroup>, String> {
+    dbx_core::redis_ops::redis_stream_groups_in_db_core(&state, &connection_id, db, &key_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_stream_consumers(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    group_raw: String,
+) -> Result<Vec<RedisStreamConsumer>, String> {
+    dbx_core::redis_ops::redis_stream_consumers_in_db_core(&state, &connection_id, db, &key_raw, &group_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_stream_pending(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    group_raw: String,
+    cursor: Option<String>,
+    consumer_raw: Option<String>,
+) -> Result<RedisStreamPendingPage, String> {
+    dbx_core::redis_ops::redis_stream_pending_in_db_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        &group_raw,
+        cursor.as_deref(),
+        consumer_raw.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -235,6 +278,7 @@ pub async fn redis_stream_add(
     fields: Vec<(String, String)>,
     ttl: Option<i64>,
 ) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "XADD").await?;
     dbx_core::redis_ops::redis_stream_add_in_db_core(&state, &connection_id, db, &key_raw, &entry_id, fields, ttl).await
 }
 
@@ -247,6 +291,7 @@ pub async fn redis_json_set(
     value: String,
     ttl: Option<i64>,
 ) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "JSON.SET").await?;
     dbx_core::redis_ops::redis_json_set_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
 }
 
@@ -269,6 +314,18 @@ pub async fn redis_set_ttl(
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "EXPIRE").await?;
     dbx_core::redis_ops::redis_set_ttl_in_db_core(&state, &connection_id, db, &key_raw, ttl).await
+}
+
+#[tauri::command]
+pub async fn redis_set_expire_at(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    expire_at: i64,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "EXPIREAT").await?;
+    dbx_core::redis_ops::redis_set_expire_at_in_db_core(&state, &connection_id, db, &key_raw, expire_at).await
 }
 
 #[tauri::command]

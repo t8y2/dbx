@@ -10,7 +10,7 @@ import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connection
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
 import { isQueryExecutionErrorResult, usesMysqlProtocolDatabaseType } from "@/lib/query/queryResultError";
-import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redis/redisCommandSafety";
+import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
@@ -21,6 +21,10 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
+
+interface SqlExecutionOptions {
+  openInNewResultTab?: boolean;
+}
 
 export function stripSqlComments(sql: string): string {
   return sql
@@ -96,6 +100,9 @@ export function useSqlExecution(deps: {
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
   const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
   const pendingSourceOffset = ref<number | undefined>();
+  const pendingDangerKind = ref<"sql" | "redis">("sql");
+  const pendingDangerSourceOffset = ref<number | undefined>();
+  const pendingOpenInNewResultTab = ref(false);
 
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number }> {
     const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type).atSet;
@@ -110,7 +117,7 @@ export function useSqlExecution(deps: {
     return { sql, sourceOffset: source.selectionFrom + leadingWhitespace };
   }
 
-  async function tryExecute(sqlOverride?: SqlExecutionOverride) {
+  async function tryExecute(sqlOverride?: SqlExecutionOverride, options: SqlExecutionOptions = {}) {
     const tab = deps.activeTab.value;
     const { sql, sourceOffset } = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) return;
@@ -118,23 +125,45 @@ export function useSqlExecution(deps: {
       deps.onMissingDatabase?.();
       return;
     }
-    if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset)) return;
-    await continueExecute(sql, sourceOffset);
+    if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset, options)) return;
+    await continueExecute(sql, sourceOffset, options);
   }
 
-  async function continueExecute(sql: string, sourceOffset?: number) {
-    // Redis: block dangerous commands when toggle is on (check each line for multi-line input)
+  function tryExecuteInNewResultTab(sqlOverride?: SqlExecutionOverride) {
+    return tryExecute(sqlOverride, { openInNewResultTab: true });
+  }
+
+  async function continueExecute(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
+    // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
         .split("\n")
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
+      let highestSafety: "allowed" | "write" | "confirm" | "blocked" = "allowed";
       for (const cmd of commands) {
         const safety = classifyRedisCommandSafety(cmd);
         if (safety === "blocked") {
-          toast(t("redis.blockedCommand", { command: firstRedisCommandToken(cmd) }), 5000);
-          return;
+          highestSafety = "blocked";
+          break;
         }
+        if (safety === "confirm") {
+          highestSafety = "confirm";
+        }
+      }
+      if (highestSafety === "blocked") {
+        toast(t("redis.blockedCommand", { command: "Redis" }), 5000);
+        return;
+      }
+      if (highestSafety === "confirm") {
+        dangerSql.value = sql;
+        pendingDangerSql.value = sql;
+        pendingDangerKind.value = "redis";
+        pendingDangerSourceOffset.value = sourceOffset;
+        pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
+        suppressDangerConfirm.value = false;
+        showDangerDialog.value = true;
+        return;
       }
     }
     const productionAssessment = assessProductionSql(sql, deps.activeConnection.value, deps.activeTab.value?.database);
@@ -147,21 +176,23 @@ export function useSqlExecution(deps: {
         productionDatabases: productionAssessment.databases,
         source: t("production.sourceSqlEditor"),
       });
-      if (confirmed) await doExecute(sql, sourceOffset);
+      if (confirmed) await doExecute(sql, sourceOffset, options);
       return;
     }
     if (isDangerousSql(sql, deps.activeConnection.value?.db_type) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
       dangerSql.value = sql;
       pendingDangerSql.value = sql;
-      pendingSourceOffset.value = sourceOffset;
+      pendingDangerKind.value = "sql";
+      pendingDangerSourceOffset.value = sourceOffset;
+      pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
       suppressDangerConfirm.value = false;
       showDangerDialog.value = true;
     } else {
-      await doExecute(sql, sourceOffset);
+      await doExecute(sql, sourceOffset, options);
     }
   }
 
-  function prepareSqlParameterDialog(sql: string, sourceOffset?: number): boolean {
+  function prepareSqlParameterDialog(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}): boolean {
     const databaseType = deps.activeConnection.value?.db_type;
     const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType);
     const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
@@ -172,11 +203,12 @@ export function useSqlExecution(deps: {
     sqlParameterDatabaseType.value = databaseType;
     sqlParameterEnabledSyntaxes.value = enabledSyntaxes;
     pendingSourceOffset.value = sourceOffset;
+    pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
     showSqlParameterDialog.value = true;
     return true;
   }
 
-  async function doExecute(sql?: string, sourceOffset?: number) {
+  async function doExecute(sql?: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
     if (sql === undefined) ({ sql, sourceOffset } = await resolvedExecutableSql());
     const tab = deps.activeTab.value;
     if (!tab || !sql.trim()) return;
@@ -190,10 +222,12 @@ export function useSqlExecution(deps: {
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
-    await queryStore.executeCurrentSql(sql, {
+    const producedResult = await queryStore.executeCurrentSql(sql, {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
+      ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
     });
+    if (producedResult === false) return;
     if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       deps.activeOutputView.value = "summary";
     }
@@ -255,17 +289,23 @@ export function useSqlExecution(deps: {
   }
 
   async function onDangerConfirm() {
-    const resolved = pendingDangerSql.value ? { sql: pendingDangerSql.value, sourceOffset: pendingSourceOffset.value } : await resolvedExecutableSql();
-    if (suppressDangerConfirm.value) {
+    const sql = pendingDangerSql.value;
+    const sourceOffset = pendingDangerSourceOffset.value;
+    const kind = pendingDangerKind.value;
+    const openInNewResultTab = pendingOpenInNewResultTab.value;
+    pendingDangerSql.value = "";
+    pendingDangerSourceOffset.value = undefined;
+    pendingDangerKind.value = "sql";
+    pendingOpenInNewResultTab.value = false;
+    if (suppressDangerConfirm.value && kind === "sql") {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
-    pendingDangerSql.value = "";
-    pendingSourceOffset.value = undefined;
-    await doExecute(resolved.sql, resolved.sourceOffset);
+    await doExecute(sql, sourceOffset, { openInNewResultTab });
   }
 
   async function onSqlParametersConfirm(sql: string) {
+    const openInNewResultTab = pendingOpenInNewResultTab.value;
     showSqlParameterDialog.value = false;
     sqlParameterSourceSql.value = "";
     sqlParameterNames.value = [];
@@ -273,7 +313,8 @@ export function useSqlExecution(deps: {
     sqlParameterEnabledSyntaxes.value = [];
     const sourceOffset = pendingSourceOffset.value;
     pendingSourceOffset.value = undefined;
-    await continueExecute(sql, sourceOffset);
+    pendingOpenInNewResultTab.value = false;
+    await continueExecute(sql, sourceOffset, { openInNewResultTab });
   }
 
   watch(showSqlParameterDialog, (open) => {
@@ -283,6 +324,16 @@ export function useSqlExecution(deps: {
     sqlParameterDatabaseType.value = undefined;
     sqlParameterEnabledSyntaxes.value = [];
     pendingSourceOffset.value = undefined;
+    pendingOpenInNewResultTab.value = false;
+  });
+
+  watch(showDangerDialog, (open) => {
+    if (open) return;
+    pendingDangerSql.value = "";
+    pendingDangerSourceOffset.value = undefined;
+    pendingDangerKind.value = "sql";
+    pendingOpenInNewResultTab.value = false;
+    suppressDangerConfirm.value = false;
   });
 
   return {
@@ -291,6 +342,7 @@ export function useSqlExecution(deps: {
     showDangerDialog,
     suppressDangerConfirm,
     tryExecute,
+    tryExecuteInNewResultTab,
     doExecute,
     cancelActiveExecution,
     tryExplain,

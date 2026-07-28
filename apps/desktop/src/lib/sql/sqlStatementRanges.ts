@@ -249,14 +249,16 @@ const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY"
 const CLICKHOUSE_ALTER_TABLE_HEADER = /^ALTER\s+TABLE\s+(?:(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")\s*\.\s*)?(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")(?:\s+ON\s+CLUSTER\s+(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+"|'(?:''|[^'])+'))?\s*$/i;
 const SET_OPERATION_KEYWORDS = new Set(["UNION", "INTERSECT", "EXCEPT", "MINUS"]);
 const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
-const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle"]);
+const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
 const MYSQL_CREATE_TABLE_OPTION_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);
 const MYSQL_ROUTINE_OBJECT_TYPES = new Set(["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
 const MYSQL_NON_ROUTINE_CREATE_TYPES = new Set(["DATABASE", "INDEX", "LOGFILE", "ROLE", "SCHEMA", "SERVER", "SPATIAL", "TABLE", "TEMPORARY", "UNIQUE", "USER", "VIEW"]);
 const MYSQL_CONTROL_BLOCK_SUFFIXES = new Set(["IF", "LOOP", "CASE", "REPEAT", "WHILE"]);
 const ORACLE_PL_SQL_BLOCK_STARTERS = new Set(["DECLARE", "BEGIN"]);
-const ORACLE_PL_SQL_CREATE_OBJECT_TYPES = new Set(["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE", "PACKAGE BODY", "TYPE", "TYPE BODY"]);
+// Plain CREATE TYPE ... AS OBJECT (...); ends with ");" and is not a PL/SQL block.
+// Only PACKAGE (spec), PACKAGE/TYPE BODY, and routine/trigger objects are PL/SQL blocks.
+const ORACLE_PL_SQL_CREATE_OBJECT_TYPES = new Set(["FUNCTION", "PROCEDURE", "TRIGGER", "PACKAGE"]);
 const ORACLE_PL_SQL_TERMINATORS = new Set(["IF", "LOOP", "CASE"]);
 const SAP_HANA_SCRIPT_BLOCK_TERMINATORS = new Set(["IF", "FOR", "WHILE"]);
 
@@ -287,6 +289,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let customDelimiter: string | null = null;
   let state: QuoteState = "none";
   let dollarTag = "";
+  let postgresDollarQuotedRoutine = false;
   let i = 0;
 
   const isWhitespace = (ch: string) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
@@ -303,6 +306,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (statementStart === -1) {
       statementEnd = -1;
       pendingHintStart = -1;
+      postgresDollarQuotedRoutine = false;
       return;
     }
     const trimmedTo = trimRangeEnd(sql, statementStart, to);
@@ -312,6 +316,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     statementStart = -1;
     statementEnd = -1;
     pendingHintStart = -1;
+    postgresDollarQuotedRoutine = false;
   };
 
   while (i < len) {
@@ -468,6 +473,9 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       const tagMatch = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(i));
       if (tagMatch) {
         markContent(i);
+        if (databaseType === "gaussdb" && statementStart !== -1 && startsWithPostgresDollarQuotedRoutinePrefix(sql.slice(statementStart, i))) {
+          postgresDollarQuotedRoutine = true;
+        }
         dollarTag = tagMatch[0].slice(1, -1);
         i += tagMatch[0].length;
         state = "dollar";
@@ -495,7 +503,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         flush();
       } else {
         const statementSoFar = statementStart === -1 ? "" : sql.slice(statementStart, i);
-        const isOraclePlSql = isOracleLikeDatabase(databaseType) && statementStart !== -1 && startsWithOraclePlSqlBlock(statementSoFar);
+        const isOraclePlSql = isOracleLikeDatabase(databaseType) && !postgresDollarQuotedRoutine && statementStart !== -1 && startsWithOraclePlSqlBlock(statementSoFar);
         const isSapHanaScriptBlock = isSapHanaScriptBlockDatabase(databaseType) && statementStart !== -1 && startsWithSapHanaScriptBlock(statementSoFar);
         if (isOraclePlSql || isSapHanaScriptBlock) {
           markContent(i);
@@ -1614,13 +1622,37 @@ function startsWithOraclePlSqlBlock(sql: string): boolean {
   if (ORACLE_PL_SQL_BLOCK_STARTERS.has(first)) return first !== "BEGIN" || words[1] !== "TRANSACTION";
   if (first !== "CREATE") return false;
 
-  let index = 1;
-  while (["OR", "REPLACE", "EDITIONABLE", "NONEDITIONABLE"].includes(words[index] ?? "")) {
-    index += 1;
-  }
+  const index = skipOraclePlSqlCreateModifiers(words, 1);
+  // PACKAGE BODY / TYPE BODY are programmable blocks with an outer END.
   if (words[index] === "PACKAGE" && words[index + 1] === "BODY") return true;
   if (words[index] === "TYPE" && words[index + 1] === "BODY") return true;
+  // Plain CREATE TYPE ... AS OBJECT (...); is ordinary SQL terminated by ';'.
+  if (words[index] === "TYPE") return false;
   return ORACLE_PL_SQL_CREATE_OBJECT_TYPES.has(words[index] ?? "");
+}
+
+function startsWithPostgresDollarQuotedRoutinePrefix(sql: string): boolean {
+  const words = oraclePlSqlWords(sql);
+  if (words[0] !== "CREATE") return false;
+  const objectIndex = skipOraclePlSqlCreateModifiers(words, 1);
+  return (words[objectIndex] === "FUNCTION" || words[objectIndex] === "PROCEDURE") && words[words.length - 1] === "AS";
+}
+
+/** Skip OR REPLACE / FORCE / NOFORCE / EDITIONABLE modifiers after CREATE. */
+function skipOraclePlSqlCreateModifiers(words: readonly string[], startIndex: number): number {
+  let index = startIndex;
+  while (index < words.length) {
+    if (words[index] === "OR" && words[index + 1] === "REPLACE") {
+      index += 2;
+      continue;
+    }
+    if (["FORCE", "NOFORCE", "EDITIONABLE", "NONEDITIONABLE"].includes(words[index] ?? "")) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return index;
 }
 
 function startsWithSapHanaScriptBlock(sql: string): boolean {
@@ -1663,19 +1695,24 @@ function oraclePlSqlBlockIsComplete(sql: string): boolean {
   const tokens = oraclePlSqlTokens(sql);
   if (!startsWithOraclePlSqlBlock(sql)) return false;
 
-  const stack: string[] = [];
+  // Package/type specifications have no BEGIN — only declarations closed by
+  // END [name];. Bodies also own an outer END beyond nested routine END pairs.
+  const objectKind = oraclePlSqlCreateObjectKind(sql);
+  const stack: string[] = objectKind === "body" ? ["OBJECT_BODY"] : objectKind === "spec" ? ["OBJECT_SPEC"] : [];
+  let sawBegin = false;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token.kind !== "word") continue;
 
     if (token.value === "DECLARE") {
-      stack.push("DECLARATION");
+      if (stack[stack.length - 1] !== "DECLARATION") stack.push("DECLARATION");
       continue;
     }
     if (token.value === "BEGIN") {
       if (tokens[index - 1]?.kind === "word" && tokens[index - 1]?.value === "TRANSACTION") continue;
       const previous = previousWordToken(tokens, index);
       if (previous === "END") continue;
+      sawBegin = true;
       if (stack[stack.length - 1] === "DECLARATION") stack[stack.length - 1] = "BLOCK";
       else stack.push("BLOCK");
       continue;
@@ -1690,19 +1727,53 @@ function oraclePlSqlBlockIsComplete(sql: string): boolean {
       continue;
     }
     if (token.value === "CASE") {
+      // Both CASE statements and CASE expressions own an END. The CASE token
+      // following END CASE is ignored below, so it cannot start a new scope.
       if (previousWordToken(tokens, index) !== "END") stack.push("CASE");
       continue;
     }
     if (token.value === "END") {
-      const next = nextWordToken(tokens, index);
-      const target = ORACLE_PL_SQL_TERMINATORS.has(next ?? "") ? next : "BLOCK";
       const top = stack[stack.length - 1];
+      // CASE expressions close as END; while CASE statements close as END CASE;.
+      // In either form, this END belongs to CASE rather than the surrounding block.
+      if (top === "CASE") {
+        stack.pop();
+        continue;
+      }
+      const next = nextWordToken(tokens, index);
+      const target = ORACLE_PL_SQL_TERMINATORS.has(next ?? "") ? next : top === "OBJECT_BODY" || top === "OBJECT_SPEC" ? top : "BLOCK";
       if (top === target || (target === "BLOCK" && top === "BLOCK")) stack.pop();
       continue;
     }
   }
 
-  return stack.length === 0 && tokens[tokens.length - 1]?.kind === "semicolon";
+  const endsWithSemicolon = tokens[tokens.length - 1]?.kind === "semicolon";
+  if (objectKind === "spec") {
+    // Specs complete on outer END [name]; without requiring a BEGIN block.
+    return stack.length === 0 && endsWithSemicolon;
+  }
+  return sawBegin && stack.length === 0 && endsWithSemicolon;
+}
+
+/**
+ * Classify CREATE programmable objects:
+ * - body: PACKAGE BODY / TYPE BODY (outer END beyond nested routines)
+ * - spec: PACKAGE specification only (declarations + END, no BEGIN)
+ * - null: ordinary SQL / other objects (including plain CREATE TYPE ... AS OBJECT)
+ */
+function oraclePlSqlCreateObjectKind(sql: string): "body" | "spec" | null {
+  const words = oraclePlSqlWords(sql);
+  if (words[0] !== "CREATE") return null;
+
+  const index = skipOraclePlSqlCreateModifiers(words, 1);
+  if ((words[index] === "PACKAGE" || words[index] === "TYPE") && words[index + 1] === "BODY") {
+    return "body";
+  }
+  // Only PACKAGE specs lack BEGIN; plain TYPE objects end with ");".
+  if (words[index] === "PACKAGE") {
+    return "spec";
+  }
+  return null;
 }
 
 function oraclePlSqlWords(sql: string): string[] {

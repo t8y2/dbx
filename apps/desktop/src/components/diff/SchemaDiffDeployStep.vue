@@ -335,10 +335,10 @@ function getObjectIconColor(kind: DiffObjectKind): string {
 <style scoped>
 :deep(.splitpanes--vertical > .splitpanes__splitter) {
   width: 4px;
-  background: hsl(var(--border));
+  background: var(--border);
   cursor: col-resize;
 }
 :deep(.splitpanes--vertical > .splitpanes__splitter:hover) {
-  background: hsl(var(--primary));
+  background: var(--primary);
 }
 </style>

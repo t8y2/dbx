@@ -16,7 +16,7 @@ import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue";
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
-import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency } from "@/lib/schema/schemaDiffMetadataLoad";
+import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, shouldFetchSchemaDiffDdl } from "@/lib/schema/schemaDiffMetadataLoad";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig } from "@/types/schemaDiff";
 import type { ObjectSourceKind, TableInfo } from "@/types/database";
@@ -306,12 +306,14 @@ async function loadSchemaDetails(tables: TableInfo[], context: SchemaDetailLoadC
 
   return mapWithConcurrency(tables, concurrency, async (table) => {
     const objectType = isViewOrMaterializedView(table.table_type);
+    const shouldFetchDdl = shouldFetchSchemaDiffDdl(Boolean(objectType), context.options);
+    const ddlPromise = shouldFetchDdl ? runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)) : Promise.resolve("");
     const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
       runMetadataQuery(() => api.getColumns(context.connectionId, context.database, context.schema, table.name)),
       shouldLoadIndexes(context.options) ? runMetadataQuery(() => api.listIndexes(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
       context.options.foreignKeys ? runMetadataQuery(() => api.listForeignKeys(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
       context.options.triggers ? runMetadataQuery(() => api.listTriggers(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
-      runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)),
+      ddlPromise,
     ]);
 
     return { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
@@ -885,10 +887,10 @@ const targetConnectionInfo = computed(() => {
 <style scoped>
 :deep(.splitpanes--horizontal > .splitpanes__splitter) {
   height: 8px;
-  background: hsl(var(--border));
+  background: var(--border);
   cursor: row-resize;
 }
 :deep(.splitpanes--horizontal > .splitpanes__splitter:hover) {
-  background: hsl(var(--primary));
+  background: var(--primary);
 }
 </style>

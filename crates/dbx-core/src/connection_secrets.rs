@@ -737,6 +737,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: format!("{id} connection"),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,

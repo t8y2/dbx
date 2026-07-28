@@ -28,6 +28,7 @@ import {
   Check,
   UsersRound,
   CalendarClock,
+  Gauge,
   Lock,
   Archive,
   Square,
@@ -43,8 +44,8 @@ import ProductionContextBadge from "@/components/common/ProductionContextBadge.v
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
-import { canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode } from "@/types/database";
+import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -53,7 +54,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
-import { isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
+import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { isWindows } from "@/lib/backend/platform";
 import { flattenTree } from "@/composables/useFlatTree";
@@ -62,6 +63,8 @@ import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 // --- Drag and Drop ---
 import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
+import { treeNodePinKey } from "@/lib/app/pinnedItems";
+import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
 
 const { t } = useI18n();
 
@@ -224,6 +227,11 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Link, colorClass: "text-blue-400" };
     case "group-triggers":
       return { icon: Zap, colorClass: "text-orange-400" };
+    case "group-constraints":
+      return { icon: Key, colorClass: "text-amber-500" };
+    case "group-table-partitions":
+    case "group-table-subpartitions":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "object-browser":
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
@@ -244,6 +252,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-sky-500" };
     case "etcd-root":
       return { icon: Database, colorClass: "text-sky-500" };
+    case "etcd-dashboard":
+      return { icon: Gauge, colorClass: "text-sky-500" };
     case "zookeeper-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "mongo-db":
@@ -302,25 +312,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set([
-  "group-columns",
-  "group-indexes",
-  "group-fkeys",
-  "group-triggers",
-  "group-tables",
-  "group-views",
-  "group-materialized-views",
-  "group-procedures",
-  "group-functions",
-  "group-sequences",
-  "group-packages",
-  "group-types",
-  "group-partitions",
-  "group-extensions",
-]);
-
 function isGroupLabel(node: TreeNode): boolean {
-  return groupTypes.has(node.type);
+  return isTreeGroupNodeType(node.type);
 }
 
 function displayLabel(node: TreeNode): string {
@@ -338,6 +331,18 @@ function visibleLabel(node: TreeNode): string {
     return withValidity(sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes));
   }
   return withValidity(displayLabel(node));
+}
+
+function hasActiveTableNameFilter(node: TreeNode): boolean {
+  if (node.type !== "group-tables" || !node.connectionId || !node.database) return false;
+  const filter = connectionStore.tableNameFilterForScope({
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: node.schema,
+    nodeKind: node.type,
+    catalog: node.catalog,
+  });
+  return !!filter && (filter.includePatterns.length > 0 || filter.excludePatterns.length > 0);
 }
 
 type DetailTooltipRow = {
@@ -547,7 +552,11 @@ const canExpand = computed(() =>
 const isPinned = computed(() => activeNode.value.pinned || connectionStore.isTreeNodePinned(activeNode.value));
 
 const isNodeDefaultDatabase = computed(
-  () => (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
+  () =>
+    (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") &&
+    !!activeNode.value.connectionId &&
+    typeof activeNode.value.database === "string" &&
+    connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
 );
 
 const trailingComment = computed(() => {
@@ -613,6 +622,11 @@ function formattedObjectStorage(): string {
 
 const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" ? props.commentLabelWidth : undefined));
 
+function alignedCommentLeadingStyle(): { width: string } | undefined {
+  const width = alignedCommentLeadingWidth(alignedCommentLabelWidth.value, canTreeNodePin(activeNode.value.type));
+  return width === undefined ? undefined : { width: `${width}px` };
+}
+
 function hasTrailingMetadata(): boolean {
   return !!trailingComment.value || !!formattedObjectStorage();
 }
@@ -621,7 +635,7 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.valu
 
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 
-const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata() }));
+const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: hasTrailingMetadata(), hasInlineAction: isPinned.value }));
 
 watch(() => [isRightAlignedComment(), visibleLabel(activeNode.value), trailingComment.value, trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
@@ -639,12 +653,11 @@ const isConnecting = computed(() => activeNode.value.type === "connection" && !!
 const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false));
 
 const databaseOpenVisual = computed(() => {
-  const opened = isSidebarDatabaseOpened(activeNode.value, connectionStore.isTreeNodeChildrenLoaded);
-  const showsIndicator = activeNode.value.type === "database" && (opened || (!!activeNode.value.connectionId && activeNode.value.database != null && queryStore.openDatabaseKeys.has(`${activeNode.value.connectionId}\x00${activeNode.value.database}`)));
+  const databaseOpen = isSidebarDatabaseOpenForVisual(activeNode.value, connectionStore.isTreeNodeChildrenLoaded, queryStore.openDatabaseKeys);
   const infoClass = getIconInfo(activeNode.value)?.colorClass;
   return {
-    iconClass: activeNode.value.type !== "database" || opened ? infoClass : "text-muted-foreground/65",
-    showsIndicator,
+    iconClass: activeNode.value.type !== "database" || databaseOpen ? infoClass : "text-muted-foreground/65",
+    showsIndicator: databaseOpen,
   };
 });
 
@@ -690,8 +703,8 @@ const tableSearchStyle = computed(() => {
   return {
     paddingLeft: paddingLeft.value,
     "--tree-table-search-row-bg": rowBackgroundColor,
-    "--tree-table-search-input-bg": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.05 : 0.03) : "hsl(var(--background) / 0.56)",
-    "--tree-table-search-border": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.12 : 0.08) : "hsl(var(--border) / 0.36)",
+    "--tree-table-search-input-bg": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.05 : 0.03) : "color-mix(in srgb, var(--background) 56%, transparent)",
+    "--tree-table-search-border": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.12 : 0.08) : "color-mix(in srgb, var(--border) 36%, transparent)",
   };
 });
 
@@ -756,12 +769,27 @@ function finishRenameGroup() {
   connectionStore.renameConnectionGroup(activeNode.value.id, trimmed);
 }
 
+const PINNED_TREE_NODE_DRAG_TYPE = "__pinned-tree-node__";
+
+function pinnedSortKey(): string {
+  return treeNodePinKey(activeNode.value);
+}
+
+function canDragPinnedOrder(): boolean {
+  return isPinned.value && !isNodeDefaultDatabase.value && !props.dragDisabled;
+}
+
 const {
   state: dragState,
   startDrag,
   updateTarget,
   clearTarget,
 } = useDragSort((draggedId, targetId, position) => {
+  if (dragState.draggedType === PINNED_TREE_NODE_DRAG_TYPE) {
+    connectionStore.reorderPinnedTreeNodes(draggedId, targetId, position);
+    return;
+  }
+
   // If the grabbed row is part of a multi-selection, move all selected rows
   // together; otherwise just the grabbed one (issue #681).
   const selected = connectionStore.selectedTreeNodeIds;
@@ -774,13 +802,46 @@ const isDraggable = computed(() => {
   return activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
 });
 
-const dragVisual = computed(() => ({
-  isDropTarget: activeNode.value.type === "connection" || activeNode.value.type === "connection-group",
-  showBefore: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "before",
-  showAfter: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "after",
-  showInside: dragState.active && dragState.targetId === activeNode.value.id && dragState.dropPosition === "inside",
-  dragging: dragState.active && dragState.draggedId === activeNode.value.id,
-}));
+function isPinnedOrderDrag(): boolean {
+  return dragState.active && dragState.draggedType === PINNED_TREE_NODE_DRAG_TYPE;
+}
+
+const dragVisual = computed(() => {
+  const targetId = isPinnedOrderDrag() ? pinnedSortKey() : activeNode.value.id;
+  const isDropTarget = isPinnedOrderDrag() ? connectionStore.isPinnedTreeNodeReorderTarget(pinnedSortKey()) : activeNode.value.type === "connection" || activeNode.value.type === "connection-group";
+
+  return {
+    isDropTarget,
+    showBefore: dragState.active && dragState.targetId === targetId && dragState.dropPosition === "before",
+    showAfter: dragState.active && dragState.targetId === targetId && dragState.dropPosition === "after",
+    showInside: !isPinnedOrderDrag() && dragState.active && dragState.targetId === targetId && dragState.dropPosition === "inside",
+    dragging: dragState.active && dragState.draggedId === targetId,
+  };
+});
+
+function startPinnedOrderDrag(event: MouseEvent) {
+  if (event.button !== 0 || !canDragPinnedOrder()) return;
+  const draggedKey = pinnedSortKey();
+  connectionStore.beginPinnedTreeNodeReorder(draggedKey);
+  startDrag(event, draggedKey, PINNED_TREE_NODE_DRAG_TYPE, {
+    autoScroll: true,
+    scrollContainer: rowRef.value?.closest<HTMLElement>(".connection-tree-scroller") ?? null,
+    onEnd: connectionStore.endPinnedTreeNodeReorder,
+  });
+}
+
+function updateTreeDragTarget(event: MouseEvent) {
+  if (!dragState.active || !dragVisual.value.isDropTarget) return;
+  if (isPinnedOrderDrag()) {
+    updateTarget(event, pinnedSortKey(), PINNED_TREE_NODE_DRAG_TYPE);
+    return;
+  }
+  updateTarget(event, activeNode.value.id, activeNode.value.type);
+}
+
+function clearTreeDragTarget() {
+  clearTarget(isPinnedOrderDrag() ? pinnedSortKey() : activeNode.value.id);
+}
 
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 
@@ -1048,10 +1109,10 @@ function onKeydown(event: KeyboardEvent) {
         @dblclick="onDoubleClick"
         @keydown="onKeydown"
         @mousedown="onRowMouseDown"
-        @mousemove="dragVisual.isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
+        @mousemove="updateTreeDragTarget"
         @mouseenter="handleMouseEnter"
         @mouseleave="
-          clearTarget(node.id);
+          clearTreeDragTarget();
           handleMouseLeave();
         "
       >
@@ -1069,11 +1130,7 @@ function onKeydown(event: KeyboardEvent) {
         <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="w-3.5 h-3.5 shrink-0 animate-spin text-primary" />
         <component v-else :is="getIconInfo(node)?.icon || Database" class="w-3.5 h-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
         <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
-          <div
-            ref="trailingCommentLeadingRef"
-            :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'"
-            :style="alignedCommentLabelWidth ? { width: `${alignedCommentLabelWidth}px` } : undefined"
-          >
+          <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">
             <input
               v-if="isRenamingGroup"
               ref="renameInputRef"
@@ -1085,6 +1142,19 @@ function onKeydown(event: KeyboardEvent) {
               @click.stop
             />
             <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
+            <button
+              v-if="canDragPinnedOrder()"
+              type="button"
+              class="flex h-4 w-4 shrink-0 cursor-grab items-center justify-center rounded-sm text-primary hover:bg-primary/10 active:cursor-grabbing"
+              :aria-label="t('contextMenu.reorderPinned')"
+              :title="t('contextMenu.reorderPinned')"
+              @mousedown.stop="startPinnedOrderDrag"
+              @click.stop.prevent
+              @dblclick.stop.prevent
+            >
+              <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
+            </button>
+            <Pin v-else-if="isPinned" class="h-3 w-3 shrink-0 fill-current text-primary" aria-hidden="true" />
             <ProductionContextBadge v-if="showProductionBadge" compact />
             <span
               v-if="
@@ -1092,7 +1162,7 @@ function onKeydown(event: KeyboardEvent) {
                 node.objectCount != null
               "
               class="text-muted-foreground text-[10px] shrink-0"
-              >{{ node.objectCount }}</span
+              >{{ node.objectCount }}<span v-if="hasActiveTableNameFilter(node)"> · {{ t("tree.tableNameFilterActive") }}</span></span
             >
             <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
               {{ t("editor.defaultDatabase") }}
@@ -1112,7 +1182,6 @@ function onKeydown(event: KeyboardEvent) {
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
-        <Pin v-if="isPinned" class="w-3 h-3 shrink-0 text-primary fill-current" aria-hidden="true" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
         <button
           v-if="isConnecting"
@@ -1259,33 +1328,29 @@ function onKeydown(event: KeyboardEvent) {
 /* Multi-selection treats every selected row as equal; keep focus neutral. */
 .tree-item-active--selection-set:focus {
   background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
-  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.14);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 14%, transparent);
 }
 :root.dark .tree-item-active--selection-set:focus {
   background-color: var(--tree-connection-active-bg, rgb(36 36 36)) !important;
-  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.18);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent);
 }
 
-/* Locate highlight: instant amber, then fade on removal */
+/* Locate highlight: instant warning tint, then fade on removal */
 .tree-item-highlight {
-  background-color: rgb(253 225 167) !important;
-  background-color: oklch(0.92 0.08 85) !important;
+  background-color: var(--warning-bg) !important;
   transition: background-color 0.28s ease-out;
 }
 
 :root.dark .tree-item-highlight {
-  background-color: rgb(110 67 0) !important;
-  background-color: oklch(0.42 0.12 80) !important;
+  background-color: var(--warning-bg) !important;
   transition: background-color 0.28s ease-out;
 }
 
 .tree-item-connection-tint.tree-item-highlight::before {
-  background-color: rgb(253 225 167) !important;
-  background-color: oklch(0.92 0.08 85) !important;
+  background-color: var(--warning-bg) !important;
 }
 
 :root.dark .tree-item-connection-tint.tree-item-highlight::before {
-  background-color: rgb(110 67 0) !important;
-  background-color: oklch(0.42 0.12 80) !important;
+  background-color: var(--warning-bg) !important;
 }
 </style>

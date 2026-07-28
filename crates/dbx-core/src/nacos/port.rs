@@ -9,6 +9,17 @@ pub trait NacosAdmin: Send + Sync {
     async fn create_namespace(&self, req: NacosNamespaceCreate) -> Result<(), String>;
     async fn update_namespace(&self, req: NacosNamespaceUpdate) -> Result<(), String>;
     async fn list_configs(&self, query: NacosConfigQuery) -> Result<NacosConfigList, String>;
+    /// Returns `Ok(None)` only when the server does not expose a native
+    /// content-search endpoint. Authentication, throttling and transport
+    /// failures are returned as errors so callers never amplify them with a
+    /// more expensive full scan.
+    async fn search_config_content_page(
+        &self,
+        namespace: &str,
+        query: &str,
+        page_no: u32,
+        page_size: u32,
+    ) -> Result<Option<NacosConfigList>, String>;
     async fn get_config(&self, key: NacosConfigKey) -> Result<NacosConfigItem, String>;
     async fn publish_config(&self, req: NacosConfigUpsert) -> Result<(), String>;
     async fn delete_config(&self, key: NacosConfigKey) -> Result<(), String>;
@@ -20,5 +31,6 @@ pub trait NacosAdmin: Send + Sync {
     async fn list_services(&self, query: NacosServiceQuery) -> Result<NacosServiceList, String>;
     async fn list_instances(&self, query: NacosInstanceQuery) -> Result<Vec<NacosInstanceInfo>, String>;
     async fn update_instance(&self, req: NacosInstanceUpdate) -> Result<(), String>;
+    async fn get_dashboard(&self, query: NacosDashboardQuery) -> Result<NacosDashboardSnapshot, String>;
     async fn raw_request(&self, req: NacosRawRequest) -> Result<NacosRawResponse, String>;
 }

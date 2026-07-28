@@ -206,6 +206,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let extensions = extension_infos_from_query_result(result, true);

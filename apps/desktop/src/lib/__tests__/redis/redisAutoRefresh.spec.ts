@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { computeAutoRefreshTick, computeDisplayTtl, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
+import { computeAutoRefreshTick, computeDisplayTtl, computeTtlForExpiryEdit, shouldStopAutoRefresh } from "@/lib/redis/redisAutoRefresh";
 
 describe("computeAutoRefreshTick", () => {
   it("returns idle when auto-refresh is disabled", () => {
@@ -62,5 +62,19 @@ describe("computeDisplayTtl", () => {
 
   it("clamps an active countdown below zero instead of showing stale data", () => {
     expect(computeDisplayTtl(true, -1, 10)).toBe(0);
+  });
+});
+
+describe("computeTtlForExpiryEdit", () => {
+  it("keeps a last-confirmed positive TTL during the in-flight zero-countdown window", () => {
+    expect(computeTtlForExpiryEdit(true, 0, 5)).toBe(5);
+    expect(computeTtlForExpiryEdit(true, -1, 5)).toBe(5);
+  });
+
+  it("uses the live positive countdown and preserves non-expiring server states", () => {
+    expect(computeTtlForExpiryEdit(true, 3, 10)).toBe(3);
+    expect(computeTtlForExpiryEdit(false, 3, 10)).toBe(10);
+    expect(computeTtlForExpiryEdit(true, 0, -1)).toBe(-1);
+    expect(computeTtlForExpiryEdit(true, 0, -2)).toBe(-2);
   });
 });

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { ObjectDirective } from "vue";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
@@ -16,7 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, IdentifierCase, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
-import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
+import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
@@ -38,6 +39,8 @@ import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
 import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
+import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
 import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
@@ -53,9 +56,9 @@ import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView }
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
 import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
-import { driverInstallProgressChannel, driverInstallProgressPercent, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
+import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { normalizeNacosEndpoint } from "@/lib/nacos/nacosAdmin";
+import { nacosMetricsCandidates, normalizeNacosEndpoint, normalizeNacosMetricsUrl } from "@/lib/nacos/nacosAdmin";
 import {
   ArrowLeft,
   ArrowDown,
@@ -94,7 +97,7 @@ import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
-import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
+import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
 
 type DbOption = { value: string; label: string };
 type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
@@ -174,6 +177,7 @@ const savedDatabaseInfoFingerprint = ref("");
 const savedConnectionConfigFingerprint = ref("");
 const showAgentInstallDialog = ref(false);
 const agentInstallRunning = ref(false);
+const agentInstallOperationId = ref<string | null>(null);
 const agentInstallDriverKey = ref("");
 const agentInstallLabel = ref("");
 const agentInstallProgress = ref<DriverInstallProgress | null>(null);
@@ -210,6 +214,7 @@ function initialConfigTab(): ConfigTab {
 
 const defaultForm = (): ConnectionForm => ({
   name: "",
+  note: "",
   db_type: "mysql",
   driver_profile: "mysql",
   driver_label: "MySQL",
@@ -258,6 +263,7 @@ const defaultForm = (): ConnectionForm => ({
 
 const elasticsearchConnectionMode = ref<ElasticsearchConnectionMode>("direct");
 const elasticsearchKibanaBasePath = ref("");
+const elasticsearchConnectivityCheckPath = ref("");
 const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, number>>({
   direct: 9200,
   kibana: 5601,
@@ -267,6 +273,7 @@ function resetElasticsearchProxyFields(externalConfig?: unknown) {
   const mode = elasticsearchConnectionModeFromConfig(externalConfig);
   elasticsearchConnectionMode.value = mode;
   elasticsearchKibanaBasePath.value = elasticsearchKibanaBasePathFromConfig(externalConfig);
+  elasticsearchConnectivityCheckPath.value = elasticsearchConnectivityCheckPathFromConfig(externalConfig);
   elasticsearchConnectionPorts.value = {
     direct: mode === "direct" ? form.value.port : 9200,
     kibana: mode === "kibana" ? form.value.port : 5601,
@@ -442,6 +449,23 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
+
+function resizeNoteTextarea() {
+  const textarea = noteTextareaRef.value;
+  if (!textarea) return;
+
+  const style = window.getComputedStyle(textarea);
+  const lineHeight = Number.parseFloat(style.lineHeight) || 20;
+  const paddingHeight = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0);
+  const borderHeight = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0);
+  const maxContentHeight = lineHeight * 3 + paddingHeight;
+
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.min(textarea.scrollHeight, maxContentHeight) + borderHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maxContentHeight ? "auto" : "hidden";
+}
+
 const showJdbcDependencyDriverManagerAction = computed(() => form.value.db_type === "jdbc" && isJdbcMissingRuntimeDependencyError(connectionErrorDetail.value));
 
 function externalConfigRecord(value: unknown): Record<string, unknown> {
@@ -510,11 +534,15 @@ const hiveKrb5ConfPath = ref("");
 const hiveJaasConfigPath = ref("");
 const hiveUseSubjectCredsOnlyFalse = ref(false);
 const hiveExtraJavaOptions = ref("");
+const damengJvmOptions = ref("");
 const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
 const selectedDbCategory = ref<DbCategoryKey>("sql");
 const configTab = ref<ConfigTab>("connection");
+watch([() => form.value.note, configTab, dialogStep, open], () => {
+  void nextTick(resizeNoteTextarea);
+});
 const MQ_KAFKA_SECURITY_PROTOCOL_AUTO = "__auto";
 const mqAdminUrl = ref("http://127.0.0.1:8080");
 const mqSystemKind = ref<MqSystemKind>("pulsar");
@@ -602,6 +630,8 @@ const nacosAuthKind = ref<NacosAuthKind>("none");
 const nacosUsername = ref("nacos");
 const nacosPassword = ref("");
 const nacosTlsSkipVerify = ref(false);
+const nacosMetricsMode = ref<NacosMetricsMode>("auto");
+const nacosMetricsUrl = ref("");
 const nacosPageSize = ref(20);
 const nacosPrimaryAddressLabel = computed(() => {
   if (nacosImplementation.value === "rnacos") return t("connection.nacosPrimaryAddressRNacos");
@@ -610,8 +640,7 @@ const nacosPrimaryAddressLabel = computed(() => {
   return t("connection.nacosPrimaryAddressAuto");
 });
 const nacosPrimaryAddressPlaceholder = computed(() => {
-  if (nacosImplementation.value === "rnacos" || nacosVersionMode.value === "v2") return "http://127.0.0.1:8848/nacos";
-  return "http://127.0.0.1:8080";
+  return "http://127.0.0.1:8848/nacos";
 });
 const nacosNormalizedPreview = computed(() => {
   if (!nacosServerAddr.value.trim()) return "";
@@ -628,7 +657,7 @@ const nacosNormalizedPreview = computed(() => {
 });
 const nacosEffectiveContextPath = computed(() => {
   if (!nacosServerAddr.value.trim()) {
-    return nacosContextPathCustomized.value ? nacosContextPath.value.trim() || "/" : nacosImplementation.value === "rnacos" || nacosVersionMode.value === "v2" ? "/nacos" : "/";
+    return nacosContextPathCustomized.value ? nacosContextPath.value.trim() || "/" : "/nacos";
   }
   try {
     const normalized = normalizeNacosEndpoint(nacosServerAddr.value, {
@@ -647,6 +676,28 @@ const nacosContextPathInput = computed({
     nacosContextPathCustomized.value = true;
     nacosContextPath.value = value;
   },
+});
+const nacosMetricsAutoPreview = computed(() => {
+  if (!nacosNormalizedPreview.value) return "";
+  try {
+    const normalized = normalizeNacosEndpoint(nacosServerAddr.value, {
+      implementation: nacosImplementation.value,
+      versionMode: nacosVersionMode.value,
+      contextPath: nacosContextPathCustomized.value ? nacosContextPath.value : undefined,
+    });
+    return nacosMetricsCandidates(normalized.serverAddr, normalized.contextPath, nacosImplementation.value).join(" · ");
+  } catch {
+    return "";
+  }
+});
+const nacosMetricsUrlError = computed(() => {
+  if (nacosMetricsMode.value !== "custom") return "";
+  try {
+    normalizeNacosMetricsUrl(nacosMetricsUrl.value);
+    return "";
+  } catch {
+    return t("connection.nacosMetricsUrlInvalid");
+  }
 });
 
 function resetNacosContextPathCustomization() {
@@ -778,6 +829,7 @@ const driverProfiles: Record<
     label: "Elasticsearch",
     icon: "elasticsearch",
   },
+  hbase: { type: "hbase", port: 8080, user: "", label: "Apache HBase", icon: "hbase" },
   qdrant: { type: "qdrant", port: 6333, user: "", label: "Qdrant", icon: "qdrant" },
   milvus: { type: "milvus", port: 19530, user: "root", label: "Milvus", icon: "milvus" },
   weaviate: { type: "weaviate", port: 8080, user: "", label: "Weaviate", icon: "weaviate" },
@@ -818,6 +870,7 @@ const driverProfiles: Record<
   questdb: { type: "questdb", port: 8812, user: "questdb", label: "QuestDB", icon: "questdb" },
   kingbase: { type: "kingbase", port: 54321, user: "system", label: "KingBase", icon: "kingbase" },
   highgo: { type: "highgo", port: 5866, user: "highgo", label: "瀚高 HighGo", icon: "highgo" },
+  uxdb: { type: "uxdb", port: 52025, user: "uxdb", label: "优炫 UXDB", icon: "uxdb" },
   yashandb: { type: "yashandb", port: 1688, user: "sys", label: "崖山 YashanDB", icon: "yashandb" },
   vastbase: { type: "vastbase", port: 5432, user: "vastbase", label: "Vastbase", icon: "vastbase" },
   doris: { type: "mysql", port: 9030, user: "root", label: "Doris", icon: "doris", urlParams: "" },
@@ -1087,6 +1140,8 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   nacosConsoleUsername.value = consoleAuth.kind === "usernamePassword" ? consoleAuth.username : "";
   nacosConsolePassword.value = consoleAuth.kind === "usernamePassword" ? consoleAuth.password : "";
   nacosTlsSkipVerify.value = !!config?.tlsSkipVerify;
+  nacosMetricsMode.value = config?.metricsMode || "auto";
+  nacosMetricsUrl.value = config?.metricsUrl || "";
   nacosPageSize.value = Number(config?.pageSize) > 0 ? Number(config?.pageSize) : 20;
   const auth = (config?.auth || { kind: "none" }) as NacosAuthConfig;
   nacosAuthKind.value = auth.kind || "none";
@@ -1126,6 +1181,10 @@ function resetHiveKerberosFields(config?: Pick<ConnectionConfig, "url_params" | 
   hiveJaasConfigPath.value = kerberos.jaasConfigPath;
   hiveUseSubjectCredsOnlyFalse.value = kerberos.useSubjectCredsOnlyFalse;
   hiveExtraJavaOptions.value = kerberos.extraJavaOptions;
+}
+
+function resetDamengJvmOptions(config?: Pick<ConnectionConfig, "agent_java_options">) {
+  damengJvmOptions.value = damengJvmSystemPropertiesText(config?.agent_java_options);
 }
 
 function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
@@ -1290,9 +1349,20 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   if (nacosImplementation.value === "rnacos" && normalized.warnings.length) {
     throw new Error(t("connection.nacosRNacosOpenApiRequired"));
   }
+  const rnacosConsoleConfigured = nacosImplementation.value === "rnacos" && !!nacosRNacosConsoleAddr.value.trim();
+  if (nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value && !rnacosConsoleConfigured) {
+    throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
+  }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
-  if (nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value) {
-    if (!nacosRNacosConsoleAddr.value.trim()) throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
+  let metricsUrl: string | undefined;
+  if (nacosMetricsMode.value === "custom") {
+    try {
+      metricsUrl = normalizeNacosMetricsUrl(nacosMetricsUrl.value);
+    } catch {
+      throw new Error(t("connection.nacosMetricsUrlInvalid"));
+    }
+  }
+  if (rnacosConsoleConfigured) {
     if (nacosConsoleAuthKind.value === "inherit") {
       if (nacosAuthKind.value !== "usernamePassword") throw new Error(t("connection.nacosConsoleAuthSeparateRequired"));
       rnacosConsoleAuth = { kind: "inherit" };
@@ -1310,11 +1380,13 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     serverAddr: normalized.serverAddr,
     namespace: nacosNamespace.value.trim() || undefined,
     contextPath: normalized.contextPath || undefined,
-    rnacosConsoleAddr: nacosImplementation.value === "rnacos" && nacosHistoryEnabled.value ? nacosRNacosConsoleAddr.value.trim() || undefined : undefined,
+    rnacosConsoleAddr: nacosImplementation.value === "rnacos" ? nacosRNacosConsoleAddr.value.trim() || undefined : undefined,
     rnacosHistoryEnabled: nacosImplementation.value === "rnacos" ? nacosHistoryEnabled.value : undefined,
     rnacosConsoleAuth,
     auth: buildNacosAuth(),
     tlsSkipVerify: nacosTlsSkipVerify.value || undefined,
+    metricsMode: nacosMetricsMode.value,
+    metricsUrl,
     pageSize: Number(nacosPageSize.value) > 0 ? Number(nacosPageSize.value) : 20,
   };
 }
@@ -1384,6 +1456,7 @@ async function refreshLocalAgentDrivers(): Promise<AgentDriverInstallState[]> {
 }
 
 function beginAgentDriverInstall(driverKey: string, label: string) {
+  agentInstallOperationId.value = crypto.randomUUID();
   agentInstallDriverKey.value = driverKey;
   agentInstallLabel.value = label;
   agentInstallProgress.value = null;
@@ -1393,6 +1466,7 @@ function beginAgentDriverInstall(driverKey: string, label: string) {
 }
 
 function finishAgentDriverInstall() {
+  agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
   agentInstallProgress.value = null;
   agentInstallError.value = "";
@@ -1400,6 +1474,7 @@ function finishAgentDriverInstall() {
 }
 
 function failAgentDriverInstall(error: unknown) {
+  agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
   agentInstallError.value = errorMessage(error);
   showAgentInstallDialog.value = true;
@@ -1419,6 +1494,7 @@ function setAgentInstallDialogOpen(value: boolean) {
 function handleAgentInstallProgress(payload: DriverInstallProgress) {
   if (!agentInstallRunning.value || !agentInstallDriverKey.value) return;
   if (driverInstallProgressChannel(payload) !== "agent") return;
+  if (!isDriverInstallProgressForOperation(payload, agentInstallOperationId.value)) return;
   if (payload.db_type && payload.db_type !== agentInstallDriverKey.value) return;
   if (payload.step === "done" || payload.step === "all-done") {
     agentInstallProgress.value = null;
@@ -1453,7 +1529,7 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
   testResult.value = { ok: true, message: `Installing ${label} driver...` };
   beginAgentDriverInstall(driverKey, label);
   try {
-    await api.installAgent(driverKey);
+    await api.installAgent(driverKey, agentInstallOperationId.value ?? undefined);
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
@@ -1484,7 +1560,7 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
   const label = t("connection.sqlServerLegacyCompatibilityComponent");
   beginAgentDriverInstall(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, label);
   try {
-    await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY);
+    await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, agentInstallOperationId.value ?? undefined);
     await refreshLocalAgentDrivers();
     finishAgentDriverInstall();
   } catch (error) {
@@ -1781,6 +1857,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     form.value.username = profile.user;
     form.value.url_params = profile.urlParams || "";
     form.value.agent_java_options = [];
+    damengJvmOptions.value = "";
     if (profile.host) {
       form.value.host = profile.host;
     }
@@ -1877,6 +1954,7 @@ watch(
       const profileConfig = driverProfiles[profile];
       form.value = {
         name: config.name,
+        note: config.note || "",
         db_type: oceanbasePatch?.db_type || profileConfig?.type || config.db_type,
         driver_profile: oceanbasePatch?.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
@@ -1944,6 +2022,7 @@ watch(
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
       resetHiveKerberosFields(config.db_type === "hive" ? config : undefined);
+      resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
       selectedTransportLayerId.value = form.value.transport_layers?.[0]?.id || null;
@@ -1981,6 +2060,7 @@ watch(
       resetInfluxDbFields();
       resetElasticsearchProxyFields();
       resetHiveKerberosFields();
+      resetDamengJvmOptions();
       oceanbaseSubMode.value = "mysql";
       h2ConnectionMode.value = "file";
       dremioConnectionMode.value = "legacy";
@@ -2079,6 +2159,7 @@ function defaultDatabaseForProfile() {
   if (form.value.db_type === "databend") return "default";
   if (selectedType.value === "cockroachdb") return "defaultdb";
   if (form.value.db_type === "highgo") return "highgo";
+  if (form.value.db_type === "uxdb") return "uxdb";
   if (form.value.db_type === "yashandb") return "yasdb";
   if (form.value.db_type === "postgres" || form.value.db_type === "vastbase") return "postgres";
   if (form.value.db_type === "sqlserver") return "master";
@@ -2131,6 +2212,7 @@ const iconTypeMap: Record<string, string> = {
   sqlserver: "sqlserver",
   oracle: "oracle",
   elasticsearch: "elasticsearch",
+  hbase: "hbase",
   qdrant: "qdrant",
   milvus: "milvus",
   weaviate: "weaviate",
@@ -2157,6 +2239,7 @@ const iconTypeMap: Record<string, string> = {
   questdb: "questdb",
   kingbase: "kingbase",
   highgo: "highgo",
+  uxdb: "uxdb",
   yashandb: "yashandb",
   vastbase: "vastbase",
   doris: "doris",
@@ -2209,6 +2292,7 @@ const dbOptions: DbOption[] = [
   { value: "sqlite", label: "SQLite" },
   { value: "sqlserver", label: "SQL Server" },
   { value: "elasticsearch", label: "Elasticsearch" },
+  { value: "hbase", label: "Apache HBase" },
   { value: "qdrant", label: "Qdrant" },
   { value: "milvus", label: "Milvus" },
   { value: "weaviate", label: "Weaviate" },
@@ -2245,6 +2329,7 @@ const dbOptions: DbOption[] = [
   { value: "gbase", label: "GBase" },
   { value: "kingbase", label: "KingBase" },
   { value: "highgo", label: "瀚高 HighGo" },
+  { value: "uxdb", label: "优炫 UXDB" },
   { value: "yashandb", label: "崖山 YashanDB" },
   { value: "vastbase", label: "Vastbase" },
   { value: "redshift", label: "Redshift" },
@@ -2299,7 +2384,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "domestic",
     titleKey: "connection.databaseCategoryDomestic",
-    optionValues: ["dm", "opengauss", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
+    optionValues: ["dm", "opengauss", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
   },
   {
     key: "lightweight",
@@ -2309,7 +2394,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "document",
     titleKey: "connection.databaseCategoryDocument",
-    optionValues: ["mongodb", "redis", "elasticsearch", "manticoresearch", "cassandra"],
+    optionValues: ["mongodb", "redis", "elasticsearch", "hbase", "manticoresearch", "cassandra"],
   },
   {
     key: "graph_ai",
@@ -2424,10 +2509,10 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "redis", "etcd", "clickhouse", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "dameng", "redis", "etcd", "clickhouse", "elasticsearch", "hbase", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
-const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch");
+const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
@@ -2435,6 +2520,37 @@ const mysqlCleartextPasswordAuth = computed({
   get: () => mysqlCleartextPasswordAuthEnabled(form.value.url_params),
   set: (value: boolean) => {
     form.value.url_params = setMysqlCleartextPasswordAuthEnabled(form.value.url_params, value);
+  },
+});
+// DM8 configures SSL through JDBC URL parameters, so the TLS form and Advanced tab share one source of truth.
+const tlsEnabled = computed({
+  get: () => !!form.value.ssl || (form.value.db_type === "dameng" && damengSslFormConfig(form.value.url_params).enabled),
+  set: (enabled: boolean) => {
+    form.value.ssl = enabled;
+    if (form.value.db_type === "dameng" && !enabled) {
+      form.value.url_params = applyDamengSslUrlParams(form.value.url_params, false, "", "", "");
+    }
+  },
+});
+const damengSslFilesPath = computed({
+  get: () => damengSslFormConfig(form.value.url_params).sslFilesPath,
+  set: (value: string) => {
+    const current = damengSslFormConfig(form.value.url_params);
+    form.value.url_params = applyDamengSslUrlParams(form.value.url_params, true, value, current.sslKeystorePassword, current.sslProtocol);
+  },
+});
+const damengSslKeystorePassword = computed({
+  get: () => damengSslFormConfig(form.value.url_params).sslKeystorePassword,
+  set: (value: string) => {
+    const current = damengSslFormConfig(form.value.url_params);
+    form.value.url_params = applyDamengSslUrlParams(form.value.url_params, true, current.sslFilesPath, value, current.sslProtocol);
+  },
+});
+const damengSslProtocol = computed({
+  get: () => damengSslFormConfig(form.value.url_params).sslProtocol,
+  set: (value: string) => {
+    const current = damengSslFormConfig(form.value.url_params);
+    form.value.url_params = applyDamengSslUrlParams(form.value.url_params, true, current.sslFilesPath, current.sslKeystorePassword, value);
   },
 });
 const mysqlTlsMode = computed({
@@ -2678,8 +2794,9 @@ const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || 
 const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLegacyCompatibility(form.value) ? "legacy" : "auto"));
 const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
 const connectionDialogContentClass = computed(() => {
-  if (dialogStep.value === "select") return "sm:h-[720px] sm:max-w-[880px]";
-  return shouldUseWideConnectionDialog.value ? "sm:max-w-[660px]" : "sm:max-w-[560px]";
+  if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
+  const widthClass = shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
+  return `${widthClass} connection-dialog-content--config`;
 });
 const connectionLabelClass = "justify-self-start text-left";
 const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
@@ -2748,11 +2865,11 @@ function backToDatabasePicker() {
   resetTestState();
 }
 
-function handleDialogOpenAutoFocus(event: Event) {
-  event.preventDefault();
-  if (!(event.currentTarget instanceof HTMLElement)) return;
-  event.currentTarget.querySelector<HTMLElement>("[data-connection-dialog-title]")?.focus({ preventScroll: true });
-}
+const vConnectionDialogAutoFocus: ObjectDirective<HTMLInputElement> = {
+  mounted(input) {
+    input.focus({ preventScroll: true });
+  },
+};
 
 function handleDialogEscape(event: KeyboardEvent) {
   if (dialogStep.value !== "config" || editingId.value) return;
@@ -2957,6 +3074,7 @@ function generateConnectionName(): string {
 function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionConfig {
   const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   config.database_info = undefined;
+  config.note = config.note?.trim() || undefined;
   if (selectedType.value === "oceanbase" && (config.driver_profile === "oceanbase" || config.driver_profile === "oceanbase-oracle")) {
     Object.assign(config, oceanbaseModeConnectionPatch(oceanbaseSubMode.value));
   }
@@ -3010,6 +3128,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   if (config.db_type === "manticoresearch") {
     config.url_params = "";
   }
+  if (config.db_type === "dameng") {
+    const damengSsl = damengSslFormConfig(config.url_params);
+    config.ssl = !!config.ssl || damengSsl.enabled;
+    config.url_params = applyDamengSslUrlParams(config.url_params, config.ssl, damengSsl.sslFilesPath, damengSsl.sslKeystorePassword, damengSsl.sslProtocol);
+  }
   if (config.db_type === "hive") {
     if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
       throw new Error(t("connection.hiveKerberosPrincipalRequired"));
@@ -3025,6 +3148,15 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     });
     config.url_params = hiveKerberos.urlParams;
     config.agent_java_options = hiveKerberos.agentJavaOptions;
+  } else if (config.db_type === "dameng") {
+    try {
+      config.agent_java_options = parseDamengJvmSystemProperties(damengJvmOptions.value);
+    } catch (error) {
+      if (error instanceof DamengJvmSystemPropertyError) {
+        throw new Error(t("connection.damengJvmOptionsInvalid", { line: error.lineNumber }));
+      }
+      throw error;
+    }
   } else if (!(config.db_type === "jdbc" && config.driver_profile === JDBCX_DRIVER_PROFILE)) {
     config.agent_java_options = undefined;
   }
@@ -3085,7 +3217,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       config.database = config.database?.trim() || undefined;
     }
   } else if (config.db_type === "elasticsearch") {
-    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value);
+    config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value);
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else {
@@ -4057,15 +4189,16 @@ function isLegacySshAgentMethod(hop: Partial<SshTunnelConfig> | null | undefined
 function updateSelectedSshAuthMethod(value: unknown) {
   const layer = selectedSshLayer.value;
   if (!layer) return;
-  layer.auth_method = value === "key" ? "key" : value === "none" ? "none" : "password";
+  layer.auth_method = value === "key" ? "key" : value === "key+password" ? "key+password" : value === "none" ? "none" : "password";
   // Scrub credential fields that do not apply to the selected method so
   // they are not accidentally submitted or used by the backend fallback.
-  if (layer.auth_method !== "password") layer.password = "";
-  if (layer.auth_method !== "key") {
+  // "key+password" keeps both key and password fields.
+  if (layer.auth_method !== "password" && layer.auth_method !== "key+password") layer.password = "";
+  if (layer.auth_method !== "key" && layer.auth_method !== "key+password") {
     layer.key_path = "";
     layer.key_passphrase = "";
   }
-  if (layer.auth_method !== "key") {
+  if (layer.auth_method !== "key" && layer.auth_method !== "key+password") {
     layer.use_ssh_agent = false;
   }
   resetTestState();
@@ -4188,6 +4321,20 @@ async function browseCaCertPath() {
     });
     if (selected && typeof selected === "string") {
       form.value.ca_cert_path = selected;
+    }
+  }
+}
+
+async function browseDamengSslFilesPath() {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: t("connection.damengSslFilesPathBrowse"),
+      directory: true,
+      multiple: false,
+    });
+    if (selected && typeof selected === "string") {
+      damengSslFilesPath.value = selected;
     }
   }
 }
@@ -4512,14 +4659,14 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @open-auto-focus="handleDialogOpenAutoFocus" @escape-key-down="handleDialogEscape">
+    <DialogContent class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape">
       <DialogHeader>
-        <DialogTitle data-connection-dialog-title tabindex="-1">{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
+        <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
 
       <template v-if="dialogStep === 'select'">
         <div class="flex min-h-0 flex-1 flex-col gap-4">
-          <div class="flex flex-col gap-3 p-0.5 sm:flex-row sm:items-center sm:justify-between">
+          <div class="connection-db-picker-toolbar flex flex-col gap-3 p-0.5 sm:flex-row sm:items-center sm:justify-between">
             <div class="flex items-center gap-2">
               <div class="flex shrink-0 rounded-lg border bg-muted/40 p-0.5">
                 <Button
@@ -4547,9 +4694,9 @@ function openExternalUrl(url: string) {
                   <List class="h-3.5 w-3.5" />
                 </Button>
               </div>
-              <div class="relative w-full sm:w-64">
+              <div class="connection-db-picker-search relative w-full sm:w-64">
                 <Search class="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input v-model="dbSearchQuery" class="h-9 pl-8" :placeholder="t('connection.searchDatabasePlaceholder')" />
+                <Input v-model="dbSearchQuery" v-connection-dialog-auto-focus class="h-9 pl-8" :placeholder="t('connection.searchDatabasePlaceholder')" />
               </div>
             </div>
             <Button data-jdbc-connection-entry type="button" variant="outline" class="h-9 shrink-0 gap-2" @click="goToConnectionStep('jdbc')">
@@ -4558,14 +4705,14 @@ function openExternalUrl(url: string) {
             </Button>
           </div>
 
-          <div class="min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-4">
+          <div class="connection-db-picker-body min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-4">
             <nav data-connection-category-nav class="flex shrink-0 gap-1 overflow-x-auto border-b px-0.5 pt-0.5 pb-2.5 sm:w-40 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:py-0.5 sm:pr-3.5" :aria-label="t('connection.databaseCategories')">
               <button
                 v-for="category in dbCategories"
                 :key="category.key"
                 type="button"
-                class="shrink-0 whitespace-nowrap rounded-[4px] px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-full"
-                :class="!isDbSearchActive && selectedDbCategory === category.key ? 'bg-primary/10 font-medium text-primary hover:bg-primary/10' : 'text-muted-foreground hover:bg-muted/70'"
+                class="connection-db-category-option shrink-0 whitespace-nowrap rounded-[4px] px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-full"
+                :class="!isDbSearchActive && selectedDbCategory === category.key ? 'connection-db-category-option--selected bg-primary/10 font-medium text-primary hover:bg-primary/10' : 'text-muted-foreground hover:bg-muted/70'"
                 :aria-current="!isDbSearchActive && selectedDbCategory === category.key ? 'page' : undefined"
                 @click="selectDbCategory(category.key)"
               >
@@ -4573,7 +4720,7 @@ function openExternalUrl(url: string) {
               </button>
             </nav>
 
-            <div class="min-w-0 flex-1 space-y-5 overflow-y-auto p-0.5 pr-2">
+            <div class="connection-db-picker-results min-w-0 flex-1 space-y-5 overflow-y-auto p-0.5 pr-2">
               <div v-if="isDbSearchActive" class="text-sm font-medium">{{ t("connection.searchResults") }}</div>
 
               <section v-for="category in visibleDbCategories" :key="category.key" class="space-y-2">
@@ -4585,7 +4732,7 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option group flex min-h-24 flex-col items-center justify-center gap-2 rounded-[4px] border bg-background/70 p-3 text-center transition hover:border-primary/40 hover:bg-muted/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'connection-db-picker-option--selected shadow-sm' : 'border-border'"
+                    :class="selectedType === opt.value ? 'dbx-tile-selected shadow-sm' : 'border-border'"
                     :aria-pressed="selectedType === opt.value"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
@@ -4603,7 +4750,7 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option flex items-center gap-3 rounded-[4px] border bg-background px-3 py-2 text-left transition hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'connection-db-picker-option--selected' : 'border-border'"
+                    :class="selectedType === opt.value ? 'dbx-tile-selected' : 'border-border'"
                     :aria-pressed="selectedType === opt.value"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
@@ -4647,7 +4794,7 @@ function openExternalUrl(url: string) {
             </div>
 
             <TabsContent value="connection" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2">
+              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2 pb-2">
                 <div v-if="!isJdbcConnection && form.db_type !== 'nacos'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
@@ -4665,7 +4812,7 @@ function openExternalUrl(url: string) {
 
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.name") }}</Label>
-                  <Input v-model="form.name" class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
+                  <Input v-model="form.name" v-connection-dialog-auto-focus class="col-span-3" :placeholder="t('connection.namePlaceholder')" />
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">
@@ -5250,6 +5397,30 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelClass">{{ t("connection.nacosNamespace") }}</Label>
                     <Input v-model="nacosNamespace" class="col-span-3" placeholder="public" />
                   </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosMetrics") }}</Label>
+                    <Select v-model="nacosMetricsMode">
+                      <SelectTrigger class="col-span-3 h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">{{ t("connection.nacosMetricsAuto") }}</SelectItem>
+                        <SelectItem value="disabled">{{ t("connection.nacosMetricsDisabled") }}</SelectItem>
+                        <SelectItem value="custom">{{ t("connection.nacosMetricsCustom") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div v-if="nacosMetricsMode === 'auto' && nacosMetricsAutoPreview" class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 m-0 break-all text-xs leading-5 text-muted-foreground">{{ t("connection.nacosMetricsAutoHint", { addresses: nacosMetricsAutoPreview }) }}</p>
+                  </div>
+                  <div v-if="nacosMetricsMode === 'custom'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.nacosMetricsUrl") }}</Label>
+                    <div class="col-span-3">
+                      <Input v-model="nacosMetricsUrl" :aria-invalid="!!nacosMetricsUrlError" :class="{ 'border-destructive focus-visible:ring-destructive': nacosMetricsUrlError }" placeholder="http://127.0.0.1:8818/nacos/actuator/prometheus" />
+                      <p v-if="nacosMetricsUrlError" class="mt-1 text-xs text-destructive">{{ nacosMetricsUrlError }}</p>
+                    </div>
+                  </div>
                   <template v-if="nacosImplementation === 'rnacos'">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.nacosConfigurationHistory") }}</Label>
@@ -5268,11 +5439,15 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                     </div>
-                    <template v-if="nacosHistoryEnabled">
-                      <div class="grid grid-cols-4 items-center gap-4">
-                        <Label :class="connectionLabelClass">{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
-                        <Input v-model="nacosRNacosConsoleAddr" class="col-span-3" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
-                      </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.nacosRNacosConsoleUrl") }}</Label>
+                      <Input v-model="nacosRNacosConsoleAddr" class="col-span-3" :placeholder="t('connection.nacosRNacosConsoleUrlPlaceholder')" />
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 m-0 text-xs leading-5 text-muted-foreground">{{ t("connection.nacosRNacosConsoleUrlHint") }}</p>
+                    </div>
+                    <template v-if="nacosRNacosConsoleAddr.trim()">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.nacosConsoleAuthentication") }}</Label>
                         <div class="col-span-3 flex gap-2">
@@ -5726,6 +5901,11 @@ function openExternalUrl(url: string) {
                     <Input v-model="elasticsearchKibanaBasePath" class="col-span-3" placeholder="/kibana/s/default" @input="resetTestState" />
                   </div>
 
+                  <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckPath") }}</Label>
+                    <Input v-model="elasticsearchConnectivityCheckPath" class="col-span-3" :placeholder="t('connection.elasticsearchConnectivityCheckPathPlaceholder')" @input="resetTestState" />
+                  </div>
+
                   <div v-if="form.driver_profile === 'gbase8s'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.gbaseServer") }}</Label>
                     <Input v-model="form.gbase_server" class="col-span-3" placeholder="gbase01" />
@@ -5746,7 +5926,7 @@ function openExternalUrl(url: string) {
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'hbase'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                   </div>
@@ -5921,6 +6101,20 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
+                  <div v-if="form.db_type === 'dameng'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.damengJvmOptions") }}</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <textarea
+                        v-model="damengJvmOptions"
+                        class="min-h-16 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        :placeholder="t('connection.damengJvmOptionsPlaceholder')"
+                      />
+                      <p class="text-xs leading-5 text-muted-foreground">
+                        {{ t("connection.damengJvmOptionsHint") }}
+                      </p>
+                    </div>
+                  </div>
+
                   <template v-if="isPrestoSqlConnection">
                     <div class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.jdbcDriverPaths") }}</Label>
@@ -6023,6 +6217,18 @@ function openExternalUrl(url: string) {
                     </PopoverContent>
                   </Popover>
                 </div>
+
+                <div class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
+                  <textarea
+                    ref="noteTextareaRef"
+                    v-model="form.note"
+                    rows="1"
+                    class="col-span-3 min-h-8 w-full min-w-0 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
+                    :placeholder="t('connection.notePlaceholder')"
+                    @input="resizeNoteTextarea"
+                  />
+                </div>
               </div>
             </TabsContent>
 
@@ -6031,10 +6237,45 @@ function openExternalUrl(url: string) {
                 <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" v-model="form.ssl" class="mr-0" />
+                    <input type="checkbox" v-model="tlsEnabled" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.sslEnable") }}</span>
                   </label>
                 </div>
+
+                <template v-if="form.db_type === 'dameng'">
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.damengSslFilesPath") }}</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <div class="flex items-center gap-1">
+                        <Input v-model="damengSslFilesPath" class="flex-1" :placeholder="t('connection.damengSslFilesPathPlaceholder')" :disabled="!tlsEnabled" />
+                        <Tooltip v-if="isDesktop">
+                          <TooltipTrigger as-child>
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="!tlsEnabled" @click="browseDamengSslFilesPath">
+                              <FolderOpen class="h-4 w-4" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>{{ t("connection.damengSslFilesPathBrowse") }}</TooltipContent>
+                        </Tooltip>
+                      </div>
+                      <p class="text-[11px] leading-4 text-muted-foreground">{{ t("connection.damengSslHint") }}</p>
+                    </div>
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.damengSslKeystorePassword") }}</Label>
+                    <PasswordInput v-model="damengSslKeystorePassword" class="col-span-3" :disabled="!tlsEnabled" />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.damengSslProtocol") }}</Label>
+                    <Input v-model="damengSslProtocol" class="col-span-3" :placeholder="t('connection.damengSslProtocolPlaceholder')" :disabled="!tlsEnabled" />
+                  </div>
+
+                  <div class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-[11px] leading-4 text-muted-foreground">{{ t("connection.damengSslVerificationHint") }}</p>
+                  </div>
+                </template>
 
                 <div v-if="form.db_type === 'redis'" class="grid grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.redisTlsInsecure") }}</Label>
@@ -6519,12 +6760,13 @@ function openExternalUrl(url: string) {
                         <SelectContent>
                           <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
                           <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+                          <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
                           <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
                           <SelectItem v-if="isLegacySshAgentMethod(selectedSshLayer)" value="agent" disabled>{{ t("connection.sshAuthMethodAgentLegacy") }}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
-                    <div v-if="selectedSshLayer.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedSshLayer.auth_method === 'key' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPath") }}</Label>
                       <div class="col-span-3 flex items-center gap-1">
                         <Input v-model="selectedSshLayer.key_path" class="flex-1" placeholder="~/.ssh/id_rsa" :disabled="selectedSshLayer.enabled === false" />
@@ -6538,11 +6780,11 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                     </div>
-                    <div v-if="selectedSshLayer.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="selectedSshLayer.auth_method === 'key' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshKeyPassphrase") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
-                    <div v-if="!selectedSshLayer.auth_method || selectedSshLayer.auth_method === 'password'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="!selectedSshLayer.auth_method || selectedSshLayer.auth_method === 'password' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshPassword") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                     </div>
@@ -6892,15 +7134,43 @@ function openExternalUrl(url: string) {
   max-height: calc(var(--dbx-viewport-height) - 2rem);
 }
 
-@media (min-width: 640px) {
-  .connection-db-picker-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+.connection-dialog-content--config {
+  min-height: 0;
+}
+
+@media (max-height: 720px) {
+  .connection-dialog-content--config {
+    /* A definite flex height lets tab bodies shrink and scroll above the fixed footer. */
+    height: calc(var(--dbx-viewport-height) - 2rem);
+  }
+
+  .connection-dialog-content--config .connection-form-body {
+    /* Keep grid rows compact when the scroll viewport is taller than the form. */
+    align-content: start;
   }
 }
 
-@media (min-width: 1024px) {
-  .connection-db-picker-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+/* Legacy responsive layout rules live in public/connection-dialog-legacy.css
+ * so the production build cannot rewrite their classic media queries. */
+@supports not (color: oklch(0.5 0.1 180)) {
+  .connection-db-category-option--selected {
+    color: rgb(23, 23, 23) !important;
+    background-color: rgba(23, 23, 23, 0.08) !important;
+  }
+
+  .connection-db-category-option--selected:hover {
+    color: rgb(23, 23, 23) !important;
+    background-color: rgba(23, 23, 23, 0.12) !important;
+  }
+
+  .dark .connection-db-category-option--selected {
+    color: rgb(244, 244, 245) !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+  }
+
+  .dark .connection-db-category-option--selected:hover {
+    color: rgb(244, 244, 245) !important;
+    background-color: rgba(255, 255, 255, 0.14) !important;
   }
 }
 
@@ -6908,30 +7178,8 @@ function openExternalUrl(url: string) {
   color: var(--foreground);
 }
 
-.connection-db-picker-option--selected {
-  border-color: rgb(23, 23, 23);
-  background-color: rgba(23, 23, 23, 0.08);
-  box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.24);
-  color: rgb(10, 10, 10);
-}
-
-.connection-db-picker-option--selected:hover {
-  background-color: rgba(23, 23, 23, 0.12);
-}
-
 .connection-config-step :is([data-slot="input"], [data-slot="select-trigger"], [data-slot="tabs-list"], [data-slot="tabs-trigger"], textarea) {
   border-radius: var(--dbx-radius-fixed-4, 4px);
-}
-
-.dark .connection-db-picker-option--selected {
-  border-color: rgb(208, 208, 214);
-  background-color: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
-  color: rgb(221, 221, 226);
-}
-
-.dark .connection-db-picker-option--selected:hover {
-  background-color: rgba(255, 255, 255, 0.12);
 }
 
 .connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {

@@ -408,8 +408,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
         if (!constraints.hasFilter()) {
             return;
         }
-        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '\\\\'");
-        args.add(constraints.fuzzyLikePattern().toUpperCase(Locale.ROOT));
+        sql.append(" AND UPPER(").append(column).append(") LIKE ? ESCAPE '~'");
+        args.add(constraints.fuzzyLikePattern('~').toUpperCase(Locale.ROOT));
     }
 
     private static void appendLimitOffset(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
@@ -1089,7 +1089,17 @@ public final class DamengAgent extends BaseDatabaseAgent {
     private static String buildUrl(ConnectParams params) {
         String database = params.getDatabase() == null ? "" : params.getDatabase().trim();
         String suffix = database.isEmpty() ? "" : "/" + database;
-        return "jdbc:dm://" + params.getHost() + ":" + params.getPort() + suffix;
+        String url = "jdbc:dm://" + params.getHost() + ":" + params.getPort() + suffix;
+        String urlParams = params.getUrl_params() == null ? "" : params.getUrl_params().trim();
+        while (urlParams.startsWith("?") || urlParams.startsWith("&") || urlParams.startsWith(";")) {
+            urlParams = urlParams.substring(1);
+        }
+        if (urlParams.isEmpty()) {
+            return url;
+        }
+
+        // DM8 SSL options are JDBC URL query parameters; dropping them makes the driver initialize SSL with defaults.
+        return url + "?" + urlParams;
     }
 
     private static String formatDataType(
@@ -1314,10 +1324,13 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return result;
     }
 
-    private static String indexDdl(String schema, String table, IndexInfo index) {
+    static String indexDdl(String schema, String table, IndexInfo index) {
         StringBuilder ddl = new StringBuilder("CREATE ");
         if (index.getIs_unique()) {
             ddl.append("UNIQUE ");
+        }
+        if ("SPATIAL".equalsIgnoreCase(coalesce(index.getIndex_type()).trim())) {
+            ddl.append("SPATIAL ");
         }
         ddl.append("INDEX ")
             .append(qualifiedName(schema, index.getName()))

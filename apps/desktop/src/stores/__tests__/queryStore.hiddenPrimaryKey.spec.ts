@@ -131,6 +131,44 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("starts a qualified MySQL star query before slow column metadata finishes", async () => {
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    getColumns.mockReturnValue(columnsGate.promise);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "sys_dept",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["dept_id", "dept_name"],
+        rows: [[1, "Headquarters"]],
+        affected_rows: 0,
+        execution_time_ms: 12,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    const execution = store.executeTabSql(tabId, "SELECT sys_dept.* FROM sys_dept");
+    await vi.waitFor(() => expect(executeMulti).toHaveBeenCalled());
+    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT sys_dept.* FROM sys_dept", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+
+    columnsGate.resolve([
+      { name: "dept_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "dept_name", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    await execution;
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta?.tableName).toBe("sys_dept"));
+  });
+
   it("loads metadata from the connection default database when the query tab database is empty", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -144,6 +182,32 @@ describe("queryStore hidden primary key editing", () => {
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
     expect(tab.tableMeta?.database).toBe("app");
     expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps insert disabled when a MySQL table has a physical primary key named like DBX ROWID", async () => {
+    getColumns.mockResolvedValue([
+      { name: "__DBX_ROWID", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "name", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "users",
+        selectStar: false,
+        columns: [{ sourceName: "name", resultName: "name", expression: "name" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "__DBX_ROWID", resultName: "__DBX_PK_0", expression: "`__DBX_ROWID`" }] : [])],
+      },
+    }));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "__DBX_ROWID"]));
+    expect(tab.queryAnalysis?.allowInsert).toBe(false);
   });
 
   it("uses the connection default database for SQL library tabs without a saved database", async () => {
@@ -180,6 +244,45 @@ describe("queryStore hidden primary key editing", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
     expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("starts a MySQL JDBC star query before slow column metadata finishes", async () => {
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    getConnectionConfig.mockReturnValue({ id: "jdbc-1", name: "JDBC MySQL", db_type: "jdbc", connection_string: "jdbc:mysql://localhost:3306/app", database: "app", query_timeout_secs: 30 });
+    getColumns.mockReturnValue(columnsGate.promise);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "sys_dept",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["dept_id", "dept_name"],
+        rows: [[1, "Headquarters"]],
+        affected_rows: 0,
+        execution_time_ms: 12,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("jdbc-1", "", "Query");
+
+    const execution = store.executeTabSql(tabId, "SELECT * FROM sys_dept");
+    await vi.waitFor(() => expect(executeMulti).toHaveBeenCalled());
+    expect(executeMulti).toHaveBeenCalledWith("jdbc-1", "", "SELECT * FROM sys_dept", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+
+    columnsGate.resolve([
+      { name: "dept_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "dept_name", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    await execution;
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta?.tableName).toBe("sys_dept"));
   });
 
   it("keeps an explicitly selected database instead of falling back to the connection default", async () => {
@@ -266,7 +369,7 @@ describe("queryStore hidden primary key editing", () => {
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["ID", "PLATFORM", "__DBX_ROWID"]));
     expect(tab.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]);
     expect(tab.queryAnalysis).toBeDefined();
-    expect(tab.queryAnalysis?.allowInsert).toBe(false);
+    expect(tab.queryAnalysis?.allowInsert).not.toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 

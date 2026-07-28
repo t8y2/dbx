@@ -21,6 +21,19 @@ export interface CompleteLocalDataGridResultOptions {
   hasMore?: boolean;
 }
 
+export interface CanFetchNextDataGridSegmentOptions {
+  hasMore?: boolean;
+  loadedRowCount: number;
+  pageSize: number;
+  totalRowCount?: number;
+  allRowsLoaded?: boolean;
+}
+
+export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean }): number | undefined {
+  if (options.paginationTotalRowCount !== undefined) return options.paginationTotalRowCount;
+  return options.totalRowCountIsExact ? options.serverKnownTotalRowCount : undefined;
+}
+
 export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridResultOptions): boolean {
   if (!options.isResultsContext || options.truncated === true || options.hasMore === true) return false;
   if (options.pageLimit === undefined) return true;
@@ -49,4 +62,16 @@ export function canGoNextDataGridPage(options: CanGoNextDataGridPageOptions): bo
   }
 
   return options.rowCount >= pageSize;
+}
+
+export function canFetchNextDataGridSegment(options: CanFetchNextDataGridSegmentOptions): boolean {
+  if (options.hasMore === true) return true;
+
+  const totalRowCount = options.totalRowCount;
+  if (typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0) {
+    return options.loadedRowCount < totalRowCount;
+  }
+
+  if (options.allRowsLoaded === true) return false;
+  return options.loadedRowCount >= Math.max(1, options.pageSize);
 }

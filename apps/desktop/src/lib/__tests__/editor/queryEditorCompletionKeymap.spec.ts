@@ -89,6 +89,18 @@ afterEach(() => {
 });
 
 describe("QueryEditor completion Tab keymap", () => {
+  it("keeps CodeMirror prefix filtering enabled for SQL completion results", () => {
+    const javascript = ts.transpileModule(extractFunction("buildCompletionResult"), {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const buildCompletionResult = new Function("completionOptionForItem", `${javascript}\nreturn buildCompletionResult;`)(() => ({ label: "created_at" })) as (items: Array<{ label: string }>, from: number) => { filter?: boolean; options: Array<{ label: string }>; from: number } | null;
+
+    const result = buildCompletionResult([{ label: "created_at" }], 0);
+
+    expect(result).not.toBeNull();
+    expect(result).not.toHaveProperty("filter");
+  });
+
   it("keeps normal Tab indentation when completion is inactive", () => {
     const harness = createHarness({ completionStatus: () => null });
     const view = createView();

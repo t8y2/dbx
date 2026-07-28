@@ -1241,6 +1241,31 @@ fn mysql_create_unique_index_with_comment_and_btree() {
 }
 
 #[test]
+fn mysql_create_functional_index_preserves_key_part_syntax() {
+    let functional_key_part = "((case when (`STATUS` = _utf8mb4'online') then _utf8mb4'online' else NULL end))";
+    let mut idx = index("test_UNIQUE", &["attr", "attr2", functional_key_part]);
+    idx.is_unique = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "test".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![format!("CREATE UNIQUE INDEX `test_UNIQUE` ON `test` (`attr`, `attr2`, {functional_key_part});")]
+    );
+}
+
+#[test]
 fn mysql_add_timestamp_column_drops_invalid_precision() {
     let mut created_at = column("created_at");
     created_at.data_type = "timestamp(255)".to_string();
@@ -2729,6 +2754,61 @@ fn mysql_create_table_with_auto_increment() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 1);
     assert!(result.statements[0].contains("AUTO_INCREMENT"));
+}
+
+#[test]
+fn mysql_create_table_keeps_column_charset_collation_and_comment() {
+    let mut name = column("name");
+    name.data_type = "varchar(255)".to_string();
+    name.character_set = "gbk".to_string();
+    name.collation = "gbk_bin".to_string();
+    name.comment = "测试".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("User accounts".to_string()),
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE `users` (\n  `name` varchar(255) CHARACTER SET `gbk` COLLATE `gbk_bin` COMMENT '测试'\n) COMMENT = 'User accounts';"
+        ]
+    );
+}
+
+#[test]
+fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
+    for database_type in [DatabaseType::StarRocks, DatabaseType::Databend, DatabaseType::Gbase] {
+        let mut name = column("name");
+        name.data_type = "varchar(255)".to_string();
+        name.character_set = "utf8mb4".to_string();
+        name.collation = "utf8mb4_bin".to_string();
+
+        let result = build_create_table_sql(TableStructureSqlOptions {
+            database_type: Some(database_type),
+            schema: None,
+            table_name: "users".to_string(),
+            columns: vec![name],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            table_comment: None,
+            original_table_comment: None,
+        });
+
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert!(!result.statements[0].contains("CHARACTER SET"));
+        assert!(!result.statements[0].contains("COLLATE"));
+    }
 }
 
 #[test]

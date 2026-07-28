@@ -18,10 +18,12 @@ pub fn is_single_connection_pool(db_type: &DatabaseType) -> bool {
             | DatabaseType::Turso
             | DatabaseType::CloudflareD1
             | DatabaseType::MongoDb
+            | DatabaseType::Hbase
             | DatabaseType::Oracle
             | DatabaseType::Dameng
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
             | DatabaseType::Goldendb
             | DatabaseType::Yashandb

@@ -101,6 +101,31 @@ describe("connectionStore database info", () => {
     expect(store.connectedIds.has(config.id)).toBe(true);
   });
 
+  it("keeps a live connection when only its note changes", async () => {
+    const config = mysqlConnection();
+    const saveConnections = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn().mockRejectedValue(new Error("metadata unavailable")),
+      saveConnections,
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await store.addConnection(config);
+    await store.connect(config);
+
+    await store.updateConnection({ ...config, note: "Production reporting" });
+
+    expect(saveConnections).toHaveBeenLastCalledWith([expect.objectContaining({ id: config.id, note: "Production reporting" })]);
+    expect(store.getConfig(config.id)?.note).toBe("Production reporting");
+    expect(store.connectedIds.has(config.id)).toBe(true);
+  });
+
   it("does not delay connection success while optional metadata is loading", async () => {
     const config = mysqlConnection();
     let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;

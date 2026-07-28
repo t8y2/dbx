@@ -1,6 +1,6 @@
 import { effectScope, nextTick, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useDataGridConditionEditor } from "@/composables/useDataGridConditionEditor";
+import { completeDataGridConditionQuote, useDataGridConditionEditor } from "@/composables/useDataGridConditionEditor";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 
 const storage = new Map<string, string>();
@@ -39,6 +39,155 @@ describe("useDataGridConditionEditor", () => {
     expect(editor.highlightedIndex.value).toBe(1);
     expect(editor.accept()).toBe(true);
     expect(value.value).toBe("status = customer_name");
+  });
+
+  it("builds and applies suggestions at the current caret instead of the value end", async () => {
+    const value = ref("");
+    const selectionStart = ref(0);
+    const selectionEnd = ref(0);
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      selectionStart,
+      selectionEnd,
+      columns: ["customer_id", "customer_name"],
+      historyScope: {},
+    });
+
+    value.value = "status = cus AND enabled = 1";
+    selectionStart.value = 12;
+    selectionEnd.value = 12;
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["customer_id", "customer_name"]));
+
+    expect(editor.accept(0)).toBe(true);
+    expect(value.value).toBe("status = customer_id AND enabled = 1");
+    expect(selectionStart.value).toBe(20);
+    expect(selectionEnd.value).toBe(20);
+  });
+
+  it("uses the current selection as an explicit replacement range", async () => {
+    const value = ref("");
+    const selectionStart = ref(0);
+    const selectionEnd = ref(0);
+    const editor = useDataGridConditionEditor({ kind: "where", value, selectionStart, selectionEnd, columns: ["old_value"], historyScope: {} });
+
+    value.value = "status = old AND enabled = 1";
+    selectionStart.value = 9;
+    selectionEnd.value = 12;
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["old_value"]));
+
+    expect(editor.accept()).toBe(true);
+    expect(value.value).toBe("status = old_value AND enabled = 1");
+  });
+
+  it("suggests WHERE connectors after a completed expression", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["account_id", "owner_id"], historyScope: {} });
+
+    value.value = "owner_id = 1 a";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "AND", kind: "keyword" }]));
+    expect(editor.accept()).toBe(true);
+    expect(value.value).toBe("owner_id = 1 AND");
+    await nextTick();
+
+    value.value = "owner_id = 1 o";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toEqual([{ value: "OR", kind: "keyword" }]));
+  });
+
+  it("suggests fields after a WHERE connector even when the active token is empty", async () => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["account_id", "owner_id"], historyScope: {} });
+
+    value.value = "status = 'active' AND ";
+    await nextTick();
+    await vi.waitFor(() =>
+      expect(editor.suggestions.value).toEqual([
+        { value: "account_id", kind: "column" },
+        { value: "owner_id", kind: "column" },
+      ]),
+    );
+    expect(editor.accept(1)).toBe(true);
+    expect(value.value).toBe("status = 'active' AND owner_id");
+  });
+
+  it("does not offer connectors inside quoted values or in ORDER BY", async () => {
+    const whereValue = ref("");
+    const whereEditor = useDataGridConditionEditor({ kind: "where", value: whereValue, columns: ["name"], historyScope: {} });
+    whereValue.value = "name = 'Alice a";
+    await nextTick();
+    await vi.waitFor(() => expect(whereEditor.suggestions.value).toEqual([]));
+
+    const orderByValue = ref("");
+    const orderByEditor = useDataGridConditionEditor({ kind: "orderBy", value: orderByValue, columns: ["amount"], historyScope: {} });
+    orderByValue.value = "created_at a";
+    await nextTick();
+    await vi.waitFor(() => expect(orderByEditor.suggestions.value).toEqual([]));
+  });
+
+  it.each(["deleted_at IS ", "deleted_at IS a", "deleted_at IS NOT o", "name LIKE o", "id IN a", "score BETWEEN o"])("does not offer connectors while the keyword operator is incomplete: %s", async (condition) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({ kind: "where", value, columns: ["account_id"], historyScope: {}, suggestionDebounceMs: 1 });
+
+    value.value = condition;
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(editor.suggestions.value).toEqual([]);
+  });
+
+  it("completes inside dialect quoted identifiers without treating them as strings", async () => {
+    const value = ref("");
+    const selectionStart = ref(0);
+    const selectionEnd = ref(0);
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      selectionStart,
+      selectionEnd,
+      identifierQuote: '"',
+      columns: [{ name: "name", insertText: '"name"' }],
+      historyScope: {},
+    });
+
+    value.value = '"na" = 1';
+    selectionStart.value = 3;
+    selectionEnd.value = 3;
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["name"]));
+    expect(editor.accept()).toBe(true);
+    expect(value.value).toBe('"name" = 1');
+  });
+
+  it("keeps double quotes as string delimiters when the dialect uses another identifier quote", async () => {
+    const value = ref("");
+    const selectionStart = ref(0);
+    const selectionEnd = ref(0);
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      selectionStart,
+      selectionEnd,
+      identifierQuote: "`",
+      columns: ["name"],
+      historyScope: {},
+      suggestionDebounceMs: 1,
+    });
+
+    value.value = '"na" = 1';
+    selectionStart.value = 3;
+    selectionEnd.value = 3;
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(editor.suggestions.value).toEqual([]);
+  });
+
+  it("pairs WHERE quotes, wraps selections, and skips an existing closing quote", () => {
+    expect(completeDataGridConditionQuote("id = ", 5, 5, "'")).toEqual({ value: "id = ''", selectionStart: 6, selectionEnd: 6 });
+    expect(completeDataGridConditionQuote("name", 0, 4, '"')).toEqual({ value: '"name"', selectionStart: 1, selectionEnd: 5 });
+    expect(completeDataGridConditionQuote("id = ''", 6, 6, "'")).toEqual({ value: "id = ''", selectionStart: 7, selectionEnd: 7 });
   });
 
   it("reuses column comments for field suggestions without adding them to history", async () => {
@@ -159,6 +308,32 @@ describe("useDataGridConditionEditor", () => {
     resolvers.get("cus")?.(["customer_id"]);
     await Promise.resolve();
     expect(editor.suggestions.value.map((item) => item.value)).toEqual(["order_id"]);
+  });
+
+  it("passes the cursor text and replacement range to asynchronous providers", async () => {
+    const value = ref("");
+    const selectionStart = ref(0);
+    const selectionEnd = ref(0);
+    const suggestionProvider = vi.fn(() => ["customer_id"]);
+    useDataGridConditionEditor({ kind: "where", value, selectionStart, selectionEnd, historyScope: {}, suggestionProvider });
+
+    value.value = "status = cus AND enabled = 1";
+    selectionStart.value = 12;
+    selectionEnd.value = 12;
+    await nextTick();
+    await vi.waitFor(() => expect(suggestionProvider).toHaveBeenCalledOnce());
+
+    expect(suggestionProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        value: "status = cus AND enabled = 1",
+        valueBeforeCursor: "status = cus",
+        token: "cus",
+        from: 9,
+        to: 12,
+        selectionStart: 12,
+        selectionEnd: 12,
+      }),
+    );
   });
 
   it("loads, filters, accepts, and deletes scoped history", () => {

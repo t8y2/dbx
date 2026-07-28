@@ -86,7 +86,7 @@ function fnv1a(value: string, seed: number): number {
 }
 
 export function connectionConfigFingerprint(config: ConnectionConfig, sourceName = config.name): string {
-  const { database_info: _databaseInfo, ...submittedConfig } = config;
+  const { database_info: _databaseInfo, note: _note, ...submittedConfig } = config;
   const serialized = JSON.stringify(stableValue({ config: submittedConfig, sourceName }));
   const first = fnv1a(serialized, 0x811c9dc5).toString(16).padStart(8, "0");
   const second = fnv1a(serialized, 0x9e3779b9).toString(16).padStart(8, "0");

@@ -1,5 +1,5 @@
 use crate::agent_events::AgentEvent;
-use crate::ai::{AiConfig, AiEffortLevel, AiModelInfo, AiTestConnectionResult};
+use crate::ai::{AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortLevel, AiModelInfo, AiTestConnectionResult};
 use crate::ai_cli_agent::{
     build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env, model_infos, parse_cli_jsonl_event,
     run_cli_jsonl_agent, CliAgentCommandSpec, CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
@@ -284,9 +284,13 @@ fn build_claude_code_command_with_mcp_arg(
         args.push("--model".to_string());
         args.push(model.to_string());
     }
-    if let Some(effort) = config.reasoning_level.as_claude_code_effort() {
+    let effort = match config.runtime_effort.as_ref() {
+        Some(effort) => effort.cli_value(),
+        None => config.reasoning_level.as_claude_code_effort().map(ToString::to_string),
+    };
+    if let Some(effort) = effort {
         args.push("--effort".to_string());
-        args.push(effort.to_string());
+        args.push(effort);
     }
 
     ClaudeCodeCommandSpec { program: claude_code_program(config), args }
@@ -387,7 +391,17 @@ fn parse_claude_code_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
                 .filter(|name| !name.is_empty())
                 .map(ToString::to_string);
             let mut info = AiModelInfo::new(id, display_name);
-            info.supported_effort_levels = parse_claude_code_effort_levels(model);
+            let effort_levels = parse_claude_code_effort_level_strings(model);
+            info.supported_effort_levels =
+                effort_levels.iter().filter_map(|level| level.parse::<AiEffortLevel>().ok()).collect();
+            info.effort_capability =
+                if model.get("supportsEffort").or_else(|| model.get("supports_effort")).and_then(Value::as_bool)
+                    == Some(false)
+                {
+                    Some(AiEffortCapability::Unsupported)
+                } else {
+                    crate::ai_effort::dynamic_enum_capability(effort_levels, AiCapabilitySource::LocalCli)
+                };
             result.push(info);
         }
 
@@ -403,7 +417,7 @@ fn parse_claude_code_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
     None
 }
 
-fn parse_claude_code_effort_levels(model: &Value) -> Vec<AiEffortLevel> {
+fn parse_claude_code_effort_level_strings(model: &Value) -> Vec<String> {
     if model.get("supportsEffort").or_else(|| model.get("supports_effort")).and_then(Value::as_bool) == Some(false) {
         return Vec::new();
     }
@@ -417,8 +431,10 @@ fn parse_claude_code_effort_levels(model: &Value) -> Vec<AiEffortLevel> {
     levels
         .iter()
         .filter_map(Value::as_str)
-        .filter_map(|level| level.parse::<AiEffortLevel>().ok())
-        .filter(|level| seen.insert(*level))
+        .map(str::trim)
+        .filter(|level| !level.is_empty())
+        .filter(|level| seen.insert((*level).to_string()))
+        .map(ToString::to_string)
         .collect()
 }
 
@@ -532,7 +548,10 @@ mod tests {
     #[cfg(unix)]
     use super::{list_claude_code_models, run_claude_code_agent};
     use crate::agent_events::AgentEvent;
-    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiEffortLevel, AiModelInfo, AiProvider, AiReasoningLevel};
+    use crate::ai::{
+        AiApiStyle, AiAuthMethod, AiConfig, AiEffortCapability, AiEffortLevel, AiEffortSelection, AiProvider,
+        AiReasoningLevel,
+    };
     use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -552,11 +571,14 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,
             claude_code_cli_env: Default::default(),
+            pi_agent_cli_path: None,
+            pi_agent_cli_env: Default::default(),
         }
     }
 
@@ -568,6 +590,7 @@ mod tests {
             agent_mode: true,
             allow_writes: false,
             allow_dangerous: false,
+            confirmed_write_sql: None,
             mcp_server_command: None,
         }
     }
@@ -736,6 +759,21 @@ esac
     }
 
     #[test]
+    fn runtime_effort_takes_priority_over_legacy_reasoning_level() {
+        let mut config = claude_code_config("sonnet");
+        config.reasoning_level = AiReasoningLevel::Xhigh;
+        config.runtime_effort = Some(AiEffortSelection::ProviderDefault);
+
+        let spec = build_claude_code_command(&config, "hello", &run_options());
+        assert!(!spec.args.contains(&"--effort".to_string()));
+
+        config.runtime_effort = Some(AiEffortSelection::Enum("future".to_string()));
+        let spec = build_claude_code_command(&config, "hello", &run_options());
+        let effort_pos = spec.args.iter().position(|arg| arg == "--effort").unwrap();
+        assert_eq!(spec.args[effort_pos + 1], "future");
+    }
+
+    #[test]
     fn default_model_list_matches_supported_aliases() {
         assert_eq!(model_infos(DEFAULT_CLAUDE_CODE_MODELS), model_infos(&["default", "sonnet", "opus", "fable"]));
     }
@@ -754,21 +792,21 @@ esac
         let models = parse_claude_code_models(stdout).unwrap();
 
         assert_eq!(
-            models,
-            vec![
-                AiModelInfo::new("default", Some("Default".to_string())),
-                AiModelInfo {
-                    id: "claude-sonnet-4-6".to_string(),
-                    display_name: Some("Sonnet 4.6".to_string()),
-                    supported_effort_levels: vec![
-                        AiEffortLevel::Low,
-                        AiEffortLevel::Medium,
-                        AiEffortLevel::High,
-                        AiEffortLevel::Max
-                    ],
-                },
-                AiModelInfo::new("claude-opus-4-8", Some("Opus 4.8".to_string())),
-            ]
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "claude-sonnet-4-6", "claude-opus-4-8"]
+        );
+        let sonnet = &models[1];
+        assert_eq!(sonnet.display_name.as_deref(), Some("Sonnet 4.6"));
+        assert_eq!(
+            sonnet.supported_effort_levels,
+            [AiEffortLevel::Low, AiEffortLevel::Medium, AiEffortLevel::High, AiEffortLevel::Max]
+        );
+        let AiEffortCapability::Enum { options, .. } = sonnet.effort_capability.as_ref().unwrap() else {
+            panic!("expected effort enum");
+        };
+        assert_eq!(
+            options.iter().map(|option| option.id.as_str()).collect::<Vec<_>>(),
+            ["low", "medium", "high", "max", "future"]
         );
     }
 

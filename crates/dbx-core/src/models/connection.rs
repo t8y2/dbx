@@ -72,6 +72,8 @@ pub fn database_info_from_protocol_value(value: &Value) -> Option<DatabaseConnec
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -307,11 +309,13 @@ pub struct SshTunnelConfig {
     /// the `SSH_AUTH_SOCK` environment variable.
     #[serde(default)]
     pub ssh_agent_sock_path: String,
-    /// Login method: `"password"`, `"key"`, `"agent"`, or `"none"`.
+    /// Login method: `"password"`, `"key"`, `"key+password"`, `"agent"`, or `"none"`.
     /// Empty string means an older saved connection predating this field —
     /// the backend falls back to probing key > password > agent based on
     /// which fields are non-empty. When set to a specific method the backend
     /// only tries that method (after the standard `none` probe).
+    /// `"key+password"` tries private key auth first and falls back to
+    /// password auth if the key is rejected.
     #[serde(default)]
     pub auth_method: String,
     /// When non-empty, this layer references a shared tunnel profile
@@ -433,6 +437,7 @@ pub enum ProxyType {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
     Mysql,
@@ -452,6 +457,7 @@ pub enum DatabaseType {
     Oracle,
     #[serde(rename = "elasticsearch")]
     Elasticsearch,
+    Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
     #[serde(rename = "milvus")]
@@ -470,6 +476,7 @@ pub enum DatabaseType {
     Dameng,
     Kingbase,
     Highgo,
+    Uxdb,
     Vastbase,
     Goldendb,
     Gaussdb,
@@ -535,6 +542,8 @@ pub enum DatabaseType {
 struct ConnectionConfigData {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub note: String,
     pub db_type: DatabaseType,
     #[serde(default)]
     pub driver_profile: Option<String>,
@@ -632,6 +641,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
         Self {
             id: data.id,
             name: data.name,
+            note: data.note,
             db_type: data.db_type,
             driver_profile: data.driver_profile,
             driver_label: data.driver_label,
@@ -857,6 +867,7 @@ impl ConnectionConfig {
             DatabaseType::Kwdb => Some("defaultdb"),
             DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
+            DatabaseType::Uxdb => Some("uxdb"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Oscar => Some("osrdb"),
             DatabaseType::Firebird => Some("employee"),
@@ -895,6 +906,13 @@ impl ConnectionConfig {
 
     pub fn canonicalized(&self) -> Self {
         let mut config = self.clone();
+        if config.db_type == DatabaseType::SqlServer
+            && sqlserver_legacy_compatibility_param(config.url_params.as_deref())
+        {
+            config.driver_profile = Some("sqlserver-legacy".to_string());
+            config.driver_label = Some("SQL Server legacy compatibility component".to_string());
+            config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
+        }
         if config.db_type == DatabaseType::Mysql
             && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("tdengine"))
         {
@@ -936,7 +954,7 @@ impl ConnectionConfig {
         let raw_host = host;
         let host = bracket_ipv6(host);
         let db_part = self.effective_database().map(|d| format!("/{}", encode_url_part(d))).unwrap_or_default();
-        let params = self.normalized_url_params();
+        let params = self.redacted_url_params();
 
         match self.db_type {
             DatabaseType::Sqlite | DatabaseType::DuckDb => {
@@ -989,6 +1007,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -999,6 +1018,7 @@ impl ConnectionConfig {
             DatabaseType::Dameng => format!("dm://{host}:{port}{db_part}"),
             DatabaseType::Kingbase => format!("kingbase://{host}:{port}{db_part}"),
             DatabaseType::Highgo => format!("highgo://{host}:{port}{db_part}"),
+            DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => format!("gaussdb://{host}:{port}{db_part}"),
@@ -1136,6 +1156,7 @@ impl ConnectionConfig {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Elasticsearch
+            | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -1151,6 +1172,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Highgo => {
                 format!("highgo://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Uxdb => {
+                format!("uxdb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Vastbase => {
                 format!("vastbase://{}:{}@{host}:{port}{db_part}", username, password)
@@ -1349,6 +1373,23 @@ impl ConnectionConfig {
         }
     }
 
+    fn redacted_url_params(&self) -> String {
+        let params = self.normalized_url_params();
+        if matches!(self.db_type, DatabaseType::Postgres | DatabaseType::Redshift) {
+            redact_postgres_url_params(&params)
+        } else {
+            params
+        }
+    }
+
+    pub(crate) fn validate_native_url_params(&self) -> Result<(), String> {
+        if matches!(self.db_type, DatabaseType::Postgres | DatabaseType::Redshift) {
+            validate_postgres_url_params(self.url_params.as_deref().unwrap_or(""))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn clickhouse_uses_tls(&self) -> bool {
         self.ssl || url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
     }
@@ -1381,6 +1422,68 @@ fn redis_url_params_enable_insecure(params: Option<&str>) -> bool {
         matches!(key.to_ascii_lowercase().as_str(), "insecure" | "tls_insecure" | "accept_invalid_certs")
             && matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "insecure")
     })
+}
+
+fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> {
+    let source = params.unwrap_or("").trim().trim_start_matches('?');
+    let mut parts = Vec::new();
+    let mut separator = None;
+    let mut start = 0;
+    let mut in_braces = false;
+    let mut chars = source.char_indices().peekable();
+
+    // SQL Server JDBC values use braces to contain separators and `}}` to escape a closing brace.
+    while let Some((index, char)) = chars.next() {
+        if in_braces {
+            if char == '}' && chars.peek().is_some_and(|(_, next)| *next == '}') {
+                chars.next();
+            } else if char == '}' {
+                in_braces = false;
+            }
+        } else if char == '{' {
+            in_braces = true;
+        } else if matches!(char, '&' | ';') {
+            parts.push((separator, &source[start..index]));
+            separator = Some(char);
+            start = index + char.len_utf8();
+        }
+    }
+
+    parts.push((separator, &source[start..]));
+    parts
+}
+
+fn sqlserver_legacy_compatibility_part(part: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    let disabled =
+        matches!(value.trim().to_ascii_lowercase().as_str(), "disabled" | "disable" | "false" | "0" | "off" | "no");
+    key.trim().eq_ignore_ascii_case("sqlserverEncryption") && disabled
+}
+
+fn sqlserver_legacy_compatibility_param(params: Option<&str>) -> bool {
+    sqlserver_url_param_parts(params).into_iter().any(|(_, part)| sqlserver_legacy_compatibility_part(part))
+}
+
+fn without_sqlserver_legacy_compatibility_param(params: Option<&str>) -> Option<String> {
+    let retained = sqlserver_url_param_parts(params)
+        .into_iter()
+        .filter(|(_, part)| !part.trim().is_empty())
+        .filter(|(_, part)| !sqlserver_legacy_compatibility_part(part))
+        .collect::<Vec<_>>();
+    if retained.is_empty() {
+        return None;
+    }
+
+    let mut output = String::new();
+    for (index, (separator, part)) in retained.into_iter().enumerate() {
+        if index > 0 {
+            output.extend(separator);
+        }
+        output.push_str(part);
+    }
+    Some(output)
 }
 
 fn url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
@@ -1688,12 +1791,17 @@ fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
                 "verify-full" | "verify-identity" => parts.push("sslmode=verify-full".to_string()),
                 _ => {}
             }
+        } else if key.eq_ignore_ascii_case("host")
+            || key.eq_ignore_ascii_case("hostaddr")
+            || key.eq_ignore_ascii_case("port")
+            || key.eq_ignore_ascii_case("stringtype")
+        {
         } else if key.eq_ignore_ascii_case("charset")
             || key.eq_ignore_ascii_case("require_ssl")
             || key.eq_ignore_ascii_case("verify_ca")
             || key.eq_ignore_ascii_case("verify_identity")
         {
-            // These MySQL-style parameters may be present in older/imported
+            // Driver-specific parameters may be present in older/imported
             // saved connections. tokio-postgres rejects unknown URL keys.
         } else {
             parts.push(part.to_string());
@@ -1744,6 +1852,35 @@ fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
     }
 
     parts.join("&")
+}
+
+fn redact_postgres_url_params(value: &str) -> String {
+    value
+        .split('&')
+        .filter(|part| !part.is_empty() && !url_param_key_is(part, "password"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn validate_postgres_url_params(value: &str) -> Result<(), String> {
+    for part in value.trim().trim_start_matches('?').split('&').filter(|part| !part.is_empty()) {
+        let (raw_key, raw_value) = part.split_once('=').unwrap_or((part, ""));
+        if !percent_decode_str(raw_key).decode_utf8_lossy().eq_ignore_ascii_case("stringtype") {
+            continue;
+        }
+
+        let string_type = percent_decode_str(raw_value).decode_utf8_lossy();
+        if string_type.eq_ignore_ascii_case("unspecified") || string_type.eq_ignore_ascii_case("varchar") {
+            continue;
+        }
+
+        let value = if string_type.is_empty() { "<empty>" } else { string_type.as_ref() };
+        return Err(format!(
+            "Unsupported value for PostgreSQL stringtype parameter: {value}. Expected 'unspecified' or 'varchar'."
+        ));
+    }
+
+    Ok(())
 }
 
 fn url_param_key_is(part: &str, expected: &str) -> bool {
@@ -2002,8 +2139,9 @@ fn bracket_ipv6(host: &str) -> String {
 mod tests {
     use super::{
         database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
-        default_ssh_connect_timeout_secs, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType,
-        IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
+        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo,
+        DatabaseType, IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
     };
     use std::str::FromStr;
 
@@ -2051,6 +2189,7 @@ mod tests {
         ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,
@@ -2118,6 +2257,20 @@ mod tests {
         .unwrap();
         assert!(serde_json::to_value(&legacy).unwrap().get("mcp_access").is_none());
         assert!(!legacy.read_only);
+    }
+
+    #[test]
+    fn connection_note_is_optional_and_round_trips_when_present() {
+        let config = mysql_config("root", "secret", Some("app"));
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("note").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note.is_empty());
+
+        let mut config = config;
+        config.note = "Production reporting".to_string();
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["note"], "Production reporting");
+        assert_eq!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note, config.note);
     }
 
     #[test]
@@ -2492,6 +2645,49 @@ mod tests {
     }
 
     #[test]
+    fn historical_sqlserver_legacy_setting_is_canonicalized_to_driver_profile() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_string());
+        config.driver_label = Some("SQL Server".to_string());
+        config.url_params =
+            Some("applicationName={DBX; Client};password=50%;sqlserverEncryption=disabled;encrypt=false".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver-legacy"));
+        assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server legacy compatibility component"));
+        assert_eq!(canonical.url_params.as_deref(), Some("applicationName={DBX; Client};password=50%;encrypt=false"));
+        assert_eq!(without_sqlserver_legacy_compatibility_param(Some("sqlserverEncryption=disabled")), None);
+    }
+
+    #[test]
+    fn sqlserver_legacy_migration_respects_escaped_braces() {
+        let params = "applicationName={DBX}}; Client};sqlserverEncryption=disabled;encrypt=false";
+
+        assert!(sqlserver_legacy_compatibility_param(Some(params)));
+        assert_eq!(
+            without_sqlserver_legacy_compatibility_param(Some(params)).as_deref(),
+            Some("applicationName={DBX}}; Client};encrypt=false")
+        );
+    }
+
+    #[test]
+    fn sqlserver_auto_profile_without_historical_setting_stays_native() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.driver_profile = Some("sqlserver".to_string());
+        config.driver_label = Some("SQL Server".to_string());
+        config.url_params = Some("applicationName=dbx&encrypt=false".to_string());
+
+        let canonical = config.canonicalized();
+
+        assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver"));
+        assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server"));
+        assert_eq!(canonical.url_params.as_deref(), Some("applicationName=dbx&encrypt=false"));
+    }
+
+    #[test]
     fn informix_empty_database_uses_sysmaster_for_connection() {
         let mut config = mysql_config("informix", "in4mix", None);
         config.db_type = DatabaseType::Informix;
@@ -2551,6 +2747,15 @@ mod tests {
     }
 
     #[test]
+    fn uxdb_connection_url_uses_uxdb_scheme() {
+        let mut config = mysql_config("uxdb", "secret", Some("warehouse"));
+        config.db_type = DatabaseType::Uxdb;
+        config.port = 52025;
+
+        assert_eq!(config.connection_url(), "uxdb://uxdb:secret@10.1.2.3:52025/warehouse");
+    }
+
+    #[test]
     fn clickhouse_tls_uses_https_from_ssl_or_secure_param() {
         let mut config = mysql_config("default", "", None);
         config.db_type = DatabaseType::ClickHouse;
@@ -2564,6 +2769,20 @@ mod tests {
         config.ssl = false;
         config.url_params = Some("secure=true".to_string());
         assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+    }
+
+    #[test]
+    fn hbase_rest_url_uses_http_or_https_without_embedding_credentials() {
+        let mut config = mysql_config("hbase-user", "secret", None);
+        config.db_type = DatabaseType::Hbase;
+        config.port = 8080;
+
+        assert_eq!(config.connection_url(), "http://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "http://10.1.2.3:8080");
+
+        config.ssl = true;
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8080");
+        assert_eq!(config.redacted_connection_url(), "https://10.1.2.3:8080");
     }
 
     #[test]
@@ -2749,6 +2968,104 @@ mod tests {
         );
         let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
         assert_eq!(pg_config.get_options(), Some("-c search_path=app"));
+    }
+
+    #[test]
+    fn postgres_url_ignores_jdbc_stringtype_param() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("currentSchema=public&stringtype=unspecified".to_string());
+
+        assert_eq!(config.validate_native_url_params(), Ok(()));
+        assert_eq!(
+            config.connection_url(),
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=%2Dc%20search%5Fpath%3Dpublic"
+        );
+        let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
+        assert_eq!(pg_config.get_options(), Some("-c search_path=public"));
+    }
+
+    #[test]
+    fn postgres_url_accepts_encoded_jdbc_varchar_stringtype_param() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("currentSchema=app&%73tringtype=%76aRcHaR".to_string());
+
+        assert_eq!(config.validate_native_url_params(), Ok(()));
+        assert_eq!(
+            config.connection_url(),
+            "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=prefer&options=%2Dc%20search%5Fpath%3Dapp"
+        );
+        let pg_config = tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
+        assert_eq!(pg_config.get_options(), Some("-c search_path=app"));
+    }
+
+    #[test]
+    fn postgres_url_rejects_invalid_or_empty_jdbc_stringtype_param() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+
+        config.url_params = Some("stringtype=invalid".to_string());
+        assert_eq!(
+            config.validate_native_url_params().unwrap_err(),
+            "Unsupported value for PostgreSQL stringtype parameter: invalid. Expected 'unspecified' or 'varchar'."
+        );
+
+        config.url_params = Some("  ?%73tringtype=  ".to_string());
+        assert_eq!(
+            config.validate_native_url_params().unwrap_err(),
+            "Unsupported value for PostgreSQL stringtype parameter: <empty>. Expected 'unspecified' or 'varchar'."
+        );
+    }
+
+    #[test]
+    fn postgres_url_uses_only_the_structured_endpoint() {
+        let mut config = mysql_config("postgres", "secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some(
+            "HOST=origin.example.com&%68ostaddr=203.0.113.10&%70ort=6432&currentSchema=app&application_name=dbx"
+                .to_string(),
+        );
+
+        let url = config.connection_url_with_host("127.0.0.1", 6543);
+
+        assert_eq!(
+            url,
+            "postgres://postgres:secret@127.0.0.1:6543/test?sslmode=prefer&application_name=dbx&options=%2Dc%20search%5Fpath%3Dapp"
+        );
+        let pg_config = tokio_postgres::Config::from_str(&url).unwrap();
+        assert_eq!(pg_config.get_hosts().len(), 1);
+        assert_eq!(pg_config.get_ports(), &[6543]);
+        assert!(pg_config.get_hostaddrs().is_empty());
+        assert_eq!(pg_config.get_options(), Some("-c search_path=app"));
+    }
+
+    #[test]
+    fn postgres_url_query_password_keeps_priority_but_is_redacted() {
+        let mut config = mysql_config("postgres", "field-secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("%70assword=query-secret&application_name=dbx".to_string());
+
+        let url = config.connection_url();
+        let pg_config = tokio_postgres::Config::from_str(&url).unwrap();
+        assert_eq!(pg_config.get_password(), Some(b"query-secret".as_slice()));
+        assert_eq!(
+            config.redacted_connection_url(),
+            "postgres://10.1.2.3:2883/test?sslmode=prefer&application_name=dbx"
+        );
+    }
+
+    #[test]
+    fn postgres_url_redacts_case_insensitive_and_encoded_password_keys() {
+        let mut config = mysql_config("postgres", "field-secret", Some("test"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("PASSWORD=upper-secret&%70assword=encoded-secret&application_name=dbx".to_string());
+
+        let url = config.redacted_connection_url();
+
+        assert_eq!(url, "postgres://10.1.2.3:2883/test?sslmode=prefer&application_name=dbx");
+        assert!(!url.contains("upper-secret"));
+        assert!(!url.contains("encoded-secret"));
     }
 
     #[test]

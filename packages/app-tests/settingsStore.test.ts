@@ -1,4 +1,4 @@
-import { test, vi } from "vitest";
+import { beforeEach, test, vi } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createPinia, setActivePinia } from "pinia";
@@ -8,7 +8,25 @@ import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_F
 import { tableOpenPageLimit } from "../../apps/desktop/src/lib/table/tableOpenPageLimit.ts";
 import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 
+const saveEditorSettingsMock = vi.hoisted(() => vi.fn());
+vi.mock("../../apps/desktop/src/lib/backend/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../apps/desktop/src/lib/backend/api")>();
+  // Wrap the real saveEditorSettings so existing localStorage-based tests
+  // keep working, while allowing new tests to assert on the persisted payload.
+  saveEditorSettingsMock.mockImplementation(async (settings: unknown) => {
+    await actual.saveEditorSettings(settings);
+  });
+  return {
+    ...actual,
+    saveEditorSettings: saveEditorSettingsMock,
+  };
+});
+
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
+
+beforeEach(() => {
+  saveEditorSettingsMock.mockClear();
+});
 
 async function withMockLocalStorage(initial: Record<string, string>, run: () => void | Promise<void>) {
   const previousDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -57,6 +75,41 @@ test("normalizes the dedicated default row limit for table opens", () => {
   assert.equal(tableOpenPageLimit(), 100);
   assert.equal(tableOpenPageLimit(1000), 1000);
   assert.equal(tableOpenPageLimit(0), 100);
+});
+
+test("numericColumnRightAlign defaults to true and round-trips through normalizeEditorSettings", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign, true);
+  assert.equal(normalizeEditorSettings({}).numericColumnRightAlign, true);
+  assert.equal(normalizeEditorSettings({ numericColumnRightAlign: false }).numericColumnRightAlign, false);
+  assert.equal(normalizeEditorSettings({ numericColumnRightAlign: true }).numericColumnRightAlign, true);
+  // Non-boolean values fall back to the default.
+  assert.equal(normalizeEditorSettings({ numericColumnRightAlign: undefined }).numericColumnRightAlign, true);
+  assert.equal(normalizeEditorSettings({ numericColumnRightAlign: "false" as unknown as boolean }).numericColumnRightAlign, true);
+});
+
+test("updateEditorSettings persists numericColumnRightAlign toggles", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    assert.equal(store.editorSettings.numericColumnRightAlign, true);
+
+    store.updateEditorSettings({ numericColumnRightAlign: false });
+    assert.equal(store.editorSettings.numericColumnRightAlign, false);
+    // updateEditorSettings schedules a background save via api.saveEditorSettings
+    // with a snapshot of the current settings.
+    await vi.waitFor(() => {
+      const lastCall = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { numericColumnRightAlign?: boolean } | undefined;
+      assert.equal(lastCall?.numericColumnRightAlign, false);
+    });
+
+    store.updateEditorSettings({ numericColumnRightAlign: true });
+    assert.equal(store.editorSettings.numericColumnRightAlign, true);
+    await vi.waitFor(() => {
+      const lastCall = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { numericColumnRightAlign?: boolean } | undefined;
+      assert.equal(lastCall?.numericColumnRightAlign, true);
+    });
+  });
 });
 
 test("migrates legacy execute-all settings to current once and preserves later explicit choices", async () => {
@@ -455,7 +508,12 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].iconSlug, "claudecode");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].iconSlug, "pi");
+  assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].requiresApiKey, false);
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
 });
 
 test("normalizes legacy AI config and fills provider defaults", () => {
@@ -505,6 +563,15 @@ test("normalizes legacy AI config and fills provider defaults", () => {
   ]);
   assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "max" } as any).reasoningLevel, "max");
   assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "future" } as any).reasoningLevel, "default");
+
+  const piAgent = normalizeAiConfig({
+    provider: "pi-agent-cli",
+    piAgentCliPath: " /opt/homebrew/bin/pi ",
+    piAgentCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+  } as any);
+  assert.equal(piAgent.piAgentCliPath, "/opt/homebrew/bin/pi");
+  assert.deepEqual(piAgent.piAgentCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(piAgent.model, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {

@@ -77,6 +77,26 @@ type metadataConn struct {
 	state *metadataDriverState
 }
 
+type connectionAttemptState struct {
+	mu         sync.Mutex
+	attempts   []string
+	dsns       []string
+	deadlines  []time.Time
+	pingErrors map[string]error
+}
+
+type connectionAttemptConnector struct {
+	state   *connectionAttemptState
+	sslMode string
+}
+
+type connectionAttemptDriver struct{}
+
+type connectionAttemptConn struct {
+	state   *connectionAttemptState
+	sslMode string
+}
+
 type valueRows struct {
 	columns []string
 	rows    [][]driver.Value
@@ -142,6 +162,22 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 		return &valueRows{
 			columns: []string{"table_comment"},
 			rows:    [][]driver.Value{{"orders table"}},
+		}, nil
+	}
+	if strings.Contains(query, "SELECT i.relname, sys_catalog.sys_get_indexdef(") || strings.Contains(query, "SELECT i.relname, pg_catalog.pg_get_indexdef(") {
+		return &valueRows{
+			columns: []string{"index_name", "index_definition", "index_comment"},
+			rows: [][]driver.Value{
+				{"orders_id_idx", `CREATE INDEX orders_id_idx ON public.orders USING btree (id)`, "lookup index"},
+			},
+		}, nil
+	}
+	if strings.Contains(query, "SELECT sys_catalog.sys_get_triggerdef(tg.oid, true)") || strings.Contains(query, "SELECT pg_catalog.pg_get_triggerdef(tg.oid, true)") {
+		return &valueRows{
+			columns: []string{"trigger_definition"},
+			rows: [][]driver.Value{
+				{`CREATE TRIGGER orders_audit BEFORE INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION audit_orders()`},
+			},
 		}, nil
 	}
 	if strings.Contains(query, "FROM information_schema.columns c") {
@@ -230,6 +266,50 @@ func (rows *valueRows) Next(values []driver.Value) error {
 	copy(values, rows.rows[rows.index])
 	rows.index++
 	return nil
+}
+
+func (state *connectionAttemptState) open(cp connectParams, sslMode string) (*sql.DB, error) {
+	state.mu.Lock()
+	state.attempts = append(state.attempts, sslMode)
+	state.dsns = append(state.dsns, buildDSNWithSSLMode(cp, sslMode))
+	state.mu.Unlock()
+	return sql.OpenDB(connectionAttemptConnector{state: state, sslMode: sslMode}), nil
+}
+
+func (connector connectionAttemptConnector) Connect(context.Context) (driver.Conn, error) {
+	return &connectionAttemptConn{state: connector.state, sslMode: connector.sslMode}, nil
+}
+
+func (connectionAttemptConnector) Driver() driver.Driver { return connectionAttemptDriver{} }
+
+func (connectionAttemptDriver) Open(string) (driver.Conn, error) { return nil, driver.ErrSkip }
+
+func (*connectionAttemptConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+
+func (*connectionAttemptConn) Close() error { return nil }
+
+func (*connectionAttemptConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (connection *connectionAttemptConn) Ping(ctx context.Context) error {
+	connection.state.mu.Lock()
+	if deadline, ok := ctx.Deadline(); ok {
+		connection.state.deadlines = append(connection.state.deadlines, deadline)
+	}
+	err := connection.state.pingErrors[connection.sslMode]
+	connection.state.mu.Unlock()
+	return err
+}
+
+func (state *connectionAttemptState) snapshot() ([]string, []time.Time) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.attempts...), append([]time.Time(nil), state.deadlines...)
+}
+
+func (state *connectionAttemptState) connectionStrings() []string {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.dsns...)
 }
 
 func openFakeDB(t *testing.T, rowCount int) (*sql.DB, *fakeDriverState) {
@@ -324,6 +404,243 @@ func TestBuildDSNConvertsDBXJDBCURL(t *testing.T) {
 	}
 }
 
+func TestBuildDSNNormalizesPreferWithoutPassingLiteralMode(t *testing.T) {
+	cp := connectParams{
+		Host:      "127.0.0.1",
+		Port:      54321,
+		Database:  "test",
+		Username:  "system",
+		Password:  "secret",
+		URLParams: "SSLMODE=disable&sslmode=prefer&application_name=dbx",
+	}
+	if mode := effectiveSSLMode(cp); mode != "prefer" {
+		t.Fatalf("unexpected effective SSL mode: %q", mode)
+	}
+	dsn := buildDSN(cp)
+	if strings.Count(strings.ToLower(dsn), "sslmode=") != 1 {
+		t.Fatalf("DSN must contain exactly one sslmode: %s", dsn)
+	}
+	if !strings.Contains(dsn, "sslmode=require") || strings.Contains(strings.ToLower(dsn), "sslmode=prefer") {
+		t.Fatalf("prefer must be converted to the first require attempt: %s", dsn)
+	}
+	if !strings.Contains(dsn, "application_name='dbx'") {
+		t.Fatalf("unrelated URL parameters must be preserved: %s", dsn)
+	}
+}
+
+func TestBuildDSNOverridesPreferInNativeConnectionStrings(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		connectionString   string
+		preservedFragments []string
+	}{
+		{
+			name:             "keyword DSN",
+			connectionString: "host=db.example.com application_name='dbx app' sslmode = 'prefer' options='-c search_path=public tenant'",
+			preservedFragments: []string{
+				"host=db.example.com",
+				"application_name='dbx app'",
+				"options='-c search_path=public tenant'",
+			},
+		},
+		{
+			name:             "Kingbase URL",
+			connectionString: "kingbase://system:secret@db.example.com/test?application_name=dbx&SSLMODE=prefer#section",
+			preservedFragments: []string{
+				"kingbase://system:secret@db.example.com/test?",
+				"application_name=dbx",
+				"#section",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cp := connectParams{ConnectionString: test.connectionString}
+			if mode := effectiveSSLMode(cp); mode != "prefer" {
+				t.Fatalf("unexpected effective SSL mode: %q", mode)
+			}
+			dsn := buildDSN(cp)
+			if strings.Count(strings.ToLower(dsn), "sslmode=") != 1 {
+				t.Fatalf("native DSN must contain exactly one sslmode: %s", dsn)
+			}
+			if strings.Contains(strings.ToLower(dsn), "prefer") || !strings.Contains(strings.ToLower(dsn), "sslmode=require") {
+				t.Fatalf("native prefer must be replaced by require: %s", dsn)
+			}
+			for _, fragment := range test.preservedFragments {
+				if !strings.Contains(dsn, fragment) {
+					t.Fatalf("native DSN lost %q: %s", fragment, dsn)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAndPingDBNativeConnectionStringsWithoutSSLModeUsePreferFallback(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		connectionString   string
+		preservedFragments []string
+	}{
+		{
+			name:             "keyword DSN",
+			connectionString: "host=db.example.com application_name=dbx",
+			preservedFragments: []string{
+				"host=db.example.com",
+				"application_name=dbx",
+			},
+		},
+		{
+			name:             "Kingbase URL",
+			connectionString: "kingbase://system:secret@db.example.com/test?application_name=dbx",
+			preservedFragments: []string{
+				"kingbase://system:secret@db.example.com/test?",
+				"application_name=dbx",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cp := connectParams{ConnectionString: test.connectionString}
+			if mode := effectiveSSLMode(cp); mode != "prefer" {
+				t.Fatalf("native connection string without sslmode must use prefer semantics: %q", mode)
+			}
+
+			state := &connectionAttemptState{pingErrors: map[string]error{"require": gokb.ErrSSLNotSupported}}
+			db, err := openAndPingDB(cp, time.Second, state.open)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			attempts, _ := state.snapshot()
+			if strings.Join(attempts, ",") != "require,disable" {
+				t.Fatalf("unexpected implicit prefer attempts: %v", attempts)
+			}
+			dsns := state.connectionStrings()
+			if len(dsns) != 2 {
+				t.Fatalf("unexpected generated DSNs: %v", dsns)
+			}
+			for index, sslMode := range []string{"require", "disable"} {
+				dsn := dsns[index]
+				lowerDSN := strings.ToLower(dsn)
+				if strings.Count(lowerDSN, "sslmode=") != 1 || !strings.Contains(lowerDSN, "sslmode="+sslMode) {
+					t.Fatalf("attempt %s has unexpected sslmode: %s", sslMode, dsn)
+				}
+				if strings.Contains(lowerDSN, "sslmode=prefer") {
+					t.Fatalf("literal prefer reached native driver DSN: %s", dsn)
+				}
+				for _, fragment := range test.preservedFragments {
+					if !strings.Contains(dsn, fragment) {
+						t.Fatalf("native DSN lost %q: %s", fragment, dsn)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAndPingDBHonorsExplicitNativeConnectionStringMode(t *testing.T) {
+	state := &connectionAttemptState{pingErrors: map[string]error{"require": gokb.ErrSSLNotSupported}}
+	db, err := openAndPingDB(connectParams{ConnectionString: "host=db.example.com sslmode=require"}, time.Second, state.open)
+	if db != nil {
+		db.Close()
+	}
+	if !errors.Is(err, gokb.ErrSSLNotSupported) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	attempts, _ := state.snapshot()
+	if len(attempts) != 1 || attempts[0] != "require" {
+		t.Fatalf("explicit native DSN mode must not downgrade: %v", attempts)
+	}
+}
+
+func TestOpenAndPingDBPreferFallbackUsesOneTimeoutBudget(t *testing.T) {
+	state := &connectionAttemptState{pingErrors: map[string]error{"require": gokb.ErrSSLNotSupported}}
+	db, err := openAndPingDB(connectParams{}, time.Second, state.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts, deadlines := state.snapshot()
+	if strings.Join(attempts, ",") != "require,disable" {
+		t.Fatalf("unexpected prefer attempts: %v", attempts)
+	}
+	if len(deadlines) != 2 || !deadlines[0].Equal(deadlines[1]) {
+		t.Fatalf("prefer attempts must share one deadline: %v", deadlines)
+	}
+}
+
+func TestOpenAndPingDBDoesNotDowngradeUnrelatedErrors(t *testing.T) {
+	authErr := errors.New("authentication failed")
+	state := &connectionAttemptState{pingErrors: map[string]error{"require": authErr}}
+	db, err := openAndPingDB(connectParams{}, time.Second, state.open)
+	if db != nil {
+		db.Close()
+	}
+	if !errors.Is(err, authErr) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	attempts, _ := state.snapshot()
+	if strings.Join(attempts, ",") != "require" {
+		t.Fatalf("unrelated errors must not downgrade: %v", attempts)
+	}
+}
+
+func TestOpenAndPingDBExplicitModesNeverDowngrade(t *testing.T) {
+	for _, sslMode := range []string{"disable", "require", "verify-ca", "verify-full"} {
+		t.Run(sslMode, func(t *testing.T) {
+			state := &connectionAttemptState{pingErrors: map[string]error{sslMode: gokb.ErrSSLNotSupported}}
+			db, err := openAndPingDB(connectParams{URLParams: "sslmode=" + sslMode}, time.Second, state.open)
+			if db != nil {
+				db.Close()
+			}
+			if !errors.Is(err, gokb.ErrSSLNotSupported) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			attempts, _ := state.snapshot()
+			if len(attempts) != 1 || attempts[0] != sslMode {
+				t.Fatalf("explicit mode must use one attempt: %v", attempts)
+			}
+		})
+	}
+}
+
+func TestOpenAndPingDBSSLDefaultsToVerifyFull(t *testing.T) {
+	state := &connectionAttemptState{pingErrors: map[string]error{}}
+	db, err := openAndPingDB(connectParams{SSL: true}, time.Second, state.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts, _ := state.snapshot()
+	if len(attempts) != 1 || attempts[0] != "verify-full" {
+		t.Fatalf("SSL=true must stay verify-full: %v", attempts)
+	}
+}
+
+func TestConnectAndTestConnectionSharePreferFallback(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*server, connectParams) error
+	}{
+		{name: "connect", run: func(server *server, cp connectParams) error { return server.connect(cp) }},
+		{name: "test_connection", run: func(server *server, cp connectParams) error { return server.testConnection(cp) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &connectionAttemptState{pingErrors: map[string]error{"require": gokb.ErrSSLNotSupported}}
+			server := newServer()
+			server.openDatabase = state.open
+			cp := connectParams{URLParams: "sslmode=prefer", MySQLCompatMode: true}
+			if err := test.run(server, cp); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.disconnect() })
+			attempts, _ := state.snapshot()
+			if strings.Join(attempts, ",") != "require,disable" {
+				t.Fatalf("unexpected attempts: %v", attempts)
+			}
+		})
+	}
+}
+
 func TestKingbaseListIndexesQuerySupportsSQLServerMode(t *testing.T) {
 	query := kingbaseListIndexesQuery("sys_catalog", "sys", "public", "orders")
 	if !strings.Contains(query, "unnest(ix.indkey) WITH ORDINALITY") {
@@ -331,6 +648,48 @@ func TestKingbaseListIndexesQuerySupportsSQLServerMode(t *testing.T) {
 	}
 	if strings.Contains(query, "[pos.n]") {
 		t.Fatalf("index query should not use dynamic array subscripts in SQL Server mode: %s", query)
+	}
+}
+
+func TestKingbaseCatalogFunctionsFollowMetadataMode(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	tests := []struct {
+		name            string
+		postgresCatalog bool
+		expectedIndex   string
+		expectedTrigger string
+	}{
+		{name: "sys catalog", expectedIndex: "sys_catalog.sys_get_indexdef", expectedTrigger: "sys_catalog.sys_get_triggerdef"},
+		{name: "postgres catalog", postgresCatalog: true, expectedIndex: "pg_catalog.pg_get_indexdef", expectedTrigger: "pg_catalog.pg_get_triggerdef"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &fallbackDriverState{}
+			expressionFallbackState.Store(state)
+			db, err := sql.Open("kingbase-expression-fallback-test", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.SetMaxOpenConns(1)
+			t.Cleanup(func() { _ = db.Close() })
+			server := newServer()
+			server.db = db
+			server.mode.postgresCatalog = test.postgresCatalog
+
+			if _, err := server.listIndexDefinitions("public", "orders"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := server.listTriggerDefinitions("public", "orders"); err != nil {
+				t.Fatal(err)
+			}
+
+			state.mu.Lock()
+			queries := append([]string(nil), state.queries...)
+			state.mu.Unlock()
+			if len(queries) != 2 || !strings.Contains(queries[0], test.expectedIndex+"(") || !strings.Contains(queries[1], test.expectedTrigger+"(") {
+				t.Fatalf("catalog functions do not match metadata mode: %v", queries)
+			}
+		})
 	}
 }
 
@@ -343,6 +702,24 @@ func TestMySQLCompatSchemaQueryKeepsUserSchemasWithSystemLikeNames(t *testing.T)
 		}
 		if strings.Contains(query, "NOT LIKE '"+prefix+"%'") {
 			t.Fatalf("schema query must preserve user schemas such as %sLOG: %s", prefix, query)
+		}
+	}
+}
+
+func TestListSchemasQueryIncludesSystemSchemasWhenEnabled(t *testing.T) {
+	for _, mode := range []kingbaseMode{{}, {postgresCatalog: true}, {mysqlCompat: true}} {
+		query := kingbaseListSchemasSQL(mode, true)
+		if strings.Contains(query, "NOT LIKE") || strings.Contains(query, "<>") {
+			t.Fatalf("show-system query must not filter schemas: %s", query)
+		}
+	}
+}
+
+func TestListSchemasQueryKeepsDefaultTemporarySchemaFilters(t *testing.T) {
+	for _, mode := range []kingbaseMode{{}, {postgresCatalog: true}} {
+		query := kingbaseListSchemasSQL(mode, false)
+		if !strings.Contains(query, "temp_%") {
+			t.Fatalf("default query must keep temporary schema filters: %s", query)
 		}
 	}
 }
@@ -540,7 +917,7 @@ func TestKingbaseIdentityClausesAreExposedAndRendered(t *testing.T) {
 	}
 }
 
-func TestTableDDLIncludesCatalogIdentityClause(t *testing.T) {
+func TestTableDDLIncludesIdentityIndexesTriggersAndComments(t *testing.T) {
 	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
 	expressionFallbackState.Store(&fallbackDriverState{})
 	db, err := sql.Open("kingbase-expression-fallback-test", "")
@@ -559,8 +936,15 @@ func TestTableDDLIncludesCatalogIdentityClause(t *testing.T) {
 	if !strings.Contains(ddl, `"id" integer GENERATED BY DEFAULT AS IDENTITY NOT NULL`) {
 		t.Fatalf("identity clause missing from table DDL: %s", ddl)
 	}
-	if !strings.Contains(ddl, `COMMENT ON TABLE "public"."orders" IS 'orders table';`) {
-		t.Fatalf("table comment missing from table DDL: %s", ddl)
+	for _, expected := range []string{
+		`COMMENT ON TABLE "public"."orders" IS 'orders table';`,
+		`CREATE INDEX orders_id_idx ON public.orders USING btree (id);`,
+		`COMMENT ON INDEX "public"."orders_id_idx" IS 'lookup index';`,
+		`CREATE TRIGGER orders_audit BEFORE INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION audit_orders();`,
+	} {
+		if !strings.Contains(ddl, expected) {
+			t.Fatalf("table DDL missing %q:\n%s", expected, ddl)
+		}
 	}
 }
 
@@ -604,6 +988,14 @@ func TestColumnDDLDefinitionPreservesCompatibilityExtras(t *testing.T) {
 	}
 	if extra := kingbaseIdentityClause(""); extra != nil {
 		t.Fatalf("non-identity column must not expose an extra clause: %#v", extra)
+	}
+}
+
+func TestAppendDDLStatementEnsuresSingleTerminator(t *testing.T) {
+	got := appendDDLStatement("CREATE TABLE \"public\".\"orders\" (\n  \"id\" integer\n)\n", "CREATE INDEX orders_id_idx ON public.orders (id)")
+	want := "CREATE TABLE \"public\".\"orders\" (\n  \"id\" integer\n);\n\nCREATE INDEX orders_id_idx ON public.orders (id);"
+	if got != want {
+		t.Fatalf("unexpected appended DDL:\ngot:  %q\nwant: %q", got, want)
 	}
 }
 
@@ -740,26 +1132,46 @@ func TestDetectMySQLCompatModeAcceptsExplicitMySQLMode(t *testing.T) {
 	}
 }
 
+func TestDetectKingbaseModeReportsDatabaseMode(t *testing.T) {
+	for _, databaseMode := range []string{"oracle", "postgresql"} {
+		t.Run(databaseMode, func(t *testing.T) {
+			db := openModeDetectionDB(t, &modeDetectionDriverState{databaseMode: &databaseMode})
+
+			mode := detectKingbaseMode(db, false)
+
+			if mode.compatibilityMode != databaseMode {
+				t.Fatalf("unexpected compatibility mode: %q", mode.compatibilityMode)
+			}
+		})
+	}
+}
+
 func TestConnectionInfoReportsCompatibilityIdentifierQuote(t *testing.T) {
 	for _, testCase := range []struct {
-		name        string
-		mysqlCompat bool
-		expected    string
+		name              string
+		compatibilityMode string
+		mysqlCompat       bool
+		expectedQuote     string
 	}{
-		{name: "postgres compatible", expected: `"`},
-		{name: "mysql compatible", mysqlCompat: true, expected: "`"},
+		{name: "postgres compatible", compatibilityMode: "postgresql", expectedQuote: `"`},
+		{name: "oracle compatible", compatibilityMode: "oracle", expectedQuote: `"`},
+		{name: "mysql compatible", compatibilityMode: "mysql", mysqlCompat: true, expectedQuote: "`"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			db := openModeDetectionDB(t, &modeDetectionDriverState{})
 			server := newServer()
 			server.db = db
+			server.mode.compatibilityMode = testCase.compatibilityMode
 			server.mode.mysqlCompat = testCase.mysqlCompat
 
 			info, err := server.connectionInfo()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if info["identifierQuote"] != testCase.expected {
+			if info["compatibilityMode"] != testCase.compatibilityMode {
+				t.Fatalf("unexpected compatibility mode: %#v", info["compatibilityMode"])
+			}
+			if info["identifierQuote"] != testCase.expectedQuote {
 				t.Fatalf("unexpected identifier quote: %#v", info["identifierQuote"])
 			}
 		})

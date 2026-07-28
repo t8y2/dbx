@@ -51,8 +51,8 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
   position: relative;
   flex-shrink: 0;
   overflow: hidden;
-  border: 1px solid rgba(120, 120, 128, 0.22) !important;
-  background-color: rgb(229, 229, 229) !important;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent) !important;
+  background-color: var(--input) !important;
   vertical-align: middle;
 }
 
@@ -69,8 +69,8 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 .dbx-switch-thumb {
   display: block !important;
   border-radius: 9999px;
-  background-color: rgb(255, 255, 255) !important;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+  background-color: var(--background) !important;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 18%, transparent);
   transform: translateX(0) !important;
 }
 
@@ -87,8 +87,8 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 .dbx-switch[data-state="checked"],
 .dbx-switch[data-checked],
 .dbx-switch[aria-checked="true"] {
-  border-color: rgb(23, 23, 23) !important;
-  background-color: rgb(23, 23, 23) !important;
+  border-color: var(--primary) !important;
+  background-color: var(--primary) !important;
 }
 
 .dbx-switch[data-size="default"][data-state="checked"] .dbx-switch-thumb,
@@ -103,21 +103,27 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
   transform: translateX(10px) !important;
 }
 
+.dbx-switch[data-state="checked"] .dbx-switch-thumb,
+.dbx-switch[data-checked] .dbx-switch-thumb,
+.dbx-switch[aria-checked="true"] .dbx-switch-thumb {
+  background-color: var(--primary-foreground) !important;
+}
+
 .dark .dbx-switch {
-  border-color: rgba(255, 255, 255, 0.16) !important;
-  background-color: rgba(255, 255, 255, 0.18) !important;
+  border-color: color-mix(in srgb, var(--border) 90%, transparent) !important;
+  background-color: color-mix(in srgb, var(--input) 80%, transparent) !important;
 }
 
 .dark .dbx-switch[data-state="checked"],
 .dark .dbx-switch[data-checked],
 .dark .dbx-switch[aria-checked="true"] {
-  border-color: rgb(245, 245, 245) !important;
-  background-color: rgb(245, 245, 245) !important;
+  border-color: var(--primary) !important;
+  background-color: var(--primary) !important;
 }
 
 .dark .dbx-switch[data-state="checked"] .dbx-switch-thumb,
 .dark .dbx-switch[data-checked] .dbx-switch-thumb,
 .dark .dbx-switch[aria-checked="true"] .dbx-switch-thumb {
-  background-color: rgb(23, 23, 23) !important;
+  background-color: var(--primary-foreground) !important;
 }
 </style>

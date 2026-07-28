@@ -7,12 +7,24 @@ const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY: &str = "compatibleOjdbcVers
 const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM: &str = "compatibleOjdbcVersion=8";
 const ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS: u64 = 15_000;
 
+fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
+    let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
+    if config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana") {
+        ""
+    } else {
+        driver_class
+    }
+}
+
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
         mongo_agent_database(config, database)
     } else if matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
         oracle_agent_database(config, database)
-    } else if matches!(config.db_type, DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Vastbase) {
+    } else if matches!(
+        config.db_type,
+        DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
+    ) {
         postgres_like_agent_database(config, database).to_string()
     } else if is_h2_file_connection(config) {
         h2_agent_database(config)
@@ -25,7 +37,10 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         oracle_jdbc_connection_string(config, host, port, database)
     } else if config.db_type == DatabaseType::OceanbaseOracle {
         oceanbase_oracle_jdbc_connection_string(config, host, port, database)
-    } else if matches!(config.db_type, DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Vastbase) {
+    } else if matches!(
+        config.db_type,
+        DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
+    ) {
         postgres_like_agent_jdbc_connection_string(config, host, port, database)
     } else if config.db_type == DatabaseType::SapHana {
         sap_hana_jdbc_connection_string(config, host, port, database)
@@ -64,7 +79,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "zookeeper_connect_string": zookeeper_connect_string,
         "gbase_server": config.gbase_server,
         "informix_server": config.informix_server,
-        "jdbc_driver_class": config.jdbc_driver_class.as_deref().unwrap_or(""),
+        "jdbc_driver_class": agent_jdbc_driver_class(config),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
     });
     if config.db_type == DatabaseType::ZooKeeper {
@@ -408,6 +423,7 @@ fn postgres_like_agent_jdbc_connection_string(
     let scheme = match config.db_type {
         DatabaseType::Kingbase => "kingbase8",
         DatabaseType::Highgo => "highgo",
+        DatabaseType::Uxdb => "uxdb",
         DatabaseType::Vastbase => "vastbase",
         _ => unreachable!("postgres-like agent JDBC URL requested for {:?}", config.db_type),
     };
@@ -591,6 +607,7 @@ mod tests {
         ConnectionConfig {
             id: "conn".to_string(),
             name: "Connection".to_string(),
+            note: String::new(),
             db_type,
             driver_profile: None,
             driver_label: None,
@@ -726,6 +743,16 @@ mod tests {
 
         assert_eq!(params["database"], "postgres");
         assert_eq!(params["connection_string"], "jdbc:vastbase://vastbase.example.com:5432/postgres");
+    }
+
+    #[test]
+    fn uxdb_agent_params_use_vendor_jdbc_url() {
+        let cfg = config(DatabaseType::Uxdb, Some("uxdb"));
+
+        let params = agent_connect_params(&cfg, "uxdb.example.com", 52025, "uxdb");
+
+        assert_eq!(params["database"], "uxdb");
+        assert_eq!(params["connection_string"], "jdbc:uxdb://uxdb.example.com:52025/uxdb");
     }
 
     #[test]
@@ -999,6 +1026,42 @@ mod tests {
         let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
 
         assert_eq!(params["connection_string"], "jdbc:sap://hana.example.com:30013/?databaseName=TENANT1&encrypt=true");
+    }
+
+    #[test]
+    fn sap_hana_agent_connect_params_normalizes_legacy_driver_class_aliases() {
+        for alias in ["sap_hana", "saphana"] {
+            let mut cfg = config(DatabaseType::SapHana, Some("TENANT1"));
+            cfg.jdbc_driver_class = Some(alias.to_string());
+            cfg.jdbc_driver_paths = vec!["/tmp/ngdbc.jar".to_string()];
+
+            let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
+
+            assert_eq!(params["jdbc_driver_class"], "");
+            assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/ngdbc.jar"]));
+        }
+    }
+
+    #[test]
+    fn sap_hana_agent_connect_params_preserves_custom_driver_class() {
+        let mut cfg = config(DatabaseType::SapHana, Some("TENANT1"));
+        cfg.jdbc_driver_class = Some("com.example.CustomSapHanaDriver".to_string());
+
+        let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
+
+        assert_eq!(params["jdbc_driver_class"], "com.example.CustomSapHanaDriver");
+    }
+
+    #[test]
+    fn other_agent_connect_params_preserve_sap_hana_driver_alias() {
+        let mut cfg = config(DatabaseType::Mysql, Some("test"));
+        cfg.jdbc_driver_class = Some("sap_hana".to_string());
+        cfg.jdbc_driver_paths = vec!["/tmp/custom-driver.jar".to_string()];
+
+        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "test");
+
+        assert_eq!(params["jdbc_driver_class"], "sap_hana");
+        assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/custom-driver.jar"]));
     }
 
     #[test]

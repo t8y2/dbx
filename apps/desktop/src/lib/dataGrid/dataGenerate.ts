@@ -204,11 +204,13 @@ export interface ColumnGenerateConfig {
   generatorCategoryLabel?: string;
   generatorParams?: GeneratorParams;
   isAutoIncrement?: boolean;
+  isTag?: boolean;
   columnDefault?: string | null;
 }
 
 export interface TableGenerateConfig {
   tableName: string;
+  tableType?: string;
   schema: string;
   database: string;
   rowCount: number;
@@ -1791,20 +1793,53 @@ function buildOracleInsertStatements(targetTable: string, columnList: string, va
   return statements;
 }
 
+function isTdengineStableGenerate(config: TableGenerateConfig, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "tdengine") return false;
+  const tableType = config.tableType?.trim().toUpperCase();
+  return tableType === "STABLE" || tableType === "SUPER TABLE" || tableType === "SUPERTABLE" || (!tableType && config.columns.some((column) => column.isTag));
+}
+
+function generateTdengineChildTableName(): string {
+  const randomSuffix = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  return `dbx_gen_${Date.now().toString(36)}_${randomSuffix}`;
+}
+
 export function generateTableData(config: TableGenerateConfig, databaseType?: DatabaseType): GenerateResult {
-  const colNames = config.columns.map((c) => c.columnName);
+  const isTdengineStable = isTdengineStableGenerate(config, databaseType);
+  const hasTbnameColumn = config.columns.some((column) => column.columnName.toLowerCase() === "tbname");
+  const shouldAddTbname = isTdengineStable && !hasTbnameColumn;
+  const tdengineChildTableName = shouldAddTbname ? generateTdengineChildTableName() : null;
+  const tagValues = new Map<string, unknown>();
+  const colNames = shouldAddTbname ? ["tbname", ...config.columns.map((c) => c.columnName)] : config.columns.map((c) => c.columnName);
   const rows: unknown[][] = [];
 
   for (let i = 0; i < config.rowCount; i++) {
-    const row = config.columns.map((col) => generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault));
-    rows.push(row);
+    const row = config.columns.map((col) => {
+      if (isTdengineStable && col.isTag && tagValues.has(col.columnName)) {
+        return tagValues.get(col.columnName);
+      }
+      const value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
+      if (isTdengineStable && col.isTag) {
+        tagValues.set(col.columnName, value);
+      }
+      return value;
+    });
+    rows.push(shouldAddTbname ? [tdengineChildTableName, ...row] : row);
   }
 
-  const quotedCols = config.columns.map((c) => quoteTableIdentifier(databaseType, c.columnName));
+  const quotedCols = colNames.map((column) => quoteTableIdentifier(databaseType, column));
   const targetTable = qualifiedTableName({ databaseType, schema: config.schema, tableName: config.tableName, database: config.database });
   const columnList = quotedCols.join(", ");
   const insertPrefix = `INSERT INTO ${targetTable} (${columnList}) VALUES`;
-  const valueRows = rows.map((row) => `(${row.map((value, index) => formatGeneratedValue(value, databaseType, config.columns[index]?.dataType)).join(", ")})`);
+  const valueRows = rows.map(
+    (row) =>
+      `(${row
+        .map((value, index) => {
+          const configIndex = shouldAddTbname ? index - 1 : index;
+          return formatGeneratedValue(value, databaseType, configIndex >= 0 ? config.columns[configIndex]?.dataType : undefined);
+        })
+        .join(", ")})`,
+  );
   const statements = databaseType === "oracle" ? buildOracleInsertStatements(targetTable, columnList, valueRows) : supportsGeneratedMultiRowValues(databaseType) ? [`${insertPrefix}\n${valueRows.join(",\n")};`] : valueRows.map((values) => `${insertPrefix} ${values};`);
   const sql = statements.join("\n");
 

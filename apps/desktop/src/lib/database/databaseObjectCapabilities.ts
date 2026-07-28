@@ -9,6 +9,7 @@ export interface DatabaseObjectCapabilities {
 }
 
 const TABLE_VIEW_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW"];
+const TABLE_VIEW_MV_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW"];
 
 const ROUTINE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"];
 
@@ -26,6 +27,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres like
   ["kingbase", POSTGRES_LIKE_OBJECTS],
   ["highgo", POSTGRES_LIKE_OBJECTS],
+  ["uxdb", POSTGRES_LIKE_OBJECTS],
   ["vastbase", POSTGRES_LIKE_OBJECTS],
   ["redshift", POSTGRES_LIKE_OBJECTS],
   // oracle
@@ -40,8 +42,13 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["cloudflare-d1", TABLE_VIEW_OBJECTS],
   ["duckdb", TABLE_VIEW_OBJECTS],
   ["clickhouse", TABLE_VIEW_OBJECTS],
+  // Doris: backend listing path still uses the generic SHOW TABLES path (see
+  // `list_tables_once` for `PoolKind::Mysql` in crates/dbx-core/src/schema.rs)
+  // and lacks a MV classifier. Keep Doris on TABLE_VIEW_OBJECTS until a
+  // Doris-specific MV listing/classification lands, otherwise the UI advertises
+  // MV support that the backend cannot route.
   ["doris", TABLE_VIEW_OBJECTS],
-  ["starrocks", TABLE_VIEW_OBJECTS],
+  ["starrocks", TABLE_VIEW_MV_OBJECTS],
   ["hive", TABLE_VIEW_OBJECTS],
   ["spark", TABLE_VIEW_OBJECTS],
   ["trino", TABLE_VIEW_OBJECTS],
@@ -54,6 +61,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["neo4j", TABLE_VIEW_OBJECTS],
   // others
   ["influxdb", ["TABLE"]],
+  ["hbase", ["TABLE"]],
   ["questdb", ["TABLE", "VIEW", "MATERIALIZED_VIEW"]],
   ["manticoresearch", ["TABLE", "FUNCTION"]],
   ["databend", ["TABLE", "VIEW", "PROCEDURE"]],

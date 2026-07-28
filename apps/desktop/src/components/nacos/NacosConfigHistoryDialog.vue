@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { formatNacosHistoryTime } from "@/lib/nacos/nacosAdmin";
 import type { NacosConfigHistoryItem, NacosConfigItem } from "@/types/nacos";
 
 const open = defineModel<boolean>("open", { default: false });
@@ -69,6 +70,10 @@ function display(value?: string | null) {
   return trimmed || "-";
 }
 
+function displayHistoryTime(value?: string | null) {
+  return formatNacosHistoryTime(value);
+}
+
 function operationLabel(value?: string) {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) return "-";
@@ -128,7 +133,7 @@ function loadPage(pageNo: number) {
             <tr v-for="item in items" :key="`${item.historyId}:${item.nid ?? ''}`" class="border-b">
               <td class="max-w-72 truncate px-4 py-2 font-medium" :title="item.dataId">{{ item.dataId }}</td>
               <td class="max-w-44 truncate px-4 py-2 text-xs text-muted-foreground" :title="item.group">{{ item.group || "DEFAULT_GROUP" }}</td>
-              <td class="whitespace-nowrap px-4 py-2 text-xs text-muted-foreground">{{ display(item.lastModifiedTime) }}</td>
+              <td class="whitespace-nowrap px-4 py-2 text-xs text-muted-foreground" :title="display(item.lastModifiedTime)">{{ displayHistoryTime(item.lastModifiedTime) }}</td>
               <td class="max-w-40 truncate px-4 py-2 text-xs text-muted-foreground" :title="item.appName || ''">{{ display(item.appName) }}</td>
               <td class="px-4 py-2">
                 <Badge variant="outline">{{ operationLabel(item.operation) }}</Badge>
@@ -189,7 +194,7 @@ function loadPage(pageNo: number) {
           <div class="min-w-0 truncate font-mono" :title="viewingItem.namespace || 'public'">namespace={{ viewingItem.namespace || "public" }}</div>
           <div class="min-w-0 truncate font-mono" :title="viewingItem.dataId">dataId={{ viewingItem.dataId }}</div>
           <div class="min-w-0 truncate font-mono" :title="viewingItem.group || 'DEFAULT_GROUP'">group={{ viewingItem.group || "DEFAULT_GROUP" }}</div>
-          <div class="min-w-0 truncate" :title="display(viewingItem.lastModifiedTime)">{{ t("nacos.updatedAt") }}={{ display(viewingItem.lastModifiedTime) }}</div>
+          <div class="min-w-0 truncate" :title="display(viewingItem.lastModifiedTime)">{{ t("nacos.updatedAt") }}={{ displayHistoryTime(viewingItem.lastModifiedTime) }}</div>
         </div>
       </DialogHeader>
       <div class="min-h-0 flex-1 overflow-auto bg-muted/20 p-4">

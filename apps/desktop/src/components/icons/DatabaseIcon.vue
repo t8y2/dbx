@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Database } from "@lucide/vue";
+import { useTheme } from "@/composables/useTheme";
 import { webPath } from "@/lib/common/webPath";
 
 const props = defineProps<{
   dbType: string;
 }>();
+const { isDark } = useTheme();
 
 const assetIcons: Record<string, string> = {
   mysql: "mysql",
   postgres: "postgres",
   postgresql: "postgres",
-  cloudberry: "cloudberry.png",
+  cloudberry: "cloudberry",
   sqlite: "sqlite",
   rqlite: "rqlite.png",
   turso: "turso.png",
@@ -38,9 +40,10 @@ const assetIcons: Record<string, string> = {
   kwdb: "kwdb",
   kingbase: "kingbase",
   highgo: "highgo.png",
+  uxdb: "uxdb",
   goldendb: "goldendb.png",
   databend: "databend",
-  vastbase: "vastbase.png",
+  vastbase: "vastbase",
   yashandb: "yashandb.png",
   snowflake: "snowflake",
   h2: "h2",
@@ -49,6 +52,7 @@ const assetIcons: Record<string, string> = {
   presto: "presto",
   prestosql: "presto",
   hive: "hive",
+  hbase: "hbase",
   spark: "spark-logo.png",
   apache_kylin: "apache_kylin",
   sundb: "sundb",
@@ -67,16 +71,16 @@ const assetIcons: Record<string, string> = {
   redshift: "redshift",
   neo4j: "neo4j",
   informix: "informix",
-  databricks: "databricks.webp",
-  saphana: "saphana.webp",
-  teradata: "teradata.webp",
+  databricks: "databricks",
+  saphana: "saphana",
+  teradata: "teradata",
   vertica: "vertica.webp",
-  firebird: "firebird.webp",
-  exasol: "exasol.webp",
-  gbase: "gbase.webp",
-  gbase8a: "gbase.webp",
-  gbase8s: "gbase.webp",
-  tdsql: "tdsql.webp",
+  firebird: "firebird",
+  exasol: "exasol",
+  gbase: "gbase.png",
+  gbase8a: "gbase.png",
+  gbase8s: "gbase.png",
+  tdsql: "tdsql",
   polardb: "polardb.webp",
   greatsql: "greatsql.webp",
   xugu: "xugu.png",
@@ -84,7 +88,7 @@ const assetIcons: Record<string, string> = {
   etcd: "etcd",
   qdrant: "qdrant",
   milvus: "milvus.png",
-  weaviate: "weaviate.png",
+  weaviate: "weaviate",
   chromadb: "chromadb",
   mq: "pulsar",
   pulsar: "pulsar",
@@ -92,7 +96,7 @@ const assetIcons: Record<string, string> = {
   rocketmq: "rocketmq",
   rabbitmq: "rabbitmq",
   nacos: "nacos.png",
-  iris: "iris.png",
+  iris: "iris",
   influxdb: "influxdb",
   zookeeper: "zookeeper",
   jdbcx: "jdbcx",
@@ -106,6 +110,7 @@ const normalizedType = computed(() => props.dbType.toLowerCase().replace(/[\s-]+
 const assetName = computed(() => assetIcons[normalizedType.value]);
 const assetSrc = computed(() => {
   if (!assetName.value) return "";
+  if (normalizedType.value === "uxdb" && isDark.value) return webPath("/icons/database/uxdb-dark.svg");
   return webPath(assetName.value.includes(".") ? `/icons/database/${assetName.value}` : `/icons/database/${assetName.value}.svg`);
 });
 const letter = computed(() => letterIcons[normalizedType.value]);

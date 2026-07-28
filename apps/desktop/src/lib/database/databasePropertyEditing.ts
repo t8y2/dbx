@@ -13,7 +13,7 @@ type PropertyEditConnection = Pick<ConnectionConfig, "db_type" | "driver_profile
 type DatabaseNode = Pick<{ type: TreeNodeType; database?: string | null }, "type" | "database">;
 type SchemaNode = Pick<{ type: TreeNodeType; database?: string | null; schema?: string | null }, "type" | "database" | "schema">;
 
-const POSTGRES_COMMENT_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "vastbase", "opengauss", "yashandb"]);
+const POSTGRES_COMMENT_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "yashandb"]);
 
 export const DATABASE_PROPERTY_EDITING_MATRIX = {
   mysql: { database: ["charsetCollation"] },
@@ -29,6 +29,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   mongodb: { deferred: "database options are not modeled as SQL database properties" },
   oracle: { deferred: "Oracle database properties are instance/user/tablespace administration" },
   elasticsearch: { deferred: "index settings are not database properties" },
+  hbase: { deferred: "namespace and table properties need a dedicated HBase workflow" },
   qdrant: { deferred: "collection settings are not database properties" },
   milvus: { deferred: "collection/database settings need a dedicated vector workflow" },
   weaviate: { deferred: "collection settings are not database properties" },
@@ -42,6 +43,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   gaussdb: { database: ["databaseComment"], schema: ["schemaComment"] },
   kingbase: { database: ["databaseComment"], schema: ["schemaComment"] },
   highgo: { database: ["databaseComment"], schema: ["schemaComment"] },
+  uxdb: { database: ["databaseComment"], schema: ["schemaComment"] },
   vastbase: { database: ["databaseComment"], schema: ["schemaComment"] },
   goldendb: { database: ["charsetCollation"] },
   kwdb: { database: ["databaseComment"], schema: ["schemaComment"] },

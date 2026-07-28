@@ -1376,6 +1376,7 @@ fn sqlite_completion_schemas(
             parent_name: None,
             comment: None,
             data_type: None,
+            signature: None,
         })
         .collect())
 }
@@ -1429,6 +1430,7 @@ fn sqlite_completion_tables(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -1467,6 +1469,7 @@ fn sqlite_completion_columns(
             parent_name: Some(table.to_string()),
             comment: None,
             data_type: Some(data_type),
+            signature: None,
         });
         if candidates.len() >= limit {
             break;
@@ -2374,6 +2377,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
                 truncated,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             })
         } else {
             conn.execute_batch(sql).map_err(|e| e.to_string())?;
@@ -2387,6 +2391,7 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             })
         }
     })

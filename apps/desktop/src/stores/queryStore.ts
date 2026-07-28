@@ -2424,6 +2424,7 @@ export const useQueryStore = defineStore("query", () => {
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
     tab.connectionId = connectionId;
+    tab.catalog = undefined;
     tab.database = database;
     tab.schema = undefined;
     clearResultPayload(tab);

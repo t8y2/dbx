@@ -16,6 +16,7 @@ import type { TransferMode, TransferTableNameCase } from "@/lib/backend/api";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
+import { isSameTransferDatabase } from "@/lib/database/dataTransferSelection";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
 import type { CatalogInfo } from "@/types/database";
@@ -88,7 +89,18 @@ function isCatalogCapable(id: string): boolean {
   return isDorisFamilyCatalogCapable(config?.db_type, config?.driver_profile);
 }
 
-const canStart = computed(() => sourceConnectionId.value && sourceDatabase.value && targetConnectionId.value && targetDatabase.value && selectedTables.value.size > 0 && sourceConnectionId.value + sourceDatabase.value !== targetConnectionId.value + targetDatabase.value);
+const canStart = computed(
+  () =>
+    !!sourceConnectionId.value &&
+    !!sourceDatabase.value &&
+    !!targetConnectionId.value &&
+    !!targetDatabase.value &&
+    selectedTables.value.size > 0 &&
+    !isSameTransferDatabase(
+      { connectionId: sourceConnectionId.value, catalog: sourceCatalog.value, catalogs: sourceCatalogs.value, database: sourceDatabase.value },
+      { connectionId: targetConnectionId.value, catalog: targetCatalog.value, catalogs: targetCatalogs.value, database: targetDatabase.value },
+    ),
+);
 
 function toggleSelectAll() {
   if (allSelected.value) {

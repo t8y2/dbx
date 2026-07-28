@@ -1503,12 +1503,12 @@ watch(driverStoreTab, (tab) => {
                 <div v-if="drivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
                   {{ t("common.loading") }}
                 </div>
-                <!-- Empty: no search results at all -->
-                <div v-else-if="isDriverSearchActive && searchedDrivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
+                <!-- Empty: no search results (suppressed when updatable drivers appear above) -->
+                <div v-else-if="isDriverSearchActive && searchedDrivers.length === 0 && globalUpdatableDrivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
                   {{ t("driverStore.noMatchingDrivers") }}
                 </div>
-                <!-- Empty: no drivers in selected category -->
-                <div v-else-if="!isDriverSearchActive && categoryFilteredDrivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
+                <!-- Empty: no drivers in selected category (suppressed when updatable drivers appear above) -->
+                <div v-else-if="!isDriverSearchActive && categoryFilteredDrivers.length === 0 && globalUpdatableDrivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
                   {{ t("driverStore.noMatchingDrivers") }}
                 </div>
 

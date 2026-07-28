@@ -131,4 +131,32 @@ describe("ExportProgressPopover data transfer duration", () => {
     expect(document.body.textContent).toContain("users");
     expect(document.body.textContent).toContain("permission denied for relation users");
   });
+
+  it("shows the total failure count and omitted-detail notice when the bounded list is full", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("bounded-failures", "source to target", 101);
+    for (let index = 0; index < 101; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        transferId: task.exportId,
+        table: `table_${index}`,
+        tableIndex: index,
+        totalTables: 101,
+        rowsTransferred: 0,
+        totalRows: null,
+        status: "error",
+        error: `failure ${index}`,
+        terminal: false,
+      });
+    }
+
+    await mountPopover();
+
+    const detailsButton = document.body.querySelector<HTMLButtonElement>('button[aria-expanded="false"]');
+    expect(detailsButton?.textContent).toContain("Failure details (101)");
+    detailsButton?.click();
+    await nextTick();
+
+    expect(document.body.textContent).toContain("1 additional failure detail(s) not shown");
+    expect(document.body.textContent).not.toContain("failure 100");
+  });
 });

@@ -5,6 +5,8 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
+use crate::sse::TransferProgressChannel;
+
 pub struct LoginRateLimit {
     pub fail_count: u32,
     pub locked_until: Option<std::time::Instant>,
@@ -26,6 +28,7 @@ pub struct WebState {
     pub password_hash: RwLock<Option<String>>,
     pub sessions: RwLock<HashSet<String>>,
     pub sse_channels: RwLock<HashMap<String, broadcast::Sender<String>>>,
+    pub transfer_progress_channels: RwLock<HashMap<String, Arc<TransferProgressChannel>>>,
     pub table_import_channels: RwLock<HashMap<String, watch::Sender<String>>>,
     pub sql_file_executions: RwLock<HashMap<String, CancellationToken>>,
     pub nacos_imports: RwLock<HashMap<String, NacosImportContext>>,

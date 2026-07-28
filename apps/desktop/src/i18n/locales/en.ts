@@ -1383,6 +1383,8 @@ export default {
     elapsed: "Elapsed: {duration}",
     showFailureDetails: "Failure details ({count})",
     hideFailureDetails: "Hide failure details",
+    failureDetailTruncated: "Error details were truncated",
+    failureDetailsOmitted: "{count} additional failure detail(s) not shown",
   },
   welcome: {
     title: "Database Workspace",

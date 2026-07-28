@@ -1325,6 +1325,8 @@ export default withEnglishFallback({
     elapsed: "耗時：{duration}",
     showFailureDetails: "失敗詳情（{count}）",
     hideFailureDetails: "收合失敗詳情",
+    failureDetailTruncated: "錯誤詳情已截斷",
+    failureDetailsOmitted: "另有 {count} 條失敗詳情未顯示",
   },
   welcome: {
     title: "資料庫工作檯",

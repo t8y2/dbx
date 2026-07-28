@@ -10,7 +10,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 import * as api from "@/lib/backend/api";
-import { formatDataTransferDuration, useExportTracker } from "@/composables/useExportTracker";
+import { formatDataTransferDuration, MAX_TRANSFER_FAILURE_DETAIL_BYTES, MAX_TRANSFER_FAILURE_DETAILS, MAX_TRANSFER_FAILURE_ERROR_BYTES, useExportTracker } from "@/composables/useExportTracker";
 
 let now = 0;
 
@@ -176,6 +176,61 @@ describe("data transfer failure details", () => {
       { table: "users", error: "permission denied by policy" },
       { table: "orders", error: "table missing" },
     ]);
+  });
+
+  it("bounds many distinct failures and deduplicates retained and omitted table updates", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("many-failures", "many tables", 250);
+
+    for (let index = 0; index < 250; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+      });
+    }
+
+    expect(task.transferFailures).toHaveLength(MAX_TRANSFER_FAILURE_DETAILS);
+    expect(task.transferFailuresOmitted).toBe(150);
+
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, "error", false),
+      table: "table_150",
+      error: "updated omitted failure",
+    });
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, "error", false),
+      table: "table_0",
+      error: "updated retained failure",
+    });
+
+    expect(task.transferFailuresOmitted).toBe(150);
+    expect(task.transferFailures?.[0]).toEqual({ table: "table_0", error: "updated retained failure" });
+  });
+
+  it("limits individual and total UTF-8 error detail bytes without splitting characters", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("long-failures", "long errors", 40);
+    const longError = "错误🙂".repeat(4_000);
+
+    for (let index = 0; index < 40; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `long_table_${index}`,
+        error: longError,
+      });
+    }
+
+    const encoder = new TextEncoder();
+    const retainedBytes = task.transferFailures!.reduce((total, failure) => {
+      expect(encoder.encode(failure.error).length).toBeLessThanOrEqual(MAX_TRANSFER_FAILURE_ERROR_BYTES);
+      expect(failure.error.endsWith("\ud83d")).toBe(false);
+      expect(failure.truncated).toBe(true);
+      return total + encoder.encode(failure.table).length + encoder.encode(failure.error).length;
+    }, 0);
+
+    expect(retainedBytes).toBeLessThanOrEqual(MAX_TRANSFER_FAILURE_DETAIL_BYTES);
+    expect(task.transferFailuresOmitted).toBeGreaterThan(0);
   });
 });
 

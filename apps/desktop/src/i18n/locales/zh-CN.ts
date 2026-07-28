@@ -1384,6 +1384,8 @@ export default withEnglishFallback({
     elapsed: "耗时：{duration}",
     showFailureDetails: "失败详情（{count}）",
     hideFailureDetails: "收起失败详情",
+    failureDetailTruncated: "错误详情已截断",
+    failureDetailsOmitted: "另有 {count} 条失败详情未显示",
   },
   welcome: {
     title: "数据库工作台",

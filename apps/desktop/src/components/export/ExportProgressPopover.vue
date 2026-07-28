@@ -141,6 +141,10 @@ function failureDetailsExpanded(exportId: string) {
 function toggleFailureDetails(exportId: string) {
   expandedFailureTaskIds.value = failureDetailsExpanded(exportId) ? expandedFailureTaskIds.value.filter((id) => id !== exportId) : [...expandedFailureTaskIds.value, exportId];
 }
+
+function failureDetailCount(task: ExportTask) {
+  return (task.transferFailures?.length ?? 0) + (task.transferFailuresOmitted ?? 0);
+}
 </script>
 
 <template>
@@ -184,16 +188,18 @@ function toggleFailureDetails(exportId: string) {
               <span v-if="task.status === 'Error' && task.errorMessage" class="mt-1 block whitespace-normal break-words text-destructive" :title="task.errorMessage">
                 {{ task.errorMessage }}
               </span>
-              <template v-if="task.kind === 'data-transfer' && task.transferFailures?.length">
+              <template v-if="task.kind === 'data-transfer' && failureDetailCount(task) > 0">
                 <button class="mt-1.5 flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary" :aria-expanded="failureDetailsExpanded(task.exportId)" @click="toggleFailureDetails(task.exportId)">
                   <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': failureDetailsExpanded(task.exportId) }" />
-                  {{ failureDetailsExpanded(task.exportId) ? t("exportProgress.hideFailureDetails") : t("exportProgress.showFailureDetails", { count: task.transferFailures.length }) }}
+                  {{ failureDetailsExpanded(task.exportId) ? t("exportProgress.hideFailureDetails") : t("exportProgress.showFailureDetails", { count: failureDetailCount(task) }) }}
                 </button>
                 <div v-if="failureDetailsExpanded(task.exportId)" class="mt-1.5 max-h-44 overflow-y-auto rounded border border-destructive/20 bg-destructive/5">
                   <div v-for="failure in task.transferFailures" :key="failure.table" class="border-b border-destructive/15 px-2.5 py-2 last:border-b-0">
                     <div class="break-all font-mono font-medium text-foreground">{{ failure.table }}</div>
                     <div class="mt-0.5 select-text whitespace-pre-wrap break-words text-destructive">{{ failure.error }}</div>
+                    <div v-if="failure.truncated" class="mt-0.5 text-muted-foreground">{{ t("exportProgress.failureDetailTruncated") }}</div>
                   </div>
+                  <div v-if="task.transferFailuresOmitted" class="px-2.5 py-2 text-muted-foreground">{{ t("exportProgress.failureDetailsOmitted", { count: task.transferFailuresOmitted }) }}</div>
                 </div>
               </template>
             </div>

@@ -322,6 +322,18 @@ class TDengineAgentMetadataTest {
             "2026-05-16 09:35:58.123",
             TDengineAgent.decodeTdengineValue(Timestamp.valueOf("2026-05-16 09:35:58.123"))
         );
+        Assertions.assertEquals(
+            "2026-05-16 09:35:58.000",
+            TDengineAgent.decodeTdengineValue(Timestamp.valueOf("2026-05-16 09:35:58"))
+        );
+        Assertions.assertEquals(
+            "2026-05-16 09:35:58.123456",
+            TDengineAgent.decodeTdengineValue(Timestamp.valueOf("2026-05-16 09:35:58.123456"))
+        );
+        Assertions.assertEquals(
+            "2026-05-16 09:35:58.123456789",
+            TDengineAgent.decodeTdengineValue(Timestamp.valueOf("2026-05-16 09:35:58.123456789"))
+        );
     }
 
     @Test

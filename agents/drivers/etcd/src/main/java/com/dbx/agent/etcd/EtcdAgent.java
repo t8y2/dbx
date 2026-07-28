@@ -9,20 +9,33 @@ import io.grpc.netty.GrpcSslContexts;
 import io.etcd.jetcd.ByteSequence;
 import io.etcd.jetcd.Client;
 import io.etcd.jetcd.ClientBuilder;
+import io.etcd.jetcd.Cluster;
 import io.etcd.jetcd.KV;
 import io.etcd.jetcd.KeyValue;
-import io.etcd.jetcd.kv.DeleteResponse;
-import io.etcd.jetcd.kv.GetResponse;
-import io.etcd.jetcd.kv.PutResponse;
+import io.etcd.jetcd.Lease;
+import io.etcd.jetcd.Maintenance;
+import io.etcd.jetcd.Watch;
+import io.etcd.jetcd.cluster.Member;
+import io.etcd.jetcd.cluster.MemberListResponse;
 import io.etcd.jetcd.kv.TxnResponse;
 import io.etcd.jetcd.lease.LeaseGrantResponse;
 import io.etcd.jetcd.lease.LeaseTimeToLiveResponse;
+import io.etcd.jetcd.maintenance.AlarmMember;
+import io.etcd.jetcd.maintenance.AlarmResponse;
+import io.etcd.jetcd.maintenance.StatusResponse;
 import io.etcd.jetcd.op.Cmp;
 import io.etcd.jetcd.op.CmpTarget;
 import io.etcd.jetcd.op.Op;
+import io.etcd.jetcd.kv.DeleteResponse;
+import io.etcd.jetcd.kv.GetResponse;
+import io.etcd.jetcd.kv.PutResponse;
+import io.etcd.jetcd.options.DeleteOption;
 import io.etcd.jetcd.options.GetOption;
 import io.etcd.jetcd.options.LeaseOption;
 import io.etcd.jetcd.options.PutOption;
+import io.etcd.jetcd.options.WatchOption;
+import io.etcd.jetcd.watch.WatchEvent;
+import io.etcd.jetcd.watch.WatchResponse;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import java.io.BufferedReader;
@@ -34,26 +47,43 @@ import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class EtcdAgent {
     private static final Gson GSON = new Gson();
     private static final int DEFAULT_LIMIT = 100;
     private static final int RPC_TIMEOUT_SECONDS = 30;
     private static final int PRESERVE_LEASE_MAX_ATTEMPTS = 3;
+    private static final long HISTORY_DEFAULT_REVISION_WINDOW = 10_000L;
     private static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
         AgentProtocol.CAPABILITY_CONNECT,
         AgentProtocol.CAPABILITY_TEST_CONNECTION,
         AgentProtocol.CAPABILITY_KV,
-        AgentProtocol.CAPABILITY_KV_TTL
+        AgentProtocol.CAPABILITY_KV_TTL,
+        AgentProtocol.CAPABILITY_KV_CAS,
+        AgentProtocol.CAPABILITY_KV_LIST_VALUES,
+        AgentProtocol.CAPABILITY_KV_STATUS,
+        AgentProtocol.CAPABILITY_KV_HISTORY
     ));
     private static Client client;
     private static KV kv;
+    private static List<String> connectedEndpoints = Collections.emptyList();
 
     private EtcdAgent() {
     }
@@ -69,6 +99,7 @@ public final class EtcdAgent {
         closeClient();
         client = nextClient;
         kv = client.getKVClient();
+        connectedEndpoints = endpoints(connection);
         return Collections.singletonMap("ok", true);
     }
 
@@ -141,16 +172,21 @@ public final class EtcdAgent {
         KV active = requireKv();
         String prefix = stringOrDefault(params, "prefix", "");
         int limit = intOrDefault(params, "limit", DEFAULT_LIMIT);
+        Long revision = longOrNull(params, "revision");
+        boolean includeValues = boolOrDefault(params, "includeValues", false);
         String continuation = stringOrNull(params, "continuation");
         ByteSequence start = continuation == null || continuation.isBlank()
             ? prefixStart(prefix)
             : ByteSequence.from(Base64.getDecoder().decode(continuation));
-        GetOption option = GetOption.newBuilder()
+        GetOption.Builder optionBuilder = GetOption.newBuilder()
             .withRange(prefixEnd(byteSequence(prefix)))
             .withLimit(Math.max(1, limit))
             .withSortField(GetOption.SortTarget.KEY)
-            .withSortOrder(GetOption.SortOrder.ASCEND)
-            .build();
+            .withSortOrder(GetOption.SortOrder.ASCEND);
+        if (revision != null && revision > 0) {
+            optionBuilder.withRevision(revision);
+        }
+        GetOption option = optionBuilder.build();
         GetResponse response = active.get(start, option).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
 
         List<Map<String, Object>> keys = new ArrayList<>();
@@ -158,24 +194,29 @@ public final class EtcdAgent {
         for (KeyValue item : kvs) {
             Map<String, Object> row = metadata(item);
             row.put("key", displayBytes(item.getKey().getBytes()));
+            row.put("keyBytes", bytesObject(item.getKey().getBytes()));
+            if (includeValues) {
+                row.put("value", valueObject(item.getValue().getBytes()));
+            }
             keys.add(row);
         }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("keys", keys);
         result.put("continuation", response.isMore() && !kvs.isEmpty() ? nextContinuation(kvs.get(kvs.size() - 1)) : null);
-        result.put("revision", response.getHeader().getRevision());
+        result.put("revision", longString(response.getHeader().getRevision()));
         return result;
     }
 
     private static Object get(JsonObject params) throws Exception {
         KV active = requireKv();
-        String key = params.get("key").getAsString();
-        boolean metadataOnly = boolOrDefault(params, "metadataOnly", false);
-        GetOption option = metadataOnly
-            ? GetOption.builder().withKeysOnly(true).build()
-            : GetOption.DEFAULT;
-        GetResponse response = active.get(byteSequence(key), option).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        ByteSequence key = keyBytes(params);
+        Long revision = longOrNull(params, "revision");
+        GetOption.Builder optionBuilder = GetOption.newBuilder();
+        if (revision != null && revision > 0) {
+            optionBuilder.withRevision(revision);
+        }
+        GetResponse response = active.get(key, optionBuilder.build()).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         Map<String, Object> result = new LinkedHashMap<>();
         if (response.getKvs().isEmpty()) {
             result.put("found", false);
@@ -185,27 +226,24 @@ public final class EtcdAgent {
             return result;
         }
         KeyValue item = response.getKvs().get(0);
-        Map<String, Object> metadata = metadata(item);
-        if (item.getLease() > 0) {
-            LeaseTimeToLiveResponse lease =
-                requireClient().getLeaseClient().timeToLive(item.getLease(), LeaseOption.DEFAULT)
-                    .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            metadata.put("ttl", lease.getTTL());
-        }
         result.put("found", true);
         result.put("key", displayBytes(item.getKey().getBytes()));
-        result.put("value", metadataOnly ? null : valueObject(item.getValue().getBytes()));
-        result.put("metadata", metadata);
+        result.put("keyBytes", bytesObject(item.getKey().getBytes()));
+        if (!boolOrDefault(params, "metadataOnly", false)) {
+            result.put("value", valueObject(item.getValue().getBytes()));
+        } else {
+            result.put("value", null);
+        }
+        result.put("metadata", metadataWithTtl(item));
         return result;
     }
 
     private static Object put(JsonObject params) throws Exception {
         KV active = requireKv();
-        Client activeClient = requireClient();
-        String key = params.get("key").getAsString();
+        ByteSequence key = keyBytes(params);
         byte[] value = parseValue(params.getAsJsonObject("value"));
-        ByteSequence keyBytes = byteSequence(key);
-        ByteSequence valueBytes = ByteSequence.from(value);
+        Long expectedModRevision = longOrNull(params, "expectedModRevision");
+        Long expectedCreateRevision = longOrNull(params, "expectedCreateRevision");
         JsonElement leaseElement = params.get("lease");
         JsonElement ttlElement = params.get("ttl");
         boolean hasLease = leaseElement != null && !leaseElement.isJsonNull();
@@ -214,43 +252,56 @@ public final class EtcdAgent {
         if ((hasLease && hasTtl) || (preserveLease && (hasLease || hasTtl))) {
             throw new IllegalArgumentException("lease, ttl, and preserveLease cannot be specified together");
         }
-
         if (preserveLease) {
-            long revision = putPreservingLease(active, keyBytes, valueBytes);
-            return Collections.singletonMap("revision", revision);
+            long revision = putPreservingLease(active, key, ByteSequence.from(value));
+            return Collections.singletonMap("revision", longString(revision));
         }
-
-        Long leaseId = null;
+        PutOption option = PutOption.DEFAULT;
         long grantedLeaseId = 0;
         if (hasTtl) {
             long ttl = ttlElement.getAsLong();
-            if (ttl <= 0) {
-                throw new IllegalArgumentException("ttl must be a positive integer");
-            }
-            LeaseGrantResponse grant =
-                activeClient.getLeaseClient().grant(ttl).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (ttl <= 0) throw new IllegalArgumentException("ttl must be a positive integer");
+            LeaseGrantResponse grant = requireClient().getLeaseClient().grant(ttl).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             grantedLeaseId = grant.getID();
-            leaseId = grantedLeaseId;
+            option = PutOption.newBuilder().withLeaseId(grantedLeaseId).build();
         } else if (hasLease) {
-            leaseId = leaseElement.getAsLong();
+            option = PutOption.newBuilder().withLeaseId(leaseElement.getAsLong()).build();
         }
-
-        try {
-            PutResponse response;
-            if (leaseId != null) {
-                PutOption option = PutOption.newBuilder().withLeaseId(leaseId).build();
-                response = active.put(keyBytes, valueBytes, option)
+        final long leaseToCleanUp = grantedLeaseId;
+        final Lease leaseClient = leaseToCleanUp == 0 ? null : requireClient().getLeaseClient();
+        final PutOption writeOption = option;
+        return cleanUpGrantedLeaseOnFailure(leaseToCleanUp, leaseClient, () -> {
+            if (expectedModRevision != null || expectedCreateRevision != null) {
+                List<Cmp> comparisons = new ArrayList<>();
+                if (expectedModRevision != null) {
+                    comparisons.add(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.modRevision(expectedModRevision)));
+                }
+                if (expectedCreateRevision != null) {
+                    comparisons.add(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.createRevision(expectedCreateRevision)));
+                }
+                TxnResponse response = active.txn()
+                    .If(comparisons.toArray(Cmp[]::new))
+                    .Then(Op.put(key, ByteSequence.from(value), writeOption))
+                    .commit()
                     .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            } else {
-                response = active.put(keyBytes, valueBytes)
-                    .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                if (!response.isSucceeded()) {
+                    throw new IllegalStateException("ETCD_CAS_CONFLICT: key changed after it was loaded");
+                }
+                return Collections.singletonMap("revision", longString(response.getHeader().getRevision()));
             }
-            return Collections.singletonMap("revision", response.getHeader().getRevision());
+            PutResponse response = active.put(key, ByteSequence.from(value), writeOption)
+                .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            return Collections.singletonMap("revision", longString(response.getHeader().getRevision()));
+        });
+    }
+
+    static <T> T cleanUpGrantedLeaseOnFailure(long grantedLeaseId, Lease leaseClient, Callable<T> write) throws Exception {
+        try {
+            return write.call();
         } catch (Exception error) {
             if (grantedLeaseId != 0) {
                 try {
-                    activeClient.getLeaseClient().revoke(grantedLeaseId)
-                        .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    leaseClient.revoke(grantedLeaseId).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 } catch (Exception revokeError) {
                     error.addSuppressed(revokeError);
                 }
@@ -261,8 +312,7 @@ public final class EtcdAgent {
 
     static long putPreservingLease(KV active, ByteSequence key, ByteSequence value) throws Exception {
         for (int attempt = 0; attempt < PRESERVE_LEASE_MAX_ATTEMPTS; attempt++) {
-            GetResponse existing =
-                active.get(key, GetOption.DEFAULT).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            GetResponse existing = active.get(key, GetOption.DEFAULT).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (existing.getKvs().isEmpty() || existing.getKvs().get(0).getLease() <= 0) {
                 throw new IllegalStateException("Cannot preserve lease: key does not exist or has no lease");
             }
@@ -284,11 +334,330 @@ public final class EtcdAgent {
 
     private static Object delete(JsonObject params) throws Exception {
         KV active = requireKv();
-        DeleteResponse response =
-            active.delete(byteSequence(params.get("key").getAsString())).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        ByteSequence key = keyBytes(params);
+        Long expectedModRevision = longOrNull(params, "expectedModRevision");
+        if (expectedModRevision != null) {
+            TxnResponse txnResponse = active.txn()
+                .If(new Cmp(key, Cmp.Op.EQUAL, CmpTarget.modRevision(expectedModRevision)))
+                .Then(Op.delete(key, DeleteOption.DEFAULT))
+                .commit()
+                .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!txnResponse.isSucceeded()) {
+                throw new IllegalStateException("ETCD_CAS_CONFLICT: key changed after it was loaded");
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("deleted", 1);
+            result.put("revision", longString(txnResponse.getHeader().getRevision()));
+            return result;
+        }
+        DeleteResponse response = active.delete(key).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("deleted", response.getDeleted());
-        result.put("revision", response.getHeader().getRevision());
+        result.put("revision", longString(response.getHeader().getRevision()));
+        return result;
+    }
+
+    private static Object rename(JsonObject params) throws Exception {
+        KV active = requireKv();
+        ByteSequence sourceKey = keyBytes(params);
+        ByteSequence targetKey = byteSequence(params.get("newKey").getAsString());
+        if (Arrays.equals(sourceKey.getBytes(), targetKey.getBytes())) {
+            Map<String, Object> unchanged = new LinkedHashMap<>();
+            unchanged.put("renamed", true);
+            unchanged.put("revision", null);
+            return unchanged;
+        }
+
+        GetResponse sourceResponse = active.get(sourceKey).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        if (sourceResponse.getKvs().isEmpty()) {
+            throw new IllegalStateException("ETCD_NOT_FOUND: source key does not exist");
+        }
+        KeyValue source = sourceResponse.getKvs().get(0);
+        Long expected = longOrNull(params, "expectedModRevision");
+        long expectedRevision = expected == null ? source.getModRevision() : expected;
+        PutOption putOption = source.getLease() == 0
+            ? PutOption.DEFAULT
+            : PutOption.newBuilder().withLeaseId(source.getLease()).build();
+
+        TxnResponse response = active.txn()
+            .If(
+                new Cmp(sourceKey, Cmp.Op.EQUAL, CmpTarget.modRevision(expectedRevision)),
+                new Cmp(targetKey, Cmp.Op.EQUAL, CmpTarget.createRevision(0))
+            )
+            .Then(
+                Op.put(targetKey, source.getValue(), putOption),
+                Op.delete(sourceKey, DeleteOption.DEFAULT)
+            )
+            .commit()
+            .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        if (!response.isSucceeded()) {
+            throw new IllegalStateException("ETCD_CAS_CONFLICT: source changed or target already exists");
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("renamed", true);
+        result.put("revision", longString(response.getHeader().getRevision()));
+        return result;
+    }
+
+    private static Object history(JsonObject params) throws Exception {
+        requireKv();
+        ByteSequence key = keyBytes(params);
+        int limit = Math.min(Math.max(1, intOrDefault(params, "limit", 100)), 500);
+        Long requestedEnd = longOrNull(params, "endRevision");
+        GetOption.Builder latestOption = GetOption.newBuilder();
+        if (requestedEnd != null && requestedEnd > 0) {
+            latestOption.withRevision(requestedEnd);
+        }
+        GetResponse latest = kv.get(key, latestOption.build()).get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        long endRevision = requestedEnd == null ? latest.getHeader().getRevision() : requestedEnd;
+        long targetKeyRevision = latest.getKvs().isEmpty()
+            ? endRevision
+            : latest.getKvs().get(0).getModRevision();
+        Long requestedStart = longOrNull(params, "startRevision");
+        long startRevision = historyStartRevision(requestedStart, targetKeyRevision);
+        if (startRevision > targetKeyRevision) {
+            return Map.of(
+                "events", Collections.emptyList(),
+                "observedRevision", longString(endRevision),
+                "truncated", false
+            );
+        }
+
+        Deque<Map<String, Object>> events = new ArrayDeque<>(limit);
+        AtomicBoolean truncated = new AtomicBoolean(requestedStart == null && startRevision > 1L);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        CountDownLatch created = new CountDownLatch(1);
+        CountDownLatch completed = new CountDownLatch(1);
+        Watch watch = client.getWatchClient();
+        WatchOption option = WatchOption.newBuilder()
+            .withRevision(startRevision)
+            .withPrevKV(true)
+            .withProgressNotify(true)
+            .withCreateNotify(true)
+            .build();
+
+        Watch.Watcher watcher = watch.watch(key, option, new Watch.Listener() {
+            @Override
+            public void onNext(WatchResponse response) {
+                if (response.isCreatedNotify()) {
+                    created.countDown();
+                }
+                for (WatchEvent event : response.getEvents()) {
+                    KeyValue item = event.getKeyValue();
+                    long revision = item.getModRevision();
+                    if (revision > endRevision) {
+                        continue;
+                    }
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("eventType", event.getEventType() == WatchEvent.EventType.DELETE ? "delete" : "put");
+                    row.put("revision", longString(revision));
+                    row.put(
+                        "value",
+                        event.getEventType() == WatchEvent.EventType.DELETE
+                            ? null
+                            : valueObject(item.getValue().getBytes())
+                    );
+                    KeyValue previous = event.getPrevKV();
+                    row.put(
+                        "previousValue",
+                        previous != null && previous.getVersion() > 0
+                            ? valueObject(previous.getValue().getBytes())
+                            : null
+                    );
+                    row.put(
+                        "metadata",
+                        event.getEventType() == WatchEvent.EventType.DELETE && previous != null
+                            ? metadata(previous)
+                            : metadata(item)
+                    );
+                    appendBoundedHistory(events, row, limit, truncated);
+                    if (revision >= targetKeyRevision) {
+                        completed.countDown();
+                    }
+                }
+                if (response.isProgressNotify() && response.getHeader().getRevision() >= endRevision) {
+                    completed.countDown();
+                }
+            }
+
+            @Override
+            public void onError(Throwable throwable) {
+                failure.set(throwable);
+                completed.countDown();
+            }
+
+            @Override
+            public void onCompleted() {
+                completed.countDown();
+            }
+        });
+
+        try {
+            if (!created.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("ETCD_HISTORY_TIMEOUT: watcher was not created");
+            }
+            // For an existing exact key, its latest mod revision is an explicit
+            // replay boundary. This avoids relying on progress notifications,
+            // which older etcd/jetcd combinations do not consistently emit.
+            watcher.requestProgress();
+            if (!completed.await(15, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("ETCD_HISTORY_TIMEOUT: history replay did not reach the requested revision");
+            }
+        } finally {
+            watcher.close();
+        }
+        if (failure.get() != null) {
+            Throwable cause = rootCause(failure.get());
+            if (cause instanceof io.etcd.jetcd.common.exception.CompactedException compacted) {
+                throw new IllegalStateException(
+                    "ETCD_COMPACTED: requested history was compacted at revision " + compacted.getCompactedRevision()
+                );
+            }
+            throw new IllegalStateException("ETCD_HISTORY_FAILED: " + safeMessage(cause));
+        }
+
+        List<Map<String, Object>> page;
+        synchronized (events) {
+            page = new ArrayList<>(events);
+        }
+        page.sort(Comparator.comparingLong(row -> -Long.parseLong((String) row.get("revision"))));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("events", page);
+        result.put("observedRevision", longString(endRevision));
+        result.put("truncated", truncated.get());
+        return result;
+    }
+
+    static long historyStartRevision(Long requestedStart, long targetRevision) {
+        if (requestedStart != null) {
+            return Math.max(1L, requestedStart);
+        }
+        return Math.max(1L, targetRevision - HISTORY_DEFAULT_REVISION_WINDOW + 1L);
+    }
+
+    static <T> void appendBoundedHistory(
+        Deque<T> events,
+        T event,
+        int limit,
+        AtomicBoolean truncated
+    ) {
+        synchronized (events) {
+            if (events.size() == limit) {
+                events.removeFirst();
+                truncated.set(true);
+            }
+            events.addLast(event);
+        }
+    }
+
+    private static Object status() throws Exception {
+        requireKv();
+        Maintenance maintenance = client.getMaintenanceClient();
+        Cluster cluster = client.getClusterClient();
+        Map<Long, Member> membersById = new HashMap<>();
+        List<String> endpoints = new ArrayList<>(connectedEndpoints);
+        try {
+            MemberListResponse memberList = cluster.listMember().get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            for (Member member : memberList.getMembers()) {
+                membersById.put(member.getId(), member);
+                for (java.net.URI uri : member.getClientURIs()) {
+                    if (uri.getHost() == null || "0.0.0.0".equals(uri.getHost()) || "::".equals(uri.getHost())) {
+                        continue;
+                    }
+                    String endpoint = uri.toString();
+                    if (!endpoints.contains(endpoint)) {
+                        endpoints.add(endpoint);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // Status still provides useful information for configured endpoints.
+        }
+
+        List<String> alarms = new ArrayList<>();
+        try {
+            AlarmResponse alarmResponse = maintenance.listAlarms().get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            for (AlarmMember alarm : alarmResponse.getAlarms()) {
+                alarms.add(alarm.getAlarmType().name() + "@" + Long.toUnsignedString(alarm.getMemberId()));
+            }
+        } catch (Exception error) {
+            alarms.add("UNAVAILABLE: " + safeMessage(rootCause(error)));
+        }
+
+        GetOption countOption = GetOption.newBuilder()
+            .withRange(ByteSequence.from(new byte[] {0}))
+            .withCountOnly(true)
+            .build();
+        GetResponse countResponse = kv.get(ByteSequence.from(new byte[] {0}), countOption)
+            .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+        List<Map<String, Object>> statusMembers = new ArrayList<>();
+        Set<String> observedMemberIds = new HashSet<>();
+        String clusterId = null;
+        String revision = longString(countResponse.getHeader().getRevision());
+        String leaderId = null;
+        Map<String, CompletableFuture<StatusResponse>> statusRequests = new LinkedHashMap<>();
+        Map<String, Long> statusStartedNanos = new LinkedHashMap<>();
+        for (String endpoint : endpoints) {
+            statusStartedNanos.put(endpoint, System.nanoTime());
+            statusRequests.put(endpoint, maintenance.statusMember(endpoint));
+        }
+        for (String endpoint : endpoints) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("endpoint", endpoint);
+            long started = statusStartedNanos.get(endpoint);
+            try {
+                StatusResponse memberStatus = statusRequests.get(endpoint)
+                    .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                long memberId = memberStatus.getHeader().getMemberId();
+                Member member = membersById.get(memberId);
+                clusterId = unsignedLongString(memberStatus.getHeader().getClusterId());
+                leaderId = unsignedLongString(memberStatus.getLeader());
+                row.put("memberId", unsignedLongString(memberId));
+                row.put("name", member == null ? null : member.getName());
+                row.put("version", memberStatus.getVersion());
+                row.put("leaderId", unsignedLongString(memberStatus.getLeader()));
+                row.put("revision", longString(memberStatus.getHeader().getRevision()));
+                row.put("raftTerm", longString(memberStatus.getRaftTerm()));
+                row.put("raftIndex", longString(memberStatus.getRaftIndex()));
+                row.put("raftAppliedIndex", longString(memberStatus.getRaftAppliedIndex()));
+                row.put("dbSize", longString(memberStatus.getDbSize()));
+                row.put("dbSizeInUse", longString(memberStatus.getDbSizeInUse()));
+                row.put("learner", memberStatus.isLearner());
+                row.put("reachable", true);
+                row.put("latencyMs", latencyMs);
+                row.put("errors", memberStatus.getErrorList());
+                if (!observedMemberIds.add(unsignedLongString(memberId))) {
+                    continue;
+                }
+            } catch (Exception error) {
+                statusRequests.get(endpoint).cancel(true);
+                row.put("memberId", null);
+                row.put("name", null);
+                row.put("version", null);
+                row.put("leaderId", null);
+                row.put("revision", null);
+                row.put("raftTerm", null);
+                row.put("raftIndex", null);
+                row.put("raftAppliedIndex", null);
+                row.put("dbSize", null);
+                row.put("dbSizeInUse", null);
+                row.put("learner", false);
+                row.put("reachable", false);
+                row.put("latencyMs", null);
+                row.put("errors", List.of(safeMessage(rootCause(error))));
+            }
+            statusMembers.add(row);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("clusterId", clusterId);
+        result.put("revision", revision);
+        result.put("leaderId", leaderId);
+        result.put("keyCount", longString(countResponse.getCount()));
+        result.put("alarms", alarms);
+        result.put("members", statusMembers);
         return result;
     }
 
@@ -300,6 +669,9 @@ public final class EtcdAgent {
             case AgentProtocol.KV_METHOD_GET -> get(params);
             case AgentProtocol.KV_METHOD_PUT -> put(params);
             case AgentProtocol.KV_METHOD_DELETE -> delete(params);
+            case AgentProtocol.KV_METHOD_RENAME -> rename(params);
+            case AgentProtocol.KV_METHOD_HISTORY -> history(params);
+            case AgentProtocol.KV_METHOD_STATUS -> status();
             case AgentProtocol.METHOD_DISCONNECT -> {
                 closeClient();
                 yield Collections.singletonMap("ok", true);
@@ -351,9 +723,7 @@ public final class EtcdAgent {
     }
 
     private static Client requireClient() {
-        if (client == null) {
-            throw new IllegalStateException("Not connected");
-        }
+        if (client == null) throw new IllegalStateException("Not connected");
         return client;
     }
 
@@ -366,6 +736,7 @@ public final class EtcdAgent {
             client.close();
             client = null;
         }
+        connectedEndpoints = Collections.emptyList();
     }
 
     private static ByteSequence byteSequence(String value) {
@@ -403,12 +774,42 @@ public final class EtcdAgent {
 
     private static Map<String, Object> metadata(KeyValue item) {
         Map<String, Object> metadata = new LinkedHashMap<>();
-        metadata.put("createRevision", item.getCreateRevision());
-        metadata.put("modRevision", item.getModRevision());
-        metadata.put("version", item.getVersion());
-        metadata.put("lease", item.getLease());
+        metadata.put("createRevision", longString(item.getCreateRevision()));
+        metadata.put("modRevision", longString(item.getModRevision()));
+        metadata.put("version", longString(item.getVersion()));
+        metadata.put("lease", longString(item.getLease()));
         metadata.put("valueSize", item.getValue().size());
         return metadata;
+    }
+
+    private static Map<String, Object> metadataWithTtl(KeyValue item) throws Exception {
+        Map<String, Object> metadata = metadata(item);
+        if (item.getLease() > 0) {
+            LeaseTimeToLiveResponse lease = requireClient().getLeaseClient()
+                .timeToLive(item.getLease(), LeaseOption.DEFAULT)
+                .get(RPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            metadata.put("ttl", lease.getTTL());
+        }
+        return metadata;
+    }
+
+    private static ByteSequence keyBytes(JsonObject params) {
+        JsonElement encoded = params.get("keyBytes");
+        if (encoded != null && encoded.isJsonObject()) {
+            return ByteSequence.from(parseValue(encoded.getAsJsonObject()));
+        }
+        JsonElement key = params.get("key");
+        if (key == null || key.isJsonNull()) {
+            throw new IllegalArgumentException("Key is required");
+        }
+        return byteSequence(key.getAsString());
+    }
+
+    private static Map<String, Object> bytesObject(byte[] bytes) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("encoding", "base64");
+        result.put("data", Base64.getEncoder().encodeToString(bytes));
+        return result;
     }
 
     private static Map<String, Object> valueObject(byte[] bytes) {
@@ -474,6 +875,32 @@ public final class EtcdAgent {
     private static boolean boolOrDefault(JsonObject object, String key, boolean fallback) {
         JsonElement element = object.get(key);
         return element == null || element.isJsonNull() ? fallback : element.getAsBoolean();
+    }
+
+    private static Long longOrNull(JsonObject object, String key) {
+        JsonElement element = object.get(key);
+        return element == null || element.isJsonNull() ? null : element.getAsLong();
+    }
+
+    private static String longString(long value) {
+        return Long.toString(value);
+    }
+
+    private static String unsignedLongString(long value) {
+        return Long.toUnsignedString(value);
+    }
+
+    private static Throwable rootCause(Throwable throwable) {
+        Throwable current = throwable;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
+    private static String safeMessage(Throwable throwable) {
+        String message = throwable == null ? null : throwable.getMessage();
+        return message == null || message.isBlank() ? String.valueOf(throwable) : message;
     }
 
     private static String firstNonBlank(String... values) {

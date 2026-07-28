@@ -354,11 +354,15 @@ pub enum AgentCapability {
     Ddl,
     Kv,
     KvTtl,
+    KvCas,
+    KvListValues,
+    KvStatus,
+    KvHistory,
     MultiSession,
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 14] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -368,6 +372,10 @@ impl AgentCapability {
         Self::Ddl,
         Self::Kv,
         Self::KvTtl,
+        Self::KvCas,
+        Self::KvListValues,
+        Self::KvStatus,
+        Self::KvHistory,
         Self::MultiSession,
     ];
 
@@ -382,6 +390,10 @@ impl AgentCapability {
             Self::Ddl => "ddl",
             Self::Kv => "kv",
             Self::KvTtl => "kv_ttl",
+            Self::KvCas => "kv_cas",
+            Self::KvListValues => "kv_list_values",
+            Self::KvStatus => "kv_status",
+            Self::KvHistory => "kv_history",
             Self::MultiSession => "multi_session",
         }
     }
@@ -611,10 +623,14 @@ pub enum AgentKvMethod {
     Get,
     Put,
     Delete,
+    Rename,
+    History,
+    Status,
 }
 
 impl AgentKvMethod {
-    pub const ALL: [Self; 4] = [Self::ListPrefix, Self::Get, Self::Put, Self::Delete];
+    pub const ALL: [Self; 7] =
+        [Self::ListPrefix, Self::Get, Self::Put, Self::Delete, Self::Rename, Self::History, Self::Status];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -622,6 +638,9 @@ impl AgentKvMethod {
             Self::Get => "kv_get",
             Self::Put => "kv_put",
             Self::Delete => "kv_delete",
+            Self::Rename => "kv_rename",
+            Self::History => "kv_history",
+            Self::Status => "kv_status",
         }
     }
 }
@@ -892,7 +911,13 @@ impl AgentDriverClient {
         .map_err(|e| format!("Agent RPC task failed: {e}"))?;
 
         let _ = self.stdout.insert(returned_reader);
-        result.map_err(|e| self.format_agent_process_error(&e))
+        result.map_err(|error| {
+            if is_agent_rpc_response_error(&error) {
+                error
+            } else {
+                self.format_agent_process_error(&error)
+            }
+        })
     }
 
     pub async fn call_method<T: DeserializeOwned + Send + 'static>(
@@ -1638,7 +1663,15 @@ pub fn is_unsupported_handshake_error(error: &str) -> bool {
 }
 
 pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability: AgentCapability) -> bool {
-    if matches!(capability, AgentCapability::Kv | AgentCapability::KvTtl) {
+    if matches!(
+        capability,
+        AgentCapability::Kv
+            | AgentCapability::KvTtl
+            | AgentCapability::KvCas
+            | AgentCapability::KvListValues
+            | AgentCapability::KvStatus
+            | AgentCapability::KvHistory
+    ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
     handshake.map(|value| value.supports(capability)).unwrap_or(true)
@@ -1887,6 +1920,10 @@ fn format_agent_process_error(base: &str, exit_status: Option<String>, stderr_ta
     parts.join(". ")
 }
 
+fn is_agent_rpc_response_error(message: &str) -> bool {
+    message.trim_start().starts_with("Agent RPC error (")
+}
+
 fn agent_process_error_hint(stderr: &str) -> Option<&'static str> {
     let lower = stderr.to_ascii_lowercase();
     if lower.contains("unsupportedclassversionerror")
@@ -1944,11 +1981,11 @@ mod tests {
         agent_close_query_session_params, agent_handshake_params, agent_java_args, agent_java_args_with_extra,
         agent_java_args_with_extra_opts, agent_object_source_params, agent_proxy_env_vars, agent_schema_params,
         agent_schema_table_params, agent_supports_capability, agent_transaction_params, format_agent_process_error,
-        format_agent_startup_error, is_unsupported_handshake_error, mongo_collection_params, mongo_database_params,
-        mongo_document_id_params, parse_agent_java_opts, read_agent_line, start_stderr_collector, AgentCapability,
-        AgentDriverClient, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentRuntimeClient,
-        AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail,
-        AGENT_PROTOCOL_VERSION,
+        format_agent_startup_error, is_agent_rpc_response_error, is_unsupported_handshake_error,
+        mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
+        read_agent_line, start_stderr_collector, AgentCapability, AgentDriverClient, AgentHandshake, AgentKvMethod,
+        AgentLaunchSpec, AgentMethod, AgentRuntimeClient, AgentTableReadCloseParams, AgentTableReadPageParams,
+        AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
     };
     use std::io::Cursor;
     use std::io::Write;
@@ -2143,6 +2180,14 @@ mod tests {
         assert!(!message.contains("agent process exited"));
     }
 
+    #[test]
+    fn rpc_response_errors_do_not_require_process_stderr_diagnostics() {
+        assert!(is_agent_rpc_response_error(
+            "Agent RPC error (-1): ETCD_CAS_CONFLICT: key changed after it was loaded"
+        ));
+        assert!(!is_agent_rpc_response_error("Failed to read response from agent: end of stream"));
+    }
+
     #[tokio::test]
     async fn multiplexed_runtime_correlates_out_of_order_responses() {
         let script_path = std::env::temp_dir().join(format!("dbx-agent-runtime-test-{}.py", uuid::Uuid::new_v4()));
@@ -2310,8 +2355,12 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::Ddl.as_str(), "ddl");
         assert_eq!(AgentCapability::Kv.as_str(), "kv");
         assert_eq!(AgentCapability::KvTtl.as_str(), "kv_ttl");
+        assert_eq!(AgentCapability::KvCas.as_str(), "kv_cas");
+        assert_eq!(AgentCapability::KvListValues.as_str(), "kv_list_values");
+        assert_eq!(AgentCapability::KvStatus.as_str(), "kv_status");
+        assert_eq!(AgentCapability::KvHistory.as_str(), "kv_history");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
-        assert_eq!(AgentCapability::ALL.len(), 10);
+        assert_eq!(AgentCapability::ALL.len(), 14);
     }
 
     #[test]
@@ -2372,7 +2421,10 @@ for line in sys.stdin:
         assert_eq!(AgentKvMethod::Get.as_str(), "kv_get");
         assert_eq!(AgentKvMethod::Put.as_str(), "kv_put");
         assert_eq!(AgentKvMethod::Delete.as_str(), "kv_delete");
-        assert_eq!(AgentKvMethod::ALL.len(), 4);
+        assert_eq!(AgentKvMethod::Rename.as_str(), "kv_rename");
+        assert_eq!(AgentKvMethod::History.as_str(), "kv_history");
+        assert_eq!(AgentKvMethod::Status.as_str(), "kv_status");
+        assert_eq!(AgentKvMethod::ALL.len(), 7);
     }
 
     #[test]
@@ -2631,6 +2683,14 @@ for line in sys.stdin:
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::Kv));
         assert!(!agent_supports_capability(None, AgentCapability::KvTtl));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvTtl));
+        assert!(!agent_supports_capability(None, AgentCapability::KvCas));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvCas));
+        assert!(!agent_supports_capability(None, AgentCapability::KvListValues));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvListValues));
+        assert!(!agent_supports_capability(None, AgentCapability::KvStatus));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvStatus));
+        assert!(!agent_supports_capability(None, AgentCapability::KvHistory));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvHistory));
     }
 
     #[test]

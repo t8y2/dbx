@@ -65,6 +65,7 @@ describe("connectionDatabaseInfo", () => {
     expect(connectionConfigFingerprint({ ...original, transport_layers: [{ ...original.transport_layers![0], host: "other-jump" }] })).not.toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint(original, "")).not.toBe(connectionConfigFingerprint(original, original.name));
     expect(connectionConfigFingerprint({ ...original, database_info: { productName: "MySQL", productVersion: "8.4.0" } })).toBe(connectionConfigFingerprint(original));
+    expect(connectionConfigFingerprint({ ...original, note: "Production reporting" })).toBe(connectionConfigFingerprint(original));
   });
 
   it("formats only database metadata for rows and copied text", () => {

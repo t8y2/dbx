@@ -568,6 +568,7 @@ mod tests {
             agent_mode: true,
             allow_writes: false,
             allow_dangerous: false,
+            confirmed_write_sql: None,
             mcp_server_command: None,
         }
     }

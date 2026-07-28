@@ -132,6 +132,7 @@ pub async fn run_agent_loop(
             agent_mode: is_agent_mode,
             allow_writes: agent_ctx.sql_permissions.allow_writes,
             allow_dangerous: agent_ctx.sql_permissions.allow_dangerous,
+            confirmed_write_sql: agent_ctx.sql_permissions.confirmed_write_sql.clone(),
             mcp_server_command: agent_ctx.cli_mcp_server_command.clone(),
         };
         if matches!(config.provider, AiProvider::ClaudeCodeCli) {
@@ -163,7 +164,7 @@ pub async fn run_agent_loop(
         .await;
     }
     let tools = if is_agent_mode {
-        agent_tools::all_tools(agent_ctx.db_type, agent_ctx.sql_permissions)
+        agent_tools::all_tools(agent_ctx.db_type, agent_ctx.sql_permissions.clone())
     } else {
         agent_tools::read_only_tools(agent_ctx.db_type)
     };
@@ -368,7 +369,7 @@ pub async fn run_agent_loop(
         let conn2 = agent_ctx.connection_id.clone();
         let db2 = agent_ctx.database.clone();
         let db_type = agent_ctx.db_type;
-        let sql_permissions = agent_ctx.sql_permissions;
+        let sql_permissions = agent_ctx.sql_permissions.clone();
 
         // Split by index into parallel and sequential groups using tool metadata
         let tool_parallel_map: std::collections::HashMap<&str, bool> =
@@ -387,7 +388,8 @@ pub async fn run_agent_loop(
                 let state = Arc::clone(&state2);
                 let conn = conn2.clone();
                 let db = db2.clone();
-                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, sql_permissions).await }
+                let perms = sql_permissions.clone();
+                async move { agent_tools::execute_tool(&tc, &state, &conn, &db, &db_type, perms).await }
             })
             .collect();
         let parallel_results = join_all(parallel_futures).await;
@@ -397,7 +399,7 @@ pub async fn run_agent_loop(
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
             sequential_results
-                .push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type, sql_permissions).await);
+                .push(agent_tools::execute_tool(&tc, &state2, &conn2, &db2, &db_type, sql_permissions.clone()).await);
         }
 
         // Merge results back into original order

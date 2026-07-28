@@ -67,6 +67,9 @@ public final class AgentProtocol {
     public static final String KV_METHOD_GET = "kv_get";
     public static final String KV_METHOD_PUT = "kv_put";
     public static final String KV_METHOD_DELETE = "kv_delete";
+    public static final String KV_METHOD_RENAME = "kv_rename";
+    public static final String KV_METHOD_HISTORY = "kv_history";
+    public static final String KV_METHOD_STATUS = "kv_status";
 
     public static final String CAPABILITY_CONNECT = "connect";
     public static final String CAPABILITY_TEST_CONNECTION = "test_connection";
@@ -77,6 +80,10 @@ public final class AgentProtocol {
     public static final String CAPABILITY_DDL = "ddl";
     public static final String CAPABILITY_KV = "kv";
     public static final String CAPABILITY_KV_TTL = "kv_ttl";
+    public static final String CAPABILITY_KV_CAS = "kv_cas";
+    public static final String CAPABILITY_KV_LIST_VALUES = "kv_list_values";
+    public static final String CAPABILITY_KV_STATUS = "kv_status";
+    public static final String CAPABILITY_KV_HISTORY = "kv_history";
     public static final String CAPABILITY_MULTI_SESSION = "multi_session";
 
     public static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
@@ -98,7 +105,11 @@ public final class AgentProtocol {
         CAPABILITY_TRANSACTION,
         CAPABILITY_DDL,
         CAPABILITY_KV,
-        CAPABILITY_KV_TTL
+        CAPABILITY_KV_TTL,
+        CAPABILITY_KV_CAS,
+        CAPABILITY_KV_LIST_VALUES,
+        CAPABILITY_KV_STATUS,
+        CAPABILITY_KV_HISTORY
     ));
 
     public static final List<String> COMMON_METHODS = Collections.unmodifiableList(Arrays.asList(
@@ -171,7 +182,10 @@ public final class AgentProtocol {
         KV_METHOD_LIST_PREFIX,
         KV_METHOD_GET,
         KV_METHOD_PUT,
-        KV_METHOD_DELETE
+        KV_METHOD_DELETE,
+        KV_METHOD_RENAME,
+        KV_METHOD_HISTORY,
+        KV_METHOD_STATUS
     ));
 
     private AgentProtocol() {

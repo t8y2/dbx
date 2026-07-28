@@ -134,6 +134,7 @@ const emit = defineEmits<{
   cursorChange: [pos: number];
   formatError: [message: string];
   execute: [source: SqlExecutionOverride];
+  executeInNewResultTab: [source: SqlExecutionOverride];
   save: [];
   clickTable: [target: SqlObjectNavigationTarget];
   viewTableData: [target: SqlObjectNavigationTarget];
@@ -562,6 +563,15 @@ function performNormalTab(view: EditorViewType): boolean {
 interface RequestExecuteOptions {
   ignoreSelection?: boolean;
   bypassPicker?: boolean;
+  openInNewResultTab?: boolean;
+}
+
+function emitExecutionRequest(source: SqlExecutionOverride, openInNewResultTab = false) {
+  if (openInNewResultTab) {
+    emit("executeInNewResultTab", source);
+  } else {
+    emit("execute", source);
+  }
 }
 
 function requestExecute(options: RequestExecuteOptions = {}) {
@@ -570,15 +580,19 @@ function requestExecute(options: RequestExecuteOptions = {}) {
   return requestExecuteFromView(currentView, currentView.state.selection.main.head, options);
 }
 
+function requestExecuteInNewResultTab() {
+  return requestExecute({ bypassPicker: true, openInNewResultTab: true });
+}
+
 function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, options: RequestExecuteOptions = {}) {
   const selection = currentView.state.selection.main;
   if (!options.ignoreSelection && !selection.empty) {
     // Has manual selection → execute directly, skip picker.
-    emit("execute", sqlExecutionSnapshotFromView(currentView));
+    emitExecutionRequest(sqlExecutionSnapshotFromView(currentView), options.openInNewResultTab);
     return true;
   }
   if (!supportsExecutionTargetPicker(props.databaseType)) {
-    emit("execute", sqlExecutionSnapshotFromView(currentView));
+    emitExecutionRequest(sqlExecutionSnapshotFromView(currentView), options.openInNewResultTab);
     return true;
   }
   // No selection → resolve the execution target, optionally via the picker.
@@ -590,7 +604,7 @@ function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, 
   if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType)) {
     const preferredKind = settingsStore.editorSettings.executeMode === "current" ? "cursor" : "all";
     const candidate = candidates.find((item) => item.kind === preferredKind) ?? candidates[0];
-    emit("execute", candidate.sql);
+    emitExecutionRequest(candidate.sql, options.openInNewResultTab);
     return true;
   }
   closePicker();
@@ -963,6 +977,12 @@ function executeFromContextMenu() {
   focusEditor();
 }
 
+function executeInNewResultTabFromContextMenu() {
+  if (!canExecuteContextSql.value) return;
+  requestExecuteInNewResultTab();
+  focusEditor();
+}
+
 async function copySelectedSqlFromContextMenu() {
   if (!canCopySelectedSql.value) return;
   try {
@@ -1230,6 +1250,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             icon: Play,
             shortcut: shortcuts.executeSql,
           },
+          {
+            label: t("settings.shortcutExecuteSqlInNewResultTab"),
+            action: executeInNewResultTabFromContextMenu,
+            disabled: !canExecuteContextSql.value,
+            icon: Play,
+            shortcut: shortcuts.executeSqlInNewResultTab,
+          },
         ]),
     ...queryContextObjectActions(contextObjectTarget.value?.type).map(contextObjectMenuItem),
     { label: "", separator: true },
@@ -1299,6 +1326,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
   // Keep the shortcut on the shared execution-mode path (selection priority + configured cursor/all target),
   // but bypass the picker so the keyboard shortcut always executes directly instead of popping a dialog.
   const executeBindings = props.hideExecutionControls ? [] : binding(shortcuts.executeSql, () => requestExecute({ bypassPicker: true }));
+  const executeInNewResultTabBindings = props.hideExecutionControls ? [] : binding(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab);
   return [
     Prec?.high(
       codeMirrorKeymap.of([
@@ -1309,6 +1337,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
+        ...executeInNewResultTabBindings,
         ...executeBindings,
         ...binding(shortcuts.saveSql, () => {
           emit("save");
@@ -1341,6 +1370,11 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           const sql = selectedSqlFromView(currentView);
           if (sql.trim()) emit("sendSelectionToAi", sql);
           return true;
+        }),
+        ...createQueryEditorSearchKeymap({
+          openSearch,
+          openReplace,
+          isReadOnly: () => !!props.readOnly,
         }),
       ]),
     ) ?? [],
@@ -3212,7 +3246,7 @@ onMounted(async () => {
   if (!editorRef.value) return;
 
   const [
-    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
+    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, scrollPastEnd, ViewPlugin },
     { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
@@ -3273,7 +3307,7 @@ onMounted(async () => {
       textUnderlineOffset: "3px",
     },
     ".cm-sql-semantic-warning": {
-      textDecoration: "underline wavy hsl(var(--warning, 38 92% 50%))",
+      textDecoration: "underline wavy var(--warning)",
       textUnderlineOffset: "3px",
     },
   });
@@ -3653,6 +3687,7 @@ onMounted(async () => {
       trimmedSelectionLayer(),
       selectionMatchOccurrences(),
       dropCursor(),
+      props.readOnly ? [] : scrollPastEnd(),
       EditorView.dragMovesSelection.of((event) => !event.ctrlKey && !event.metaKey),
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
@@ -3702,11 +3737,6 @@ onMounted(async () => {
       buildResultSourceRangeExtension(),
       Prec.highest(
         keymap.of([
-          ...createQueryEditorSearchKeymap({
-            openSearch,
-            openReplace,
-            isReadOnly: () => !!props.readOnly,
-          }),
           { key: "'", run: handleSqlSingleQuote },
           { key: "Tab", run: handleTab },
           {
@@ -4358,6 +4388,7 @@ defineExpose({
   openReplace,
   scrollCursorIntoView,
   requestExecute,
+  requestExecuteInNewResultTab,
   pasteClipboardAsSqlInCondition,
   previewStatementRange,
   refreshCompletionCache,

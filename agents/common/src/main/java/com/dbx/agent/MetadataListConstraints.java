@@ -61,6 +61,10 @@ public final class MetadataListConstraints {
     }
 
     public String fuzzyLikePattern() {
+        return fuzzyLikePattern('\\');
+    }
+
+    public String fuzzyLikePattern(char escapeCharacter) {
         if (filter.isEmpty()) {
             return "%%";
         }
@@ -68,8 +72,8 @@ public final class MetadataListConstraints {
         builder.append('%');
         for (int i = 0; i < filter.length(); i++) {
             char ch = filter.charAt(i);
-            if (ch == '\\' || ch == '%' || ch == '_') {
-                builder.append('\\');
+            if (ch == escapeCharacter || ch == '%' || ch == '_') {
+                builder.append(escapeCharacter);
             }
             builder.append(ch);
             builder.append('%');

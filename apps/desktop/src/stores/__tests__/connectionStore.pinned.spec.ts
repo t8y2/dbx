@@ -82,9 +82,13 @@ describe("connectionStore pinned tree node removal", () => {
 
     const usersKey = treeNodePinKey(users);
     const ordersKey = treeNodePinKey(orders);
+    store.beginPinnedTreeNodeReorder(usersKey);
     expect(store.reorderPinnedTreeNodes(usersKey, ordersKey, "after")).toBe(true);
+    store.endPinnedTreeNodeReorder();
     await vi.waitFor(() => expect(savePinnedTreeNodeIds).toHaveBeenCalledTimes(1));
+    store.beginPinnedTreeNodeReorder(ordersKey);
     expect(store.reorderPinnedTreeNodes(ordersKey, usersKey, "after")).toBe(true);
+    store.endPinnedTreeNodeReorder();
 
     expect(savePinnedTreeNodeIds).toHaveBeenCalledTimes(1);
     resolvers[0]!();
@@ -95,6 +99,49 @@ describe("connectionStore pinned tree node removal", () => {
       [ordersKey, usersKey],
       [usersKey, ordersKey],
     ]);
+  });
+
+  it("caches active drag targets and invalidates them on tree changes and drag end", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const users = tableNode("users");
+    const orders = tableNode("orders");
+    const logs = tableNode("logs");
+    store.treeNodes = [{ id: "conn", label: "Connection", type: "connection", connectionId: "conn", children: [users, orders, logs] }];
+    store.toggleTreeNodePin(users);
+    store.toggleTreeNodePin(orders);
+    store.toggleTreeNodePin(logs);
+
+    const usersKey = treeNodePinKey(users);
+    const ordersKey = treeNodePinKey(orders);
+    const logsKey = treeNodePinKey(logs);
+    let schemaReads = 0;
+    Object.defineProperty(orders, "schema", {
+      configurable: true,
+      get() {
+        schemaReads += 1;
+        return "public";
+      },
+    });
+
+    store.beginPinnedTreeNodeReorder(usersKey);
+    expect(store.isPinnedTreeNodeReorderTarget(ordersKey)).toBe(true);
+    const readsAfterFirstLookup = schemaReads;
+    expect(readsAfterFirstLookup).toBeGreaterThan(0);
+
+    for (let index = 0; index < 100; index += 1) {
+      expect(store.isPinnedTreeNodeReorderTarget(index % 2 === 0 ? ordersKey : logsKey)).toBe(true);
+    }
+    expect(schemaReads).toBe(readsAfterFirstLookup);
+
+    store.treeNodes[0].children = [users, logs];
+    store.treeNodes.push({ id: "other", label: "Other", type: "connection", connectionId: "other", children: [orders] });
+    expect(store.isPinnedTreeNodeReorderTarget(ordersKey)).toBe(false);
+
+    store.endPinnedTreeNodeReorder();
+    expect(store.isPinnedTreeNodeReorderTarget(logsKey)).toBe(false);
   });
 
   it("moves a renamed pinned object to its new identity so recreating the old name is unpinned", async () => {

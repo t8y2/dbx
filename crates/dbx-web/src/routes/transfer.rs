@@ -6,9 +6,54 @@ use axum::Json;
 use dbx_core::transfer::{self, TransferRequest, TransferStatus};
 use futures::stream::Stream;
 use serde::Deserialize;
+use tokio::time::{sleep, Duration};
 
 use crate::error::AppError;
+use crate::sse::{TransferProgressChannel, TransferReplayEventKind};
 use crate::state::WebState;
+
+const COMPLETED_TRANSFER_CHANNEL_TTL: Duration = Duration::from_secs(60);
+
+fn send_transfer_progress(channel: &TransferProgressChannel, progress: &transfer::TransferProgress) {
+    if let Ok(json) = serde_json::to_string(progress) {
+        let kind = if progress.terminal {
+            TransferReplayEventKind::Terminal
+        } else if matches!(&progress.status, TransferStatus::Error) {
+            TransferReplayEventKind::Failure
+        } else {
+            TransferReplayEventKind::Progress
+        };
+        channel.send(json, kind);
+    }
+}
+
+fn terminal_transfer_error(req: &TransferRequest, error: impl ToString) -> transfer::TransferProgress {
+    transfer::TransferProgress {
+        transfer_id: req.transfer_id.clone(),
+        table: String::new(),
+        table_index: 0,
+        total_tables: req.tables.len(),
+        rows_transferred: 0,
+        total_rows: None,
+        status: TransferStatus::Error,
+        error: Some(error.to_string()),
+        terminal: true,
+    }
+}
+
+async fn finish_transfer_channel(state: &Arc<WebState>, transfer_id: &str, channel: &Arc<TransferProgressChannel>) {
+    transfer::clear_cancelled(transfer_id).await;
+    let state = state.clone();
+    let transfer_id = transfer_id.to_string();
+    let channel = channel.clone();
+    tokio::spawn(async move {
+        sleep(COMPLETED_TRANSFER_CHANNEL_TTL).await;
+        let mut channels = state.transfer_progress_channels.write().await;
+        if channels.get(&transfer_id).is_some_and(|current| Arc::ptr_eq(current, &channel)) {
+            channels.remove(&transfer_id);
+        }
+    });
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,9 +90,10 @@ pub async fn start_transfer(
 
     let transfer_id = req.transfer_id.clone();
 
-    // Create a broadcast channel for progress
-    let (tx, _) = tokio::sync::broadcast::channel::<String>(256);
-    state.sse_channels.write().await.insert(transfer_id.clone(), tx.clone());
+    // Keep bounded replay state so a web EventSource opened after this POST
+    // still receives early table failures and the terminal result.
+    let progress_channel = Arc::new(TransferProgressChannel::new());
+    state.transfer_progress_channels.write().await.insert(transfer_id.clone(), progress_channel.clone());
 
     let app = state.app.clone();
     let state_clone = state.clone();
@@ -56,14 +102,16 @@ pub async fn start_transfer(
         let source_db_type = match transfer::get_db_type(&app, &req.source_connection_id).await {
             Ok(t) => t,
             Err(e) => {
-                let _ = tx.send(serde_json::json!({"error": e}).to_string());
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
         };
         let target_db_type = match transfer::get_db_type(&app, &req.target_connection_id).await {
             Ok(t) => t,
             Err(e) => {
-                let _ = tx.send(serde_json::json!({"error": e}).to_string());
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
         };
@@ -72,7 +120,8 @@ pub async fn start_transfer(
         {
             Ok(k) => k,
             Err(e) => {
-                let _ = tx.send(serde_json::json!({"error": e}).to_string());
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
         };
@@ -80,7 +129,8 @@ pub async fn start_transfer(
         {
             Ok(k) => k,
             Err(e) => {
-                let _ = tx.send(serde_json::json!({"error": e}).to_string());
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
         };
@@ -105,16 +155,14 @@ pub async fn start_transfer(
         if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
             && matches!(target_db_type, dbx_core::models::connection::DatabaseType::Postgres)
         {
-            let tx_clone = tx.clone();
+            let progress_channel_clone = progress_channel.clone();
             match transfer::transfer_postgres_schema_dependencies(
                 &app,
                 &req,
                 &source_pool_key,
                 &target_pool_key,
                 |progress| {
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx_clone.send(json);
-                    }
+                    send_transfer_progress(&progress_channel_clone, &progress);
                 },
             )
             .await
@@ -132,11 +180,8 @@ pub async fn start_transfer(
                         error: None,
                         terminal: true,
                     };
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx.send(json);
-                    }
-                    transfer::clear_cancelled(&req.transfer_id).await;
-                    state_clone.remove_sse_channel(&req.transfer_id).await;
+                    send_transfer_progress(&progress_channel, &progress);
+                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                     return;
                 }
                 Err(e) => {
@@ -151,11 +196,8 @@ pub async fn start_transfer(
                         error: Some(e),
                         terminal: true,
                     };
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx.send(json);
-                    }
-                    transfer::clear_cancelled(&req.transfer_id).await;
-                    state_clone.remove_sse_channel(&req.transfer_id).await;
+                    send_transfer_progress(&progress_channel, &progress);
+                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                     return;
                 }
             }
@@ -174,15 +216,12 @@ pub async fn start_transfer(
                     error: None,
                     terminal: true,
                 };
-                if let Ok(json) = serde_json::to_string(&progress) {
-                    let _ = tx.send(json);
-                }
-                transfer::clear_cancelled(&req.transfer_id).await;
-                state_clone.remove_sse_channel(&req.transfer_id).await;
+                send_transfer_progress(&progress_channel, &progress);
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                 return;
             }
 
-            let tx_clone = tx.clone();
+            let progress_channel_clone = progress_channel.clone();
             let mut last_rows_transferred = 0_u64;
             let mut last_total_rows = None;
             let result = transfer::transfer_table(
@@ -197,9 +236,7 @@ pub async fn start_transfer(
                 |progress| {
                     last_rows_transferred = progress.rows_transferred;
                     last_total_rows = progress.total_rows;
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx_clone.send(json);
-                    }
+                    send_transfer_progress(&progress_channel_clone, &progress);
                 },
             )
             .await;
@@ -217,9 +254,7 @@ pub async fn start_transfer(
                         error: None,
                         terminal: false,
                     };
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx.send(json);
-                    }
+                    send_transfer_progress(&progress_channel, &progress);
                 }
                 Err(e) => {
                     if e == "Cancelled" {
@@ -234,11 +269,8 @@ pub async fn start_transfer(
                             error: None,
                             terminal: true,
                         };
-                        if let Ok(json) = serde_json::to_string(&progress) {
-                            let _ = tx.send(json);
-                        }
-                        transfer::clear_cancelled(&req.transfer_id).await;
-                        state_clone.remove_sse_channel(&req.transfer_id).await;
+                        send_transfer_progress(&progress_channel, &progress);
+                        finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                         return;
                     }
                     failed_tables.push(table.clone());
@@ -253,9 +285,7 @@ pub async fn start_transfer(
                         error: Some(e),
                         terminal: false,
                     };
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx.send(json);
-                    }
+                    send_transfer_progress(&progress_channel, &progress);
                 }
             }
         }
@@ -263,16 +293,14 @@ pub async fn start_transfer(
         if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
             && matches!(target_db_type, dbx_core::models::connection::DatabaseType::Postgres)
         {
-            let tx_clone = tx.clone();
+            let progress_channel_clone = progress_channel.clone();
             match transfer::transfer_postgres_schema_objects(
                 &app,
                 &req,
                 &source_pool_key,
                 &target_pool_key,
                 |progress| {
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx_clone.send(json);
-                    }
+                    send_transfer_progress(&progress_channel_clone, &progress);
                 },
             )
             .await
@@ -290,11 +318,8 @@ pub async fn start_transfer(
                         error: None,
                         terminal: true,
                     };
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx.send(json);
-                    }
-                    transfer::clear_cancelled(&req.transfer_id).await;
-                    state_clone.remove_sse_channel(&req.transfer_id).await;
+                    send_transfer_progress(&progress_channel, &progress);
+                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
                     return;
                 }
                 Err(e) => {
@@ -310,9 +335,7 @@ pub async fn start_transfer(
                         error: Some(e),
                         terminal: false,
                     };
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = tx.send(json);
-                    }
+                    send_transfer_progress(&progress_channel, &progress);
                 }
             }
         }
@@ -337,12 +360,8 @@ pub async fn start_transfer(
             },
             terminal: true,
         };
-        if let Ok(json) = serde_json::to_string(&done) {
-            let _ = tx.send(json);
-        }
-
-        transfer::clear_cancelled(&req.transfer_id).await;
-        state_clone.remove_sse_channel(&req.transfer_id).await;
+        send_transfer_progress(&progress_channel, &done);
+        finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
     });
 
     Ok(Json(serde_json::json!({ "transferId": transfer_id })))
@@ -383,11 +402,11 @@ pub async fn transfer_progress(
     State(state): State<Arc<WebState>>,
     Path(transfer_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
-    let channels = state.sse_channels.read().await;
-    let tx = channels.get(&transfer_id).ok_or_else(|| AppError::from("Transfer not found".to_string()))?;
-    let rx = tx.subscribe();
+    let channels = state.transfer_progress_channels.read().await;
+    let channel =
+        channels.get(&transfer_id).cloned().ok_or_else(|| AppError::from("Transfer not found".to_string()))?;
     drop(channels);
-    Ok(crate::sse::sse_from_channel(rx))
+    Ok(crate::sse::sse_from_transfer_channel(channel))
 }
 
 pub async fn cancel_transfer(

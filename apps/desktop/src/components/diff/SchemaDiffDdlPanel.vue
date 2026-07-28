@@ -379,12 +379,12 @@ function copyDeploySqlAll() {
 
 <style scoped>
 :deep(.splitpanes--vertical > .splitpanes__splitter) {
-  background-color: hsl(var(--border));
+  background-color: var(--border);
   width: 4px;
   cursor: col-resize;
   position: relative;
 }
 :deep(.splitpanes--vertical > .splitpanes__splitter:hover) {
-  background-color: hsl(var(--primary));
+  background-color: var(--primary);
 }
 </style>

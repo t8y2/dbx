@@ -640,6 +640,7 @@ mod tests {
         ConnectionConfig {
             id: "conn".to_string(),
             name: "test".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,

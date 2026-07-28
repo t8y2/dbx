@@ -17,6 +17,9 @@ pub struct CliAgentRunOptions {
     pub agent_mode: bool,
     pub allow_writes: bool,
     pub allow_dangerous: bool,
+    /// When present, write/DDL execute_query calls in the MCP subprocess must
+    /// match this SQL after trimming only surrounding whitespace.
+    pub confirmed_write_sql: Option<String>,
     pub mcp_server_command: Option<CliAgentCommandSpec>,
 }
 
@@ -61,13 +64,41 @@ pub fn dbx_mcp_enabled_tools(agent_mode: bool) -> Vec<&'static str> {
 }
 
 pub fn dbx_mcp_scope_env(options: &CliAgentRunOptions) -> Vec<(&'static str, String)> {
-    vec![
+    let mut env = vec![
         ("DBX_MCP_ALLOW_WRITES", if options.allow_writes { "1" } else { "0" }.to_string()),
         ("DBX_MCP_ALLOW_DANGEROUS_SQL", if options.allow_dangerous { "1" } else { "0" }.to_string()),
         ("DBX_MCP_SCOPE_CONNECTION_ID", options.connection_id.clone()),
         ("DBX_MCP_SCOPE_CONNECTION_NAME", options.connection_name.clone()),
         ("DBX_MCP_SCOPE_DATABASE", options.database.clone()),
-    ]
+    ];
+    if let Some(ref sql) = options.confirmed_write_sql {
+        env.push(("DBX_MCP_CONFIRMED_WRITE_SQL", sql.clone()));
+    }
+    env
+}
+
+#[cfg(test)]
+mod scope_env_tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_write_sql_is_passed_to_the_scoped_mcp_subprocess() {
+        let options = CliAgentRunOptions {
+            connection_id: "connection-1".to_string(),
+            connection_name: "staging".to_string(),
+            database: "app".to_string(),
+            agent_mode: true,
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("DELETE FROM sessions WHERE id = 7".to_string()),
+            mcp_server_command: None,
+        };
+
+        let env = dbx_mcp_scope_env(&options);
+        assert!(env.contains(&("DBX_MCP_CONFIRMED_WRITE_SQL", "DELETE FROM sessions WHERE id = 7".to_string())));
+        assert!(env.contains(&("DBX_MCP_ALLOW_WRITES", "1".to_string())));
+        assert!(env.contains(&("DBX_MCP_ALLOW_DANGEROUS_SQL", "1".to_string())));
+    }
 }
 
 pub fn append_config_overrides(args: &mut Vec<String>, overrides: impl IntoIterator<Item = String>) {

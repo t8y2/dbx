@@ -21,7 +21,7 @@ use crate::transfer::{
     pagination_sql_with_filter_order, qualified_table, quote_identifier,
 };
 use crate::types::QueryResult;
-use crate::xlsx_export::{finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook};
+use crate::xlsx_export::{finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options};
 
 const DEFAULT_BATCH_SIZE: usize = 10_000;
 const SQL_INSERT_BATCH_SIZE: usize = 100;
@@ -59,6 +59,8 @@ pub struct TableExportRequest {
     pub row_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date_time_format: Option<String>,
+    #[serde(default)]
+    pub numeric_column_right_align: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -377,6 +379,7 @@ async fn fetch_table_export_batch(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 
@@ -763,11 +766,14 @@ async fn try_export_native_table_stream(
             let xlsx_column_types = export_column_types(request);
             let xlsx_file =
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
-            let mut writer = start_streaming_xlsx_workbook(
+            let mut writer = start_streaming_xlsx_workbook_with_options(
                 BufWriter::new(xlsx_file),
                 Some(&request.table_name),
                 col_names,
                 &xlsx_column_types,
+                &[],
+                request.date_time_format.as_deref(),
+                request.numeric_column_right_align,
             )?;
             let result = stream_native_table_rows(
                 state,
@@ -1387,11 +1393,14 @@ async fn export_table_data_core_inner(
             // sharing a file descriptor between two independent buffers.
             let xlsx_file =
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
-            let mut writer = start_streaming_xlsx_workbook(
+            let mut writer = start_streaming_xlsx_workbook_with_options(
                 BufWriter::new(xlsx_file),
                 Some(&request.table_name),
                 &col_names,
                 &xlsx_column_types,
+                &[],
+                request.date_time_format.as_deref(),
+                request.numeric_column_right_align,
             )?;
 
             loop {
@@ -1869,6 +1878,7 @@ mod tests {
             batch_size: Some(batch_size),
             row_limit,
             date_time_format: None,
+            numeric_column_right_align: false,
         };
 
         ExternalDriverExportFixture { state, request, calls, output, dir }
@@ -2029,6 +2039,7 @@ mod tests {
             batch_size: Some(500),
             row_limit: Some(1000),
             date_time_format: None,
+            numeric_column_right_align: false,
         };
 
         let sql = table_cursor_sql(
@@ -2077,6 +2088,7 @@ mod tests {
             batch_size: Some(100),
             row_limit: None,
             date_time_format: None,
+            numeric_column_right_align: false,
         };
         let sql = table_cursor_sql(&request, &DatabaseType::Oracle, &columns, &primary_keys);
         assert_eq!(sql, "SELECT \"ID\", \"NAME\" FROM \"APP\".\"USERS\"");
@@ -2395,6 +2407,7 @@ mod tests {
                 vec![json!(2), json!("Bob"), json!(82000)],
                 vec![json!(3), Value::Null, json!(0)],
             ],
+            numeric_column_right_align: false,
         };
         let workbook = build_xlsx_workbook(&data).expect("XLSX build should succeed");
 

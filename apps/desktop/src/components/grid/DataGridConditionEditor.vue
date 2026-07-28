@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, type CSSProperties } from "vue";
 import { ChevronDown, X } from "@lucide/vue";
-import { useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
+import { completeDataGridConditionQuote, useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
 import { getDataGridConditionSuggestionPosition, getDataGridConditionSuggestionPreferredWidth } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { DataGridConditionHistoryKind, DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 
@@ -14,6 +14,7 @@ const props = withDefaults(
     ariaLabel?: string;
     historyEmptyText?: string;
     historyNoMatchesText?: string;
+    identifierQuote?: string;
     suggestionProvider?: DataGridConditionSuggestionProvider;
     suggestionDebounceMs?: number;
     disabled?: boolean;
@@ -39,6 +40,8 @@ const emit = defineEmits<{
 }>();
 
 const inputRef = ref<HTMLTextAreaElement>();
+const selectionStart = ref(modelValue.value.length);
+const selectionEnd = ref(modelValue.value.length);
 const suggestionListId = `${useId()}-${props.kind}-condition-suggestions`;
 const overlayRef = ref<HTMLTextAreaElement>();
 const controlRef = ref<HTMLDivElement>();
@@ -56,6 +59,9 @@ let expandAfterComposition = false;
 const editor = useDataGridConditionEditor({
   kind: props.kind,
   value: modelValue,
+  selectionStart,
+  selectionEnd,
+  identifierQuote: () => props.identifierQuote,
   columns: () => props.columns,
   historyScope: () => props.historyScope,
   suggestionProvider: props.suggestionProvider,
@@ -166,9 +172,9 @@ function resizeEditor(forceExpand = false) {
       void nextTick(() => {
         const overlay = overlayRef.value;
         if (!overlay || composing.value) return;
-        const start = input.selectionStart;
+        syncSelection(input);
         overlay.focus();
-        overlay.setSelectionRange(start, start);
+        overlay.setSelectionRange(selectionStart.value, selectionEnd.value);
       });
     }
   });
@@ -188,7 +194,31 @@ function onCompositionEnd() {
 function focus(select = false) {
   const target = activeEditor.value ?? inputRef.value;
   target?.focus();
-  if (select) target?.select();
+  if (select) {
+    target?.select();
+    if (target) syncSelection(target);
+  } else {
+    target?.setSelectionRange(selectionStart.value, selectionEnd.value);
+  }
+  resizeEditor(true);
+}
+
+function syncSelection(target: HTMLTextAreaElement) {
+  selectionStart.value = target.selectionStart;
+  selectionEnd.value = target.selectionEnd;
+}
+
+function onFocus(event: FocusEvent) {
+  syncSelection(event.currentTarget as HTMLTextAreaElement);
+  resizeEditor(true);
+}
+
+function onSelectionChange(event: Event) {
+  syncSelection(event.currentTarget as HTMLTextAreaElement);
+}
+
+function onClick(event: MouseEvent) {
+  onSelectionChange(event);
   resizeEditor(true);
 }
 
@@ -201,7 +231,8 @@ function scheduleCollapse() {
   }, 0);
 }
 
-function onInput() {
+function onInput(event: Event) {
+  syncSelection(event.currentTarget as HTMLTextAreaElement);
   resizeEditor(true);
   updateSuggestionPosition();
 }
@@ -221,9 +252,27 @@ async function clearCondition() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (completeQuote(event)) return;
   const action = editor.handleKeydown(event);
   if (action === "apply") void applyCondition();
   if (action === "accept") void nextTick(() => focus());
+}
+
+function completeQuote(event: KeyboardEvent) {
+  if (props.kind !== "where" || (event.key !== "'" && event.key !== '"') || event.isComposing || event.keyCode === 229 || event.metaKey || event.ctrlKey || event.altKey) return false;
+  const target = event.currentTarget as HTMLTextAreaElement;
+  const completion = completeDataGridConditionQuote(modelValue.value, target.selectionStart, target.selectionEnd, event.key);
+  event.preventDefault();
+  modelValue.value = completion.value;
+  selectionStart.value = completion.selectionStart;
+  selectionEnd.value = completion.selectionEnd;
+  editor.dismiss();
+  void nextTick(() => {
+    const active = activeEditor.value;
+    active?.focus();
+    active?.setSelectionRange(completion.selectionStart, completion.selectionEnd);
+  });
+  return true;
 }
 
 function openHistory() {
@@ -340,9 +389,11 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           class="data-grid-topbar-condition-input absolute inset-x-0 top-0 h-6 min-w-0 resize-none bg-transparent outline-none"
           :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact }]"
           style="height: 24px"
-          @focus="resizeEditor(true)"
+          @focus="onFocus"
           @blur="scheduleCollapse"
-          @click="resizeEditor(true)"
+          @click="onClick"
+          @select="onSelectionChange"
+          @keyup="onSelectionChange"
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
           @input="onInput"
@@ -373,6 +424,10 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           class="data-grid-topbar-condition-input data-grid-topbar-condition-input--expanded absolute resize-none outline-none"
           :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact }]"
           @blur="scheduleCollapse"
+          @focus="onFocus"
+          @click="onSelectionChange"
+          @select="onSelectionChange"
+          @keyup="onSelectionChange"
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
           @input="onInput"

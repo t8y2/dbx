@@ -57,6 +57,7 @@ import {
   isBrowserReloadShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
   isModRShortcut,
@@ -300,6 +301,7 @@ const {
   showDangerDialog,
   suppressDangerConfirm,
   tryExecute,
+  tryExecuteInNewResultTab,
   doExecute,
   cancelActiveExecution,
   tryExplain,
@@ -324,6 +326,11 @@ const {
 function requestActiveEditorExecute() {
   if (contentAreaRef.value?.requestQueryEditorExecute?.()) return;
   void tryExecute();
+}
+
+function requestActiveEditorExecuteInNewResultTab() {
+  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
+  void tryExecuteInNewResultTab();
 }
 
 const dialogs = useDialogSources();
@@ -1684,7 +1691,7 @@ async function handleQuickOpenSelect(item: any) {
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch") {
-        await connectionStore.loadElasticsearchIndices(item.connectionId);
+        await connectionStore.openElasticsearchConnectionTree(item.connectionId);
       } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await connectionStore.loadVectorCollections(item.connectionId);
       } else if (config?.db_type === "mq") {
@@ -1709,7 +1716,7 @@ async function handleQuickOpenSelect(item: any) {
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch") {
-        await connectionStore.loadElasticsearchIndices(item.connectionId);
+        await connectionStore.openElasticsearchConnectionTree(item.connectionId);
       } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await connectionStore.loadVectorCollections(item.connectionId);
       } else if (config?.db_type === "mq") {
@@ -1902,6 +1909,12 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     void openSaveSqlDialog();
+    return;
+  }
+  if (activeTab.value?.mode === "query" && isExecuteSqlInNewResultTabShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
+    e.preventDefault();
+    e.stopPropagation();
+    requestActiveEditorExecuteInNewResultTab();
     return;
   }
   if (activeTab.value?.mode === "query" && isExecuteSqlShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
@@ -2265,6 +2278,7 @@ onUnmounted(() => {
                     @fix-with-ai="fixWithAi"
                     @send-selection-to-ai="sendSelectionToAi"
                     @execute="tryExecute($event)"
+                    @execute-in-new-result-tab="tryExecuteInNewResultTab($event)"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"
                     @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"

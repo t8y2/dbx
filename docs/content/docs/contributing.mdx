@@ -33,6 +33,8 @@ If nobody is working on the issue, post this as a standalone comment:
 
 The claim workflow assigns the issue to you when it is available. If your proposed solution changes existing behavior, explain the approach briefly in the issue before making a large patch.
 
+If you later cannot continue, post `/unclaim` as a standalone comment (`/unclaimed` is also accepted). The workflow removes only your own assignment so another contributor can claim the issue.
+
 ## 2. Install the Toolchain
 
 DBX Desktop uses Tauri, Vue, and Rust. The repository currently requires:
@@ -420,6 +422,8 @@ The pull request description should include:
 6. Database name, version, and verification steps for database changes
 
 If CI fails, open the failed job and inspect its logs. Push the fix to the same branch; you do not need to create another pull request.
+
+When your linked PR has been merged into the default branch but the issue remains open, post `/close` as a standalone issue comment. The workflow only closes the issue when you are its current assignee and the author of a merged PR that cross-references the issue.
 
 ## 10. Update the Pull Request After Review
 

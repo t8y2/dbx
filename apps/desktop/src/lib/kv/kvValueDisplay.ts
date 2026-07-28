@@ -28,7 +28,7 @@ export function prettyPrintJsonText(text: string): PrettyPrintJsonResult {
   }
 }
 
-function valueLabel(value: number | null | undefined): string {
+function valueLabel(value: string | number | null | undefined): string {
   return value == null ? "-" : String(value);
 }
 

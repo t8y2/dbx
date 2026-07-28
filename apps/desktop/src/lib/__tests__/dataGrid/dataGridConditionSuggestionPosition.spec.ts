@@ -34,10 +34,11 @@ describe("getDataGridConditionSuggestionPosition", () => {
     expect(position.width).toBeLessThanOrEqual(520);
   });
 
-  test("keeps normal width when suggestions have no comments or are history entries", () => {
+  test("keeps normal width when suggestions have no comments or are keyword/history entries", () => {
     expect(
       getDataGridConditionSuggestionPreferredWidth([
         { value: "customer_id", kind: "column", comment: "" },
+        { value: "AND", kind: "keyword" },
         { value: "status = 'active'", kind: "history" },
       ]),
     ).toBeUndefined();

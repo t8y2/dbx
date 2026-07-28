@@ -45,8 +45,9 @@ test("only explicitly supported query schemas can be cleared from query tabs", (
   assert.equal(supportsClearableQuerySchema("jdbc"), false);
 });
 
-test("Nacos connection menus do not expose SQL-style query actions", () => {
+test("non-SQL connection menus do not expose SQL-style query actions", () => {
   assert.equal(supportsConnectionQueryActions("nacos"), false);
+  assert.equal(supportsConnectionQueryActions("hbase"), false);
   assert.equal(supportsConnectionQueryActions("mysql"), true);
   assert.equal(supportsConnectionQueryActions("redis"), true);
 });

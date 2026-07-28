@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { enforceRightSidebarPanelExclusivity, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, transitionRightSidebarPanels, type RightSidebarPanelState } from "@/stores/settingsStore";
+import { enforceRightSidebarPanelExclusivity, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, transitionRightSidebarPanels, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { createPinia, setActivePinia } from "pinia";
 import { isProxy } from "vue";
 import type { AiConfigItem } from "@/types/ai";
@@ -113,6 +113,37 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).dataGridSearchMode).toBe("filter");
     expect(normalizeEditorSettings({ dataGridSearchMode: "highlight" }).dataGridSearchMode).toBe("highlight");
     expect(normalizeEditorSettings({ dataGridSearchMode: "invalid" as any }).dataGridSearchMode).toBe("filter");
+  });
+
+  it("defaults the global data grid copy extractor and preserves valid choices", () => {
+    expect(normalizeEditorSettings({}).dataGridCopyExtractor).toBe("tsv");
+    expect(normalizeEditorSettings({ dataGridCopyExtractor: "sql-updates" }).dataGridCopyExtractor).toBe("sql-updates");
+    expect(normalizeEditorSettings({ dataGridCopyExtractor: "markdown" }).dataGridCopyExtractor).toBe("markdown");
+    expect(normalizeEditorSettings({ dataGridCopyExtractor: "invalid" as any }).dataGridCopyExtractor).toBe("tsv");
+  });
+
+  it("normalizes persistent extractor configuration fail-fast defaults", () => {
+    const defaults = normalizeEditorSettings({}).dataGridExtractorOptions;
+    expect(defaults.dsv).toMatchObject({ columnSeparator: ",", rowSeparator: "\n", quote: '"', quotePolicy: "minimal" });
+    expect(defaults.sql).toMatchObject({ skipComputedColumns: true, skipGeneratedColumns: true, insertMode: "merged" });
+
+    const configured = normalizeEditorSettings({
+      dataGridExtractorOptions: {
+        dsv: { ...defaults.dsv, columnSeparator: "|", quotePolicy: "always" },
+        sql: { ...defaults.sql, insertMode: "row-by-row" },
+        json: { pretty: false },
+      },
+    }).dataGridExtractorOptions;
+    expect(configured.dsv.columnSeparator).toBe("|");
+    expect(configured.dsv.quotePolicy).toBe("always");
+    expect(configured.sql.insertMode).toBe("row-by-row");
+    expect(configured.json.pretty).toBe(false);
+  });
+
+  it("defaults retained result runs to tiled tabs and preserves list mode", () => {
+    expect(normalizeEditorSettings({}).resultRunDisplayMode).toBe("tabs");
+    expect(normalizeEditorSettings({ resultRunDisplayMode: "list" }).resultRunDisplayMode).toBe("list");
+    expect(normalizeEditorSettings({ resultRunDisplayMode: "invalid" as any }).resultRunDisplayMode).toBe("tabs");
   });
 
   it("defaults persistent data grid view options off and preserves enabled values", () => {
@@ -287,6 +318,31 @@ function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiCo
   } as AiConfigItem;
 }
 
+describe("settingsStore AI API key normalization", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("trims API keys before persisting new configurations", async () => {
+    const saveAiConfigItem = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ saveAiConfigItem }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    const config = makeTestConfig({ id: "trimmed-key", apiKey: " \tsecret\r\n" });
+
+    await store.createAiConfig(config);
+
+    expect(saveAiConfigItem).toHaveBeenCalledWith(expect.objectContaining({ apiKey: "secret" }));
+    expect(store.aiConfigs[0].apiKey).toBe("secret");
+  });
+
+  it("trims API keys when normalizing loaded configurations", () => {
+    expect(normalizeAiConfig({ provider: "openai", apiKey: "  secret  " }).apiKey).toBe("secret");
+  });
+});
+
 describe("settingsStore MCP policy persistence", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -347,6 +403,19 @@ describe("settingsStore sidebar connection sort persistence", () => {
 
     await store.persistEditorSettings();
     expect(isProxy(saveEditorSettings.mock.calls[1][0])).toBe(false);
+  });
+
+  it("persists the retained result run display mode", async () => {
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.updateEditorSettings({ resultRunDisplayMode: "list" });
+
+    expect(store.editorSettings.resultRunDisplayMode).toBe("list");
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ resultRunDisplayMode: "list" }));
+    expect(isProxy(saveEditorSettings.mock.calls[0][0])).toBe(false);
   });
 });
 

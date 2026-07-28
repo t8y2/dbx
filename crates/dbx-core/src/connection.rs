@@ -96,6 +96,7 @@ pub enum PoolKind {
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
+    HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
     Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
@@ -118,6 +119,7 @@ enum ConnectionDatabaseInfoSource {
     Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
     ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
     NativeMysql(db::mysql::MySqlPool),
+    NativeHBase(db::hbase_driver::HBaseClient),
 }
 
 /// Held connection for a manual transaction session
@@ -1149,6 +1151,7 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
+        validate_connection_url_params(&config)?;
         let db_type = Some(config.db_type);
         let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
 
@@ -1397,6 +1400,17 @@ impl AppState {
                 );
                 db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Elasticsearch(client)
+            }
+            DatabaseType::Hbase => {
+                let client = db::hbase_driver::HBaseClient::new(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    false,
+                    connect_timeout,
+                )?;
+                db::hbase_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::HBase(client)
             }
             DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
                 let kind = match db_config.db_type {
@@ -2232,6 +2246,18 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::HBase(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::hbase_driver::test_connection(&client, timeout).await {
+                        Ok(_) => false,
+                        Err(err) => {
+                            log::warn!("HBase connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::VectorDb(client) => {
                     let client = client.clone();
                     drop(connections);
@@ -2797,6 +2823,7 @@ impl AppState {
                     })
                 }
                 Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
+                Some(PoolKind::HBase(client)) => Some(ConnectionDatabaseInfoSource::NativeHBase(client.clone())),
                 _ => None,
             }
         };
@@ -2818,6 +2845,9 @@ impl AppState {
             }
             Some(ConnectionDatabaseInfoSource::NativeMysql(pool)) => {
                 db::mysql::database_connection_info(&pool, db::mysql::protocol_product_name(&config)).await.map(Some)
+            }
+            Some(ConnectionDatabaseInfoSource::NativeHBase(client)) => {
+                db::hbase_driver::database_connection_info(&client).await
             }
             None => Ok(None),
         }
@@ -2993,6 +3023,13 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::HBase(client) => match db::hbase_driver::test_connection(client, timeout).await {
+                    Ok(_) => true,
+                    Err(e) => {
+                        log::warn!("HBase connection pool '{key}' is unhealthy: {e}");
+                        false
+                    }
+                },
                 PoolKind::VectorDb(client) => match db::vector_driver::test_connection(client, timeout).await {
                     Ok(()) => true,
                     Err(e) => {
@@ -3235,6 +3272,7 @@ enum KeepaliveTarget {
     ClickHouse(db::clickhouse_driver::ChClient),
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
+    HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
     Agent(Arc<tokio::sync::Mutex<db::agent_driver::AgentDriverClient>>),
@@ -3253,6 +3291,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::ClickHouse(client) => Some(KeepaliveTarget::ClickHouse(client.clone())),
         PoolKind::SqlServer(client) => Some(KeepaliveTarget::SqlServer(client.clone())),
         PoolKind::Elasticsearch(client) => Some(KeepaliveTarget::Elasticsearch(client.clone())),
+        PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
         PoolKind::Agent(client) => Some(KeepaliveTarget::Agent(client.clone())),
@@ -3283,6 +3322,7 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
             db::sqlserver::test_connection(&mut client).await
         }
         KeepaliveTarget::Elasticsearch(client) => db::elasticsearch_driver::test_connection(client, timeout).await,
+        KeepaliveTarget::HBase(client) => db::hbase_driver::test_connection(client, timeout).await.map(|_| ()),
         KeepaliveTarget::VectorDb(client) => db::vector_driver::test_connection(client, timeout).await,
         KeepaliveTarget::InfluxDb(client) => db::influxdb_driver::test_connection(client, timeout).await,
         KeepaliveTarget::Agent(client) => {
@@ -3498,6 +3538,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::ClickHouse(client) => PoolKind::ClickHouse(client.clone()),
         PoolKind::SqlServer(client) => PoolKind::SqlServer(client.clone()),
         PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
+        PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
         PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
@@ -3550,6 +3591,9 @@ pub async fn close_pool_kind(pool: PoolKind) {
             drop(client);
         }
         PoolKind::Elasticsearch(client) => {
+            drop(client);
+        }
+        PoolKind::HBase(client) => {
             drop(client);
         }
         PoolKind::VectorDb(client) => {
@@ -3766,6 +3810,11 @@ fn native_postgres_url_config(config: &ConnectionConfig) -> Option<ConnectionCon
     }
 }
 
+fn validate_connection_url_params(config: &ConnectionConfig) -> Result<(), String> {
+    let normalized = native_postgres_url_config(config);
+    normalized.as_ref().unwrap_or(config).validate_native_url_params()
+}
+
 pub async fn probe_connection_endpoint(config: &ConnectionConfig, host: &str, port: u16) -> Result<(), String> {
     if !uses_tcp_probe(config, host, port) {
         return Ok(());
@@ -3863,7 +3912,8 @@ mod tests {
         oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
         redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
         sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3885,6 +3935,7 @@ mod tests {
         ConnectionConfig {
             id: "conn".to_string(),
             name: "MySQL".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Mysql,
             driver_profile: None,
             driver_label: None,
@@ -4796,6 +4847,18 @@ mod tests {
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
             "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=prefer&application_name=dbx"
+        );
+    }
+
+    #[test]
+    fn postgres_url_validation_rejects_invalid_stringtype_before_connect() {
+        let mut config = mysql_config(Some("postgres"));
+        config.db_type = DatabaseType::Postgres;
+        config.url_params = Some("currentSchema=public&stringtype=text".to_string());
+
+        assert_eq!(
+            validate_connection_url_params(&config).unwrap_err(),
+            "Unsupported value for PostgreSQL stringtype parameter: text. Expected 'unspecified' or 'varchar'."
         );
     }
 

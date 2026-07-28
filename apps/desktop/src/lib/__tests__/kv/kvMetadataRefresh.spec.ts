@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KvGetResponse } from "@/lib/backend/api";
-import { decideKvMetadataRefresh, knownKvLeaseKeys, KvListRequestGuard, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
+import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseSummaries, KvListRequestGuard, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
 
 function found(metadata: NonNullable<KvGetResponse["metadata"]>): KvGetResponse {
   return {
@@ -83,10 +83,26 @@ describe("decideKvMetadataRefresh", () => {
   });
 
   it("tracks only known leased keys and excludes the selected key", () => {
-    const keys = [{ key: "/no-lease", lease: 0 }, { key: "/leased", lease: 10 }, { key: "/selected", lease: 20 }, { key: "/unknown" }];
+    const keys = [{ key: "/no-lease", lease: 0 }, { key: "/leased", lease: "10" }, { key: "/selected", lease: 20 }, { key: "/unknown" }];
 
-    expect(knownKvLeaseKeys(keys, "/selected")).toEqual(["/leased"]);
-    expect(knownKvLeaseKeys(keys, null)).toEqual(["/leased", "/selected"]);
+    expect(knownKvLeaseSummaries(keys, "/selected")).toEqual([keys[1]]);
+    expect(knownKvLeaseSummaries(keys, null)).toEqual([keys[1], keys[2]]);
+  });
+
+  it("excludes only the selected raw-byte identity from lease refresh", () => {
+    const keys = [
+      { key: "[base64:/w==]", keyIdentity: "ff", lease: 10 },
+      { key: "[base64:/w==]", keyIdentity: "5b6261736536343a2f773d3d5d", lease: 20 },
+    ];
+
+    expect(knownKvLeaseSummaries(keys, "ff")).toEqual([keys[1]]);
+  });
+
+  it("recognizes positive lease IDs in the string-based int64 transport", () => {
+    expect(hasPositiveKvLease("9007199254740993")).toBe(true);
+    expect(hasPositiveKvLease(10)).toBe(true);
+    expect(hasPositiveKvLease("0")).toBe(false);
+    expect(hasPositiveKvLease("")).toBe(false);
   });
 
   it("merges refreshed metadata without replacing the known value size and removes expired keys", () => {
@@ -100,6 +116,16 @@ describe("decideKvMetadataRefresh", () => {
       { key: "/expired", lease: 20, ttl: 1 },
     ]);
     expect(mergeKvKeyMetadata(keys, "/expired", { found: false })).toEqual([{ key: "/leased", lease: 10, ttl: 4, valueSize: 12 }]);
+  });
+
+  it("refreshes and removes only the matching raw-byte identity when display keys collide", () => {
+    const keys = [
+      { key: "[base64:/w==]", keyIdentity: "ff", lease: 10, ttl: 4, valueSize: 12 },
+      { key: "[base64:/w==]", keyIdentity: "5b6261736536343a2f773d3d5d", lease: 20, ttl: 8, valueSize: 24 },
+    ];
+
+    expect(mergeKvKeyMetadata(keys, "[base64:/w==]", found({ lease: 11, ttl: 3, modRevision: 5 }), "ff")).toEqual([{ key: "[base64:/w==]", keyIdentity: "ff", lease: 11, ttl: 3, modRevision: 5, valueSize: 12 }, keys[1]]);
+    expect(removeMissingKvKey(keys, "[base64:/w==]", "ff")).toEqual([keys[1]]);
   });
 
   it("backs off after failures and resets after a successful cycle", () => {

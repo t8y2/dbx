@@ -78,25 +78,35 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     {"url": versioned_native.name, "size": versioned_native.stat().st_size},
                 )
 
-    def test_full_offline_bundle_includes_versioned_native_artifact(self) -> None:
+    def test_full_offline_bundle_includes_supported_windows_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             release_dir = Path(temp_dir)
             filename = "dbx-agent-kingbase-0.1.34-windows-x64.exe"
+            kafka_filename = "dbx-agent-kafka-0.1.0.jar"
             (release_dir / filename).write_bytes(b"MZtest-agent")
+            (release_dir / kafka_filename).write_bytes(b"test-kafka-agent")
             (release_dir / "dbx-jre-21-windows-x64.tar.gz").write_bytes(b"test-jre")
+            (release_dir / "dbx-jre-21-windows-aarch64.tar.gz").write_bytes(b"test-jre")
             (release_dir / "agent-registry.json").write_text('{"jres":{},"drivers":{}}', encoding="utf-8")
 
-            subprocess.run(
+            result = subprocess.run(
                 ["bash", str(Path(__file__).with_name("build_offline_zip.sh")), str(release_dir)],
                 check=True,
                 capture_output=True,
                 text=True,
             )
 
-            bundle = release_dir / "dbx-agents-offline-windows-x64.zip"
-            self.assertTrue(bundle.is_file())
-            with zipfile.ZipFile(bundle) as archive:
+            self.assertNotIn("SKIP windows-aarch64", result.stdout)
+            x64_bundle = release_dir / "dbx-agents-offline-windows-x64.zip"
+            arm64_bundle = release_dir / "dbx-agents-offline-windows-aarch64.zip"
+            self.assertTrue(x64_bundle.is_file())
+            self.assertTrue(arm64_bundle.is_file())
+            with zipfile.ZipFile(x64_bundle) as archive:
                 self.assertIn(f"drivers/{filename}", archive.namelist())
+                self.assertIn(f"drivers/{kafka_filename}", archive.namelist())
+            with zipfile.ZipFile(arm64_bundle) as archive:
+                self.assertIn("jre/dbx-jre-21-windows-aarch64.tar.gz", archive.namelist())
+                self.assertIn(f"drivers/{kafka_filename}", archive.namelist())
 
 
 if __name__ == "__main__":

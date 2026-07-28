@@ -21,7 +21,7 @@ export interface DataGridConditionSuggestionPosition {
 
 export interface DataGridConditionSuggestionContent {
   value: string;
-  kind: "column" | "history";
+  kind: "column" | "keyword" | "history";
   comment?: string | null;
 }
 

@@ -3,7 +3,7 @@ use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1124,6 +1124,7 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
+        PoolKind::HBase(client) => db::hbase_driver::list_namespaces(client).await,
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             let con = con.lock().map_err(|e| e.to_string())?;
@@ -2473,6 +2474,9 @@ async fn list_tables_once(
             .await
             .map(|names| collection_names_to_tables(names, "INDEX"))
             .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
+        PoolKind::HBase(client) => db::hbase_driver::list_tables(client, database)
+            .await
+            .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter)),
         PoolKind::VectorDb(client) => db::vector_driver::list_collections(client)
             .await
             .map(|infos| collection_names_to_tables(infos.into_iter().map(|i| i.name).collect(), "COLLECTION"))
@@ -2848,14 +2852,15 @@ mod tests {
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error,
-        mysql_object_source_sql, mysql_table_metadata_catalog, normalize_information_schema_table_type,
-        oracle_columns_from_query_result, oracle_columns_sql, oracle_object_statistics_dba_segments_sql,
-        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
-        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
-        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_from_query_result,
-        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        should_query_oracle_columns_via_sql_first, table_name_filter_matches, visible_schema_filter, TableNameFilter,
+        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_metadata_catalog,
+        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
+        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
+        oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
+        oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, should_query_oracle_columns_via_sql_first, table_name_filter_matches,
+        visible_schema_filter, TableNameFilter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -2886,6 +2891,7 @@ mod tests {
         ConnectionConfig {
             id: "test".to_string(),
             name: "test".to_string(),
+            note: String::new(),
             db_type,
             driver_profile: None,
             driver_label: None,
@@ -2963,6 +2969,35 @@ mod tests {
     }
 
     #[test]
+    fn mysql_object_source_sql_emits_show_create_materialized_view() {
+        // Regression for the review comment: Doris / StarRocks ride on the MySQL
+        // protocol, so the MV branch of mysql_object_source_sql must produce a
+        // real statement (used at crates/dbx-core/src/schema.rs:5395-5404 by
+        // get_table_ddl_core). Returning an empty string silently broke the UI.
+        assert_eq!(
+            mysql_object_source_sql("shop", "daily_sales_mv", &db::ObjectSourceKind::MaterializedView),
+            "SHOW CREATE MATERIALIZED VIEW `shop`.`daily_sales_mv`"
+        );
+        assert_eq!(
+            mysql_object_source_sql("", "daily_sales_mv", &db::ObjectSourceKind::MaterializedView),
+            "SHOW CREATE MATERIALIZED VIEW `daily_sales_mv`"
+        );
+    }
+
+    #[test]
+    fn mysql_object_source_ddl_column_index_matches_dialect_layout() {
+        // VIEW and Doris/StarRocks MaterializedView return (Name, DDL).
+        // PROCEDURE / FUNCTION return (Name, sql_mode, DDL, …).
+        // Reading the wrong index returns the empty/no-op and surfaces as
+        // "Failed to read object source" — regression-guarded here so we
+        // don't have to spin up a real StarRocks to catch it.
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::View), 1);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::MaterializedView), 1);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Procedure), 2);
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Function), 2);
+    }
+
+    #[test]
     fn metadata_retry_recovers_missing_pool_only_as_transient_state() {
         assert!(is_retryable_metadata_error("Pool not found"));
         assert!(is_retryable_metadata_error("connection reset by peer"));
@@ -3009,6 +3044,20 @@ mod tests {
         let mut legacy_oracle = test_connection_config(DatabaseType::Oracle);
         legacy_oracle.driver_profile = Some("oracle-legacy".to_string());
         assert!(!super::supports_agent_table_paging(&legacy_oracle));
+    }
+
+    #[test]
+    fn detects_opengauss_sequence_compatibility_profiles() {
+        assert!(super::is_opengauss_family_config(&test_connection_config(DatabaseType::OpenGauss)));
+        assert!(super::is_opengauss_family_config(&test_connection_config(DatabaseType::Gaussdb)));
+        assert!(!super::is_opengauss_family_config(&test_connection_config(DatabaseType::Postgres)));
+
+        let mut profiled_postgres = test_connection_config(DatabaseType::Postgres);
+        profiled_postgres.driver_profile = Some("opengauss".to_string());
+        assert!(super::is_opengauss_family_config(&profiled_postgres));
+
+        profiled_postgres.driver_profile = Some("gaussdb".to_string());
+        assert!(super::is_opengauss_family_config(&profiled_postgres));
     }
 
     #[test]
@@ -3352,6 +3401,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let tables = presto_like_tables_from_query_result(&result);
@@ -3396,6 +3446,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let columns = presto_like_columns_from_query_result(&result);
@@ -3682,6 +3733,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         assert_eq!(oracle_table_comment_from_query_result(result).unwrap().as_deref(), Some("Customer table"));
@@ -3696,6 +3748,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         assert_eq!(oracle_table_comment_from_query_result(empty).unwrap(), None);
@@ -3728,6 +3781,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let comments = oracle_table_comments_from_query_result(result);
@@ -3847,6 +3901,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let columns = oracle_columns_from_query_result(result);
@@ -3948,6 +4003,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         let stats = oracle_object_statistics_from_query_result(result);
@@ -4812,6 +4868,7 @@ async fn native_postgres_metadata_pool(
 
     let mut postgres_config = database_connection_config(config, Some(database));
     postgres_config.db_type = DatabaseType::Postgres;
+    postgres_config.validate_native_url_params()?;
     let (host, port) = state.connection_host_port(connection_id, &postgres_config).await?;
     let url = connection_url_for_endpoint(&postgres_config, &host, port);
     let connect_timeout = Duration::from_secs(postgres_config.effective_connect_timeout_secs());
@@ -5162,6 +5219,9 @@ pub async fn get_columns_core_for_session(
             PoolKind::Elasticsearch(client) => {
                 db::elasticsearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::HBase(client) => {
+                db::hbase_driver::get_columns(client, database, table).await.map(deduplicate_column_infos)
+            }
             _ => Ok(vec![]),
         }
     })
@@ -5471,10 +5531,14 @@ pub async fn list_sequences_core(
 ) -> Result<Vec<db::SequenceInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
+        let db_config = connection_config(state, connection_id).await;
         let connections = state.connections.read().await;
         let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
         match pool {
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_family_config) => {
+                db::postgres::list_opengauss_sequences(p, schema, with_last_values).await
+            }
             PoolKind::Postgres(p) => db::postgres::list_sequences(p, schema, with_last_values).await,
             _ => Ok(vec![]),
         }
@@ -5588,6 +5652,29 @@ pub async fn get_table_ddl_core(
     schema: &str,
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false).await
+}
+
+pub async fn get_table_display_ddl_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true).await
+}
+
+async fn get_table_ddl_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+    include_postgres_access: bool,
 ) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
@@ -5744,6 +5831,11 @@ pub async fn get_table_ddl_core(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             cloudberry_ddl(p, schema, table).await
         }
+        PoolKind::Postgres(p)
+            if include_postgres_access && db_config.as_ref().is_some_and(is_native_postgres_config) =>
+        {
+            pg_display_ddl(p, schema, table).await
+        }
         PoolKind::Postgres(p) => pg_ddl(p, schema, table).await,
         PoolKind::Sqlite(p) => sqlite_ddl(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::table_ddl(client, table).await,
@@ -5759,6 +5851,10 @@ async fn connection_config(state: &AppState, connection_id: &str) -> Option<Conn
 fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {
     matches!(config.db_type, DatabaseType::OpenGauss | DatabaseType::Gaussdb)
         || matches!(config.driver_profile.as_deref(), Some("opengauss" | "gaussdb"))
+}
+
+fn is_native_postgres_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Postgres && matches!(config.driver_profile.as_deref(), None | Some("postgres"))
 }
 
 fn is_cloudberry_config(config: &ConnectionConfig) -> bool {
@@ -5942,6 +6038,46 @@ fn opengauss_object_source_sql(
     postgres_object_source_sql_inner(schema, name, kind, signature, true, true)
 }
 
+fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache: bool) -> String {
+    let cache_clause = if include_cache {
+        "'    cache ' || COALESCE((pg_sequence_last_value(c.oid)).cache_value::text, '1') || E'\\n' || "
+    } else {
+        ""
+    };
+    format!(
+        "SELECT concat_ws(E'\\n\\n', \
+           '-- auto-generated definition' || E'\\n' || \
+           'create ' || CASE WHEN c.relkind IN ('L','Z') THEN 'large ' ELSE '' END || \
+           'sequence ' || quote_ident(c.relname) || E'\\n' || \
+           '    increment by ' || COALESCE(s.increment::text, '1') || E'\\n' || \
+           '    minvalue ' || COALESCE(s.minimum_value::text, '1') || E'\\n' || \
+           '    maxvalue ' || COALESCE(s.maximum_value::text, '9223372036854775807') || E'\\n' || \
+           '    start with ' || COALESCE(s.start_value::text, '1') || E'\\n' || \
+           {cache_clause} \
+           CASE WHEN upper(COALESCE(s.cycle_option::text, 'NO')) = 'YES' \
+             THEN '    cycle;' ELSE '    no cycle;' END, \
+           'alter ' || CASE WHEN c.relkind IN ('L','Z') THEN 'large ' ELSE '' END || \
+           'sequence ' || quote_ident(c.relname) || ' owner to ' || quote_ident(pg_get_userbyid(c.relowner)) || ';', \
+           CASE WHEN owned.relname IS NOT NULL AND a.attname IS NOT NULL \
+             THEN 'alter ' || CASE WHEN c.relkind IN ('L','Z') THEN 'large ' ELSE '' END || \
+             'sequence ' || quote_ident(c.relname) || ' owned by ' || quote_ident(owned.relname) || '.' || quote_ident(a.attname) || ';' \
+           END \
+         ) \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         JOIN information_schema.sequences s \
+           ON s.sequence_schema = n.nspname AND s.sequence_name = c.relname \
+         LEFT JOIN pg_catalog.pg_depend d \
+           ON d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'a' \
+         LEFT JOIN pg_catalog.pg_class owned ON owned.oid = d.refobjid \
+         LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid \
+         WHERE n.nspname = {schema} AND c.relname = {name} AND c.relkind IN ('S','L','z','Z') \
+         ORDER BY c.oid LIMIT 1",
+        schema = sql_string(schema),
+        name = sql_string(name)
+    )
+}
+
 fn postgres_object_source_sql_without_relispopulated(
     schema: &str,
     name: &str,
@@ -6055,6 +6191,9 @@ fn postgres_object_source_sql_inner(
             )
         }
         db::ObjectSourceKind::Sequence => {
+            if unwrap_opengauss_record {
+                return opengauss_sequence_object_source_sql(schema, name, true);
+            }
             format!(
                 "SELECT concat_ws(E'\\n\\n', \
                    '-- auto-generated definition' || E'\\n' || \
@@ -6131,8 +6270,40 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
         | db::ObjectSourceKind::Type
-        | db::ObjectSourceKind::TypeBody
-        | db::ObjectSourceKind::MaterializedView => String::new(),
+        | db::ObjectSourceKind::TypeBody => String::new(),
+        // Doris and StarRocks expose materialized views via `SHOW CREATE MATERIALIZED VIEW`.
+        // MySQL itself never reaches this arm in normal use: the desktop capabilities map at
+        // apps/desktop/src/lib/database/databaseObjectCapabilities.ts has no "mysql" entry,
+        // so the UI never sends MaterializedView for a real MySQL connection. If something
+        // else forces the kind through, MySQL 8.x will surface a syntax error instead of
+        // silently returning empty, which is the desired fail-loud behaviour.
+        db::ObjectSourceKind::MaterializedView => {
+            format!("SHOW CREATE MATERIALIZED VIEW {qualified_name}")
+        }
+    }
+}
+
+/// Column index of the DDL text in the row returned by the statements generated
+/// by [`mysql_object_source_sql`].
+///
+/// The shape of the result is dialect-dependent:
+/// - `SHOW CREATE VIEW`, Doris/StarRocks `SHOW CREATE MATERIALIZED VIEW` →
+///   `(Name, DDL)` → DDL at index `1`.
+/// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION` →
+///   `(Name, sql_mode, DDL, …)` → DDL at index `2`.
+///
+/// Encoded as a function so the index can be unit-tested without a live DB.
+pub(crate) fn mysql_object_source_ddl_column_index(kind: &db::ObjectSourceKind) -> usize {
+    match kind {
+        db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => 1,
+        db::ObjectSourceKind::Procedure
+        | db::ObjectSourceKind::Function
+        | db::ObjectSourceKind::Trigger
+        | db::ObjectSourceKind::Sequence
+        | db::ObjectSourceKind::Package
+        | db::ObjectSourceKind::PackageBody
+        | db::ObjectSourceKind::Type
+        | db::ObjectSourceKind::TypeBody => 2,
     }
 }
 
@@ -6162,17 +6333,42 @@ async fn mysql_object_source(
     name: &str,
     kind: &db::ObjectSourceKind,
 ) -> Result<String, String> {
-    use mysql_async::prelude::*;
-    let sql = mysql_object_source_sql(database, name, kind);
+    let primary_sql = mysql_object_source_sql(database, name, kind);
+    let primary_column_index = mysql_object_source_ddl_column_index(kind);
     let mut conn = db::mysql::get_conn_with_timeout(pool, db::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+
+    match read_mysql_object_source_row(&mut conn, &primary_sql, primary_column_index).await {
+        Ok(source) => Ok(source),
+        Err(primary_err) if matches!(kind, db::ObjectSourceKind::MaterializedView) => {
+            // StarRocks predating PR 73396 rejects SHOW CREATE MATERIALIZED VIEW for
+            // sync MVs. Fall back to the persistent definition exposed by
+            // information_schema.materialized_views. The fallback returns a single
+            // column (MATERIALIZED_VIEW_DEFINITION) so the column index is always 0.
+            let fallback_sql = db::mysql::mysql_materialized_view_definition_sql(database, name);
+            read_mysql_object_source_row(&mut conn, &fallback_sql, 0).await.map_err(|fallback_err| {
+                format!(
+                    "SHOW CREATE MATERIALIZED VIEW failed ({primary_err}); \
+                         fallback query against information_schema.materialized_views failed ({fallback_err})"
+                )
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn read_mysql_object_source_row(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    ddl_column_index: usize,
+) -> Result<String, String> {
+    use mysql_async::prelude::*;
+    let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let row = rows.first().ok_or("Object source not found")?;
-    let index = if matches!(kind, db::ObjectSourceKind::View) { 1 } else { 2 };
-    row.get_opt::<String, usize>(index)
+    row.get_opt::<String, usize>(ddl_column_index)
         .and_then(|result| result.ok())
         .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(index)
+            row.get_opt::<Vec<u8>, usize>(ddl_column_index)
                 .and_then(|result| result.ok())
                 .map(|b| String::from_utf8_lossy(&b).to_string())
         })
@@ -6693,6 +6889,17 @@ async fn postgres_object_source(
         }
         Err(primary_err)
             if unwrap_opengauss_record
+                && matches!(object_type, db::ObjectSourceKind::Sequence)
+                && opengauss_sequence_cache_metadata_error(&primary_err) =>
+        {
+            let fallback_sql = opengauss_sequence_object_source_sql(schema, name, false);
+            db::postgres::execute_query(pool, &fallback_sql)
+                .await
+                .and_then(first_string_cell)
+                .map_err(|fallback_err| format!("{primary_err}; sequence cache fallback failed: {fallback_err}"))
+        }
+        Err(primary_err)
+            if unwrap_opengauss_record
                 && matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) =>
         {
             let mut errors = vec![primary_err];
@@ -6733,6 +6940,11 @@ fn postgres_missing_prokind_error(err: &str) -> bool {
         && (lower.contains("column p.prokind")
             || lower.contains("column \"p\".\"prokind\"")
             || lower.contains("column \"prokind\""))
+}
+
+fn opengauss_sequence_cache_metadata_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("pg_sequence_last_value") || lower.contains("cache_value")
 }
 
 fn postgres_missing_relispopulated_error(err: &str) -> bool {
@@ -6832,6 +7044,35 @@ mod object_source_tests {
             postgres_function_object_source_sql_without_prokind("public", "recalc_score", true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND NOT p.proisagg AND NOT p.proiswindow ORDER BY p.oid LIMIT 1"
         );
+    }
+
+    #[test]
+    fn builds_opengauss_sequence_source_without_pg_sequence_catalog() {
+        let sql = opengauss_object_source_sql("public", "order_id_seq", &ObjectSourceKind::Sequence, None);
+
+        assert!(sql.contains("information_schema.sequences"));
+        assert!(sql.contains("s.sequence_schema = n.nspname"));
+        assert!(sql.contains("s.sequence_name = c.relname"));
+        assert!(sql.contains("c.relkind IN ('S','L','z','Z')"));
+        assert!(sql.contains("CASE WHEN c.relkind IN ('L','Z') THEN 'large '"));
+        assert!(sql.contains("increment by"));
+        assert!(sql.contains("start with"));
+        assert!(sql.contains("(pg_sequence_last_value(c.oid)).cache_value::text"));
+        assert!(sql.contains("cycle;"));
+        assert!(!sql.contains("pg_catalog.pg_sequence"));
+
+        let fallback_sql = opengauss_sequence_object_source_sql("public", "order_id_seq", false);
+        assert!(fallback_sql.contains("c.relkind IN ('S','L','z','Z')"));
+        assert!(fallback_sql.contains("CASE WHEN c.relkind IN ('L','Z') THEN 'large '"));
+        assert!(!fallback_sql.contains("pg_sequence_last_value"));
+        assert!(!fallback_sql.contains("cache_value"));
+    }
+
+    #[test]
+    fn detects_opengauss_sequence_cache_metadata_fallback_errors() {
+        assert!(opengauss_sequence_cache_metadata_error("cannot execute pg_sequence_last_value() on a standby node"));
+        assert!(opengauss_sequence_cache_metadata_error("column notation .cache_value applied to type text"));
+        assert!(!opengauss_sequence_cache_metadata_error("permission denied for sequence order_id_seq"));
     }
 
     #[test]
@@ -7040,6 +7281,85 @@ mod ddl_tests {
         let ddl = render_postgres_table_ddl("public", "users", &columns, &[], &[], Some("User table"));
 
         assert!(ddl.contains("COMMENT ON TABLE \"public\".\"users\" IS 'User table';"));
+    }
+
+    #[test]
+    fn postgres_display_ddl_preserves_owner_revokes_and_grant_chain() {
+        use db::postgres::{PostgresTableAccessInfo, PostgresTablePrivilegeInfo};
+
+        let privilege =
+            |grantor: &str, grantee: &str, privilege_type: &str, is_grantable: bool, column_name: Option<&str>| {
+                PostgresTablePrivilegeInfo {
+                    grantor: grantor.to_string(),
+                    grantee: grantee.to_string(),
+                    privilege_type: privilege_type.to_string(),
+                    is_grantable,
+                    column_name: column_name.map(str::to_string),
+                }
+            };
+        let access = PostgresTableAccessInfo {
+            owner: "table\"owner".to_string(),
+            owner_default_privileges: vec!["DELETE", "INSERT", "SELECT", "UPDATE"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            privileges: vec![
+                privilege("table\"owner", "table\"owner", "SELECT", false, None),
+                privilege("table\"owner", "z manager", "SELECT", true, None),
+                privilege("table\"owner", "z manager", "SELECT", true, Some("customer_name")),
+                privilege("z manager", "a delegate", "SELECT", true, None),
+                privilege("a delegate", "reader role", "SELECT", false, Some("customer_name")),
+                privilege("z manager", "reader role", "SELECT", false, Some("customer_name")),
+                privilege("table\"owner", "PUBLIC", "INSERT", false, Some("customer_name")),
+                privilege("table\"owner", "PUBLIC", "INSERT", false, Some("amount")),
+            ],
+        };
+
+        let ddl = append_postgres_access_ddl(
+            "CREATE TABLE \"app\".\"orders\" (\n  \"id\" bigint\n);\n".to_string(),
+            "app",
+            "orders",
+            &access,
+        );
+
+        assert!(ddl.contains("ALTER TABLE \"app\".\"orders\" OWNER TO \"table\"\"owner\";"));
+        assert!(ddl.contains("REVOKE DELETE, INSERT, UPDATE ON TABLE \"app\".\"orders\" FROM \"table\"\"owner\";"));
+        assert!(ddl.contains("GRANT INSERT (\"amount\", \"customer_name\") ON TABLE \"app\".\"orders\" TO PUBLIC;"));
+        assert!(ddl.contains("GRANT SELECT (\"customer_name\") ON TABLE \"app\".\"orders\" TO \"reader role\";"));
+
+        let owner_role = ddl.find("SET ROLE \"table\"\"owner\";").unwrap();
+        let manager_role = ddl.find("SET ROLE \"z manager\";").unwrap();
+        let delegate_role = ddl.find("SET ROLE \"a delegate\";").unwrap();
+        assert!(owner_role < manager_role && manager_role < delegate_role, "ddl: {ddl}");
+        assert!(ddl[owner_role..manager_role]
+            .contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"z manager\" WITH GRANT OPTION;"));
+        assert!(ddl[owner_role..manager_role].contains(
+            "GRANT SELECT (\"customer_name\") ON TABLE \"app\".\"orders\" TO \"z manager\" WITH GRANT OPTION;"
+        ));
+        assert!(ddl[manager_role..delegate_role]
+            .contains("GRANT SELECT ON TABLE \"app\".\"orders\" TO \"a delegate\" WITH GRANT OPTION;"));
+        assert!(ddl[delegate_role..]
+            .contains("GRANT SELECT (\"customer_name\") ON TABLE \"app\".\"orders\" TO \"reader role\";"));
+    }
+
+    #[test]
+    fn postgres_display_ddl_can_revoke_all_owner_ordinary_privileges() {
+        let access = db::postgres::PostgresTableAccessInfo {
+            owner: "locked_owner".to_string(),
+            owner_default_privileges: vec!["INSERT", "SELECT", "UPDATE"].into_iter().map(str::to_string).collect(),
+            privileges: vec![],
+        };
+
+        let ddl = append_postgres_access_ddl(
+            "CREATE TABLE \"app\".\"locked\" (\"id\" bigint);".to_string(),
+            "app",
+            "locked",
+            &access,
+        );
+
+        assert!(ddl.contains("SET ROLE \"locked_owner\";"));
+        assert!(ddl.contains("REVOKE INSERT, SELECT, UPDATE ON TABLE \"app\".\"locked\" FROM \"locked_owner\";"));
+        assert!(ddl.ends_with("RESET ROLE;"));
     }
 
     #[test]
@@ -7342,6 +7662,215 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
         ),
         &trigger_definitions,
     ))
+}
+
+async fn pg_display_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
+    let (ddl, access) = tokio::join!(pg_ddl(pool, schema, table), db::postgres::get_table_access(pool, schema, table));
+    let ddl = ddl?;
+    match access {
+        Ok(access) => Ok(append_postgres_access_ddl(ddl, schema, table, &access)),
+        Err(error) => {
+            log::warn!(
+                "[schema][postgres:table-access-ddl-fallback] schema={} table={} error={}",
+                schema,
+                table,
+                error
+            );
+            Ok(ddl)
+        }
+    }
+}
+
+fn append_postgres_access_ddl(
+    mut ddl: String,
+    schema: &str,
+    table: &str,
+    access: &db::postgres::PostgresTableAccessInfo,
+) -> String {
+    let table_name = format!("{}.{}", pg_ident(schema), pg_ident(table));
+    ddl = ddl.trim_end().to_string();
+    if !ddl.ends_with(';') {
+        ddl.push(';');
+    }
+    ddl.push_str(&format!("\n\nALTER TABLE {table_name} OWNER TO {};", pg_ident(&access.owner)));
+
+    let owner_privileges = access
+        .privileges
+        .iter()
+        .filter(|privilege| {
+            privilege.grantor == access.owner && privilege.grantee == access.owner && privilege.column_name.is_none()
+        })
+        .map(|privilege| privilege.privilege_type.clone())
+        .collect::<BTreeSet<_>>();
+    let owner_revokes = access
+        .owner_default_privileges
+        .iter()
+        .filter(|privilege| !owner_privileges.contains(*privilege))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let grants = normalized_postgres_grants(access);
+    let grantor_order = postgres_grantor_order(&access.owner, !owner_revokes.is_empty(), &grants);
+
+    // PostgreSQL records the active granting role, so each batch must run in that role's context.
+    for grantor in grantor_order {
+        ddl.push_str(&format!("\n\nSET ROLE {};", pg_ident(&grantor)));
+        if grantor == access.owner && !owner_revokes.is_empty() {
+            ddl.push_str(&format!(
+                "\nREVOKE {} ON TABLE {table_name} FROM {};",
+                owner_revokes.iter().cloned().collect::<Vec<_>>().join(", "),
+                pg_ident(&access.owner)
+            ));
+        }
+        append_postgres_grants_for_role(&mut ddl, &table_name, &grantor, &grants);
+        ddl.push_str("\nRESET ROLE;");
+    }
+
+    ddl
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostgresGrant {
+    grantor: String,
+    grantee: String,
+    privilege_type: String,
+    is_grantable: bool,
+    column_name: Option<String>,
+}
+
+fn normalized_postgres_grants(access: &db::postgres::PostgresTableAccessInfo) -> Vec<PostgresGrant> {
+    let mut grants = BTreeMap::<(String, String, String, Option<String>), bool>::new();
+    for privilege in &access.privileges {
+        if privilege.grantor == access.owner && privilege.grantee == access.owner && privilege.column_name.is_none() {
+            continue;
+        }
+        *grants
+            .entry((
+                privilege.grantor.clone(),
+                privilege.grantee.clone(),
+                privilege.privilege_type.clone(),
+                privilege.column_name.clone(),
+            ))
+            .or_default() |= privilege.is_grantable;
+    }
+    grants
+        .into_iter()
+        .map(|((grantor, grantee, privilege_type, column_name), is_grantable)| PostgresGrant {
+            grantor,
+            grantee,
+            privilege_type,
+            is_grantable,
+            column_name,
+        })
+        .collect()
+}
+
+fn postgres_grant_scope_covers(parent: &PostgresGrant, child: &PostgresGrant) -> bool {
+    if parent.privilege_type != child.privilege_type {
+        return false;
+    }
+    match (&parent.column_name, &child.column_name) {
+        (None, _) => true,
+        (Some(parent), Some(child)) => parent == child,
+        (Some(_), None) => false,
+    }
+}
+
+fn postgres_grantor_order(owner: &str, include_owner: bool, grants: &[PostgresGrant]) -> Vec<String> {
+    let mut remaining = grants.iter().map(|grant| grant.grantor.clone()).collect::<BTreeSet<_>>();
+    if include_owner {
+        remaining.insert(owner.to_string());
+    }
+
+    let mut dependencies = BTreeMap::<String, BTreeSet<String>>::new();
+    for child in grants.iter().filter(|grant| grant.grantor != owner) {
+        for parent in grants.iter().filter(|grant| {
+            grant.grantee == child.grantor
+                && grant.is_grantable
+                && grant.grantor != child.grantor
+                && postgres_grant_scope_covers(grant, child)
+        }) {
+            dependencies.entry(child.grantor.clone()).or_default().insert(parent.grantor.clone());
+        }
+    }
+
+    let mut order = Vec::with_capacity(remaining.len());
+    if remaining.remove(owner) {
+        order.push(owner.to_string());
+    }
+    while !remaining.is_empty() {
+        let ready = remaining
+            .iter()
+            .filter(|grantor| {
+                dependencies.get(*grantor).is_none_or(|required| required.iter().all(|role| !remaining.contains(role)))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            order.extend(remaining);
+            break;
+        }
+        for grantor in ready {
+            remaining.remove(&grantor);
+            order.push(grantor);
+        }
+    }
+    order
+}
+
+fn append_postgres_grants_for_role(ddl: &mut String, table_name: &str, grantor: &str, grants: &[PostgresGrant]) {
+    let mut table_grants = BTreeMap::<(String, bool), BTreeSet<String>>::new();
+    let mut column_grants = BTreeMap::<(String, bool), BTreeMap<String, BTreeSet<String>>>::new();
+    for grant in grants.iter().filter(|grant| grant.grantor == grantor) {
+        if let Some(column) = &grant.column_name {
+            column_grants
+                .entry((grant.grantee.clone(), grant.is_grantable))
+                .or_default()
+                .entry(grant.privilege_type.clone())
+                .or_default()
+                .insert(column.clone());
+        } else {
+            table_grants
+                .entry((grant.grantee.clone(), grant.is_grantable))
+                .or_default()
+                .insert(grant.privilege_type.clone());
+        }
+    }
+
+    for ((grantee, is_grantable), privileges) in table_grants {
+        append_postgres_grant_statement(
+            ddl,
+            table_name,
+            &grantee,
+            is_grantable,
+            privileges.into_iter().collect::<Vec<_>>().join(", "),
+        );
+    }
+    for ((grantee, is_grantable), privileges) in column_grants {
+        let privileges = privileges
+            .into_iter()
+            .map(|(privilege, columns)| {
+                format!(
+                    "{} ({})",
+                    privilege,
+                    columns.into_iter().map(|column| pg_ident(&column)).collect::<Vec<_>>().join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        append_postgres_grant_statement(ddl, table_name, &grantee, is_grantable, privileges);
+    }
+}
+
+fn append_postgres_grant_statement(
+    ddl: &mut String,
+    table_name: &str,
+    grantee: &str,
+    is_grantable: bool,
+    privileges: String,
+) {
+    let grantee = if grantee == "PUBLIC" { grantee.to_string() } else { pg_ident(grantee) };
+    let grant_option = if is_grantable { " WITH GRANT OPTION" } else { "" };
+    ddl.push_str(&format!("\nGRANT {privileges} ON TABLE {table_name} TO {grantee}{grant_option};"));
 }
 
 pub async fn opengauss_table_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {

@@ -246,6 +246,14 @@ def validate_release_runtime_keys(root: Path) -> list[str]:
             "release workflow JRE must include jdk.security.jgss for Kafka GSSAPI SASL support",
         ),
         (
+            r"jdk\.crypto\.ec",
+            "release workflow JRE must include jdk.crypto.ec for Kafka EC TLS support",
+        ),
+        (
+            r'\["windows-aarch64"\]\s*=\s*"windows/aarch64"',
+            "release workflow must build the managed JRE for windows-aarch64",
+        ),
+        (
             r"legacy-placeholder\.jar",
             "native-only registry entries must publish a legacy jar placeholder for older DBX clients",
         ),

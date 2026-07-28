@@ -4579,6 +4579,8 @@ export default {
     clearDownloadCache: "Clear cache",
     downloadCacheClearSuccess: "Download cache cleared",
     downloadCacheClearFailed: "Failed to clear download cache: {error}",
+    driverCategoryAll: "All Drivers",
+    driverCategoryLabel: "Category",
     offlineDownloadHint: "For air-gapped environments, download offline driver packages on an internet-connected machine, then import them here.",
     offlineDownloadLink: "Offline driver downloads",
     searchDrivers: "Search driver name, type, version...",

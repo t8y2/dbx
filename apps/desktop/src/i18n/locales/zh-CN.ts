@@ -4578,6 +4578,8 @@ export default withEnglishFallback({
     clearDownloadCache: "清理缓存",
     downloadCacheClearSuccess: "下载缓存已清理",
     downloadCacheClearFailed: "下载缓存清理失败: {error}",
+    driverCategoryAll: "全部驱动",
+    driverCategoryLabel: "分类",
     offlineDownloadHint: "内网环境可先在有网机器下载离线驱动包，再回到这里导入。",
     offlineDownloadLink: "离线驱动下载",
     searchDrivers: "搜索驱动名称、类型、版本...",

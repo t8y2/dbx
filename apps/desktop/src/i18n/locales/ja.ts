@@ -4344,6 +4344,8 @@ export default withEnglishFallback({
     clearDownloadCache: "キャッシュを削除",
     downloadCacheClearSuccess: "ダウンロードキャッシュを削除しました",
     downloadCacheClearFailed: "ダウンロードキャッシュの削除に失敗しました: {error}",
+    driverCategoryAll: "All Drivers",
+    driverCategoryLabel: "Category",
     offlineDownloadHint: "エアギャップ環境の場合は、インターネット接続されたマシンでオフラインドライバーパッケージをダウンロードし、ここでインポートしてください。",
     offlineDownloadLink: "オフラインドライバーダウンロード",
     searchDrivers: "ドライバー名、タイプ、バージョンを検索...",

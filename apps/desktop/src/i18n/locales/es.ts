@@ -4346,6 +4346,8 @@ export default withEnglishFallback({
     clearDownloadCache: "Limpiar caché",
     downloadCacheClearSuccess: "Caché de descargas limpiada",
     downloadCacheClearFailed: "Error al limpiar la caché de descargas: {error}",
+    driverCategoryAll: "All Drivers",
+    driverCategoryLabel: "Category",
     offlineDownloadHint: "Para entornos sin conexión a internet, descarga los paquetes de drivers offline en una máquina con conexión, luego impórtalos aquí.",
     offlineDownloadLink: "Descargas de drivers offline",
     searchDrivers: "Buscar nombre de driver, tipo, versión...",

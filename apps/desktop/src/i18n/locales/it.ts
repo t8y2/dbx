@@ -4344,6 +4344,8 @@ export default withEnglishFallback({
     clearDownloadCache: "Pulisci cache",
     downloadCacheClearSuccess: "Cache download pulita",
     downloadCacheClearFailed: "Pulizia cache download non riuscita: {error}",
+    driverCategoryAll: "All Drivers",
+    driverCategoryLabel: "Category",
     offlineDownloadHint: "Per ambienti air-gapped, scarica i pacchetti driver offline su una macchina connessa a Internet, quindi importali qui.",
     offlineDownloadLink: "Download driver offline",
     searchDrivers: "Cerca nome driver, tipo, versione...",

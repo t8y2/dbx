@@ -4013,6 +4013,8 @@ export default withEnglishFallback({
     clearDownloadCache: "清理快取",
     downloadCacheClearSuccess: "下載快取已清理",
     downloadCacheClearFailed: "下載快取清理失敗： {error}",
+    driverCategoryAll: "全部驅動",
+    driverCategoryLabel: "分類",
     javaRuntimeSaved: "Java 執行環境設定已儲存",
     javaRuntimeSaveFailed: "Java 執行環境設定失敗： {error}",
     chooseJavaExecutable: "選擇 Java 可執行檔",

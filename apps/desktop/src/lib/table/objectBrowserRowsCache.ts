@@ -15,6 +15,7 @@ export interface ObjectBrowserRowsCacheScope {
 const objectBrowserRowsCache = new MetadataResultCache<ObjectBrowserRow[]>({
   ttlMs: OBJECT_BROWSER_ROWS_CACHE_TTL_MS,
   maxEntries: OBJECT_BROWSER_ROWS_CACHE_MAX_ENTRIES,
+  now: () => Date.now(),
 });
 
 function objectBrowserRowsScope(scope: ObjectBrowserRowsCacheScope): MetadataScopeInput {
@@ -32,7 +33,7 @@ function cloneRows(rows: readonly ObjectBrowserRow[]): ObjectBrowserRow[] {
 }
 
 export function getCachedObjectBrowserRows(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRow[] | undefined {
-  const hit = objectBrowserRowsCache.get(objectBrowserRowsScope(scope), { allowStale: true });
+  const hit = objectBrowserRowsCache.get(objectBrowserRowsScope(scope));
   return hit ? cloneRows(hit.value) : undefined;
 }
 

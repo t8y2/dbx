@@ -118,6 +118,7 @@ import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import { cacheObjectBrowserRows, getCachedObjectBrowserRows, type ObjectBrowserRowsCacheScope } from "@/lib/table/objectBrowserRowsCache";
+import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -245,7 +246,7 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   updated_at: 150,
   comment: 260,
 });
-let loadId = 0;
+const objectBrowserRowsLoadGuard = createObjectBrowserRowsLoadGuard();
 let stopColumnResize: (() => void) | null = null;
 let preserveObjectFilterScrollOnce = false;
 
@@ -2152,21 +2153,26 @@ async function saveSource() {
   }
 }
 
-async function loadSchemas() {
+async function loadSchemas(epoch: number): Promise<boolean> {
+  if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return false;
   if (!needsSchema.value) {
     schemas.value = [];
     selectedSchema.value = undefined;
-    return;
+    return true;
   }
   loadingSchemas.value = true;
+  const connectionId = props.connection.id;
+  const database = props.database;
   try {
-    const names = await api.listSchemas(props.connection.id, props.database);
+    const names = await api.listSchemas(connectionId, database);
+    if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return false;
     schemas.value = names;
     if (!selectedSchema.value || !names.includes(selectedSchema.value)) {
       selectedSchema.value = names.includes("public") ? "public" : names[0];
     }
+    return true;
   } finally {
-    loadingSchemas.value = false;
+    if (objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) loadingSchemas.value = false;
   }
 }
 
@@ -2198,12 +2204,11 @@ function finishObjectBrowserRowsLoad() {
 }
 
 async function loadObjects(options?: { allowCached?: boolean }) {
-  const id = ++loadId;
   error.value = "";
   const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
-  const cacheScope = objectBrowserRowsCacheScope(schema);
+  const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
   if (options?.allowCached) {
-    const cachedRows = getCachedObjectBrowserRows(cacheScope);
+    const cachedRows = getCachedObjectBrowserRows(request.scope);
     if (cachedRows) {
       applyObjectBrowserRows(cachedRows);
       finishObjectBrowserRowsLoad();
@@ -2214,37 +2219,37 @@ async function loadObjects(options?: { allowCached?: boolean }) {
   loadingObjects.value = true;
   rows.value = [];
   try {
-    const objects: ObjectInfo[] = await api.listObjects(props.connection.id, props.database, schema, undefined, undefined, undefined, undefined, props.catalog);
-    if (id !== loadId) return;
+    const objects: ObjectInfo[] = await api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, undefined, undefined, undefined, undefined, request.scope.catalog);
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     const nextRows = buildObjectBrowserRows({
       objects,
-      database: props.database,
-      fallbackSchema: schema,
+      database: request.scope.database,
+      fallbackSchema: request.scope.schema,
       rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
     });
     applyObjectBrowserRows(nextRows);
-    cacheObjectBrowserRows(cacheScope, nextRows);
-    void loadObjectStatistics(id, schema);
+    cacheObjectBrowserRows(request.scope, nextRows);
+    void loadObjectStatistics(request);
   } catch (e: any) {
-    if (id !== loadId) return;
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     error.value = e?.message || String(e);
   } finally {
-    if (id === loadId) finishObjectBrowserRowsLoad();
+    if (objectBrowserRowsLoadGuard.isCurrent(request)) finishObjectBrowserRowsLoad();
   }
 }
 
-async function loadObjectStatistics(id: number, schema: string) {
+async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle) {
   if (!rows.value.some((row) => row.type === "TABLE")) return;
   try {
-    const stats = await api.listObjectStatistics(props.connection.id, props.database, schema);
-    if (id !== loadId || stats.length === 0) return;
-    mergeObjectStatistics(stats, schema);
+    const stats = await api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema);
+    if (!objectBrowserRowsLoadGuard.isCurrent(request) || stats.length === 0) return;
+    mergeObjectStatistics(stats, request.scope.schema, request.scope);
   } catch (e) {
     console.debug("[ObjectBrowser] table statistics unavailable", e);
   }
 }
 
-function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string) {
+function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheScope: ObjectBrowserRowsCacheScope) {
   const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
   rows.value = rows.value.map((row) => {
     if (row.type !== "TABLE") return row;
@@ -2256,7 +2261,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
     };
   });
-  cacheObjectBrowserRows(objectBrowserRowsCacheScope(fallbackSchema), rows.value);
+  cacheObjectBrowserRows(cacheScope, rows.value);
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {
@@ -2267,8 +2272,10 @@ function normalizeStatisticNumber(value: number | null | undefined): number | nu
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-async function reload(options?: { allowCachedObjects?: boolean }) {
-  await loadSchemas();
+async function reload(options?: { allowCachedObjects?: boolean; contextEpoch?: number }) {
+  const epoch = options?.contextEpoch ?? objectBrowserRowsLoadGuard.invalidate();
+  if (!(await loadSchemas(epoch))) return;
+  if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return;
   await loadObjects({ allowCached: options?.allowCachedObjects });
 }
 
@@ -2334,12 +2341,14 @@ function onSearchKeydown(event: KeyboardEvent) {
 defineExpose({ focusSearch, refresh });
 
 onBeforeUnmount(() => {
+  objectBrowserRowsLoadGuard.invalidate();
   stopColumnResize?.();
 });
 
 watch(
   [() => props.connection.id, () => props.database, () => props.schema],
   async () => {
+    const contextEpoch = objectBrowserRowsLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
     objectFilter.value = "all";
@@ -2358,7 +2367,8 @@ watch(
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connection.id, e);
     }
-    void reload({ allowCachedObjects: true });
+    if (!objectBrowserRowsLoadGuard.isEpochCurrent(contextEpoch)) return;
+    void reload({ allowCachedObjects: true, contextEpoch });
   },
   { immediate: true },
 );

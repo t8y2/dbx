@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 import { cacheObjectBrowserRows, clearObjectBrowserRowsCache, getCachedObjectBrowserRows, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 
@@ -11,6 +11,7 @@ const row: ObjectBrowserRow = {
 
 describe("objectBrowserRowsCache", () => {
   beforeEach(() => clearObjectBrowserRowsCache());
+  afterEach(() => vi.useRealTimers());
 
   it("restores cached rows only for the same object browser scope", () => {
     const scope = { connectionId: "c1", database: "db", schema: "public" };
@@ -29,6 +30,25 @@ describe("objectBrowserRowsCache", () => {
     cached[0].displayName = "changed";
 
     expect(getCachedObjectBrowserRows(scope)?.[0].displayName).toBe("users");
+  });
+
+  it("restores fresh rows when a remounted component reads the shared cache", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    const scope = { connectionId: "c1", database: "db", schema: "public" };
+    cacheObjectBrowserRows(scope, [row]);
+
+    expect(getCachedObjectBrowserRows(scope)).toEqual([row]);
+  });
+
+  it("rejects cached rows after the TTL", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+    const scope = { connectionId: "c1", database: "db", schema: "public" };
+    cacheObjectBrowserRows(scope, [row]);
+
+    vi.advanceTimersByTime(30_001);
+    expect(getCachedObjectBrowserRows(scope)).toBeUndefined();
   });
 
   it("invalidates matching connection and database scopes", () => {

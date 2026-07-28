@@ -60,12 +60,17 @@ struct PiRpcProcess {
 }
 
 impl PiRpcProcess {
-    async fn spawn(config: &AiConfig, runtime: Option<&PiIsolatedRuntime>) -> Result<Self, String> {
+    async fn spawn(
+        config: &AiConfig,
+        runtime: Option<&PiIsolatedRuntime>,
+        apply_selection: bool,
+    ) -> Result<Self, String> {
         let command = resolve_pi_command(config)?;
         let mut process = cli_command(&command.program);
         process
             .args(command.args.iter().map(String::as_str))
             .args(pi_rpc_args(runtime))
+            .args(if apply_selection { pi_selection_args(config)? } else { Vec::new() })
             .envs(pi_agent_process_env(config, &command)?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -198,6 +203,19 @@ fn pi_rpc_args(runtime: Option<&PiIsolatedRuntime>) -> Vec<String> {
         args.extend(["-e".to_string(), runtime.extension_path.to_string_lossy().to_string()]);
     }
     args
+}
+
+fn pi_selection_args(config: &AiConfig) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let model = config.model.trim();
+    if !model.is_empty() && !model.eq_ignore_ascii_case("default") {
+        let (provider, model_id) = split_pi_model_key(model)?;
+        args.extend(["--provider".to_string(), provider.to_string(), "--model".to_string(), model_id.to_string()]);
+    }
+    if let Some(level) = pi_thinking_level(config.runtime_effort.as_ref()) {
+        args.extend(["--thinking".to_string(), level]);
+    }
+    Ok(args)
 }
 
 fn pi_program(config: &AiConfig) -> String {
@@ -352,18 +370,6 @@ fn pi_thinking_level(selection: Option<&AiEffortSelection>) -> Option<String> {
     }
 }
 
-async fn select_pi_model(process: &mut PiRpcProcess, config: &AiConfig) -> Result<(), String> {
-    let model = config.model.trim();
-    if !model.is_empty() && !model.eq_ignore_ascii_case("default") {
-        let (provider, model_id) = split_pi_model_key(model)?;
-        process.request("set_model", json!({ "provider": provider, "modelId": model_id })).await?;
-    }
-    if let Some(level) = pi_thinking_level(config.runtime_effort.as_ref()) {
-        process.request("set_thinking_level", json!({ "level": level })).await?;
-    }
-    Ok(())
-}
-
 fn parse_thinking_levels(data: &Value) -> Vec<String> {
     let mut seen = BTreeSet::new();
     data.get("levels")
@@ -383,7 +389,7 @@ fn pi_effort_capability(data: &Value) -> Option<AiEffortCapability> {
 }
 
 pub async fn list_pi_agent_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    let mut process = PiRpcProcess::spawn(config, None).await?;
+    let mut process = PiRpcProcess::spawn(config, None, false).await?;
     let result = list_pi_agent_models_with_process(&mut process).await;
     process.shutdown().await;
     result
@@ -425,17 +431,29 @@ async fn list_pi_agent_models_with_process(process: &mut PiRpcProcess) -> Result
         if !seen.insert(key.clone()) {
             continue;
         }
-        process.request("set_model", json!({ "provider": provider, "modelId": model_id })).await?;
-        let (levels, _) = process.request("get_available_thinking_levels", json!({})).await?;
         let name = model.get("name").and_then(Value::as_str).unwrap_or(model_id);
         result.push(AiModelInfo {
             id: key,
             display_name: Some(format!("{name} ({provider})")),
             supported_effort_levels: Vec::new(),
-            effort_capability: pi_effort_capability(&levels),
+            effort_capability: None,
         });
     }
     Ok(result)
+}
+
+pub async fn resolve_pi_agent_model_effort(config: &AiConfig, model_id: &str) -> Result<AiEffortCapability, String> {
+    let mut config = config.clone();
+    config.model = model_id.to_string();
+    config.runtime_effort = None;
+    let mut process = PiRpcProcess::spawn(&config, None, true).await?;
+    let result = async {
+        let (levels, _) = process.request("get_available_thinking_levels", json!({})).await?;
+        Ok(pi_effort_capability(&levels).unwrap_or(AiEffortCapability::Unsupported))
+    }
+    .await;
+    process.shutdown().await;
+    result
 }
 
 pub async fn test_pi_agent_connection(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
@@ -629,7 +647,7 @@ pub async fn run_pi_agent(
 ) -> Result<String, String> {
     let runtime = PiIsolatedRuntime::create()?;
     let mut process = spawn_pi_with_bridge(config, &runtime, &options).await?;
-    let result = run_pi_agent_session(&mut process, config, prompt, &runtime, cancelled, &on_event).await;
+    let result = run_pi_agent_session(&mut process, prompt, &runtime, cancelled, &on_event).await;
     if result.is_ok() {
         process.shutdown().await;
     } else {
@@ -640,14 +658,12 @@ pub async fn run_pi_agent(
 
 async fn run_pi_agent_session(
     process: &mut PiRpcProcess,
-    config: &AiConfig,
     prompt: &str,
     runtime: &PiIsolatedRuntime,
     cancelled: &Notify,
     on_event: &impl Fn(AgentEvent),
 ) -> Result<String, String> {
     wait_for_bridge(process, runtime).await?;
-    select_pi_model(process, config).await?;
     let (_, buffered) = process.request("prompt", json!({ "message": prompt })).await?;
 
     let mut final_text = String::new();
@@ -693,6 +709,7 @@ async fn spawn_pi_with_bridge(
     process
         .args(command.args.iter().map(String::as_str))
         .args(pi_rpc_args(Some(runtime)))
+        .args(pi_selection_args(config)?)
         .envs(pi_agent_process_env(config, &command)?)
         .current_dir(&runtime.path)
         .stdin(Stdio::piped())
@@ -707,7 +724,7 @@ async fn spawn_pi_with_bridge(
 mod tests {
     use super::{
         build_pi_agent_prompt, classify_pi_run_error, configure_pi_bridge, emit_pi_event, parse_thinking_levels,
-        pi_agent_process_env, pi_rpc_args, split_pi_model_key, PiIsolatedRuntime,
+        pi_agent_process_env, pi_rpc_args, pi_selection_args, split_pi_model_key, PiIsolatedRuntime,
     };
     use crate::agent_events::AgentEvent;
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiEffortSelection, AiProvider, AiReasoningLevel};
@@ -756,6 +773,20 @@ mod tests {
                 "--no-approve",
             ]
         );
+    }
+
+    #[test]
+    fn selection_uses_startup_arguments_instead_of_mutating_rpc_commands() {
+        let config = config();
+        assert_eq!(
+            pi_selection_args(&config).unwrap(),
+            ["--provider", "openai-codex", "--model", "gpt-5.4", "--thinking", "high"]
+        );
+
+        let mut default_config = config;
+        default_config.model = "default".to_string();
+        default_config.runtime_effort = Some(AiEffortSelection::ProviderDefault);
+        assert!(pi_selection_args(&default_config).unwrap().is_empty());
     }
 
     #[test]

@@ -1383,7 +1383,11 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
         return Err("Model is required".to_string());
     }
 
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if matches!(config.provider, AiProvider::PiAgentCli) {
+        return crate::ai_pi_agent_cli::resolve_pi_agent_model_effort(config, model_id).await;
+    }
+
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
         let models = list_models_core(config).await?;
         return Ok(models
             .into_iter()

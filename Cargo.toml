@@ -12,7 +12,7 @@ postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", b
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }
 # Temporary compatibility patch for MySQL accounts using the deprecated
 # sha256_password auth plugin. Remove after upstream support lands.
-mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "5c1186d05e62f712e717632a5b66dd030466e9b3" }
+mysql_async = { git = "https://github.com/lanlan-wzz/mysql_async.git", rev = "01f3fc3cc313eeeb611a3ba91691438d72806688" }
 
 [profile.release]
 panic = "abort"

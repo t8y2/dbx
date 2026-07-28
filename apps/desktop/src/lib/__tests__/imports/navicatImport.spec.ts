@@ -17,7 +17,7 @@ class TestDocument {
   private readonly elements: TestElement[];
 
   constructor(xml: string) {
-    this.elements = parseTestConnections(xml);
+    this.elements = flattenTestElements(parseTestConnections(xml));
   }
 
   querySelector(selector: string) {
@@ -27,6 +27,10 @@ class TestDocument {
   querySelectorAll(selector: string) {
     return selector === "*" ? this.elements : [];
   }
+}
+
+function flattenTestElements(elements: TestElement[]): TestElement[] {
+  return elements.flatMap((element) => [element, ...flattenTestElements(element.children)]);
 }
 
 function parseTestConnections(xml: string): TestElement[] {
@@ -235,6 +239,16 @@ describe("parseNavicatConnections", () => {
     expect(connection?.host).toBe("replica-a.example.test");
     expect(connection?.port).toBe(27017);
     expect(connection?.connection_string).toBe("mongodb://mongouser:multi-secret@replica-a.example.test:27017,replica-b.example.test:27017/appdb?replicaSet=rs0&authSource=admin&retryWrites=true");
+  });
+
+  it("preserves explicitly disabled MongoDB retry settings", async () => {
+    const [connection] = await parseNavicatConnections(`<Connections>
+  <Connection ConnectionName="rs-no-retry" ConnType="MONGODB" Host="localhost" Port="27017" ConnMethod="ReplicaSet" RetryReads="false" RetryWrites="false">
+    <Member Hostname="replica.example.test" Port="27017"/>
+  </Connection>
+</Connections>`);
+
+    expect(connection?.connection_string).toBe("mongodb://replica.example.test:27017?retryWrites=false&retryReads=false");
   });
 
   it("does not turn replica-set <Member> children into standalone connections", async () => {

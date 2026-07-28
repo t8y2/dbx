@@ -66,6 +66,10 @@ function truthyNavicatFlag(value: string) {
   return ["1", "true", "yes", "y", "on", "checked"].includes(normalized);
 }
 
+function optionalNavicatFlag(value: string): boolean | undefined {
+  return value.trim() ? truthyNavicatFlag(value) : undefined;
+}
+
 function hexToBytes(hex: string) {
   const clean = hex.trim();
   if (!clean || clean.length % 2 !== 0 || /[^0-9a-f]/i.test(clean)) return null;
@@ -232,8 +236,8 @@ function buildMongoReplicaSetConnectionString(opts: {
   authSource: string;
   authMechanism: string;
   readPreference: string;
-  retryReads: boolean;
-  retryWrites: boolean;
+  retryReads?: boolean;
+  retryWrites?: boolean;
   ssl: boolean;
 }): string {
   const scheme = opts.useSrv ? "mongodb+srv://" : "mongodb://";
@@ -256,8 +260,8 @@ function buildMongoReplicaSetConnectionString(opts: {
   if (authMechanism) params.set("authMechanism", authMechanism);
   const readPreference = normalizeMongoReadPreference(opts.readPreference);
   if (readPreference) params.set("readPreference", readPreference);
-  if (opts.retryWrites) params.set("retryWrites", "true");
-  if (opts.retryReads) params.set("retryReads", "true");
+  if (opts.retryWrites !== undefined) params.set("retryWrites", String(opts.retryWrites));
+  if (opts.retryReads !== undefined) params.set("retryReads", String(opts.retryReads));
   if (opts.ssl) params.set("tls", "true");
   const query = params.toString();
 
@@ -345,8 +349,8 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
       authSource: getAny(node.values, ["authSource"]),
       authMechanism: getAny(node.values, ["authMechanism"]),
       readPreference: getAny(node.values, ["readPreference"]),
-      retryReads: truthyNavicatFlag(getAny(node.values, ["retryReads"])),
-      retryWrites: truthyNavicatFlag(getAny(node.values, ["retryWrites"])),
+      retryReads: optionalNavicatFlag(getAny(node.values, ["retryReads"])),
+      retryWrites: optionalNavicatFlag(getAny(node.values, ["retryWrites"])),
       ssl: truthyNavicatFlag(getAny(node.values, ["ssl", "useSsl"])),
     });
     config.host = node.members[0].host;

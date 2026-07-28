@@ -645,6 +645,8 @@ export default withEnglishFallback({
     sshHostKeyNoticeRejected: "ホスト {host}:{port} のホストキー検証を拒否しました。接続は中止され、資格情報は送信されませんでした。",
     sshHostKeyNoticeGeneric: "SSHホスト {host}:{port} のキー検証に失敗しました。",
     sshHostKeyNoticeLearnFailed: "{host}:{port} のホストキーを保存できません — このホストは現在のセッションでのみ信頼され、次回の接続時に再確認が必要です。",
+    damengJvmOptions: "JVM パラメータ",
+    damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
   },
   editor: {
     pressToExecute: "{mod}+Enter で実行",

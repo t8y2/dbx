@@ -645,6 +645,8 @@ export default withEnglishFallback({
     sshHostKeyNoticeRejected: "您已拒絕 {host}:{port} 的主機金鑰驗證，連線已中止，憑證未發送。",
     sshHostKeyNoticeGeneric: "SSH 主機 {host}:{port} 的金鑰驗證失敗。",
     sshHostKeyNoticeLearnFailed: "無法儲存 {host}:{port} 的主機金鑰 — 該主機僅在本次會話內受信任，下次連線仍需重新確認。",
+    damengJvmOptions: "JVM 參數",
+    damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
   },
   editor: {
     pressToExecute: "按 {mod}+Enter 執行查詢",

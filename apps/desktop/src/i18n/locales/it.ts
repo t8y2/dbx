@@ -645,6 +645,8 @@ export default withEnglishFallback({
     sshHostKeyNoticeRejected: "Hai rifiutato la verifica della chiave host di {host}:{port}, la connessione è stata interrotta e le credenziali non sono state inviate.",
     sshHostKeyNoticeGeneric: "Verifica della chiave host SSH {host}:{port} fallita.",
     sshHostKeyNoticeLearnFailed: "Impossibile salvare la chiave host di {host}:{port} — Questo host è considerato affidabile solo per questa sessione, alla prossima connessione sarà necessaria una nuova conferma.",
+    damengJvmOptions: "parametri JVM",
+    damengJvmOptionsPlaceholder: "-Djava.net.preferIPv4Stack=true",
   },
   editor: {
     pressToExecute: "Premi {mod}+Enter per eseguire",

@@ -50,7 +50,7 @@ import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
-import { externalSqlFileOpenErrorMessage, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
@@ -1084,16 +1084,14 @@ async function openSqlFile() {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = ".sql";
-      input.onchange = () => {
+      input.onchange = async () => {
         const file = input.files?.[0];
         if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (typeof reader.result === "string") {
-            queryStore.updateSql(tab.id, reader.result);
-          }
-        };
-        reader.readAsText(file);
+        try {
+          queryStore.updateSql(tab.id, await readBrowserSqlFile(file));
+        } catch (e: any) {
+          toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+        }
       };
       input.click();
     }

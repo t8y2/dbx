@@ -47,6 +47,8 @@ export function externalSqlFilePaths(paths: string[]): string[] {
   return paths.filter(isSqlFilePath);
 }
 
+export const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES = 64 * 1024 * 1024;
+
 export class ExternalSqlFileTooLargeError extends Error {
   constructor(
     readonly sizeBytes: number,
@@ -59,6 +61,23 @@ export class ExternalSqlFileTooLargeError extends Error {
 
 export function isExternalSqlFileTooLargeError(error: unknown): error is ExternalSqlFileTooLargeError {
   return error instanceof ExternalSqlFileTooLargeError;
+}
+
+export function readBrowserSqlFile(file: Blob): Promise<string> {
+  if (file.size > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES) {
+    return Promise.reject(new ExternalSqlFileTooLargeError(file.size, MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES));
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") resolve(reader.result);
+      else reject(new Error("Failed to read SQL file as text"));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read SQL file"));
+    reader.onabort = () => reject(new Error("SQL file read was cancelled"));
+    reader.readAsText(file);
+  });
 }
 
 export function formatSqlFileSize(bytes: number): string {

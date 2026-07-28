@@ -7,6 +7,10 @@ use tokio::io::AsyncReadExt;
 
 const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+fn exceeds_external_sql_editor_limit(size_bytes: u64) -> bool {
+    size_bytes > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ExternalSqlFileReadResult {
@@ -106,7 +110,7 @@ fn read_external_sql_file_content(path: &Path) -> Result<ExternalSqlFileReadResu
         return Err("Only .sql files can be opened this way".to_string());
     }
     let metadata = std::fs::metadata(path).map_err(|e| format!("Failed to inspect SQL file: {e}"))?;
-    if metadata.len() > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES {
+    if exceeds_external_sql_editor_limit(metadata.len()) {
         return Ok(ExternalSqlFileReadResult::TooLarge {
             size_bytes: metadata.len(),
             max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
@@ -122,7 +126,7 @@ async fn read_external_sql_file_content_async(path: PathBuf) -> Result<ExternalS
     }
     let file = tokio::fs::File::open(&path).await.map_err(|e| format!("Failed to read SQL file: {e}"))?;
     let metadata = file.metadata().await.map_err(|e| format!("Failed to inspect SQL file: {e}"))?;
-    if metadata.len() > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES {
+    if exceeds_external_sql_editor_limit(metadata.len()) {
         return Ok(ExternalSqlFileReadResult::TooLarge {
             size_bytes: metadata.len(),
             max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
@@ -133,7 +137,7 @@ async fn read_external_sql_file_content_async(path: PathBuf) -> Result<ExternalS
         .read_to_end(&mut bytes)
         .await
         .map_err(|e| format!("Failed to read SQL file: {e}"))?;
-    if bytes.len() as u64 > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES {
+    if exceeds_external_sql_editor_limit(bytes.len() as u64) {
         return Ok(ExternalSqlFileReadResult::TooLarge {
             size_bytes: bytes.len() as u64,
             max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
@@ -245,6 +249,12 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         assert!(result.unwrap_err().contains(".sql"));
+    }
+
+    #[test]
+    fn external_sql_editor_limit_is_inclusive() {
+        assert!(!exceeds_external_sql_editor_limit(MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES));
+        assert!(exceeds_external_sql_editor_limit(MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1));
     }
 
     #[test]

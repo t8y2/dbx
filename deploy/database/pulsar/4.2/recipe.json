@@ -1,0 +1,13 @@
+{
+  "database": "pulsar",
+  "name": "Pulsar",
+  "version": "4.2.3",
+  "displayVersion": "4.2",
+  "image": "docker.cnb.cool/znb/images/pulsar:4.2.3",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 6650,
+  "connection": { "host": "127.0.0.1", "port": 6651, "authentication": "none", "database": "dbx", "namespace": "public/default", "webPort": 8081 },
+  "shell": ["/bin/bash"],
+  "smoke": { "steps": [{ "name": "produce a smoke message", "command": ["bin/pulsar-client", "produce", "persistent://public/default/dbx-smoke", "--messages", "DBX smoke"], "expect": "1 messages successfully produced" }] }
+}

@@ -23,7 +23,7 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
-        # Rust toolchain — lock to the minimum required version (1.77)
+        # Rust toolchain — lock to the minimum required version (1.88)
         # while allowing newer stable releases to satisfy all crate deps.
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
@@ -150,6 +150,10 @@
         # Convenience alias
         packages.default = self.packages.${system}.dbx-desktop;
 
+        # Fast fixed-output target used by CI to validate pnpm dependency hashes
+        # without compiling the frontend and Rust desktop application.
+        packages.dbx-pnpm-deps = self.packages.${system}.dbx-desktop.pnpmDeps;
+
         # ------------------------------------------------------------------ #
         # packages.dbx-desktop — Tauri desktop application                    #
         # Build with: nix build .#dbx-desktop                                 #
@@ -160,13 +164,13 @@
         #   3. pnpm build      → compile Vue/TypeScript frontend               #
         #   4. cargo build -p dbx → compile Tauri Rust backend                 #
         #                                                                      #
-        # ⚠️  The pnpmDeps.hash below is a placeholder.                       #
-        #    Run `nix build .#dbx-desktop` once; Nix will report the          #
-        #    correct sha256 — paste it in place of the placeholder.           #
+        # The pnpmDeps hash is verified by the nix-packaging CI job.           #
+        # When dependency inputs change, use the hash reported by the failed  #
+        # Nix build and rerun the job before merging.                          #
         # ------------------------------------------------------------------ #
         packages.dbx-desktop = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "dbx-desktop";
-          version = "0.5.56";
+          version = "0.5.68";
 
           src = pkgs.lib.cleanSource ./.;
 
@@ -177,18 +181,18 @@
             inherit (finalAttrs) pname version src;
             # `fetcherVersion = 4` is supported for `pnpm_11`
             fetcherVersion = 4;
-            # Replace with the correct hash after the first failed build:
-            #   nix build .#dbx-desktop 2>&1 | grep 'got:'
-            hash = "sha256-e2/C37EaymMy3vG1MBZyxCa2sWlsl3OV9LLfJAHXrO0=";
+            # Update with the hash reported by a failed fixed-output build:
+            #   nix build .#dbx-pnpm-deps 2>&1 | grep 'got:'
+            hash = "sha256-Bt3AwBVAdA96B4UWBVDvwNBy/JX2eNn8adPpWueAjcs=";
           };
 
           # ── Step 2: vendor Cargo dependencies ───────────────────────────── #
           cargoDeps = pkgs.rustPlatform.importCargoLock {
             lockFile = ./Cargo.lock;
             outputHashes = {
-              "tokio-postgres-0.7.17" = "sha256-mGzfqYmo1PPcpKOlyA6ePzZA4lrNspOJ5G52meHiocY=";
-              "mysql_async-0.36.2" = "sha256-qxSo2JX/ldU8Z+PVDrHy8+EB9ZG3Vdo9TbKLCLQt2CU=";
-              "mysql_common-0.35.5" = "sha256-CwXuC6QInSI1GcVSdaD1tcA7J+zTY9ZatOyTYTYPe0Q=";
+                "tokio-postgres-0.7.17" = "sha256-mGzfqYmo1PPcpKOlyA6ePzZA4lrNspOJ5G52meHiocY=";
+                "mysql-common-derive-0.32.2" = "sha256-8lWgsdTuLTgOmzP7tXmA9LnomOE0wjxXsCBw9NEMt2o=";
+                "mysql_async-0.37.0" = "sha256-r4+VFDmflMu7KLButuwE/lcYAlPuacXiDQN6ZdBhuwo=";
             };
           };
 
@@ -227,7 +231,7 @@
             icon = "dbx";
             desktopName = "DBX";
             genericName = "Database Management Tool";
-            comment = "Open-source database management tool for 60+ databases";
+            comment = "Open-source database management tool for 70+ databases";
             categories = [ "Development" "Database" ];
             keywords = [
               "database"
@@ -389,7 +393,7 @@
           meta = with pkgs.lib; {
             description = "DBX desktop — open-source database management tool (Tauri 2)";
             longDescription = ''
-              DBX is a lightweight (~15 MB) database management tool supporting 60+
+              DBX is a lightweight (~15 MB) database management tool supporting 70+
               databases. Built with Tauri 2, Vue 3, and Rust. No Java, no Chromium.
             '';
             license = licenses.asl20;

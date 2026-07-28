@@ -2,6 +2,8 @@ import { ref, shallowRef } from "vue";
 import type { TreeNode } from "@/types/database";
 import type { PasteTableMode } from "@/lib/table/tableClipboard";
 import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
+import type { AuthorizationPlan, AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
 
 export type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
 type ConnectionDeleteTarget = TreeNode & { connectionId: string };
@@ -61,6 +63,14 @@ export const showCreateDatabaseDialog = ref(false);
 export const createDatabaseName = ref("");
 export const createDatabaseCharset = ref("utf8mb4");
 export const createDatabaseCollation = ref("utf8mb4_unicode_ci");
+export const createDatabaseUsers = ref<DatabaseUserIdentity[]>([]);
+export const createDatabaseSelectedUsers = ref<DatabaseUserIdentity[]>([]);
+export const createDatabaseUsersLoading = ref(false);
+export const showCreateDatabasePreviewDialog = ref(false);
+export const createDatabaseAuthorizationPlan = ref<AuthorizationPlan>();
+export const createDatabasePreviewSql = ref("");
+export const createDatabaseAuthorizationResults = ref<AuthorizationStepResult[]>([]);
+export const createDatabaseAuthorizationApplying = ref(false);
 export const showCreateNacosNamespaceDialog = ref(false);
 export const createNacosNamespaceId = ref("");
 export const createNacosNamespaceName = ref("");
@@ -77,6 +87,11 @@ export const showDropDatabaseConfirm = ref(false);
 export const dropDatabaseLoading = ref(false);
 export const showDropMongoCollectionConfirm = ref(false);
 export const dropMongoCollectionLoading = ref(false);
+export const showRenameMongoCollectionDialog = ref(false);
+export const renameMongoCollectionName = ref("");
+export const renameMongoCollectionError = ref("");
+export const renameMongoCollectionPreview = ref("");
+export const renameMongoCollectionLoading = ref(false);
 export const showDropMongoIndexConfirm = ref(false);
 export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
@@ -115,10 +130,12 @@ const openFlags = [
   showDuplicateDialog,
   showPasteDialog,
   showCreateDatabaseDialog,
+  showCreateDatabasePreviewDialog,
   showCreateNacosNamespaceDialog,
   showEditNacosNamespaceDialog,
   showDropDatabaseConfirm,
   showDropMongoCollectionConfirm,
+  showRenameMongoCollectionDialog,
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showFlushRedisDbConfirm,
@@ -132,6 +149,13 @@ const openFlags = [
 
 export function resetSidebarTreeDialogState() {
   for (const flag of openFlags) flag.value = false;
+  createDatabaseUsers.value = [];
+  createDatabaseSelectedUsers.value = [];
+  createDatabaseUsersLoading.value = false;
+  createDatabaseAuthorizationPlan.value = undefined;
+  createDatabasePreviewSql.value = "";
+  createDatabaseAuthorizationResults.value = [];
+  createDatabaseAuthorizationApplying.value = false;
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;

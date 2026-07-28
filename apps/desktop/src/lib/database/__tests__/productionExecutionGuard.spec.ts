@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { executeWithProductionSqlGuard } from "../productionExecutionGuard";
+import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "../productionExecutionGuard";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -112,6 +112,70 @@ describe("production SQL execution guard", () => {
         execute,
       }),
     ).resolves.toBe("done");
+
+    expect(useProductionSafetyStore().pending).toBeUndefined();
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("production context execution guard (non-SQL)", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it("waits for confirmation before executing production non-SQL mutations", async () => {
+    const execute = vi.fn().mockResolvedValue("renamed");
+    const reviewText = 'db.getSiblingDB("app").getCollection("users").renameCollection("accounts")';
+    const pendingExecution = executeWithProductionContextGuard({
+      connection: connection({ db_type: "mongodb", is_production: true }),
+      database: "app",
+      reviewText,
+      source: "Object tree",
+      execute,
+    });
+
+    await Promise.resolve();
+    const store = useProductionSafetyStore();
+    expect(store.pending).toMatchObject({
+      sql: reviewText,
+      database: "app",
+      source: "Object tree",
+    });
+    expect(execute).not.toHaveBeenCalled();
+
+    store.confirm();
+    await expect(pendingExecution).resolves.toBe("renamed");
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels production non-SQL mutations without executing the callback", async () => {
+    const execute = vi.fn().mockResolvedValue("renamed");
+    const pendingExecution = executeWithProductionContextGuard({
+      connection: connection({ db_type: "mongodb", production_databases: ["app"] }),
+      database: "app",
+      reviewText: 'db.getCollection("users").renameCollection("accounts")',
+      source: "Object tree",
+      execute,
+    });
+
+    await Promise.resolve();
+    useProductionSafetyStore().cancel();
+
+    await expect(pendingExecution).resolves.toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("executes non-production non-SQL mutations immediately", async () => {
+    const execute = vi.fn().mockResolvedValue("renamed");
+    await expect(
+      executeWithProductionContextGuard({
+        connection: connection({ db_type: "mongodb" }),
+        database: "scratch",
+        reviewText: 'db.getCollection("users").renameCollection("accounts")',
+        source: "Object tree",
+        execute,
+      }),
+    ).resolves.toBe("renamed");
 
     expect(useProductionSafetyStore().pending).toBeUndefined();
     expect(execute).toHaveBeenCalledTimes(1);

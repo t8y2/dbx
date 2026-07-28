@@ -31,6 +31,28 @@ export function visibleColumnIndexesForFilter(availableIndexes: number[], hidden
   return visibleIndexes.length > 0 ? visibleIndexes : availableIndexes;
 }
 
+export function hiddenColumnIndexesForKeys(hiddenKeys: readonly string[] | undefined, columnKeys: readonly string[], availableIndexes: readonly number[]): Set<number> {
+  const available = new Set(availableIndexes);
+  const hiddenKeySet = new Set((hiddenKeys ?? []).filter((key): key is string => typeof key === "string"));
+  const hiddenIndexes = new Set<number>();
+
+  for (let index = 0; index < columnKeys.length; index++) {
+    if (available.has(index) && hiddenKeySet.has(columnKeys[index]!)) hiddenIndexes.add(index);
+  }
+
+  if (availableIndexes.length > 0 && hiddenIndexes.size === availableIndexes.length) {
+    hiddenIndexes.delete(availableIndexes[0]!);
+  }
+  return hiddenIndexes;
+}
+
+export function hiddenColumnKeysForIndexes(hiddenIndexes: ReadonlySet<number>, autoHiddenIndexes: ReadonlySet<number>, columnKeys: readonly string[], availableIndexes: readonly number[]): string[] {
+  return availableIndexes.flatMap((index) => {
+    const key = columnKeys[index];
+    return hiddenIndexes.has(index) && !autoHiddenIndexes.has(index) && key ? [key] : [];
+  });
+}
+
 export function nextHiddenColumnIndexes(options: { columnIndex: number; hiddenIndexes: ReadonlySet<number>; totalColumns: number }): Set<number> {
   const next = new Set(options.hiddenIndexes);
   if (next.has(options.columnIndex)) {
@@ -53,7 +75,22 @@ export function invertedHiddenColumnIndexes(availableIndexes: number[], hiddenIn
 
 export function allNullColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>, availableIndexes: number[]): number[] {
   if (rows.length === 0) return [];
-  return availableIndexes.filter((index) => rows.every((row) => row[index] === null));
+  // 单遍行扫描 + 候选原地压缩：列一旦见到非 null 即永久剔除，候选清空提前
+  // 返回。最坏复杂度同为 O(列×行)（全 null 时无法避免），改进在于常数项：
+  // 原实现逐列 rows.every 各自从头扫外层 rows 并逐格调用回调，这里每个
+  // 单元格至多访问一次且无闭包调用
+  const candidates = [...availableIndexes];
+  let count = candidates.length;
+  for (const row of rows) {
+    let write = 0;
+    for (let read = 0; read < count; read++) {
+      if (row[candidates[read]!] === null) candidates[write++] = candidates[read]!;
+    }
+    count = write;
+    if (count === 0) return [];
+  }
+  candidates.length = count;
+  return candidates;
 }
 
 export function hiddenColumnIndexesWithAllNullColumns(options: { availableIndexes: number[]; hiddenIndexes: ReadonlySet<number>; allNullIndexes: ReadonlySet<number> }): { hiddenIndexes: Set<number>; autoHiddenIndexes: Set<number> } {

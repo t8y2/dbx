@@ -16,12 +16,19 @@ export interface SqlSemanticCompletionScope {
 export function sqlSemanticReferencedTables(model: SqlSemanticModel): SqlCompletionReferencedTable[] {
   return model.rowSources
     .filter((source) => source.kind !== "unknown")
-    .map((source) => ({
-      name: source.name,
-      schema: source.qualifierParts[source.qualifierParts.length - 1],
-      alias: source.alias,
-      columns: source.columns,
-    }));
+    .map((source) => {
+      const identifierParts = source.qualifiedName?.parts ?? [];
+      return {
+        name: source.name,
+        nameQuoted: !!identifierParts[identifierParts.length - 1]?.quote,
+        database: source.metadataTarget?.database,
+        schema: source.qualifierParts[source.qualifierParts.length - 1],
+        schemaQuoted: source.qualifierParts.length > 0 ? !!identifierParts[identifierParts.length - 2]?.quote : undefined,
+        alias: source.alias,
+        columns: source.columns,
+        columnAliases: source.columnAliases,
+      };
+    });
 }
 
 export function sqlSemanticLocalColumnsByTable(model: SqlSemanticModel): Map<string, SqlCompletionColumn[]> {
@@ -176,20 +183,26 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
   }
 
   const scope = sqlSemanticCompletionScope(model);
-  const qualifier = model.cursorIntent.qualifierParts.length > 0 ? model.cursorIntent.qualifierParts.join(".") : undefined;
+  const contextKind = semanticContextKind(model);
+  const basePrefixHasNonAscii = Array.from(base.prefix).some((character) => (character.codePointAt(0) ?? 0) > 0x7f);
+  const useBaseTrailingIdentifier = basePrefixHasNonAscii && model.cursorIntent.prefix.length === 0 && model.cursorIntent.replacementRange.start === model.cursorIntent.replacementRange.end && base.contextKind === contextKind;
+  const prefix = useBaseTrailingIdentifier ? base.prefix : model.cursorIntent.prefix;
+  const qualifierParts = model.cursorIntent.qualifierParts.length > 0 ? [...model.cursorIntent.qualifierParts] : useBaseTrailingIdentifier ? base.qualifierParts : undefined;
+  const qualifier = qualifierParts?.join(".");
   const referencedTables = sqlSemanticReferencedTables(model);
   const mutationTarget = semanticMutationTarget(model);
+  const mutationDatabase = mutationTarget?.metadataTarget?.database;
   const mutationSchema = mutationTarget?.qualifierParts[mutationTarget.qualifierParts.length - 1];
   const suggestTables = scope.kind === "table" || scope.kind === "schema" || scope.kind === "catalog";
   const suggestColumns = scope.kind === "columns";
-  const suggestRoutines = scope.kind === "routine";
+  const suggestRoutines = scope.kind === "routine" || (suggestColumns && base.suggestRoutines && !base.exclusiveColumnSuggestions);
   const projectionAliases = sqlSemanticProjectionAliasColumns(model).map((column) => column.name);
 
   return {
     ...base,
-    prefix: model.cursorIntent.prefix,
+    prefix,
     qualifier,
-    qualifierParts: model.cursorIntent.qualifierParts.length > 0 ? [...model.cursorIntent.qualifierParts] : undefined,
+    qualifierParts,
     suggestTables,
     suggestColumns,
     suggestKeywords: scope.kind === "keyword" || (!suggestTables && !suggestColumns && !suggestRoutines),
@@ -197,15 +210,16 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
     suggestJoinConditions: model.cursorIntent.kind === "join_condition",
     exclusiveTableSuggestions: suggestTables,
     exclusiveColumnSuggestions: model.cursorIntent.kind === "alias_column" || model.cursorIntent.kind === "insert_column" || model.cursorIntent.kind === "update_column",
-    exclusiveRoutineSuggestions: suggestRoutines,
+    exclusiveRoutineSuggestions: scope.kind === "routine",
     prioritizeSelectAliases: base.prioritizeSelectAliases || projectionAliases.length > 0,
     selectAliases: projectionAliases.length > 0 ? projectionAliases : base.selectAliases,
     referencedTables: referencedTables.length > 0 ? referencedTables : base.referencedTables,
     insertTable: model.cursorIntent.kind === "insert_column" ? mutationTarget?.name : base.insertTable,
+    insertDatabase: model.cursorIntent.kind === "insert_column" ? mutationDatabase : base.insertDatabase,
     insertSchema: model.cursorIntent.kind === "insert_column" ? mutationSchema : base.insertSchema,
     updateTarget: model.cursorIntent.kind === "update_column" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.updateTarget,
     deleteTarget: model.cursorIntent.kind === "delete_target" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.deleteTarget,
     onStar: model.cursorIntent.kind === "star" || base.onStar,
-    contextKind: semanticContextKind(model),
+    contextKind,
   };
 }

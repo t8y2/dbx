@@ -17,7 +17,9 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.sql.Connection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public final class JsonRpcServer {
     private static final long CONNECTION_VALIDATION_INTERVAL_MILLIS = 5_000L;
@@ -105,10 +107,11 @@ public final class JsonRpcServer {
             return Collections.singletonMap("ok", true);
         }
         if (AgentProtocol.METHOD_TEST_CONNECTION.equals(method)) {
-            if (!agent.testConnection(gson.fromJson(params, ConnectParams.class))) {
+            Map<String, Object> result = agent.testConnectionWithInfo(gson.fromJson(params, ConnectParams.class));
+            if (!Boolean.TRUE.equals(result.get("ok"))) {
                 throw new RuntimeException("Connection failed");
             }
-            return Collections.singletonMap("ok", true);
+            return result;
         }
         if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)) {
             Connection conn = agent.getConnection();
@@ -126,7 +129,13 @@ public final class JsonRpcServer {
         }
         ensureLiveConnection(method);
         if (AgentProtocol.METHOD_CONNECTION_INFO.equals(method)) {
-            return Collections.singletonMap("identifierQuote", agent.getIdentifierQuote());
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("identifierQuote", agent.getIdentifierQuote());
+            Map<String, String> databaseInfo = agent.getDatabaseInfo();
+            if (databaseInfo != null && !databaseInfo.isEmpty()) {
+                result.put("databaseInfo", databaseInfo);
+            }
+            return result;
         }
         if (AgentProtocol.METHOD_LIST_DATABASES.equals(method)) {
             return agent.listDatabases();

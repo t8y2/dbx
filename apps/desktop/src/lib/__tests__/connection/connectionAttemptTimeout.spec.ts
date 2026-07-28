@@ -51,6 +51,70 @@ describe("connectionAttemptTimeout", () => {
     ).toBe(27_000);
   });
 
+  it("uses resolved shared SSH profile settings instead of reference stub defaults", () => {
+    const profile = {
+      type: "ssh" as const,
+      id: "shared-ssh",
+      name: "Slow bastion",
+      host: "bastion.example.com",
+      port: 22,
+      user: "dbx",
+      connect_timeout_secs: 40,
+    };
+
+    expect(
+      connectionAttemptTimeoutMs(
+        {
+          db_type: "redis",
+          connect_timeout_secs: 5,
+          transport_layers: [
+            {
+              type: "ssh",
+              id: "connection-hop",
+              profile_id: profile.id,
+              host: "",
+              port: 22,
+              user: "root",
+              connect_timeout_secs: 5,
+            },
+          ],
+        },
+        (profileId) => (profileId === profile.id ? profile : undefined),
+      ),
+    ).toBe(42_000);
+  });
+
+  it("keeps disabled shared layers outside the attempt deadline", () => {
+    expect(
+      connectionAttemptTimeoutMs(
+        {
+          db_type: "redis",
+          connect_timeout_secs: 5,
+          transport_layers: [
+            {
+              type: "ssh",
+              id: "connection-hop",
+              profile_id: "shared-ssh",
+              enabled: false,
+              host: "",
+              port: 22,
+              user: "root",
+              connect_timeout_secs: 5,
+            },
+          ],
+        },
+        () => ({
+          type: "ssh",
+          id: "shared-ssh",
+          host: "bastion.example.com",
+          port: 22,
+          user: "dbx",
+          connect_timeout_secs: 40,
+        }),
+      ),
+    ).toBe(7_000);
+  });
+
   it("ignores disabled transport layer timeouts", () => {
     expect(
       connectionAttemptTimeoutMs({

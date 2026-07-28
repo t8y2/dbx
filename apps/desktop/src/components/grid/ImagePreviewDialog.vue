@@ -184,7 +184,7 @@ onUnmounted(() => {
       :show-close-button="false"
       overlay-class="!z-[80]"
       portal-class="!z-[81]"
-      class="image-preview-dialog !flex !max-w-[92vw] flex-col gap-0 overflow-hidden rounded-xl border-white/10 bg-[#090b0f] p-0 text-white shadow-2xl sm:!max-w-[92vw]"
+      class="image-preview-dialog !flex !max-w-[92vw] flex-col gap-0 overflow-hidden rounded-lg border-white/10 bg-[#090b0f] p-0 text-white shadow-2xl sm:!max-w-[92vw]"
       :style="dialogStyle"
       @escape-key-down="close"
     >

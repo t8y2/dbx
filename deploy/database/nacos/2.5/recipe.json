@@ -1,0 +1,17 @@
+{
+  "database": "nacos",
+  "name": "Nacos",
+  "version": "2.5.2",
+  "displayVersion": "2.5",
+  "image": "docker.cnb.cool/znb/images/nacos-server:v2.5.2",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 8848,
+  "connection": { "host": "127.0.0.1", "port": 8849, "username": "nacos", "password": "123456", "database": "dbx", "namespace": "public" },
+  "bootstrap": {
+    "check": { "command": ["curl", "--fail", "--silent", "--show-error", "--request", "POST", "http://127.0.0.1:8848/nacos/v1/auth/login", "--data-urlencode", "username=nacos", "--data-urlencode", "password=${DB_PASSWORD}"], "expect": "accessToken" },
+    "steps": [{ "name": "initialize administrator password", "command": ["sh", "-ec", "curl --fail --silent --show-error --request POST --data-urlencode \"password=$1\" http://127.0.0.1:8848/nacos/v1/auth/users/admin >/dev/null; curl --fail --silent --show-error --request POST http://127.0.0.1:8848/nacos/v1/auth/login --data-urlencode username=nacos --data-urlencode \"password=$1\" | grep -q '\"accessToken\"'; printf 'administrator initialized\\n'", "sh", "${DB_PASSWORD}"], "expect": "administrator initialized" }]
+  },
+  "shell": ["curl", "--fail", "--silent", "--show-error", "--request", "POST", "http://127.0.0.1:8848/nacos/v1/auth/login", "--data-urlencode", "username=nacos", "--data-urlencode", "password=${DB_PASSWORD}"],
+  "smoke": { "steps": [{ "name": "log in with initialized administrator credentials", "command": ["curl", "--fail", "--silent", "--show-error", "--request", "POST", "http://127.0.0.1:8848/nacos/v1/auth/login", "--data-urlencode", "username=nacos", "--data-urlencode", "password=${DB_PASSWORD}"], "expect": "accessToken" }] }
+}

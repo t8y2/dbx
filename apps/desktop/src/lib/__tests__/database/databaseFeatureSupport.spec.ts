@@ -2,7 +2,23 @@ import { describe, expect, it } from "vitest";
 import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget } from "@/lib/database/databaseNamespaceCreation";
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
-import { supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsDatabaseSchemaQualifier, supportsSqlInListPaste, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+
+describe("schema awareness", () => {
+  it("keeps SQLite database aliases separate from schema-capable databases", () => {
+    expect(isSchemaAware("sqlite")).toBe(false);
+  });
+});
+
+describe("database and schema qualifiers", () => {
+  it.each(["sqlserver", "trino", "prestosql"] as const)("supports three-part object names for %s", (databaseType) => {
+    expect(supportsDatabaseSchemaQualifier(databaseType)).toBe(true);
+  });
+
+  it.each(["mysql", "postgres", "oracle", "snowflake"] as const)("does not widen unverified three-part completion for %s", (databaseType) => {
+    expect(supportsDatabaseSchemaQualifier(databaseType)).toBe(false);
+  });
+});
 
 describe("supportsTransaction", () => {
   it("returns true for supported database types", () => {
@@ -82,6 +98,7 @@ describe("database property editing", () => {
     expect(editableDatabasePropertyGroups({ db_type: "mysql", read_only: true }, { type: "database", database: "app" })).toEqual([]);
     expect(editableDatabasePropertyGroups({ db_type: "sqlite" }, { type: "database", database: "main" })).toEqual([]);
     expect(editableDatabasePropertyGroups({ db_type: "sqlserver" }, { type: "database", database: "master" })).toEqual([]);
+    expect(editableDatabasePropertyGroups({ db_type: "hbase" }, { type: "database", database: "default" })).toEqual([]);
     expect(editableDatabasePropertyGroups({ db_type: "postgres" }, { type: "connection" })).toEqual([]);
     expect(editableSchemaPropertyGroups({ db_type: "postgres", read_only: true }, { type: "schema", database: "postgres", schema: "public" })).toEqual([]);
     expect(editableSchemaPropertyGroups({ db_type: "postgres" }, { type: "database", database: "postgres" })).toEqual([]);
@@ -105,15 +122,23 @@ describe("database namespace creation", () => {
   it("keeps non-database creation flows explicit", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "dameng" })).toBe("schema");
     expect(connectionNamespaceCreationTarget({ db_type: "duckdb" })).toBe("attach");
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb" })).toBe("special");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBeNull();
   });
 
+  it("hides persistent SQLite attachment for memory and SQLCipher connections", () => {
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite", host: ":memory:", password: "" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite", host: "/tmp/main.sqlite", password: "secret" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite", host: "/tmp/main.sqlite", password: "" })).toBe("attach");
+  });
+
   it("hides creation for read-only, file-only, and unknown generic targets", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "mysql", read_only: true })).toBeNull();
-    expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "sqlite", read_only: true })).toBeNull();
     expect(connectionNamespaceCreationTarget({ db_type: "jdbc" })).toBeNull();
     expect(connectionNamespaceCreationTarget({ db_type: "oracle" })).toBeNull();
+    expect(connectionNamespaceCreationTarget({ db_type: "hbase" })).toBeNull();
   });
 
   it("allows schema creation only on writable database nodes with schema targets", () => {

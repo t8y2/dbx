@@ -84,7 +84,7 @@ function withDuplicateSuffix(fileName: string, index: number): string {
 function sanitizePathStem(value: string): string {
   return value
     .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/[<>:"/\\|?*\p{Cc}]+/gu, "-")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^[-.\s]+|[-.\s]+$/g, "")

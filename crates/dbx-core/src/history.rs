@@ -27,6 +27,64 @@ pub struct HistoryEntry {
     pub details_json: Option<String>,
 }
 
+/// Matches current entries by connection ID and legacy entries by connection name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryConnectionFilter {
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(default)]
+    pub connection_name: String,
+}
+
+/// Includes connection identity so same-named databases do not match across connections.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryDatabaseFilter {
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(default)]
+    pub connection_name: String,
+    #[serde(default)]
+    pub database: String,
+}
+
+/// Mirrors the descending (executed_at, id) order to paginate equal timestamps safely.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryCursor {
+    pub executed_at: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HistorySearchRequest {
+    #[serde(default)]
+    pub search_text: String,
+    #[serde(default)]
+    pub connections: Vec<HistoryConnectionFilter>,
+    #[serde(default)]
+    pub databases: Vec<HistoryDatabaseFilter>,
+    pub activity_kind: Option<String>,
+    pub success: Option<bool>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub cursor: Option<HistoryCursor>,
+    #[serde(default)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySearchResult {
+    pub entries: Vec<HistoryEntry>,
+    pub next_cursor: Option<HistoryCursor>,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryConnectionOption {
+    pub connection_id: String,
+    pub connection_name: String,
+    pub databases: Vec<String>,
+}
+
 pub const MAX_HISTORY: usize = 1000;
 
 fn default_activity_kind() -> String {

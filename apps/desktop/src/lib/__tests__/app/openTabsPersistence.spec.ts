@@ -50,4 +50,11 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.sql).toBe("SELECT 1");
     expect(restored.originalSql).toBe("");
   });
+
+  it("preserves an external Doris catalog across tab restore", () => {
+    const [restored] = roundTrip([queryTab({ database: "dbx_catalog_completion", catalog: "dbx_mysql_catalog" })]);
+
+    expect(restored.database).toBe("dbx_catalog_completion");
+    expect(restored.catalog).toBe("dbx_mysql_catalog");
+  });
 });

@@ -25,6 +25,7 @@ pub(crate) fn current_app_support_info() -> AppSupportInfo {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn format_support_info_for_native_about() -> String {
     let info = current_app_support_info();
     let operating_system = format_operating_system(&info);
@@ -32,6 +33,7 @@ pub(crate) fn format_support_info_for_native_about() -> String {
     ["Desktop".to_string(), unknown_if_empty(&operating_system), unknown_if_empty(&info.arch)].join(" • ")
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn format_support_info_for_clipboard() -> String {
     let info = current_app_support_info();
     let operating_system = format_operating_system(&info);
@@ -45,6 +47,7 @@ pub(crate) fn format_support_info_for_clipboard() -> String {
     .join("\n")
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn format_operating_system(info: &AppSupportInfo) -> String {
     let operating_system = [Some(info.os_name.as_str()), info.os_version.as_deref()]
         .into_iter()
@@ -55,6 +58,7 @@ fn format_operating_system(info: &AppSupportInfo) -> String {
     operating_system
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn normalize_app_version(version: &str) -> String {
     let trimmed = version.trim();
     if trimmed.is_empty() {
@@ -67,6 +71,7 @@ fn normalize_app_version(version: &str) -> String {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn unknown_if_empty(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {

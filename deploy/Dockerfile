@@ -4,7 +4,9 @@
 FROM --platform=$BUILDPLATFORM node:22-slim AS frontend
 WORKDIR /app
 RUN npm i -g pnpm
-COPY package.json pnpm-lock.yaml ./
+# Keep the workspace package available because Vite resolves it directly from source.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/mongo-shell/ packages/mongo-shell/
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY apps/desktop/ apps/desktop/
@@ -29,9 +31,14 @@ RUN dpkg --add-architecture arm64 \
 COPY Cargo.toml Cargo.lock ./
 COPY crates/dbx-core/Cargo.toml crates/dbx-core/
 COPY crates/dbx-web/Cargo.toml crates/dbx-web/
+COPY crates/dbx-mcp/Cargo.toml crates/dbx-mcp/
+COPY crates/dbx-cli/Cargo.toml crates/dbx-cli/
 COPY src-tauri/Cargo.toml src-tauri/
+COPY vendor/ctor/ vendor/ctor/
 RUN mkdir -p crates/dbx-core/src && echo '' > crates/dbx-core/src/lib.rs \
     && mkdir -p crates/dbx-web/src && echo 'fn main() {}' > crates/dbx-web/src/main.rs \
+    && mkdir -p crates/dbx-mcp/src && echo '' > crates/dbx-mcp/src/lib.rs && echo 'fn main() {}' > crates/dbx-mcp/src/main.rs \
+    && mkdir -p crates/dbx-cli/src && echo 'fn main() {}' > crates/dbx-cli/src/main.rs \
     && mkdir -p src-tauri/src && echo 'fn main() {}' > src-tauri/src/main.rs && echo 'pub fn run() {}' > src-tauri/src/lib.rs
 
 COPY src-tauri/build.rs src-tauri/

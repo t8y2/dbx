@@ -38,6 +38,8 @@ impl DuckDbConnection {
         self.draining.load(Ordering::SeqCst)
     }
 
+    // Preserve PoisonError ownership so close_connection can still release the contained DuckDB handle.
+    #[allow(clippy::result_large_err)]
     fn into_inner(self) -> std::sync::LockResult<duckdb::Connection> {
         self.connection.into_inner()
     }

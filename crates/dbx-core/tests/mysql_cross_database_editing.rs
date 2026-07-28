@@ -54,6 +54,7 @@ fn mysql_cross_database_query_flow_preserves_target_database() {
 
     let save = prepare_data_grid_save(DataGridSaveStatementOptions {
         database_type: Some(DatabaseType::Mysql),
+        identifier_quote: None,
         table_meta: DataGridTableMeta {
             catalog: None,
             database: None,

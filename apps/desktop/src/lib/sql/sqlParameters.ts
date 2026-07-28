@@ -19,9 +19,11 @@ export interface SqlParameterDescriptor {
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
+  replacement?: "string-fragment";
 }
 
 type ComplexTypeDeclarationKind = "struct" | "variant";
+type TriggerPseudoRecordName = "new" | "old" | "parent" | "eventinfo";
 
 export interface SqlParameterOptions {
   databaseType?: DatabaseType;
@@ -62,7 +64,10 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
   let cursor = 0;
   for (const occurrence of occurrences) {
     result += sql.slice(cursor, occurrence.start);
-    result += sqlParameterLiteral(values[occurrence.key] ?? { kind: "string", value: "" });
+    const input = values[occurrence.key] ?? { kind: "string", value: "" };
+    // Embedded placeholders stay inside the surrounding SQL string, so their value
+    // must be escaped as text instead of being wrapped in a second SQL literal.
+    result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : sqlParameterLiteral(input);
     cursor = occurrence.end;
   }
   result += sql.slice(cursor);
@@ -85,6 +90,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   const enabledSyntaxes = options?.enabledSyntaxes ? new Set(options.enabledSyntaxes) : null;
   const isSyntaxEnabled = (syntax: SqlParameterSyntax) => !enabledSyntaxes || enabledSyntaxes.has(syntax);
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql) : new Set<number>();
+  const triggerPseudoRecordFieldStarts = supportsNamedParameters && isSyntaxEnabled("named") ? collectTriggerPseudoRecordFieldStarts(sql, options?.databaseType) : new Set<number>();
   let i = 0;
   let dollarQuoteEnd = "";
   let positionalIndex = 0;
@@ -101,7 +107,25 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     const ch = sql[i];
     const next = sql[i + 1];
 
-    if (ch === "'" || ch === '"' || ch === "`") {
+    if (ch === "'" || ch === '"') {
+      // Exact quoted placeholders use SQL-literal replacement; embedded placeholders
+      // in ordinary single-quoted values use escaped text replacement below.
+      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch as "'" | '"', isSyntaxEnabled);
+      if (quoted) {
+        occurrences.push(quoted);
+        i = quoted.end;
+        continue;
+      }
+      const quotedEnd = skipQuoted(sql, i, ch);
+      // Double quotes can delimit identifiers, so only ordinary single-quoted
+      // values opt into embedded interpolation.
+      if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
+        occurrences.push(...collectEmbeddedQuotedBracedPlaceholders(sql, i + 1, quotedEnd, isSyntaxEnabled));
+      }
+      i = quotedEnd;
+      continue;
+    }
+    if (ch === "`") {
       i = skipQuoted(sql, i, ch);
       continue;
     }
@@ -126,7 +150,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === ":" && supportsNamedParameters && isSyntaxEnabled("named")) {
       const name = readParameterName(sql, i + 1);
-      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i)) {
+      if (name && sql[i - 1] !== ":" && sql[i + 1] !== "=" && !complexTypeFieldSeparators.has(i) && !triggerPseudoRecordFieldStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -167,7 +191,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === "@" && isSyntaxEnabled("sqlserver")) {
       const name = readParameterName(sql, i + 1);
-      if (name && next !== "@" && sql[i - 1] !== "@" && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
+      if (name && next !== "@" && sql[i - 1] !== "@" && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -192,6 +216,165 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+// Oracle and Dameng expose trigger rows through colon-prefixed pseudo-records,
+// unlike PostgreSQL's unprefixed NEW/OLD records. Keep ordinary :name binds enabled.
+function collectTriggerPseudoRecordFieldStarts(sql: string, databaseType?: DatabaseType): Set<number> {
+  const starts = new Set<number>();
+  const defaults = triggerPseudoRecordDefaults(databaseType);
+  if (!defaults) return starts;
+
+  let aliases: Set<string> | null = null;
+  let i = 0;
+  let dollarQuoteEnd = "";
+
+  while (i < sql.length) {
+    if (dollarQuoteEnd) {
+      const end = sql.indexOf(dollarQuoteEnd, i);
+      if (end === -1) break;
+      i = end + dollarQuoteEnd.length;
+      dollarQuoteEnd = "";
+      continue;
+    }
+
+    const ch = sql[i];
+    const next = sql[i + 1];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      i = skipQuoted(sql, i, ch);
+      continue;
+    }
+    if (ch === "[") {
+      i = skipBracketIdentifier(sql, i);
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      i = skipLine(sql, i + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = skipBlockComment(sql, i + 2);
+      continue;
+    }
+    if (isHashLineComment(sql, i)) {
+      i = skipLine(sql, i + 1);
+      continue;
+    }
+    if (ch === "$") {
+      const marker = readDollarQuoteMarker(sql, i);
+      if (marker) {
+        dollarQuoteEnd = marker;
+        i += marker.length;
+        continue;
+      }
+    }
+
+    if (aliases && ch === "/" && isStandaloneSlashDelimiter(sql, i)) {
+      aliases = null;
+      i += 1;
+      continue;
+    }
+    if (!aliases && matchesWord(sql, i, "create")) {
+      const triggerStart = readCreateTriggerEnd(sql, i);
+      if (triggerStart !== null) {
+        aliases = new Set(defaults);
+        i = triggerStart;
+        continue;
+      }
+    }
+    if (aliases && matchesWord(sql, i, "referencing")) {
+      i = collectTriggerReferencingAliases(sql, i + "referencing".length, aliases, defaults);
+      continue;
+    }
+    if (aliases && ch === ":") {
+      const name = readParameterName(sql, i + 1);
+      if (name && aliases.has(name.toLowerCase()) && isTriggerPseudoRecordFieldReference(sql, i + 1 + name.length)) {
+        starts.add(i);
+        i += 1 + name.length;
+        continue;
+      }
+    }
+    i += 1;
+  }
+
+  return starts;
+}
+
+function triggerPseudoRecordDefaults(databaseType?: DatabaseType): readonly TriggerPseudoRecordName[] | null {
+  if (databaseType === "oracle") return ["new", "old", "parent"];
+  if (databaseType === "dameng") return ["new", "old", "eventinfo"];
+  return null;
+}
+
+function readCreateTriggerEnd(sql: string, start: number): number | null {
+  let keyword = readNextKeyword(sql, start + "create".length);
+  if (!keyword) return null;
+  if (keyword.word === "or") {
+    keyword = readNextKeyword(sql, keyword.end);
+    if (keyword?.word !== "replace") return null;
+    keyword = readNextKeyword(sql, keyword.end);
+  }
+  return keyword?.word === "trigger" ? keyword.end : null;
+}
+
+function collectTriggerReferencingAliases(sql: string, start: number, aliases: Set<string>, defaults: readonly TriggerPseudoRecordName[]): number {
+  const supported = new Set<string>(defaults);
+  let i = start;
+
+  while (i < sql.length) {
+    const source = readNextKeyword(sql, i);
+    if (!source || isTriggerReferencingBoundary(source.word)) return i;
+    if (!supported.has(source.word)) {
+      i = source.end;
+      continue;
+    }
+
+    let alias = readNextKeyword(sql, source.end);
+    if (alias?.word === "row") alias = readNextKeyword(sql, alias.end);
+    if (alias?.word === "as") alias = readNextKeyword(sql, alias.end);
+    if (!alias || supported.has(alias.word) || isTriggerReferencingBoundary(alias.word)) {
+      i = source.end;
+      continue;
+    }
+
+    aliases.add(alias.word);
+    i = alias.end;
+  }
+
+  return i;
+}
+
+function isTriggerReferencingBoundary(word: string): boolean {
+  return ["before", "after", "instead", "for", "when", "begin", "declare", "call", "enable", "disable"].includes(word);
+}
+
+function isTriggerPseudoRecordFieldReference(sql: string, nameEnd: number): boolean {
+  if (sql[nameEnd] !== ".") return false;
+  const fieldStart = nameEnd + 1;
+  return PARAMETER_NAME_START_RE.test(sql[fieldStart] ?? "") || sql[fieldStart] === '"';
+}
+
+function isStandaloneSlashDelimiter(sql: string, start: number): boolean {
+  let before = start - 1;
+  while (before >= 0 && (sql[before] === " " || sql[before] === "\t" || sql[before] === "\r")) before -= 1;
+  if (before >= 0 && sql[before] !== "\n") return false;
+
+  let after = start + 1;
+  while (after < sql.length && (sql[after] === " " || sql[after] === "\t" || sql[after] === "\r")) after += 1;
+  return after === sql.length || sql[after] === "\n";
+}
+
+// JDBCX MCP commands accept npm scoped packages in their unquoted args value,
+// for example `args=-y @modelcontextprotocol/server-everything`. The `@scope`
+// prefix is command data, not a SQL Server-style template parameter.
+function isJdbcxMcpScopedPackage(sql: string, start: number, nameEnd: number): boolean {
+  if (sql[nameEnd] !== "/" || !/[\p{L}\p{N}_.-]/u.test(sql[nameEnd + 1] ?? "")) return false;
+
+  const blockStart = sql.lastIndexOf("{{", start);
+  if (blockStart === -1 || sql.lastIndexOf("}}", start) > blockStart) return false;
+
+  const extensionPrefix = sql.slice(blockStart + 2, start);
+  return /^\s*mcp\s*\(/i.test(extensionPrefix) && /(?:^|[,\s])args\s*=[^,]*$/i.test(extensionPrefix);
 }
 
 // Doris-style complex types use colons between field names and types; those are not bind parameters.
@@ -722,6 +905,98 @@ function readParameterName(sql: string, start: number): string {
   return sql.slice(start, i);
 }
 
+/** Match only unprefixed quote + exact `${name}`/`#{name}` + same quote. Leaves skipQuoted unchanged. */
+function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" | '"', isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence | null {
+  if (sql[start] !== quote) return null;
+  // Reject E'...', U&'...', B'...', X'...', N'...' — replacing the quoted span would leave the
+  // prefix attached to a typed literal (e.g. E'${path}' → E'C:\new', B'${flag}' → BTRUE).
+  if (hasSqlStringLiteralPrefix(sql, start)) return null;
+
+  const open = sql.slice(start + 1, start + 3);
+  let syntax: SqlParameterSyntax | null = null;
+  if (open === "${") syntax = "shell";
+  else if (open === "#{") syntax = "mybatis";
+  else return null;
+  if (!isSyntaxEnabled(syntax)) return null;
+
+  const nameStart = start + 3;
+  const closeBrace = sql.indexOf("}", nameStart);
+  if (closeBrace === -1 || sql[closeBrace + 1] !== quote) return null;
+
+  const name = sql.slice(nameStart, closeBrace).trim();
+  if (!PARAMETER_NAME_RE.test(name)) return null;
+
+  const end = closeBrace + 2;
+  // The closing quote must be a real string terminator under the same rules as skipQuoted
+  // (doubled quotes / backslash escapes). Otherwise '${value}''suffix' would match '${value}'.
+  if (skipQuoted(sql, start, quote) !== end) return null;
+
+  return {
+    key: name,
+    name,
+    syntax,
+    token: sql.slice(start, end),
+    start,
+    end,
+  };
+}
+
+function collectEmbeddedQuotedBracedPlaceholders(sql: string, contentStart: number, quotedEnd: number, isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence[] {
+  const occurrences: ParameterOccurrence[] = [];
+  const contentEnd = sql[quotedEnd - 1] === "'" ? quotedEnd - 1 : quotedEnd;
+  let i = contentStart;
+
+  while (i < contentEnd) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    let syntax: SqlParameterSyntax | null = null;
+    if (ch === "$" && next === "{") syntax = "shell";
+    else if (ch === "#" && next === "{") syntax = "mybatis";
+    if (!syntax || !isSyntaxEnabled(syntax)) {
+      i += 1;
+      continue;
+    }
+
+    const closeBrace = sql.indexOf("}", i + 2);
+    if (closeBrace === -1 || closeBrace >= contentEnd) {
+      i += 1;
+      continue;
+    }
+    const name = sql.slice(i + 2, closeBrace).trim();
+    if (!PARAMETER_NAME_RE.test(name)) {
+      i += 1;
+      continue;
+    }
+
+    occurrences.push({
+      key: name,
+      name,
+      syntax,
+      token: sql.slice(i, closeBrace + 1),
+      start: i,
+      end: closeBrace + 1,
+      replacement: "string-fragment",
+    });
+    i = closeBrace + 1;
+  }
+
+  return occurrences;
+}
+
+/** True when `quoteStart` opens a prefixed literal such as E'...', U&'...', or MySQL _charset'...'. */
+function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
+  if (quoteStart <= 0) return false;
+
+  if (quoteStart >= 2 && sql[quoteStart - 1] === "&" && (sql[quoteStart - 2] === "U" || sql[quoteStart - 2] === "u") && !PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 3] ?? "")) {
+    return true;
+  }
+
+  // SQL dialects attach word-like introducers directly to the quote. Reject the
+  // whole category so typed replacement cannot leave invalid prefixes such as
+  // `_utf8mb4TRUE`, and so future introducers do not require another allowlist.
+  return PARAMETER_NAME_CHAR_RE.test(sql[quoteStart - 1]);
+}
+
 function skipQuoted(sql: string, start: number, quote: string): number {
   let i = start + 1;
   while (i < sql.length) {
@@ -798,6 +1073,10 @@ function readDollarQuoteMarker(sql: string, start: number): string {
 
 function quoteSqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sqlParameterStringFragment(input: SqlParameterInput): string {
+  return input.value.replace(/'/g, "''");
 }
 
 function normalizeBooleanLiteral(value: string): string {

@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::nacos::types::*;
@@ -8,7 +10,9 @@ pub async fn nacos_test_connection_core(state: &AppState, conn_id: &str) -> Resu
         return Err("Connection is not a Nacos admin connection".to_string());
     }
     let admin_config = state.nacos_admin_config_for_connection(conn_id, &cfg).await?;
-    let admin = state.nacos_registry.build_transient_config(admin_config).await?;
+    // Keep this probe on the connection's shared adapter so an r-nacos console
+    // session verified for configuration history can also expose its version.
+    let admin = state.nacos_registry.get_or_build_config(conn_id, admin_config).await?;
     admin.test_connection().await
 }
 
@@ -44,6 +48,24 @@ pub async fn nacos_list_configs_core(
 ) -> Result<NacosConfigList, String> {
     let admin = get_admin(state, conn_id).await?;
     admin.list_configs(query).await
+}
+
+pub async fn nacos_search_config_content_core<F, Fut>(
+    state: &AppState,
+    conn_id: &str,
+    request: NacosContentSearchRequest,
+    on_progress: F,
+) -> Result<NacosContentSearchResult, String>
+where
+    F: Fn(NacosSearchProgress) -> Fut + Send + Sync,
+    Fut: Future<Output = ()> + Send,
+{
+    let admin = get_admin(state, conn_id).await?;
+    crate::nacos::search::search_config_content(admin, request, on_progress).await
+}
+
+pub fn nacos_cancel_operation_core(operation_id: &str) -> bool {
+    crate::nacos::search::cancel_operation(operation_id)
 }
 
 pub async fn nacos_get_config_core(
@@ -95,6 +117,23 @@ pub async fn nacos_rollback_config_core(
     admin.rollback_config(req).await
 }
 
+pub async fn nacos_get_rnacos_console_captcha_core(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<NacosRNacosConsoleCaptcha, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.get_rnacos_console_captcha().await
+}
+
+pub async fn nacos_login_rnacos_console_core(
+    state: &AppState,
+    conn_id: &str,
+    captcha: Option<String>,
+) -> Result<(), String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.login_rnacos_console(captcha).await
+}
+
 pub async fn nacos_list_services_core(
     state: &AppState,
     conn_id: &str,
@@ -123,20 +162,29 @@ pub async fn nacos_update_instance_core(
     admin.update_instance(req).await
 }
 
+pub async fn nacos_get_dashboard_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosDashboardQuery,
+) -> Result<NacosDashboardSnapshot, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.get_dashboard(query).await
+}
+
 pub async fn nacos_raw_request_core(
     state: &AppState,
     conn_id: &str,
     req: NacosRawRequest,
 ) -> Result<NacosRawResponse, String> {
     crate::nacos::http::validate_raw_api_path(&req.path)?;
-    if req.method.to_ascii_uppercase() != "GET" {
+    if !req.method.eq_ignore_ascii_case("GET") {
         ensure_connection_writable(state, conn_id, "Run mutating Nacos raw request").await?;
     }
     let admin = get_admin(state, conn_id).await?;
     admin.raw_request(req).await
 }
 
-async fn get_admin(
+pub(crate) async fn get_admin(
     state: &AppState,
     conn_id: &str,
 ) -> Result<std::sync::Arc<dyn crate::nacos::port::NacosAdmin>, String> {
@@ -148,7 +196,7 @@ async fn get_admin(
     state.nacos_registry.get_or_build_config(conn_id, admin_config).await
 }
 
-async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
+pub(crate) async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     if cfg.read_only {
         Err(format!("{action} is blocked because this connection is read-only"))
@@ -170,6 +218,7 @@ mod tests {
         let mut cfg = crate::models::connection::ConnectionConfig {
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -182,6 +231,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -216,6 +266,7 @@ mod tests {
             read_only: true,
             is_production: false,
             production_databases: Vec::new(),
+            database_info: None,
         };
         cfg.read_only = true;
         state.configs.write().await.insert(cfg.id.clone(), cfg);
@@ -238,6 +289,7 @@ mod tests {
         let cfg = crate::models::connection::ConnectionConfig {
             id: "nacos-rollback".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -250,6 +302,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -284,6 +337,7 @@ mod tests {
             read_only: true,
             is_production: false,
             production_databases: Vec::new(),
+            database_info: None,
         };
         state.configs.write().await.insert(cfg.id.clone(), cfg);
         let err = nacos_rollback_config_core(

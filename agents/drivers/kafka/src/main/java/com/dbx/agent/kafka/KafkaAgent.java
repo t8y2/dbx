@@ -13,12 +13,21 @@ import org.apache.kafka.common.resource.PatternType;
 import org.apache.kafka.common.resource.ResourcePattern;
 import org.apache.kafka.common.resource.ResourcePatternFilter;
 import org.apache.kafka.common.resource.ResourceType;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.client.ZKClientConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.io.PrintStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -29,9 +38,12 @@ import java.util.stream.Collectors;
  */
 public final class KafkaAgent {
 
+    private static final PrintStream JSON_RPC_OUT = System.out;
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
+    private static final int DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS = 10_000;
+    private static final String ZOOKEEPER_PROPERTY_PREFIX = "zookeeper.";
     private static final Set<String> KERBEROS_SYSTEM_PROPERTY_KEYS = Set.of(
         "java.security.krb5.conf",
         "sun.security.krb5.debug",
@@ -47,26 +59,40 @@ public final class KafkaAgent {
 
     private static AdminClient adminClient;
     private static KafkaProducer<String, byte[]> producer;
+    private static JsonObject activeConnection;
     private static volatile boolean shutdownRequested;
 
     private KafkaAgent() {}
+
+    private static Logger logger() {
+        // Initialize only after main redirects System.out, so any logging backend
+        // that defaults to stdout still cannot write into the JSON-RPC channel.
+        return LoggerHolder.INSTANCE;
+    }
+
+    private static final class LoggerHolder {
+        private static final Logger INSTANCE = LoggerFactory.getLogger(KafkaAgent.class);
+    }
 
     // -----------------------------------------------------------------------
     // Entry point
     // -----------------------------------------------------------------------
 
     public static void main(String[] args) throws Exception {
+        // Keep the original stdout exclusively for JSON-RPC. Redirect accidental
+        // System.out writes from dependencies to stderr so they cannot corrupt the protocol.
+        System.setOut(System.err);
         System.setProperty("org.slf4j.simpleLogger.logFile", "System.err");
-        System.out.println("{\"ready\":true}");
-        System.out.flush();
+        JSON_RPC_OUT.println("{\"ready\":true}");
+        JSON_RPC_OUT.flush();
 
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
         while (true) {
             String line = reader.readLine();
             if (line == null) break;
             String response = handleRequest(line);
-            System.out.println(response);
-            System.out.flush();
+            JSON_RPC_OUT.println(response);
+            JSON_RPC_OUT.flush();
             if (shutdownRequested) {
                 System.exit(0);
             }
@@ -92,6 +118,7 @@ public final class KafkaAgent {
             Object result = dispatch(method, params);
             response.add("result", GSON.toJsonTree(result));
         } catch (Exception e) {
+            logger().warn("Kafka Agent request failed: method={}, id={}", method, id, e);
             JsonObject error = new JsonObject();
             error.addProperty("code", -1);
             error.addProperty("message", normalizeErrorMessage(e));
@@ -144,7 +171,7 @@ public final class KafkaAgent {
     }
 
     private static Object connect(JsonObject params) throws Exception {
-        JsonObject conn = connectionObject(params);
+        JsonObject conn = resolveBrokerConnection(connectionObject(params));
         Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
         AdminClient nextAdmin = null;
         KafkaProducer<String, byte[]> nextProducer = null;
@@ -158,6 +185,7 @@ public final class KafkaAgent {
             applyKerberosSystemProperties(conn);
             adminClient = nextAdmin;
             producer = nextProducer;
+            activeConnection = conn.deepCopy();
             return Collections.singletonMap("ok", true);
         } catch (Exception e) {
             if (nextAdmin != null) {
@@ -172,7 +200,7 @@ public final class KafkaAgent {
     }
 
     private static Object testConnection(JsonObject params) throws Exception {
-        JsonObject conn = connectionObject(params);
+        JsonObject conn = resolveBrokerConnection(connectionObject(params));
         Map<String, String> previousKerberosSystemProperties = applyKerberosSystemProperties(conn);
         AdminClient probe = null;
         try {
@@ -189,14 +217,11 @@ public final class KafkaAgent {
                 probe.describeAcls(AclBindingFilter.ANY)
                     .values().get(timeout, TimeUnit.MILLISECONDS);
             } catch (Exception aclEx) {
-                Throwable cause = aclEx;
-                while (cause != null) {
-                    if (cause.getClass().getSimpleName().contains("SecurityDisabled")
-                        || (cause.getMessage() != null && cause.getMessage().contains("No Authorizer"))) {
-                        aclEnabled = false;
-                        break;
-                    }
-                    cause = cause.getCause();
+                if (isAclDisabledError(aclEx)) {
+                    aclEnabled = false;
+                    logger().debug("Kafka ACL support is disabled by the broker");
+                } else {
+                    logger().warn("Kafka ACL capability probe failed; leaving the capability enabled", aclEx);
                 }
             }
 
@@ -219,6 +244,18 @@ public final class KafkaAgent {
         }
     }
 
+    static boolean isAclDisabledError(Throwable error) {
+        Throwable cause = error;
+        while (cause != null) {
+            if (cause.getClass().getSimpleName().contains("SecurityDisabled")
+                || (cause.getMessage() != null && cause.getMessage().contains("No Authorizer"))) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        return false;
+    }
+
     private static void closeClients() {
         if (adminClient != null) {
             adminClient.close(Duration.ofSeconds(5));
@@ -228,6 +265,7 @@ public final class KafkaAgent {
             producer.close(Duration.ofSeconds(5));
             producer = null;
         }
+        activeConnection = null;
         restoreKerberosSystemProperties(BASELINE_KERBEROS_SYSTEM_PROPERTIES);
     }
 
@@ -267,6 +305,160 @@ public final class KafkaAgent {
             throw new IllegalArgumentException("bootstrap_servers is required");
         }
         return servers;
+    }
+
+    static JsonObject resolveBrokerConnection(JsonObject conn) throws Exception {
+        String configured = stringOrEmpty(conn, "bootstrap_servers");
+        if (configured.isBlank()) configured = stringOrEmpty(conn, "bootstrapServers");
+        if (!configured.isBlank()) return conn;
+
+        String connectString = stringOrEmpty(conn, "zookeeper_connect_string");
+        if (connectString.isBlank()) connectString = stringOrEmpty(conn, "zookeeperServers");
+        if (connectString.isBlank()) {
+            throw new IllegalArgumentException("bootstrap_servers or zookeeper_connect_string is required");
+        }
+
+        JsonObject resolved = conn.deepCopy();
+        resolved.addProperty("bootstrap_servers", discoverBootstrapServers(connectString, securityProtocol(conn), conn));
+        return resolved;
+    }
+
+    private static String discoverBootstrapServers(String connectString, String securityProtocol, JsonObject conn)
+        throws Exception {
+        int sessionTimeout = intOrDefault(conn, "zookeeper_session_timeout_ms", DEFAULT_SESSION_TIMEOUT_MS);
+        int connectionTimeout = intOrDefault(
+            conn,
+            "zookeeper_connection_timeout_ms",
+            DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS
+        );
+        CountDownLatch connected = new CountDownLatch(1);
+        ZooKeeper zooKeeper = new ZooKeeper(connectString, sessionTimeout, event -> {
+            if (event.getState() == Watcher.Event.KeeperState.SyncConnected) connected.countDown();
+        }, zooKeeperClientConfig(conn));
+        try {
+            if (!connected.await(connectionTimeout, TimeUnit.MILLISECONDS)) {
+                throw new IllegalStateException("Timed out connecting to ZooKeeper for Kafka broker discovery");
+            }
+
+            List<String> brokerIds;
+            try {
+                brokerIds = new ArrayList<>(zooKeeper.getChildren("/brokers/ids", false));
+            } catch (KeeperException.NoNodeException e) {
+                throw new IllegalStateException("ZooKeeper path /brokers/ids does not exist", e);
+            }
+            brokerIds.sort(KafkaAgent::compareBrokerIds);
+
+            List<JsonObject> registrations = new ArrayList<>();
+            for (String brokerId : brokerIds) {
+                try {
+                    byte[] data = zooKeeper.getData("/brokers/ids/" + brokerId, false, null);
+                    registrations.add(JsonParser.parseString(new String(data, StandardCharsets.UTF_8)).getAsJsonObject());
+                } catch (KeeperException.NoNodeException e) {
+                    // Expected race: a broker may refresh its ephemeral node between list and read.
+                    logger().debug("Kafka broker {} disappeared during ZooKeeper discovery", brokerId);
+                } catch (RuntimeException e) {
+                    logger().warn("Skipping malformed ZooKeeper registration for Kafka broker {}", brokerId, e);
+                }
+            }
+            return brokerEndpoints(registrations, securityProtocol);
+        } finally {
+            zooKeeper.close();
+        }
+    }
+
+    static ZKClientConfig zooKeeperClientConfig(JsonObject conn) {
+        ZKClientConfig clientConfig = new ZKClientConfig();
+        JsonObject properties = connectionProperties(conn);
+        if (properties == null) return clientConfig;
+
+        for (Map.Entry<String, JsonElement> entry : properties.entrySet()) {
+            if (entry.getKey().startsWith(ZOOKEEPER_PROPERTY_PREFIX)
+                && entry.getValue().isJsonPrimitive()) {
+                clientConfig.setProperty(entry.getKey(), entry.getValue().getAsString());
+            }
+        }
+        return clientConfig;
+    }
+
+    private static int compareBrokerIds(String left, String right) {
+        try {
+            return Integer.compare(Integer.parseInt(left), Integer.parseInt(right));
+        } catch (NumberFormatException e) {
+            // Third-party registries may use non-numeric IDs; lexical ordering remains deterministic.
+            logger().debug("Sorting non-numeric Kafka broker IDs lexically: left={}, right={}", left, right);
+            return left.compareTo(right);
+        }
+    }
+
+    static String brokerEndpoints(List<JsonObject> registrations, String securityProtocol) {
+        String targetProtocol = securityProtocol == null || securityProtocol.isBlank()
+            ? "PLAINTEXT"
+            : securityProtocol.toUpperCase(Locale.ROOT);
+        Set<String> addresses = new LinkedHashSet<>();
+
+        for (JsonObject registration : registrations) {
+            int addressCount = addresses.size();
+            JsonObject protocolMap = registration.has("listener_security_protocol_map")
+                && registration.get("listener_security_protocol_map").isJsonObject()
+                ? registration.getAsJsonObject("listener_security_protocol_map")
+                : new JsonObject();
+            JsonArray endpoints = registration.has("endpoints") && registration.get("endpoints").isJsonArray()
+                ? registration.getAsJsonArray("endpoints")
+                : new JsonArray();
+
+            for (JsonElement element : endpoints) {
+                if (!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString()) continue;
+                String endpoint = element.getAsString();
+                int separator = endpoint.indexOf("://");
+                if (separator <= 0) continue;
+                String listener = endpoint.substring(0, separator).toUpperCase(Locale.ROOT);
+                JsonElement mapped = protocolMap.get(listener);
+                String mappedProtocol = mapped != null && mapped.isJsonPrimitive()
+                    ? mapped.getAsString().toUpperCase(Locale.ROOT)
+                    : listener;
+                if (!targetProtocol.equals(mappedProtocol)) continue;
+                String address = endpointAddress(endpoint);
+                if (address != null) addresses.add(address);
+            }
+
+            if (addresses.size() == addressCount && endpoints.size() == 0 && registration.has("host") && registration.has("port")) {
+                try {
+                    String host = registration.get("host").getAsString().trim();
+                    int port = registration.get("port").getAsInt();
+                    if (!host.isEmpty() && port > 0 && port <= 65535) addresses.add(formatHostPort(host, port));
+                } catch (RuntimeException e) {
+                    logger().warn("Skipping malformed legacy Kafka broker registration", e);
+                }
+            }
+        }
+
+        if (addresses.isEmpty()) {
+            throw new IllegalArgumentException("ZooKeeper did not return any usable Kafka broker endpoints");
+        }
+        return String.join(",", addresses);
+    }
+
+    private static String endpointAddress(String endpoint) {
+        try {
+            URI uri = URI.create(endpoint);
+            String host = uri.getHost();
+            int port = uri.getPort();
+            if (host == null || host.isBlank() || port <= 0 || port > 65535) return null;
+            return formatHostPort(host, port);
+        } catch (IllegalArgumentException e) {
+            logger().debug("Skipping malformed Kafka broker endpoint", e);
+            return null;
+        }
+    }
+
+    private static String formatHostPort(String host, int port) {
+        return host.contains(":") && !host.startsWith("[") ? "[" + host + "]:" + port : host + ":" + port;
+    }
+
+    private static String securityProtocol(JsonObject conn) {
+        String protocol = stringOrEmpty(conn, "security_protocol");
+        if (protocol.isBlank()) protocol = stringOrEmpty(conn, "securityProtocol");
+        return protocol.isBlank() ? "PLAINTEXT" : protocol;
     }
 
     static void applySecurityProperties(JsonObject conn, Properties props) {
@@ -353,6 +545,7 @@ public final class KafkaAgent {
             for (Map.Entry<String, JsonElement> entry : properties.entrySet()) {
                 if (entry.getValue().isJsonPrimitive()) {
                     String key = entry.getKey();
+                    if (key.startsWith(ZOOKEEPER_PROPERTY_PREFIX)) continue;
                     String value = entry.getValue().getAsString();
                     props.put(key, value);
                 }
@@ -578,9 +771,45 @@ public final class KafkaAgent {
         }
 
         ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, name);
-        admin.incrementalAlterConfigs(Collections.singletonMap(resource, ops))
-            .all().get(timeout, TimeUnit.MILLISECONDS);
+        try {
+            admin.incrementalAlterConfigs(Collections.singletonMap(resource, ops))
+                .all().get(timeout, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            if (!isUnsupportedVersionError(e)) throw e;
+            logger().info("Kafka broker does not support incrementalAlterConfigs; using legacy alterConfigs for topic {}", name);
+            Config current = admin.describeConfigs(Collections.singletonList(resource))
+                .all().get(timeout, TimeUnit.MILLISECONDS).get(resource);
+            Map<String, String> values = legacyTopicConfig(current, ops);
+            Config replacement = new Config(values.entrySet().stream()
+                .map(entry -> new ConfigEntry(entry.getKey(), entry.getValue()))
+                .collect(Collectors.toList()));
+            admin.alterConfigs(Collections.singletonMap(resource, replacement))
+                .all().get(timeout, TimeUnit.MILLISECONDS);
+        }
         return Collections.singletonMap("ok", true);
+    }
+
+    static Map<String, String> legacyTopicConfig(Config current, List<AlterConfigOp> ops) {
+        Map<String, String> values = new LinkedHashMap<>();
+        for (ConfigEntry entry : current.entries()) {
+            boolean topicOverride = entry.source() == ConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG
+                || entry.source() == ConfigEntry.ConfigSource.UNKNOWN;
+            if (topicOverride && !entry.isReadOnly() && !entry.isSensitive() && entry.value() != null) {
+                values.put(entry.name(), entry.value());
+            }
+        }
+
+        for (AlterConfigOp op : ops) {
+            String key = op.configEntry().name();
+            switch (op.opType()) {
+                case SET -> values.put(key, op.configEntry().value());
+                case DELETE -> values.remove(key);
+                case APPEND, SUBTRACT -> throw new IllegalArgumentException(
+                    "Kafka broker does not support " + op.opType() + " config operations through the legacy alterConfigs API"
+                );
+            }
+        }
+        return values;
     }
 
     // -----------------------------------------------------------------------
@@ -698,6 +927,7 @@ public final class KafkaAgent {
             return Collections.singletonMap("producers", new ArrayList<>(byProducer.values()));
         } catch (Exception e) {
             if (isUnsupportedVersionError(e)) {
+                logger().info("Kafka broker does not support describeProducers; returning an empty producer list");
                 return Collections.singletonMap("producers", Collections.emptyList());
             }
             throw e;
@@ -793,22 +1023,74 @@ public final class KafkaAgent {
 
     private static Object peekMessages(JsonObject params) throws Exception {
         String topic = stringOrEmpty(params, "topic");
-        int partition = intOrDefault(params, "partition", 0);
-        long offset = longOrDefault(params, "offset", 0);
-        int count = intOrDefault(params, "count", 10);
+        Integer partition = integerOrNull(params, "partition");
+        Long offset = longOrNull(params, "offset");
+        int count = Math.max(1, intOrDefault(params, "count", 10));
 
-        // Build a temporary consumer for peeking (no commit)
-        Properties props = new Properties();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
-            adminClient != null ? adminClient.describeCluster().clusterId()
-                .get(5, TimeUnit.SECONDS) : "localhost:9092");
-        // Reuse the admin's bootstrap servers
-        JsonObject conn = params.has("connection") && params.get("connection").isJsonObject()
-            ? params.getAsJsonObject("connection") : null;
-        if (conn != null) {
-            props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers(conn));
-            applyConnectionProperties(conn, props);
+        JsonObject conn = activeConnection;
+        if (conn == null) {
+            throw new IllegalStateException("Kafka Agent is not connected");
         }
+        Properties props = peekConsumerProperties(conn, count);
+
+        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
+            List<TopicPartition> candidatePartitions = resolvePeekPartitions(consumer, topic, partition);
+            if (candidatePartitions.isEmpty()) {
+                return Collections.singletonMap("messages", Collections.emptyList());
+            }
+
+            Map<TopicPartition, Long> beginningOffsets =
+                consumer.beginningOffsets(candidatePartitions, Duration.ofSeconds(5));
+            Map<TopicPartition, Long> endOffsets =
+                consumer.endOffsets(candidatePartitions, Duration.ofSeconds(5));
+
+            List<TopicPartition> readablePartitions = new ArrayList<>();
+            Map<TopicPartition, Long> seekOffsets = new LinkedHashMap<>();
+            for (TopicPartition tp : candidatePartitions) {
+                long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
+                long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
+                long requestedOffset = offset != null ? offset : beginningOffset;
+                Long seekOffset = normalizePeekOffset(requestedOffset, beginningOffset, endOffset);
+                if (seekOffset == null) {
+                    continue;
+                }
+                readablePartitions.add(tp);
+                seekOffsets.put(tp, seekOffset);
+            }
+            if (readablePartitions.isEmpty()) {
+                return Collections.singletonMap("messages", Collections.emptyList());
+            }
+
+            consumer.assign(readablePartitions);
+            for (Map.Entry<TopicPartition, Long> entry : seekOffsets.entrySet()) {
+                consumer.seek(entry.getKey(), entry.getValue());
+            }
+
+            List<Map<String, Object>> messages = collectPeekedMessages(
+                timeout -> consumer.poll(timeout),
+                () -> {
+                    Map<TopicPartition, Long> positions = new LinkedHashMap<>();
+                    for (TopicPartition tp : readablePartitions) {
+                        positions.put(tp, consumer.position(tp));
+                    }
+                    return allPeekPartitionsCaughtUp(readablePartitions, positions, endOffsets);
+                },
+                count,
+                System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+                Duration.ofMillis(500)
+            );
+            sortPeekedMessages(messages);
+            if (messages.size() > count) {
+                messages = new ArrayList<>(messages.subList(0, count));
+            }
+            return Collections.singletonMap("messages", messages);
+        }
+    }
+
+    static Properties peekConsumerProperties(JsonObject conn, int count) {
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers(conn));
+        applyConnectionProperties(conn, props);
         props.put(ConsumerConfig.GROUP_ID_CONFIG, "dbx-peek-" + UUID.randomUUID());
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
             "org.apache.kafka.common.serialization.StringDeserializer");
@@ -817,51 +1099,143 @@ public final class KafkaAgent {
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "none");
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, count);
+        return props;
+    }
 
-        TopicPartition tp = new TopicPartition(topic, partition);
-        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
-            consumer.assign(Collections.singletonList(tp));
-            Map<TopicPartition, Long> beginningOffsets =
-                consumer.beginningOffsets(Collections.singletonList(tp), Duration.ofSeconds(5));
-            Map<TopicPartition, Long> endOffsets =
-                consumer.endOffsets(Collections.singletonList(tp), Duration.ofSeconds(5));
-            long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
-            long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
-            Long seekOffset = normalizePeekOffset(offset, beginningOffset, endOffset);
-            if (seekOffset == null) {
-                return Collections.singletonMap("messages", Collections.emptyList());
+    /**
+     * Poll until {@code count} messages are collected, every assigned partition has reached its
+     * end offset, or {@code deadlineNs} expires. Empty polls retry until caught-up or deadline —
+     * they must not abort early (broker / network / first-fetch latency can exceed one poll).
+     */
+    static List<Map<String, Object>> collectPeekedMessages(
+        PeekRecordPoller poller,
+        PeekCaughtUpChecker caughtUpChecker,
+        int count,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        List<Map<String, Object>> messages = new ArrayList<>();
+        while (messages.size() < count && System.nanoTime() < deadlineNs) {
+            long remainingNs = deadlineNs - System.nanoTime();
+            if (remainingNs <= 0) {
+                break;
             }
-            consumer.seek(tp, seekOffset);
-
-            List<Map<String, Object>> messages = new ArrayList<>();
-            ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofSeconds(5));
-            for (ConsumerRecord<String, byte[]> record : records) {
-                if (messages.size() >= count) break;
-                Map<String, Object> msg = new LinkedHashMap<>();
-                msg.put("topic", record.topic());
-                msg.put("partition", record.partition());
-                msg.put("offset", record.offset());
-                msg.put("timestamp", record.timestamp());
-                msg.put("key", record.key());
-                // Headers
-                Map<String, String> headers = new LinkedHashMap<>();
-                record.headers().forEach(h ->
-                    headers.put(h.key(), new String(h.value(), StandardCharsets.UTF_8)));
-                msg.put("headers", headers);
-                // Payload
-                if (record.value() != null) {
-                    msg.put("payloadBase64", Base64.getEncoder().encodeToString(record.value()));
-                    String text = tryDecodeUtf8(record.value());
-                    if (text != null) {
-                        msg.put("payloadText", text);
-                    }
-                } else {
-                    msg.put("payloadBase64", "");
+            Duration timeout = pollTimeout.toNanos() > remainingNs
+                ? Duration.ofNanos(remainingNs)
+                : pollTimeout;
+            ConsumerRecords<String, byte[]> records = poller.poll(timeout);
+            if (records.isEmpty()) {
+                if (caughtUpChecker.allPartitionsCaughtUp()) {
+                    break;
                 }
-                messages.add(msg);
+                continue;
             }
-            return Collections.singletonMap("messages", messages);
+            for (ConsumerRecord<String, byte[]> record : records) {
+                messages.add(peekedMessageFromRecord(record));
+                if (messages.size() >= count) {
+                    break;
+                }
+            }
         }
+        return messages;
+    }
+
+    static boolean allPeekPartitionsCaughtUp(
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Long> positions,
+        Map<TopicPartition, Long> endOffsets
+    ) {
+        for (TopicPartition tp : partitions) {
+            long endOffset = endOffsets.getOrDefault(tp, 0L);
+            long position = positions.getOrDefault(tp, 0L);
+            if (position < endOffset) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @FunctionalInterface
+    interface PeekRecordPoller {
+        ConsumerRecords<String, byte[]> poll(Duration timeout);
+    }
+
+    @FunctionalInterface
+    interface PeekCaughtUpChecker {
+        boolean allPartitionsCaughtUp();
+    }
+
+    /** When partition is null, peek across every partition of the topic. */
+    static List<TopicPartition> resolvePeekPartitions(
+        KafkaConsumer<String, byte[]> consumer,
+        String topic,
+        Integer partition
+    ) {
+        if (partition != null) {
+            return resolvePeekPartitions(topic, partition, Collections.emptyList());
+        }
+        List<PartitionInfo> infos = consumer.partitionsFor(topic, Duration.ofSeconds(5));
+        if (infos == null || infos.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Integer> available = infos.stream().map(PartitionInfo::partition).collect(Collectors.toList());
+        return resolvePeekPartitions(topic, null, available);
+    }
+
+    static List<TopicPartition> resolvePeekPartitions(String topic, Integer partition, List<Integer> availablePartitions) {
+        if (partition != null) {
+            return Collections.singletonList(new TopicPartition(topic, partition));
+        }
+        if (availablePartitions == null || availablePartitions.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return availablePartitions.stream()
+            .sorted()
+            .map(id -> new TopicPartition(topic, id))
+            .collect(Collectors.toList());
+    }
+
+    static void sortPeekedMessages(List<Map<String, Object>> messages) {
+        messages.sort((left, right) -> {
+            long leftTs = ((Number) left.getOrDefault("timestamp", 0L)).longValue();
+            long rightTs = ((Number) right.getOrDefault("timestamp", 0L)).longValue();
+            int byTs = Long.compare(leftTs, rightTs);
+            if (byTs != 0) {
+                return byTs;
+            }
+            int leftPartition = ((Number) left.getOrDefault("partition", 0)).intValue();
+            int rightPartition = ((Number) right.getOrDefault("partition", 0)).intValue();
+            int byPartition = Integer.compare(leftPartition, rightPartition);
+            if (byPartition != 0) {
+                return byPartition;
+            }
+            long leftOffset = ((Number) left.getOrDefault("offset", 0L)).longValue();
+            long rightOffset = ((Number) right.getOrDefault("offset", 0L)).longValue();
+            return Long.compare(leftOffset, rightOffset);
+        });
+    }
+
+    private static Map<String, Object> peekedMessageFromRecord(ConsumerRecord<String, byte[]> record) {
+        Map<String, Object> msg = new LinkedHashMap<>();
+        msg.put("topic", record.topic());
+        msg.put("partition", record.partition());
+        msg.put("offset", record.offset());
+        msg.put("timestamp", record.timestamp());
+        msg.put("key", record.key());
+        Map<String, String> headers = new LinkedHashMap<>();
+        record.headers().forEach(h ->
+            headers.put(h.key(), new String(h.value(), StandardCharsets.UTF_8)));
+        msg.put("headers", headers);
+        if (record.value() != null) {
+            msg.put("payloadBase64", Base64.getEncoder().encodeToString(record.value()));
+            String text = tryDecodeUtf8(record.value());
+            if (text != null) {
+                msg.put("payloadText", text);
+            }
+        } else {
+            msg.put("payloadBase64", "");
+        }
+        return msg;
     }
 
     private static Object sendMessage(JsonObject params) throws Exception {
@@ -1191,15 +1565,10 @@ public final class KafkaAgent {
     }
 
     private static String tryDecodeUtf8(byte[] bytes) {
-        try {
-            String text = new String(bytes, StandardCharsets.UTF_8);
-            // Verify round-trip
-            byte[] reEncoded = text.getBytes(StandardCharsets.UTF_8);
-            if (Arrays.equals(bytes, reEncoded)) {
-                return text;
-            }
-        } catch (Exception ignored) {}
-        return null;
+        String text = new String(bytes, StandardCharsets.UTF_8);
+        // Replacement characters change the bytes on round-trip, identifying invalid UTF-8 without exceptions.
+        byte[] reEncoded = text.getBytes(StandardCharsets.UTF_8);
+        return Arrays.equals(bytes, reEncoded) ? text : null;
     }
 
     static Long normalizePeekOffset(long requestedOffset, long beginningOffset, long endOffset) {
@@ -1229,14 +1598,24 @@ public final class KafkaAgent {
         return value == null ? fallback : value;
     }
 
-    private static int intOrDefault(JsonObject object, String key, int fallback) {
+    private static Integer integerOrNull(JsonObject object, String key) {
         JsonElement element = object.get(key);
-        return element == null || element.isJsonNull() ? fallback : element.getAsInt();
+        return element == null || element.isJsonNull() ? null : element.getAsInt();
+    }
+
+    private static Long longOrNull(JsonObject object, String key) {
+        JsonElement element = object.get(key);
+        return element == null || element.isJsonNull() ? null : element.getAsLong();
+    }
+
+    private static int intOrDefault(JsonObject object, String key, int fallback) {
+        Integer value = integerOrNull(object, key);
+        return value == null ? fallback : value;
     }
 
     private static long longOrDefault(JsonObject object, String key, long fallback) {
-        JsonElement element = object.get(key);
-        return element == null || element.isJsonNull() ? fallback : element.getAsLong();
+        Long value = longOrNull(object, key);
+        return value == null ? fallback : value;
     }
 
     private static boolean boolOrDefault(JsonObject object, String key, boolean fallback) {

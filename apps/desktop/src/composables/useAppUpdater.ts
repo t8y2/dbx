@@ -7,17 +7,24 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/stores/settingsStore";
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
+import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
+import { downloadAndInstallUpdateWhenIdle, installDownloadedUpdateWhenIdle } from "@/lib/app/appUpdateInstallFlow";
+
+interface UseAppUpdaterOptions {
+  getActiveTaskCount?: () => number;
+}
 
 export function shouldOpenUpdateDialog(options: { silent?: boolean }) {
   return options.silent !== true;
 }
 
 export function canDownloadAndInstallUpdate(info: api.UpdateInfo | null, isDesktop: boolean) {
-  return isDesktop && info?.update_available === true && info.portable_mode !== true;
+  return isDesktop && info?.update_available === true && info.manual_update_only !== true;
 }
 
 export function normalizeUpdateDownloadSource(value: unknown): SettingsUpdateDownloadSource {
-  if (value === "atomgit") return "atomgit";
+  // Old persisted AtomGit preferences should retain their mainland mirror behavior.
+  if (value === "atomgit") return "cnb";
   return value === "cnb" ? "cnb" : "official";
 }
 
@@ -30,9 +37,6 @@ export function resolveUpdateReleaseUrl(info: api.UpdateInfo | null, source: unk
   const normalizedSource = normalizeUpdateDownloadSource(source);
   if (normalizedSource === "cnb" && info?.latest_version) {
     return `https://cnb.cool/dbxio.com/dbx/-/releases/tag/${tagVersion(info.latest_version)}`;
-  }
-  if (normalizedSource === "atomgit" && info?.latest_version) {
-    return `https://atomgit.com/t8y2/dbx/releases/${tagVersion(info.latest_version)}`;
   }
   return info?.release_url || fallbackUrl;
 }
@@ -47,7 +51,7 @@ export async function resolveUpdaterProxy(): Promise<string | undefined> {
   }
 }
 
-export function useAppUpdater() {
+export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const { t } = useI18n();
   const { toast } = useToast();
   const settingsStore = useSettingsStore();
@@ -58,7 +62,10 @@ export function useAppUpdater() {
   const showUpdateDialog = ref(false);
   const isDownloadingUpdate = ref(false);
   const downloadProgress = ref(0);
+  const updateDownloaded = ref(false);
+  const isInstallingUpdate = ref(false);
   const updateReady = ref(false);
+  const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
   const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
 
@@ -75,7 +82,7 @@ export function useAppUpdater() {
     checkingUpdates.value = true;
     updateCheckMessage.value = "";
     try {
-      const info = await api.checkForUpdates(currentLocale());
+      const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource));
       updateInfo.value = info;
       if (info.update_available) {
         if (shouldOpenUpdateDialog({ silent: options.silent })) {
@@ -108,35 +115,86 @@ export function useAppUpdater() {
     openUrl(url);
   }
 
+  function blockUpdateForActiveTasks(): boolean {
+    if (!shouldBlockAppUpdate(activeTaskCount.value)) return false;
+    toast(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }), 5000);
+    return true;
+  }
+
   async function downloadAndInstallUpdate() {
-    if (!isTauriRuntime() || isDownloadingUpdate.value) return;
+    if (!isTauriRuntime() || isDownloadingUpdate.value || isInstallingUpdate.value || updateDownloaded.value || updateReady.value) return;
     if (!canDownloadAndInstallUpdate(updateInfo.value, true)) {
       openLatestRelease();
       return;
     }
+    if (blockUpdateForActiveTasks()) return;
     isDownloadingUpdate.value = true;
     downloadProgress.value = 0;
     let unlisten: (() => void) | undefined;
     const latestVersion = updateInfo.value?.latest_version;
+    let failureMessageKey = "updates.downloadFailed";
     try {
       const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<UpdateDownloadProgress>("update-download-progress", (event) => {
         const total = event.payload.total ?? 0;
         downloadProgress.value = total > 0 ? Math.round((event.payload.downloaded / total) * 100) : 0;
       });
-      await api.downloadAndInstallUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
-      downloadProgress.value = 100;
-      updateReady.value = true;
+      const result = await downloadAndInstallUpdateWhenIdle({
+        getActiveTaskCount: () => activeTaskCount.value,
+        download: async () => {
+          try {
+            await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
+            downloadProgress.value = 100;
+            updateDownloaded.value = true;
+          } finally {
+            isDownloadingUpdate.value = false;
+          }
+        },
+        install: async () => {
+          failureMessageKey = "updates.installFailed";
+          await installPendingUpdate();
+        },
+      });
+      if (result === "blocked" || result === "downloaded") {
+        blockUpdateForActiveTasks();
+      }
     } catch (e: any) {
-      toast(t("updates.downloadFailed", { error: e?.message || String(e) }), 5000);
+      toast(t(failureMessageKey, { error: e?.message || String(e) }), 5000);
     } finally {
       unlisten?.();
       isDownloadingUpdate.value = false;
     }
   }
 
+  async function installPendingUpdate() {
+    isInstallingUpdate.value = true;
+    try {
+      const portableMode = updateInfo.value?.portable_mode === true;
+      await api.installDownloadedUpdate();
+      updateDownloaded.value = false;
+      // The portable helper exits and relaunches DBX after the invoke response is delivered.
+      updateReady.value = !portableMode;
+    } finally {
+      isInstallingUpdate.value = false;
+    }
+  }
+
+  async function installDownloadedUpdate() {
+    if (!isTauriRuntime() || isDownloadingUpdate.value || isInstallingUpdate.value || !updateDownloaded.value) return;
+    try {
+      const installed = await installDownloadedUpdateWhenIdle({
+        getActiveTaskCount: () => activeTaskCount.value,
+        install: installPendingUpdate,
+      });
+      if (!installed) blockUpdateForActiveTasks();
+    } catch (e: any) {
+      toast(t("updates.installFailed", { error: e?.message || String(e) }), 5000);
+    }
+  }
+
   async function restartApp() {
     if (!isTauriRuntime()) return;
+    if (blockUpdateForActiveTasks()) return;
     try {
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
@@ -152,7 +210,10 @@ export function useAppUpdater() {
     showUpdateDialog,
     isDownloadingUpdate,
     downloadProgress,
+    updateDownloaded,
+    isInstallingUpdate,
     updateReady,
+    activeTaskCount,
     hasUpdateAvailable,
     latestReleaseUrl,
     openUrl,
@@ -160,6 +221,7 @@ export function useAppUpdater() {
     formatUpdateError,
     openLatestRelease,
     downloadAndInstallUpdate,
+    installDownloadedUpdate,
     restartApp,
   };
 }

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, isBinaryType, queryEditabilityMessageKey, sourceColumnsForResult } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, isBinaryType, queryEditabilityMessageKey, resolveMetadataColumnName, sourceColumnsForResult } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 
 test("recognizes a simple single-table SELECT as editable", () => {
   const result = analyzeEditableQueryEditability("select id, name from public.users where active = true order by id");
@@ -34,6 +34,63 @@ test("keeps the legacy analyzer API for editable SELECT queries", () => {
   assert.equal(analysis.tableName, "users");
   assert.equal(analysis.selectStar, true);
   assert.deepEqual(analysis.columns, []);
+});
+
+test("recognizes top-level SQL set operations as read-only", () => {
+  for (const operator of ["UNION", "INTERSECT", "EXCEPT", "MINUS"]) {
+    const sql = `SELECT id FROM users ${operator} SELECT id FROM archived_users`;
+
+    assert.deepEqual(analyzeEditableQueryEditability(sql), { editable: false, reason: "set-operation" }, operator);
+  }
+});
+
+test("ignores MINUS in strings, comments, and nested queries", () => {
+  for (const sql of ["SELECT id, 'MINUS' AS operation FROM users", "SELECT id FROM users -- MINUS\nWHERE active = 1", "SELECT id FROM users /* MINUS */ WHERE active = 1", "SELECT * FROM users WHERE id IN (SELECT id FROM archived_users MINUS SELECT id FROM blocked_users)"]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.equal(result.analysis.tableName, "users", sql);
+  }
+});
+
+test("recognizes Oracle FOR UPDATE variants without treating FOR as an alias", () => {
+  for (const sql of [
+    "SELECT * FROM employees FOR UPDATE",
+    "SELECT * FROM employees FOR UPDATE NOWAIT",
+    "SELECT * FROM employees FOR UPDATE SKIP LOCKED",
+    "SELECT * FROM employees FOR UPDATE OF salary, department_id WAIT 5",
+    "SELECT * FROM employees WHERE department_id = 10 ORDER BY employee_id FOR UPDATE OF salary NOWAIT",
+  ]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.equal(result.analysis.tableName, "employees", sql);
+    assert.equal(result.analysis.tableAlias, undefined, sql);
+    assert.equal(result.analysis.selectStar, true, sql);
+  }
+
+  const aliased = analyzeEditableQueryEditability("SELECT e.employee_id, e.salary FROM employees e FOR UPDATE OF e.salary SKIP LOCKED");
+  assert.equal(aliased.editable, true);
+  assert.equal(aliased.analysis.tableAlias, "e");
+});
+
+test("keeps explicit read-only and output FOR clauses non-editable", () => {
+  for (const sql of ["SELECT * FROM employees FOR READ ONLY", "SELECT * FROM employees FOR FETCH ONLY", "SELECT * FROM employees FOR JSON"]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, false, sql);
+    assert.equal(result.reason, "complex-source", sql);
+  }
+});
+
+test("recognizes PostgreSQL row-lock FOR variants", () => {
+  for (const sql of ["SELECT * FROM jobs FOR SHARE", "SELECT * FROM jobs FOR NO KEY UPDATE SKIP LOCKED", "SELECT * FROM jobs FOR KEY SHARE NOWAIT"]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.equal(result.analysis.tableName, "jobs", sql);
+    assert.equal(result.analysis.tableAlias, undefined, sql);
+  }
 });
 
 test("maps joined query source columns for column-level editing", () => {
@@ -143,6 +200,35 @@ test("accepts aliased primary key source columns for row identity", () => {
   assert.equal(allPrimaryKeysPresent(["id"], ["user_id", "name"], analysis), true);
   assert.equal(allEditableColumnsWriteable(analysis, ["user_id", "name"]), true);
   assert.equal(allPrimaryKeysPresent(["id"], ["id", "name"], analyzeEditableQuery("select id, name from users")!), true);
+});
+
+test("resolves metadata columns with dialect and quote aware identifier rules", () => {
+  const postgresColumns = ["id", "ID", "name"];
+  assert.equal(resolveMetadataColumnName("postgres", "ID", false, postgresColumns), "id");
+  assert.equal(resolveMetadataColumnName("postgres", "ID", true, postgresColumns), "ID");
+  assert.equal(resolveMetadataColumnName("postgres", "ID", undefined, postgresColumns), "ID");
+  assert.equal(resolveMetadataColumnName("postgres", "Id", true, postgresColumns), undefined);
+
+  assert.equal(resolveMetadataColumnName("kingbase", "ckg023", false, ["CKG023", "CKG096"]), "CKG023");
+  assert.equal(resolveMetadataColumnName("kingbase", "ckg023", false, ["CKG023", "Ckg023"]), undefined);
+  assert.equal(resolveMetadataColumnName("kingbase", "ckg023", true, ["CKG023"]), undefined);
+});
+
+test("requires canonical primary key names instead of case-only matches", () => {
+  const lowerId = analyzeEditableQuery("select id, name from case_keys");
+  const quotedId = analyzeEditableQuery('select "ID", name from case_keys');
+
+  assert.ok(lowerId);
+  assert.ok(quotedId);
+  assert.equal(allPrimaryKeysPresent(["ID"], ["id", "name"], lowerId), false);
+  assert.equal(allPrimaryKeysPresent(["ID"], ["ID", "name"], quotedId), true);
+});
+
+test("rejects ambiguous case-only result column mapping", () => {
+  const analysis = analyzeEditableQuery('select id as id, "ID" as "ID" from case_keys');
+
+  assert.ok(analysis);
+  assert.equal(sourceColumnsForResult(analysis, ["Id"]), undefined);
 });
 
 test("maps ClickHouse simple query results when identifier columns are returned", () => {

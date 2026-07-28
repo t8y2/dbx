@@ -15,6 +15,18 @@ function isWordBoundary(text: string, index: number): boolean {
   return prev === "_" || prev === "-" || prev === "." || prev === " " || prev === "/" || prev === "\\";
 }
 
+const SEPARATOR_RE = /[_\-. /\\]/g;
+
+/**
+ * Strip common word separators from a label to enable matching that
+ * ignores separator characters.  For example, searching "delo" will
+ * match "del_order" because the stripped form "delorder" starts with
+ * "delo".
+ */
+function stripSeparators(text: string): string {
+  return text.replace(SEPARATOR_RE, "");
+}
+
 function matchesWordPrefix(text: string, query: string): boolean {
   for (let i = 0; i < text.length; i++) {
     if (isWordBoundary(text, i) && text.startsWith(query, i)) return true;
@@ -54,6 +66,15 @@ function matchSidebarLabelWithRegex(label: string, query: string, regex: RegExp 
   if (label.includes(query)) return { kind: "substring", score: 70 };
   if (query.length >= 2 && matchesAbbreviation(label, query)) return { kind: "abbreviation", score: 60 };
   if (matchesSubsequence(label, query)) return { kind: "fuzzy", score: 40 };
+
+  // Separator-blind matching: strip underscores, hyphens, dots, spaces,
+  // and slashes, then try again.  This lets "delo" match "del_order"
+  // without typing the underscore separator between prefix and name.
+  const stripped = stripSeparators(label);
+  if (stripped !== label && stripped.length >= query.length) {
+    if (stripped.startsWith(query)) return { kind: "word-prefix", score: 65 };
+    if (stripped.includes(query)) return { kind: "substring", score: 55 };
+  }
 
   return null;
 }

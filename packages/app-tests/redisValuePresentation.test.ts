@@ -12,6 +12,7 @@ import {
   highlightRedisJsonDetail,
   parseRedisJsonDetail,
   preferredRedisValueFormat,
+  redisClipboardSafeText,
   redisMemberCopyText,
   redisValueCopyText,
 } from "../../apps/desktop/src/lib/redis/redisValuePresentation.ts";
@@ -38,6 +39,16 @@ test("keeps plain Redis member strings unchanged", () => {
   assert.equal(detail.rawLabel, "ASCII");
   assert.equal(detail.text, "plain long member value");
   assert.deepEqual(detail.availableFormats, ["utf8", "ascii", "binary", "hex", "base64"]);
+});
+
+test("keeps normal text whitespace and unicode unchanged for Redis clipboard output", () => {
+  assert.equal(redisClipboardSafeText("line 1\nline 2\t中文"), "line 1\nline 2\t中文");
+});
+
+test("escapes clipboard-unsafe controls in Redis member copies without truncating the suffix", () => {
+  const serialized = 'o:\\28:"JobMessage":1:{s:7:"payload";s:11:"before\x00after";}';
+
+  assert.equal(redisMemberCopyText(blobFromText(serialized)), 'o:\\28:"JobMessage":1:{s:7:"payload";s:11:"before\\x00after";}');
 });
 
 test("formats JSON string values without changing plain strings", () => {
@@ -221,6 +232,22 @@ test("copies collection values as readable content instead of blob transport obj
   };
 
   assert.equal(redisValueCopyText(value), '[\n  {\n    "field": "name",\n    "value": "Ada"\n  }\n]');
+});
+
+test("keeps whole-key JSON copies JSON-escaped when members contain NUL", () => {
+  const value = {
+    key_display: "users",
+    key_raw: "users",
+    ttl: -1,
+    redis_type: "list",
+    data: {
+      kind: "list" as const,
+      items: [{ value: blobFromText("before\x00after") }],
+      total: 1,
+    },
+  };
+
+  assert.equal(redisValueCopyText(value), '[\n  "before\\u0000after"\n]');
 });
 
 test("copies stream entries without collapsing repeated field names", () => {

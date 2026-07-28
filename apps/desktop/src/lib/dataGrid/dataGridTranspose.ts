@@ -1,4 +1,5 @@
 import { COLUMN_WIDTH_DENSITY_PRESETS, percentileValue } from "@/lib/dataGrid/dataGridColumnWidth";
+import { restoredDataGridScrollLeft } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import type { ColumnWidthDensity } from "@/stores/settingsStore";
 
 export interface DataGridTransposeState {
@@ -167,11 +168,25 @@ export interface TransposeRecordIndexesForModeOptions {
   visibleRecordIndexes: number[];
 }
 
+export interface AutoTransposeSingleRowOptions {
+  enabled: boolean;
+  preserveTranspose: boolean;
+  rowCount: number;
+  columnCount: number;
+}
+
 export function nextTransposeState(showTranspose: boolean, transposeRowIndex: number | null, requestedRowIndex: number): DataGridTransposeState {
   if (showTranspose && transposeRowIndex === requestedRowIndex) {
     return { showTranspose: false, transposeRowIndex: null };
   }
   return { showTranspose: true, transposeRowIndex: requestedRowIndex };
+}
+
+export function restoreDataGridAfterTranspose(options: { scroller: Pick<HTMLElement, "scrollLeft" | "scrollWidth" | "clientWidth"> | null; scrollLeftBeforeTranspose: number; attachCanvasResizeObserver: () => void; refreshGridScrollerMetrics: () => void }) {
+  if (!options.scroller) return;
+  options.scroller.scrollLeft = restoredDataGridScrollLeft(options.scrollLeftBeforeTranspose, options.scroller.scrollWidth, options.scroller.clientWidth);
+  options.attachCanvasResizeObserver();
+  options.refreshGridScrollerMetrics();
 }
 
 export function nextContextTransposeState(options: ContextTransposeStateOptions): DataGridTransposeState {
@@ -199,6 +214,10 @@ export function nextTransposeStateForRecordCount(showTranspose: boolean, transpo
     showTranspose: true,
     transposeRowIndex: Math.max(0, Math.min(totalRecords - 1, requestedRowIndex)),
   };
+}
+
+export function shouldAutoTransposeSingleRow(options: AutoTransposeSingleRowOptions): boolean {
+  return options.enabled && !options.preserveTranspose && options.rowCount === 1 && options.columnCount > 1;
 }
 
 export function buildTransposeRows<T>(options: BuildTransposeRowsOptions<T>): Array<DataGridTransposeRow<T>> {

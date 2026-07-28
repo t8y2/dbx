@@ -64,6 +64,18 @@ describe("editable query hidden primary keys", () => {
     });
   });
 
+  it("preserves an Oracle FOR UPDATE clause when appending a hidden row key", () => {
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: "SELECT * FROM APP.USERS FOR UPDATE SKIP LOCKED",
+        databaseType: "oracle",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "NAME"],
+        sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
+      })?.sql,
+    ).toBe('SELECT USERS.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.USERS FOR UPDATE SKIP LOCKED');
+  });
+
   it("qualifies a bare Oracle wildcard when appending a hidden key", () => {
     expect(
       buildQueryWithHiddenPrimaryKeys({

@@ -11,13 +11,13 @@ export interface DatabaseNamespaceCreationMatrixEntry {
   deferred?: string;
 }
 
-type CreationConnection = Pick<ConnectionConfig, "db_type" | "driver_profile" | "read_only"> | undefined;
+type CreationConnection = (Pick<ConnectionConfig, "db_type" | "driver_profile" | "read_only"> & Partial<Pick<ConnectionConfig, "host" | "password">>) | undefined;
 
 // Keep creation target-specific: many products expose schemas, files, or provider-managed namespaces instead of a top-level database.
 export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   mysql: { connection: "database" },
   postgres: { connection: "database", database: "schema" },
-  sqlite: { deferred: "file-backed; create a new connection/file instead" },
+  sqlite: { connection: "attach" },
   rqlite: { deferred: "single SQLite-compatible database per node" },
   turso: { deferred: "remote libSQL database lifecycle is provider-managed" },
   "cloudflare-d1": { deferred: "Cloudflare D1 database lifecycle is provider-managed" },
@@ -28,6 +28,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   mongodb: { connection: "special" },
   oracle: { deferred: "Oracle schemas are users; database creation is not a normal connected DDL action" },
   elasticsearch: { deferred: "index creation is not modeled as database creation" },
+  hbase: { deferred: "namespace creation needs dedicated HBase namespace options" },
   qdrant: { deferred: "collection creation is separate from database creation" },
   milvus: { deferred: "collection/database lifecycle needs a dedicated vector workflow" },
   weaviate: { deferred: "collection creation is separate from database creation" },
@@ -41,6 +42,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   gaussdb: { connection: "database", database: "schema" },
   kingbase: { connection: "database", database: "schema" },
   highgo: { connection: "database", database: "schema" },
+  uxdb: { database: "schema" },
   vastbase: { connection: "database", database: "schema" },
   goldendb: { connection: "database" },
   kwdb: { connection: "database", database: "schema" },
@@ -85,6 +87,9 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
 export function connectionNamespaceCreationTarget(connection: CreationConnection): ConnectionCreationTarget | null {
   if (!connection || connection.read_only) return null;
   if (connection.db_type === "mongodb" && connection.driver_profile === "mongodb-legacy") return null;
+  if (connection.db_type === "sqlite" && (connection.host?.trim().toLowerCase() === ":memory:" || Boolean(connection.password))) {
+    return null;
+  }
   const entry: DatabaseNamespaceCreationMatrixEntry = DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
   return entry.connection ?? null;
 }

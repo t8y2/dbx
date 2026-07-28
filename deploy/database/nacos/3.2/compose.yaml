@@ -1,0 +1,32 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/nacos-server:v3.2.2
+    container_name: dbx-nacos-3.2
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_CONSOLE_PORT:-8010}:8080"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-8849}:8848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_GRPC_PORT:-9849}:9848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_RAFT_PORT:-9850}:9849"
+    environment:
+      MODE: standalone
+      PREFER_HOST_MODE: hostname
+      NACOS_AUTH_SYSTEM_TYPE: nacos
+      NACOS_AUTH_ENABLE: "true"
+      NACOS_AUTH_ADMIN_ENABLE: "true"
+      NACOS_AUTH_CONSOLE_ENABLE: "true"
+      NACOS_AUTH_TOKEN: "bXlDdXN0b21TZWNyZXRLZXlGb3JOYWNvc1YzMTBNb3JlVGhhbjMyQ2hhcnM="
+      NACOS_AUTH_IDENTITY_KEY: dbx_nacos_identity
+      NACOS_AUTH_IDENTITY_VALUE: dbx_nacos_identity_value
+      JVM_XMS: 256m
+      JVM_XMX: 256m
+      JVM_XMN: 128m
+    volumes:
+      - data:/home/nacos/data
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8848/nacos/v3/auth/user/admin)\" = 405"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+volumes:
+  data:

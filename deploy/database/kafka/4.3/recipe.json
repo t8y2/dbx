@@ -1,0 +1,13 @@
+{
+  "database": "kafka",
+  "name": "Kafka",
+  "version": "4.3.1",
+  "displayVersion": "4.3",
+  "image": "docker.cnb.cool/znb/images/kafka:4.3.1",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 9092,
+  "connection": { "host": "127.0.0.1", "port": 9093, "authentication": "none", "database": "dbx", "internalPort": 9095 },
+  "shell": ["/bin/bash"],
+  "smoke": { "steps": [{ "name": "create, produce, and consume a smoke message", "command": ["/bin/bash", "-ec", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server database:9095 --create --if-not-exists --topic dbx-smoke --partitions 1 --replication-factor 1; printf 'DBX smoke\\n' | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server database:9095 --topic dbx-smoke; /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server database:9095 --topic dbx-smoke --from-beginning --max-messages 1 --timeout-ms 10000"], "expect": "DBX smoke" }] }
+}

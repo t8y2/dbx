@@ -13,6 +13,12 @@ import JsonTree from "./JsonTree.vue";
 const props = defineProps<{
   status: number;
   body: string;
+  /** When true, render a "Table" button to switch back to the grid view. */
+  canShowTable?: boolean;
+}>();
+
+const emit = defineEmits<{
+  showTable: [];
 }>();
 
 const { t } = useI18n();
@@ -101,6 +107,9 @@ onMounted(() => {
           >
             {{ t("redis.jsonView") }}
           </button>
+          <button v-if="canShowTable" type="button" class="h-6 rounded-[4px] px-2 text-xs transition-colors bg-background font-medium text-foreground shadow-sm" @click="emit('showTable')">
+            {{ t("tabs.tableData") }}
+          </button>
         </div>
       </div>
       <span class="shrink-0 rounded-full border px-2 py-0.5 font-mono text-[11px] font-medium tabular-nums" :class="statusClass" role="status" :aria-label="statusLabel">
@@ -111,7 +120,7 @@ onMounted(() => {
       </Button>
     </header>
     <div class="min-h-0 flex-1 overflow-hidden bg-background p-4">
-      <pre v-show="responseView === 'raw' || !parsedBody.valid" class="m-0 h-full overflow-auto bg-transparent p-0 font-mono text-sm leading-6 whitespace-pre-wrap break-words">{{ body }}</pre>
+      <pre v-show="responseView === 'raw' || !parsedBody.valid" class="m-0 h-full overflow-auto bg-transparent p-0 font-mono text-sm leading-6 whitespace-pre">{{ body }}</pre>
       <div v-if="parsedBody.valid" v-show="responseView === 'json'" class="h-full min-h-0">
         <JsonTree ref="jsonTreeRef" :value="parsedBody.value" :highlight-json="highlightJson" :virtualized="true" class="dbx-editor-font-family text-sm leading-6" />
       </div>

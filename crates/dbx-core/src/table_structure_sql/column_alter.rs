@@ -51,13 +51,21 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     }
 
     let has_rename = options.column.name != original.name;
+    let has_comment_change = clean(&options.column.comment) != original_comment(&options.column);
     let has_attribute_change = options.column.data_type.trim() != original.data_type.trim()
         || options.column.is_nullable != original.is_nullable
         || normalize_default(Some(&options.column.default_value)) != original_default(&options.column)
-        || clean(&options.column.comment) != original_comment(&options.column)
+        || (has_comment_change && capabilities.comment)
         || (is_mysql_character_data_type(&options.column.data_type)
             && (options.column.character_set.trim() != original.character_set.as_deref().unwrap_or("")
                 || options.column.collation.trim() != original.collation.as_deref().unwrap_or("")));
+
+    if has_comment_change && !capabilities.comment {
+        warnings.push(format!(
+            "Column comments are not supported for {database_label} from this editor; the comment change for \"{}\" was ignored.",
+            original.name
+        ));
+    }
 
     if has_rename && !capabilities.rename_column {
         warnings.push(format!("Renaming columns is not supported for {database_label} from this editor."));
@@ -71,13 +79,22 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     {
         return TableStructureSqlResult { statements, warnings };
     }
+    if !has_rename && !has_attribute_change && !has_column_extra_change(&options.column) {
+        return TableStructureSqlResult { statements, warnings };
+    }
 
     match dialect {
         StructureDialect::Mysql => statements.extend(build_mysql_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, &options.column)),
         StructureDialect::Oracle | StructureDialect::Dameng => {
-            statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
+            if options.database_type == Some(crate::models::connection::DatabaseType::Iris) {
+                statements.extend(build_iris_existing_column_sql(&table, &options.column));
+            } else if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
+                statements.extend(build_xugu_existing_column_sql(&table, &options.column));
+            } else {
+                statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
+            }
         }
         StructureDialect::H2 => statements.extend(build_h2_existing_column_sql(&table, &options.column)),
         StructureDialect::ClickHouse => {
@@ -287,6 +304,19 @@ pub(super) fn build_doris_existing_column_sql(
 }
 
 pub(super) fn build_postgres_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    build_postgres_like_existing_column_sql(table, column, false)
+}
+
+pub(super) fn build_xugu_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    // Xugu shares PostgreSQL's per-attribute ALTER flow, but its type clause omits TYPE entirely.
+    build_postgres_like_existing_column_sql(table, column, true)
+}
+
+fn build_postgres_like_existing_column_sql(
+    table: &str,
+    column: &EditableStructureColumn,
+    use_xugu_type_syntax: bool,
+) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();
     };
@@ -299,12 +329,31 @@ pub(super) fn build_postgres_existing_column_sql(table: &str, column: &EditableS
             quote_ident(StructureDialect::Postgres, &column.name)
         ));
     }
-    if column.data_type.trim() != original.data_type.trim() {
-        statements.push(format!(
-            "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
-            quote_ident(StructureDialect::Postgres, current_name),
-            column_data_type(StructureDialect::Postgres, column)
-        ));
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    if type_changed {
+        let column_name = quote_ident(StructureDialect::Postgres, current_name);
+        let data_type = column_data_type(StructureDialect::Postgres, column);
+        if use_xugu_type_syntax {
+            statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} {data_type};"));
+        } else {
+            let current_default = normalize_default(Some(&column.default_value));
+            let mut alterations = Vec::new();
+            if !original_default(column).is_empty() {
+                alterations.push(format!("ALTER COLUMN {column_name} DROP DEFAULT"));
+            }
+            // PostgreSQL assignment casts do not cover many valid explicit conversions. USING keeps
+            // type changes generic for built-ins, arrays, and domains while still rejecting bad data.
+            alterations.push(format!("ALTER COLUMN {column_name} TYPE {data_type} USING {column_name}::{data_type}"));
+            if !current_default.is_empty() {
+                alterations.push(format!(
+                    "ALTER COLUMN {column_name} SET DEFAULT {}",
+                    format_default_for_sql(StructureDialect::Postgres, &column.data_type, &current_default)
+                ));
+            }
+            // USING is not applied to defaults. Keeping all three actions in one ALTER TABLE makes
+            // an incompatible restored default fail atomically instead of leaving it dropped.
+            statements.push(format!("ALTER TABLE {table} {};", alterations.join(", ")));
+        }
     }
     if column.is_nullable != original.is_nullable {
         let action = if column.is_nullable { "DROP NOT NULL" } else { "SET NOT NULL" };
@@ -313,7 +362,9 @@ pub(super) fn build_postgres_existing_column_sql(table: &str, column: &EditableS
             quote_ident(StructureDialect::Postgres, current_name)
         ));
     }
-    if normalize_default(Some(&column.default_value)) != original_default(column) {
+    if (!type_changed || use_xugu_type_syntax)
+        && normalize_default(Some(&column.default_value)) != original_default(column)
+    {
         let default_value = normalize_default(Some(&column.default_value));
         let action = if default_value.is_empty() {
             "DROP DEFAULT".to_string()
@@ -424,6 +475,40 @@ pub(super) fn build_oracle_like_existing_column_sql(
     statements
 }
 
+pub(super) fn build_iris_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let dialect = StructureDialect::Oracle;
+    let mut statements = Vec::new();
+    let mut current_name = original.name.clone();
+    if column.name != original.name {
+        statements.push(format!(
+            "ALTER TABLE {table} ALTER COLUMN {} RENAME {};",
+            quote_ident(dialect, &original.name),
+            quote_ident(dialect, &column.name)
+        ));
+        current_name = column.name.clone();
+    }
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    let nullable_changed = column.is_nullable != original.is_nullable;
+    let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+    if type_changed || nullable_changed || default_changed {
+        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column)];
+        let default_value = normalize_default(Some(&column.default_value));
+        if !default_value.is_empty() {
+            parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
+        } else if default_changed {
+            parts.push("DEFAULT NULL".to_string());
+        }
+        if nullable_changed {
+            parts.push(if column.is_nullable { "NULL".to_string() } else { "NOT NULL".to_string() });
+        }
+        statements.push(format!("ALTER TABLE {table} MODIFY ({});", parts.join(" ")));
+    }
+    statements
+}
+
 pub(super) fn build_sqlserver_existing_column_sql(
     table: &str,
     column: &EditableStructureColumn,
@@ -437,6 +522,14 @@ pub(super) fn build_sqlserver_existing_column_sql(
     let dialect = StructureDialect::SqlServer;
     let mut statements = Vec::new();
     let mut current_name = original.name.clone();
+    let has_column_definition_change =
+        column.data_type.trim() != original.data_type.trim() || column.is_nullable != original.is_nullable;
+    let default_value = normalize_default(Some(&column.default_value));
+    let has_default_change = default_value != original_default(column);
+    let has_old_default = original
+        .column_default
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("null"));
 
     if has_sqlserver_identity_change(column) {
         warnings.push(format!(
@@ -456,44 +549,28 @@ pub(super) fn build_sqlserver_existing_column_sql(
         current_name = column.name.clone();
     }
 
-    // Build the ALTER COLUMN clause for type + nullability changes
-    if column.data_type.trim() != original.data_type.trim() || column.is_nullable != original.is_nullable {
-        let null_clause = if column.is_nullable { "NULL" } else { "NOT NULL" };
-        statements.push(format!(
-            "ALTER TABLE {table} ALTER COLUMN {} {} {null_clause};",
-            quote_ident(dialect, &current_name),
-            column_data_type(dialect, column)
-        ));
+    // SQL Server default constraints are separate objects that can block ALTER COLUMN.
+    // Preserve the exact constraint name and expression when the default itself is unchanged.
+    if has_column_definition_change && has_old_default && !has_default_change {
+        statements.push(build_sqlserver_alter_column_preserving_default_sql(table, &current_name, column));
+    } else {
+        if has_column_definition_change && has_old_default {
+            statements.push(build_sqlserver_drop_default_constraint_sql(table, &current_name));
+        }
+        if has_column_definition_change {
+            let null_clause = if column.is_nullable { "NULL" } else { "NOT NULL" };
+            statements.push(format!(
+                "ALTER TABLE {table} ALTER COLUMN {} {} {null_clause};",
+                quote_ident(dialect, &current_name),
+                column_data_type(dialect, column)
+            ));
+        }
     }
 
-    // Default value changes via ADD/DROP CONSTRAINT
-    if normalize_default(Some(&column.default_value)) != original_default(column) {
-        let default_value = normalize_default(Some(&column.default_value));
-        let has_old_default = !column
-            .original
-            .as_ref()
-            .and_then(|o| o.column_default.as_ref())
-            .unwrap_or(&String::new())
-            .trim()
-            .is_empty()
-            && !column
-                .original
-                .as_ref()
-                .and_then(|o| o.column_default.as_ref())
-                .map(|d| d.trim().eq_ignore_ascii_case("null"))
-                .unwrap_or(false);
-
-        if has_old_default {
-            let sql_var = sqlserver_default_constraint_sql_var(table, &current_name);
-            statements.push(format!(
-                "DECLARE {sql_var} NVARCHAR(MAX); \
-                 SELECT TOP (1) {sql_var} = N'ALTER TABLE {table} DROP CONSTRAINT ' + QUOTENAME(dc.name) \
-                 FROM sys.default_constraints AS dc \
-                 WHERE dc.parent_object_id = OBJECT_ID(N'{table}') AND dc.parent_column_id = COLUMNPROPERTY(OBJECT_ID(N'{table}'), N'{col_name}', 'ColumnId'); \
-                 IF {sql_var} IS NOT NULL EXEC sp_executesql {sql_var};",
-                table = table.replace('\'', "''"),
-                col_name = current_name.replace('\'', "''")
-            ));
+    // Default value changes via ADD/DROP CONSTRAINT.
+    if has_default_change {
+        if has_old_default && !has_column_definition_change {
+            statements.push(build_sqlserver_drop_default_constraint_sql(table, &current_name));
         }
         if !default_value.is_empty() {
             let short_table =
@@ -523,6 +600,47 @@ pub(super) fn build_sqlserver_existing_column_sql(
     }
 
     statements
+}
+
+fn build_sqlserver_alter_column_preserving_default_sql(
+    table: &str,
+    column_name: &str,
+    column: &EditableStructureColumn,
+) -> String {
+    let dialect = StructureDialect::SqlServer;
+    let sql_var = sqlserver_default_constraint_sql_var(table, column_name);
+    let name_var = format!("{sql_var}_name");
+    let definition_var = format!("{sql_var}_definition");
+    let table_literal = table.replace('\'', "''");
+    let column_literal = column_name.replace('\'', "''");
+    let quoted_column = quote_ident(dialect, column_name);
+    let quoted_column_literal = quoted_column.replace('\'', "''");
+    let null_clause = if column.is_nullable { "NULL" } else { "NOT NULL" };
+
+    format!(
+        "DECLARE {sql_var} NVARCHAR(MAX), {name_var} sysname, {definition_var} NVARCHAR(MAX); \
+         SELECT TOP (1) {name_var} = dc.name, {definition_var} = dc.definition \
+         FROM sys.default_constraints AS dc \
+         WHERE dc.parent_object_id = OBJECT_ID(N'{table_literal}') AND dc.parent_column_id = COLUMNPROPERTY(OBJECT_ID(N'{table_literal}'), N'{column_literal}', 'ColumnId'); \
+         IF {name_var} IS NOT NULL BEGIN SET {sql_var} = N'ALTER TABLE {table_literal} DROP CONSTRAINT ' + QUOTENAME({name_var}); EXEC sp_executesql {sql_var}; END; \
+         ALTER TABLE {table} ALTER COLUMN {quoted_column} {data_type} {null_clause}; \
+         IF {name_var} IS NOT NULL BEGIN SET {sql_var} = N'ALTER TABLE {table_literal} ADD CONSTRAINT ' + QUOTENAME({name_var}) + N' DEFAULT ' + {definition_var} + N' FOR {quoted_column_literal}'; EXEC sp_executesql {sql_var}; END;",
+        data_type = column_data_type(dialect, column),
+    )
+}
+
+fn build_sqlserver_drop_default_constraint_sql(table: &str, column_name: &str) -> String {
+    let sql_var = sqlserver_default_constraint_sql_var(table, column_name);
+    let table_literal = table.replace('\'', "''");
+    let column_literal = column_name.replace('\'', "''");
+
+    format!(
+        "DECLARE {sql_var} NVARCHAR(MAX); \
+         SELECT TOP (1) {sql_var} = N'ALTER TABLE {table_literal} DROP CONSTRAINT ' + QUOTENAME(dc.name) \
+         FROM sys.default_constraints AS dc \
+         WHERE dc.parent_object_id = OBJECT_ID(N'{table_literal}') AND dc.parent_column_id = COLUMNPROPERTY(OBJECT_ID(N'{table_literal}'), N'{column_literal}', 'ColumnId'); \
+         IF {sql_var} IS NOT NULL EXEC sp_executesql {sql_var};"
+    )
 }
 
 fn sqlserver_default_constraint_sql_var(table: &str, column_name: &str) -> String {

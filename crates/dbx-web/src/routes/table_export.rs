@@ -39,14 +39,14 @@ pub async fn start_table_export(
 
     // Generate temp file path for web export output
     let tmp_dir = state.data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError(e.to_string()))?;
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError::from(e.to_string()))?;
     let ext = match req.format.as_str() {
         "csv" => "csv",
         "xlsx" => "xlsx",
         "json" => "json",
         "markdown" | "md" => "md",
         "sql" => "sql",
-        _ => return Err(AppError(format!("Unsupported export format: {}", req.format))),
+        _ => return Err(AppError::from(format!("Unsupported export format: {}", req.format))),
     };
     let tmp_file = tmp_dir.join(format!("table_export_{export_id}.{ext}"));
     let file_path = tmp_file.to_string_lossy().to_string();
@@ -132,9 +132,9 @@ pub async fn table_export_download(
         .write()
         .await
         .remove(&export_id)
-        .ok_or_else(|| AppError("Export file not found".to_string()))?;
+        .ok_or_else(|| AppError::from("Export file not found".to_string()))?;
 
-    let data = tokio::fs::read(&file_path).await.map_err(|e| AppError(e.to_string()))?;
+    let data = tokio::fs::read(&file_path).await.map_err(|e| AppError::from(e.to_string()))?;
     // Clean up temp file
     let _ = tokio::fs::remove_file(&file_path).await;
 
@@ -144,7 +144,7 @@ pub async fn table_export_download(
         "json" => ("application/json; charset=utf-8", "json"),
         "markdown" | "md" => ("text/markdown; charset=utf-8", "md"),
         "sql" => ("application/sql; charset=utf-8", "sql"),
-        _ => return Err(AppError(format!("Unknown format: {format}"))),
+        _ => return Err(AppError::from(format!("Unknown format: {format}"))),
     };
 
     let filename = format!("table_export_{export_id}.{file_ext}");
@@ -154,5 +154,5 @@ pub async fn table_export_download(
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\""))
         .body(Body::from(data))
-        .map_err(|e| AppError(e.to_string()))
+        .map_err(|e| AppError::from(e.to_string()))
 }

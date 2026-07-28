@@ -49,7 +49,7 @@ WHERE username IS NOT NULL
   AND username NOT IN (
     'SYS','SYSTEM','SYSMAN','DBSNMP','SYSBACKUP','SYSDG','SYSKM','SYSRAC','OUTLN',
     'AUDSYS','LBACSYS','DVF','DVSYS','APPQOSSYS','CTXSYS','MDSYS','MDDATA',
-    'ORDSYS','ORDDATA','ORDPLUGINS','XDB','ANONYMOUS','DIP','EXFSYS',
+    'ORDSYS','ORDDATA','ORDPLUGINS','XDB','ANONYMOUS','EXFSYS',
     'GSMADMIN_INTERNAL','GSMCATUSER','GSMROOTUSER','GSMUSER','OJVMSYS','OLAPSYS',
     'ORACLE_OCM','SI_INFORMTN_SCHEMA','WMSYS','XS$NULL','DBSFWUSER',
     'REMOTE_SCHEDULER_AGENT','PDBADMIN','DGPDB_INT','OPS$ORACLE',
@@ -58,6 +58,17 @@ WHERE username IS NOT NULL
   AND username NOT LIKE 'APEX_%'
   AND username NOT LIKE 'FLOWS_%'
   AND username NOT LIKE '%$%'
+ORDER BY CASE
+  WHEN username = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') THEN 0
+  WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
+  ELSE 2
+END, username`
+
+// Oracle schemas are users, so expose every user visible through ALL_USERS; system filtering remains database-picker behavior.
+const oracleListSchemasSQL = `
+SELECT username AS owner
+FROM all_users
+WHERE username IS NOT NULL
 ORDER BY CASE
   WHEN username = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') THEN 0
   WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
@@ -138,6 +149,22 @@ const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   ELSE 5
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
+const oracleListTriggersSQL = `
+SELECT t.TRIGGER_NAME,
+       t.TRIGGERING_EVENT,
+       t.TRIGGER_TYPE,
+       t.DESCRIPTION,
+       s.LINE,
+       s.TEXT
+FROM ALL_TRIGGERS t
+LEFT JOIN ALL_SOURCE s
+  ON s.OWNER = t.OWNER
+ AND s.NAME = t.TRIGGER_NAME
+ AND s.TYPE = 'TRIGGER'
+WHERE t.OWNER = :1
+  AND t.TABLE_NAME = :2
+  AND t.BASE_OBJECT_TYPE IN ('TABLE', 'VIEW')
+ORDER BY t.TRIGGER_NAME, s.LINE`
 
 type request struct {
 	ID     json.RawMessage            `json:"id"`
@@ -200,11 +227,12 @@ type completionAssistantResponse struct {
 }
 
 type queryOptions struct {
-	SQL       string `json:"sql"`
-	Database  string `json:"database"`
-	Schema    string `json:"schema"`
-	MaxRows   int    `json:"maxRows"`
-	FetchSize int    `json:"fetchSize"`
+	SQL         string `json:"sql"`
+	Database    string `json:"database"`
+	Schema      string `json:"schema"`
+	MaxRows     int    `json:"maxRows"`
+	FetchSize   int    `json:"fetchSize"`
+	TimeoutSecs int    `json:"timeoutSecs"`
 }
 
 type queryResult struct {
@@ -340,9 +368,10 @@ type foreignKeyInfo struct {
 }
 
 type triggerInfo struct {
-	Name   string `json:"name"`
-	Event  string `json:"event"`
-	Timing string `json:"timing"`
+	Name      string  `json:"name"`
+	Event     string  `json:"event"`
+	Timing    string  `json:"timing"`
+	Statement *string `json:"statement,omitempty"`
 }
 
 type server struct {
@@ -355,6 +384,8 @@ type server struct {
 	activeCancelMu         sync.Mutex
 	activeCancel           context.CancelFunc
 	activeRows             map[*sql.Rows]context.CancelFunc
+	activeTimer            *time.Timer
+	activeTimedOut         bool
 }
 
 type agentSession struct {
@@ -792,10 +823,12 @@ func openDB(params connectParams) (*sql.DB, error) {
 }
 
 func openDBWithStringConverter(params connectParams, stringConverter converters.IStringConverter) (*sql.DB, error) {
-	dsn := buildDSN(params)
+	dsn, err := buildDSNForConnect(params)
+	if err != nil {
+		return nil, err
+	}
 	var db *sql.DB
 	if stringConverter == nil {
-		var err error
 		db, err = sql.Open("oracle", dsn)
 		if err != nil {
 			return nil, err
@@ -919,15 +952,20 @@ func buildDSN(params connectParams) string {
 		return buildGoOraURL(host, port, jdbc.Database, username, params.Password, options)
 	}
 
-	service := strings.TrimSpace(params.Database)
-	if strings.HasPrefix(strings.ToUpper(service), "SYSDBA:") {
-		service = strings.TrimSpace(service[len("SYSDBA:"):])
-	}
+	service := oracleConnectionDatabaseName(params.Database)
 	port := params.Port
 	if port == 0 {
 		port = 1521
 	}
 	return buildGoOraURL(params.Host, port, service, username, params.Password, options)
+}
+
+func oracleConnectionDatabaseName(database string) string {
+	database = strings.TrimSpace(database)
+	if strings.HasPrefix(strings.ToUpper(database), "SYSDBA:") {
+		return strings.TrimSpace(database[len("SYSDBA:"):])
+	}
+	return database
 }
 
 func buildGoOraJDBC(user, password, connStr string, options map[string]string) string {
@@ -1059,13 +1097,44 @@ func (s *server) listSchemas(visibleSchemas []string) ([]string, error) {
 	if visibleSchemas != nil && len(visibleSchemas) == 0 {
 		return []string{}, nil
 	}
-	databases, err := s.listDatabasesFiltered(visibleSchemas)
+	sqlText, args := oracleListSchemasSQLWithVisibleSchemas(visibleSchemas)
+	rows, err := s.queryRows(sqlText, args)
 	if err != nil {
+		if isOraclePGALimitError(err) {
+			databases, fallbackErr := s.currentSchemaDatabase()
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			result := make([]string, 0, len(databases))
+			for _, database := range databases {
+				result = append(result, database.Name)
+			}
+			return emptyIfNil(result), nil
+		}
 		return nil, err
 	}
-	result := make([]string, 0, len(databases))
-	for _, database := range databases {
-		result = append(result, database.Name)
+	defer s.closeRows(rows)
+	var result []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		result = append(result, name)
+	}
+	if err := rows.Err(); err != nil {
+		if isOraclePGALimitError(err) {
+			databases, fallbackErr := s.currentSchemaDatabase()
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			result = result[:0]
+			for _, database := range databases {
+				result = append(result, database.Name)
+			}
+			return emptyIfNil(result), nil
+		}
+		return nil, err
 	}
 	return emptyIfNil(result), nil
 }
@@ -1101,8 +1170,16 @@ func (s *server) listDatabasesFiltered(visibleSchemas []string) ([]databaseInfo,
 }
 
 func oracleListDatabasesSQLWithVisibleSchemas(visibleSchemas []string) (string, []any) {
+	return oracleListSQLWithVisibleSchemas(oracleListDatabasesSQL, visibleSchemas)
+}
+
+func oracleListSchemasSQLWithVisibleSchemas(visibleSchemas []string) (string, []any) {
+	return oracleListSQLWithVisibleSchemas(oracleListSchemasSQL, visibleSchemas)
+}
+
+func oracleListSQLWithVisibleSchemas(baseSQL string, visibleSchemas []string) (string, []any) {
 	if len(visibleSchemas) == 0 {
-		return oracleListDatabasesSQL, nil
+		return baseSQL, nil
 	}
 	placeholders := make([]string, 0, len(visibleSchemas))
 	args := make([]any, 0, len(visibleSchemas))
@@ -1111,7 +1188,7 @@ func oracleListDatabasesSQLWithVisibleSchemas(visibleSchemas []string) (string, 
 		args = append(args, schema)
 	}
 	sqlText := strings.Replace(
-		oracleListDatabasesSQL,
+		baseSQL,
 		"\nORDER BY CASE",
 		"\n  AND username IN ("+strings.Join(placeholders, ",")+")\nORDER BY CASE",
 		1,
@@ -1132,11 +1209,17 @@ func (s *server) currentSchema() (string, error) {
 }
 
 func (s *server) normalizeSchema(schema string) (string, error) {
-	schema = strings.TrimSpace(schema)
-	if schema == "" {
-		return s.currentSchema()
+	return resolveOracleSchema(schema, s.currentSchema, s.sessionUser)
+}
+
+func resolveOracleSchema(schema string, currentSchema, sessionUser func() (string, error)) (string, error) {
+	if schema = strings.TrimSpace(schema); schema != "" {
+		return strings.ToUpper(schema), nil
 	}
-	return strings.ToUpper(schema), nil
+	if current, err := currentSchema(); err == nil && strings.TrimSpace(current) != "" {
+		return strings.ToUpper(strings.TrimSpace(current)), nil
+	}
+	return sessionUser()
 }
 
 func (s *server) sessionUser() (string, error) {
@@ -1949,24 +2032,76 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 		return nil, err
 	}
 	table = strings.ToUpper(strings.TrimSpace(table))
-	rows, err := s.queryRows(`
-SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE
-FROM ALL_TRIGGERS
-WHERE OWNER = :1 AND TABLE_NAME = :2
-ORDER BY TRIGGER_NAME`, []any{schema, table})
+	rows, err := s.queryRows(oracleListTriggersSQL, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
 	defer s.closeRows(rows)
 	var result []triggerInfo
+	var currentName string
+	var currentDescription string
+	var source strings.Builder
+	flush := func() {
+		if len(result) == 0 || currentName == "" {
+			return
+		}
+		if body, ok := oracleTriggerBody(source.String(), currentDescription); ok {
+			result[len(result)-1].Statement = &body
+		}
+	}
 	for rows.Next() {
-		var item triggerInfo
-		if err := rows.Scan(&item.Name, &item.Event, &item.Timing); err != nil {
+		var name, event, timing string
+		var description, lineText sql.NullString
+		var line sql.NullInt64
+		if err := rows.Scan(&name, &event, &timing, &description, &line, &lineText); err != nil {
 			return nil, err
 		}
-		result = append(result, item)
+		if name != currentName {
+			flush()
+			currentName = name
+			currentDescription = description.String
+			source.Reset()
+			result = append(result, triggerInfo{Name: name, Event: event, Timing: timing})
+		}
+		if line.Valid && lineText.Valid {
+			source.WriteString(lineText.String)
+		}
 	}
+	flush()
 	return emptyIfNil(result), rows.Err()
+}
+
+func oracleTriggerBody(source, description string) (string, bool) {
+	source = strings.ReplaceAll(source, "\r\n", "\n")
+	description = strings.ReplaceAll(description, "\r\n", "\n")
+	if strings.TrimSpace(source) == "" {
+		return "", false
+	}
+
+	sourceLines := strings.Split(source, "\n")
+	descriptionLines := strings.Split(strings.TrimSpace(description), "\n")
+	for len(descriptionLines) > 0 && strings.TrimSpace(descriptionLines[len(descriptionLines)-1]) == "" {
+		descriptionLines = descriptionLines[:len(descriptionLines)-1]
+	}
+	if len(descriptionLines) > 0 && len(sourceLines) >= len(descriptionLines) {
+		matches := true
+		for index, descriptionLine := range descriptionLines {
+			sourceLine := strings.TrimSpace(sourceLines[index])
+			if index == 0 && len(sourceLine) >= len("TRIGGER") && strings.EqualFold(sourceLine[:len("TRIGGER")], "TRIGGER") {
+				sourceLine = strings.TrimSpace(sourceLine[len("TRIGGER"):])
+			}
+			if !strings.EqualFold(sourceLine, strings.TrimSpace(descriptionLine)) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return strings.TrimSpace(strings.Join(sourceLines[len(descriptionLines):], "\n")), true
+		}
+	}
+
+	// ALL_SOURCE is still more useful than an empty editor if a database version formats DESCRIPTION differently.
+	return strings.TrimSpace(source), true
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
@@ -1977,16 +2112,7 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 	}
 	upperType := strings.ToUpper(objectType)
 	if upperType == "VIEW" {
-		// ALL_VIEWS.TEXT for views — ALL_SOURCE doesn't contain views, and
-		// DBMS_METADATA.GET_DDL fails on XE editions.
-		var source string
-		err = s.db.QueryRow(
-			"SELECT TEXT FROM ALL_VIEWS WHERE OWNER = :1 AND VIEW_NAME = :2",
-			schema, strings.ToUpper(name),
-		).Scan(&source)
-		if errors.Is(err, sql.ErrNoRows) {
-			return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
-		}
+		source, err := s.getViewSource(schema, name)
 		if err != nil {
 			return nil, err
 		}
@@ -2084,22 +2210,51 @@ func normalizeDDLObjectType(value string) string {
 }
 
 func (s *server) buildViewDDL(schema, name string) (string, error) {
+	source, err := s.getViewSource(schema, name)
+	if err != nil {
+		return "", err
+	}
+	trimmed := strings.TrimSpace(source)
+	upperSource := strings.ToUpper(trimmed)
+	if strings.HasPrefix(upperSource, "CREATE ") || strings.HasPrefix(upperSource, "ALTER ") {
+		return trimmed, nil
+	}
+	return fmt.Sprintf("CREATE OR REPLACE VIEW %s.%s AS\n%s", quoteIdentifier(schema), quoteIdentifier(name), trimmed), nil
+}
+
+func (s *server) getViewSource(schema, name string) (string, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
+	viewName := strings.TrimSpace(name)
+	var ddl string
+	metadataErr := db.QueryRow(
+		"SELECT DBMS_METADATA.GET_DDL('VIEW', :1, :2) FROM DUAL",
+		viewName, schema,
+	).Scan(&ddl)
+	if metadataErr == nil && strings.TrimSpace(ddl) != "" {
+		return strings.TrimSpace(ddl), nil
+	}
+
 	var source string
-	err = db.QueryRow(
+	fallbackErr := db.QueryRow(
 		"SELECT TEXT FROM ALL_VIEWS WHERE OWNER = :1 AND VIEW_NAME = :2",
-		schema, strings.ToUpper(name),
+		schema, viewName,
 	).Scan(&source)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("view not found: %s.%s", schema, name)
+	if fallbackErr == nil && strings.TrimSpace(source) != "" {
+		return strings.TrimSpace(source), nil
 	}
-	if err != nil {
-		return "", err
+	if fallbackErr != nil && !errors.Is(fallbackErr, sql.ErrNoRows) {
+		if metadataErr != nil {
+			return "", fmt.Errorf(
+				"failed to load view source for %s.%s: DBMS_METADATA: %v; ALL_VIEWS: %w",
+				schema, viewName, metadataErr, fallbackErr,
+			)
+		}
+		return "", fmt.Errorf("failed to load view source for %s.%s from ALL_VIEWS: %w", schema, viewName, fallbackErr)
 	}
-	return fmt.Sprintf("CREATE OR REPLACE VIEW %s.%s AS\n%s", quoteIdentifier(schema), quoteIdentifier(name), strings.TrimSpace(source)), nil
+	return "", fmt.Errorf("view source not found: %s.%s", schema, viewName)
 }
 
 func (s *server) buildTableDDL(schema, table string) (string, error) {
@@ -2207,10 +2362,7 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 	}
 	defer conn.Close()
 
-	targetSchema := strings.TrimSpace(schema)
-	if targetSchema == "" && !strings.EqualFold(strings.TrimSpace(database), strings.TrimSpace(s.params.Database)) {
-		targetSchema = strings.TrimSpace(database)
-	}
+	targetSchema := oracleExplainTargetSchema(database, schema, s.params.Database)
 	if targetSchema != "" {
 		var originalSchema string
 		if err := conn.QueryRowContext(ctx, "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL").Scan(&originalSchema); err != nil {
@@ -2250,6 +2402,17 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 		builder.WriteByte('\n')
 	}
 	return strings.TrimSpace(builder.String()), planRows.Err()
+}
+
+func oracleExplainTargetSchema(database, schema, configuredDatabase string) string {
+	if schema = strings.TrimSpace(schema); schema != "" {
+		return schema
+	}
+	database = oracleConnectionDatabaseName(database)
+	if database == "" || strings.EqualFold(database, oracleConnectionDatabaseName(configuredDatabase)) {
+		return ""
+	}
+	return database
 }
 
 func cleanupOracleExplainPlan(conn *sql.Conn, statementID string) {
@@ -2414,7 +2577,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			HasMore:         false,
 		}, err
 	}
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -2480,7 +2643,7 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 	if !isQuerySQL(sqlText) {
 		return queryPageResult{}, errors.New("table read requires a SELECT query")
 	}
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -2615,7 +2778,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		maxRows = defaultMaxRows
 	}
 	if isQuerySQL(sqlText) {
-		result, err := s.executeSelect(sqlText, maxRows)
+		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -2623,7 +2786,34 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if err != nil {
 		return queryResult{}, err
 	}
-	execResult, err := db.Exec(sqlText)
+	ctx, cancel := context.WithCancel(context.Background())
+	var timer *time.Timer
+	if opts.TimeoutSecs > 0 {
+		var t *time.Timer
+		t = time.AfterFunc(time.Duration(opts.TimeoutSecs)*time.Second, func() {
+			s.activeCancelMu.Lock()
+			if s.activeTimer == t {
+				cancel()
+			}
+			s.activeCancelMu.Unlock()
+		})
+		timer = t
+	}
+	s.activeCancelMu.Lock()
+	s.activeCancel = cancel
+	s.activeTimer = timer
+	s.activeCancelMu.Unlock()
+	defer func() {
+		cancel()
+		s.activeCancelMu.Lock()
+		s.activeCancel = nil
+		if s.activeTimer != nil {
+			s.activeTimer.Stop()
+			s.activeTimer = nil
+		}
+		s.activeCancelMu.Unlock()
+	}()
+	execResult, err := db.ExecContext(ctx, sqlText)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -2631,8 +2821,8 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
-func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error) {
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, timeoutSecs)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -2691,8 +2881,8 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
-func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows, error) {
-	rows, err := s.queryRows(sqlText, nil)
+func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string, timeoutSecs int) (*sql.Rows, error) {
+	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -2710,7 +2900,7 @@ func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows,
 	// Only pay the ALL_TAB_COLUMNS rewrite cost when the result metadata shows
 	// XMLTYPE. Ordinary Oracle queries should not run dictionary probes first.
 	s.closeRows(rows)
-	return s.queryRows(rewritten, nil)
+	return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
 }
 
 func rowsContainOracleXMLType(rows *sql.Rows) bool {
@@ -3339,22 +3529,50 @@ func (s *server) setSchema(schema string) error {
 }
 
 func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
+	return s.queryRowsWithTimeout(sqlText, args, 0)
+}
+
+func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (*sql.Rows, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	var timer *time.Timer
+	if timeoutSecs > 0 {
+		var t *time.Timer
+		t = time.AfterFunc(time.Duration(timeoutSecs)*time.Second, func() {
+			s.activeCancelMu.Lock()
+			if s.activeTimer == t {
+				s.activeTimedOut = true
+				cancel()
+			}
+			s.activeCancelMu.Unlock()
+		})
+		timer = t
+	}
 	s.activeCancelMu.Lock()
 	s.activeCancel = cancel
+	s.activeTimer = timer
+	s.activeTimedOut = false
 	s.activeCancelMu.Unlock()
 	rows, queryErr := db.QueryContext(ctx, sqlText, args...)
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
+	if s.activeTimer != nil {
+		s.activeTimer.Stop()
+		s.activeTimer = nil
+	}
+	timedOut := s.activeTimedOut
 	if queryErr != nil {
 		cancel()
+	} else if timedOut {
+		cancel()
+		if rows != nil {
+			rows.Close()
+		}
+		queryErr = fmt.Errorf("query timed out after %ds", timeoutSecs)
 	} else {
-		// Keep the context alive for paged reads; database/sql may continue
-		// fetching from the driver until Rows is closed or exhausted.
 		s.activeRows[rows] = cancel
 	}
 	s.activeCancelMu.Unlock()
@@ -3564,6 +3782,10 @@ func normalizeValue(value any, columnTypeName string) any {
 		}
 		return string(v)
 	case time.Time:
+		// Oracle DATE and plain TIMESTAMP are wall-clock values; adding an offset makes clients shift them.
+		if isOracleTimezoneLessDateTime(columnTypeName) {
+			return v.Format("2006-01-02T15:04:05.999999999")
+		}
 		return v.Format(time.RFC3339Nano)
 	case int64, float64, bool, string:
 		return v
@@ -3572,6 +3794,14 @@ func normalizeValue(value any, columnTypeName string) any {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func isOracleTimezoneLessDateTime(columnTypeName string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
+	if normalized == "DATE" || normalized == "TIMESTAMPDTY" || normalized == "TIMESTAMP" {
+		return true
+	}
+	return strings.HasPrefix(normalized, "TIMESTAMP(") && strings.HasSuffix(normalized, ")")
 }
 
 func isOracleBinaryColumnType(columnTypeName string) bool {

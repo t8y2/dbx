@@ -5,12 +5,13 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, X } from "@lucide/vue";
-import type { SchemaDiffConfig, SchemaDiffCompareOptions } from "@/types/schemaDiff";
+import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry } from "@/types/schemaDiff";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -38,6 +39,8 @@ const emit = defineEmits<{
   (e: "update:targetDatabase", value: string): void;
   (e: "update:targetSchema", value: string): void;
   (e: "update:ignoreComments", value: boolean): void;
+  (e: "update:fieldMappings", value: FieldMappingEntry[]): void;
+  (e: "open-field-mapping"): void;
   (e: "compare"): void;
   (e: "saveConfig"): void;
   (e: "loadConfig"): void;
@@ -58,6 +61,11 @@ const sqlConnections = computed(() => store.connections.filter((c: any) => !["mo
 
 const sourceConfig = computed(() => store.getConfig(props.sourceConnectionId));
 const targetConfig = computed(() => store.getConfig(props.targetConnectionId));
+
+const sourceDbType = computed(() => sourceConfig.value?.db_type || "");
+const targetDbType = computed(() => targetConfig.value?.db_type || "");
+const showFieldMapping = computed(() => sourceDbType.value && targetDbType.value && sourceDbType.value !== targetDbType.value);
+const activeFieldMappings = computed(() => props.options?.fieldMappings ?? []);
 
 const canCompare = computed(() => {
   return props.sourceConnectionId && props.targetConnectionId && props.sourceDatabase && props.targetDatabase && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
@@ -267,9 +275,10 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
             content-class="w-[var(--reka-popover-trigger-width)]"
           >
             <template #option-label="{ option, label }">
-              <div class="flex items-center gap-2">
-                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="w-3.5 h-3.5" />
-                {{ label }}
+              <div class="flex min-w-0 items-center gap-2">
+                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="h-3.5 w-3.5 shrink-0" />
+                <ConnectionGroupBadge :connection-id="option" />
+                <span class="min-w-0 flex-1 truncate">{{ label }}</span>
               </div>
             </template>
           </SearchableSelect>
@@ -351,9 +360,10 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
             content-class="w-[var(--reka-popover-trigger-width)]"
           >
             <template #option-label="{ option, label }">
-              <div class="flex items-center gap-2">
-                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="w-3.5 h-3.5" />
-                {{ label }}
+              <div class="flex min-w-0 items-center gap-2">
+                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="h-3.5 w-3.5 shrink-0" />
+                <ConnectionGroupBadge :connection-id="option" />
+                <span class="min-w-0 flex-1 truncate">{{ label }}</span>
               </div>
             </template>
           </SearchableSelect>
@@ -469,6 +479,11 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
         <Button variant="outline" size="sm" @click="$emit('showOptions')">
           <Settings class="w-3.5 h-3.5 mr-1" />
           {{ t("diff.options") }}
+        </Button>
+        <Button v-if="showFieldMapping" variant="outline" size="sm" @click="$emit('open-field-mapping')">
+          <ArrowLeftRight class="w-3.5 h-3.5 mr-1" />
+          {{ t("diff.openFieldMapping") }}
+          <span v-if="activeFieldMappings.length > 0" class="ml-1 inline-flex items-center justify-center rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">{{ activeFieldMappings.length }}</span>
         </Button>
       </div>
       <Button size="sm" :disabled="!canCompare || loading" @click="$emit('compare')">

@@ -1,5 +1,5 @@
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { getSqlCompletionContext, isOracleSystemValueName } from "@/lib/sql/sqlCompletion";
 import { executableStatementRanges, isOraclePlSqlStatement, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
 
@@ -15,6 +15,7 @@ export interface SqlSemanticDiagnosticSchema {
   missingTables?: Set<string>;
   loadedColumnTables?: Set<string>;
   sql?: string;
+  databaseType?: DatabaseType;
 }
 
 export interface SqlSemanticDiagnosticVisibleRange {
@@ -52,6 +53,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   for (const table of tables) {
+    if (isSqlVirtualTableReference(table, schema.databaseType)) continue;
     if (!schema.missingTables?.has(tableReferenceKey(table))) continue;
     diagnostics.push({
       span: trimSqlTextSpanWhitespace(schema.sql, table.span),
@@ -61,6 +63,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   for (const column of analysis.columns) {
+    if (isUnquotedOracleSystemValueReference(column, schema)) continue;
     const table = resolveColumnTable(column, tables, knownTables, schema.sql, scopesById);
     if (!table) continue;
     if (schema.missingTables?.has(tableReferenceKey(table))) continue;
@@ -80,6 +83,20 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
   }
 
   return diagnostics;
+}
+
+function isUnquotedOracleSystemValueReference(column: SqlColumnReference, schema: SqlSemanticDiagnosticSchema): boolean {
+  if (column.qualifier || !isOracleSystemValueName(column.name, schema.databaseType)) return false;
+  if (!schema.sql) return false;
+
+  const range = sqlTextSpanToOffsetRange(schema.sql, column.span);
+  if (!range) return false;
+  const firstCharacter = schema.sql.slice(range.from, range.to).trimStart()[0];
+  return firstCharacter !== '"' && firstCharacter !== "'" && firstCharacter !== "`" && firstCharacter !== "[";
+}
+
+export function isSqlVirtualTableReference(table: { name: string; schema?: string | null }, databaseType?: DatabaseType): boolean {
+  return databaseType === "mysql" && !table.schema && normalizeName(table.name) === "dual";
 }
 
 function trimSqlTextSpanWhitespace(sql: string | undefined, span: SqlTextSpan): SqlTextSpan {
@@ -182,7 +199,7 @@ export function areSqlSemanticDiagnosticsEqual(left: readonly SqlSemanticDiagnos
 
 export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
   if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "weaviate" || options.databaseType === "chromadb" || options.databaseType === "redis") return false;
-  const context = getSqlCompletionContext(sql, cursor);
+  const context = getSqlCompletionContext(sql, cursor, options);
   if (context.exclusiveColumnSuggestions) return false;
   if (context.qualifier) return false;
   if ((context.suggestTables || context.exclusiveTableSuggestions) && isCursorAfterTableTrigger(sql, cursor)) return false;
@@ -191,7 +208,7 @@ export function shouldRunSqlSemanticDiagnostics(sql: string, cursor: number, opt
 
 export function isSqlSemanticDiagnosticInputContext(sql: string, cursor: number, options: { databaseType?: DatabaseType } = {}): boolean {
   if (options.databaseType === "mongodb" || options.databaseType === "elasticsearch" || options.databaseType === "qdrant" || options.databaseType === "milvus" || options.databaseType === "weaviate" || options.databaseType === "chromadb" || options.databaseType === "redis") return false;
-  const context = getSqlCompletionContext(sql, cursor);
+  const context = getSqlCompletionContext(sql, cursor, options);
   return context.exclusiveColumnSuggestions || !!context.qualifier || ((context.suggestTables || context.exclusiveTableSuggestions) && isCursorAfterTableTrigger(sql, cursor));
 }
 
@@ -238,6 +255,7 @@ function tableLookupFor(tables: SqlTableReference[]): Map<string, SqlTableRefere
     lookup.set(normalizeName(table.name), table);
     if (table.alias) lookup.set(normalizeName(table.alias), table);
     if (table.schema) lookup.set(normalizeName(`${table.schema}.${table.name}`), table);
+    if (table.database && table.schema) lookup.set(normalizeName(`${table.database}.${table.schema}.${table.name}`), table);
   }
   return lookup;
 }
@@ -284,7 +302,7 @@ function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, S
       schema: table.schema ?? undefined,
     }));
   }
-  const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name, ...keysWithTableName(columnsByTable, table.name)];
+  const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name, ...keysWithTableName(columnsByTable, table.name)];
   for (const key of keys) {
     const normalizedKey = normalizeName(key);
     const columns = columnsByTable.get(key) ?? columnsByTable.get(normalizedKey);
@@ -304,12 +322,12 @@ function rangesIntersect(left: SqlSemanticDiagnosticVisibleRange, right: SqlSema
   return left.from < right.to && right.from < left.to;
 }
 
-export function tableReferenceKey(table: Pick<SqlTableReference, "name" | "schema">): string {
-  return normalizeName(table.schema ? `${table.schema}.${table.name}` : table.name);
+export function tableReferenceKey(table: Pick<SqlTableReference, "name" | "database" | "schema">): string {
+  return normalizeName(table.schema ? `${table.database ? `${table.database}.` : ""}${table.schema}.${table.name}` : table.name);
 }
 
 function displayTableName(table: SqlTableReference): string {
-  return table.schema ? `${table.schema}.${table.name}` : table.name;
+  return table.schema ? `${table.database ? `${table.database}.` : ""}${table.schema}.${table.name}` : table.name;
 }
 
 function isCursorAfterTableTrigger(sql: string, cursor: number): boolean {

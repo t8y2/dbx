@@ -44,6 +44,11 @@ test("sortDataGridRows sorts ISO date strings by time", () => {
   assert.deepEqual(sortDataGridRows(rows, 0, "asc"), [["2025-12-31"], ["2026-01-01"], ["2026-02-01"]]);
 });
 
+test("sortDataGridRows keeps scalar types and orders JSON cells by canonical text", () => {
+  assert.deepEqual(sortDataGridRows([[10], [2], [1]], 0, "asc"), [[1], [2], [10]]);
+  assert.deepEqual(sortDataGridRows([['{"rank":10}'], ['{"rank":2}'], ['{"rank":1}']], 0, "asc"), [['{"rank":1}'], ['{"rank":2}'], ['{"rank":10}']]);
+});
+
 test("sortDataGridRowIndexes preserves stable source ordering", () => {
   const rows = [["item-10"], ["item-2"], ["item-2"]];
 

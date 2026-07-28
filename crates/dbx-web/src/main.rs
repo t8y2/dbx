@@ -2,6 +2,7 @@ mod auth;
 mod error;
 mod routes;
 mod sse;
+mod ssh_prompt;
 mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -16,9 +17,52 @@ use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
+use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
+use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::Storage;
 use state::WebState;
 use tokio::sync::RwLock;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+use tower_http::compression::CompressionLayer;
+use utoipa::OpenApi;
+
+const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "DBX Data Grid Extractor API", description = "HTTP contract for data-grid clipboard extraction."),
+    paths(routes::query::extract_data_grid_selection),
+    tags((name = "data-grid", description = "Data grid extraction and clipboard formats"))
+)]
+struct ApiDoc;
+
+async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
+    axum::Json(ApiDoc::openapi())
+}
+
+#[cfg(test)]
+mod data_grid_extractor_openapi_tests {
+    use super::*;
+
+    #[test]
+    fn extractor_openapi_contains_the_versioned_request_and_error_responses() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize extractor OpenAPI document");
+        let operation = &document["paths"]["/api/query/extract-data-grid-selection"]["post"];
+
+        assert_eq!(operation["requestBody"]["required"], true);
+        assert!(operation["responses"].get("200").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("413").is_some());
+        assert!(operation["responses"].get("422").is_some());
+        assert!(operation["responses"].get("500").is_some());
+    }
+}
+
+fn web_compression_predicate() -> impl Predicate {
+    // XLSX exports are already compressed ZIP archives, so gzip would only add CPU overhead.
+    DefaultPredicate::new().and(NotForContentType::const_new(XLSX_CONTENT_TYPE))
+}
 
 fn web_body_limit_bytes() -> usize {
     const DEFAULT_MB: usize = 1024;
@@ -57,46 +101,6 @@ fn normalize_public_base_path(value: Option<String>) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{normalize_public_base_path, web_agent_dir_from_env};
-
-    #[test]
-    fn normalize_public_base_path_defaults_to_root() {
-        assert_eq!(normalize_public_base_path(None), "/");
-        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
-        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
-    }
-
-    #[test]
-    fn normalize_public_base_path_trims_and_preserves_segments() {
-        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
-        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
-        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
-    }
-
-    #[test]
-    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
-    fn normalize_public_base_path_rejects_invalid_characters() {
-        normalize_public_base_path(Some("/dbx admin".to_string()));
-    }
-
-    #[test]
-    fn web_agent_dir_defaults_under_data_dir() {
-        let data_dir = std::path::PathBuf::from("/app/data");
-        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
-    }
-
-    #[test]
-    fn web_agent_dir_uses_explicit_env_override() {
-        let data_dir = std::path::PathBuf::from("/app/data");
-        assert_eq!(
-            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
-            std::path::PathBuf::from("/custom/agents")
-        );
-    }
-}
-
 #[cfg(feature = "mq-admin")]
 fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
@@ -116,30 +120,59 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/topics/update-partitions", post(routes::mq::update_partitions))
         .route("/mq/topics/stats", post(routes::mq::get_topic_stats))
         .route("/mq/topics/internal-stats", post(routes::mq::get_topic_internal_stats))
+        .route("/mq/topics/route", post(routes::mq::get_topic_route))
+        .route("/mq/topics/alter-config", post(routes::mq::alter_topic_config))
+        .route("/mq/topics/skip-accumulation", post(routes::mq::skip_topic_accumulation))
+        .route("/mq/exchanges/list", post(routes::mq::list_exchanges))
+        .route("/mq/exchanges/create", post(routes::mq::create_exchange))
+        .route("/mq/exchanges/delete", post(routes::mq::delete_exchange))
+        .route("/mq/bindings/list", post(routes::mq::list_bindings))
+        .route("/mq/bindings/bind", post(routes::mq::bind_queue))
+        .route("/mq/bindings/unbind", post(routes::mq::unbind_queue))
+        .route("/mq/messages/view", post(routes::mq::view_message))
+        .route("/mq/messages/query-by-key", post(routes::mq::query_messages_by_key))
+        .route("/mq/messages/query-by-topic", post(routes::mq::query_messages_by_topic))
+        .route("/mq/messages/trace", post(routes::mq::query_message_trace))
         .route("/mq/subscriptions/list", post(routes::mq::list_subscriptions))
         .route("/mq/subscriptions/create", post(routes::mq::create_subscription))
         .route("/mq/subscriptions/delete", post(routes::mq::delete_subscription))
         .route("/mq/subscriptions/skip-messages", post(routes::mq::skip_messages))
         .route("/mq/subscriptions/reset-cursor", post(routes::mq::reset_cursor))
         .route("/mq/subscriptions/clear-backlog", post(routes::mq::clear_backlog))
+        .route("/mq/consumers/group-config/get", post(routes::mq::get_consumer_group_config))
+        .route("/mq/consumers/group-config/alter", post(routes::mq::alter_consumer_group_config))
         .route("/mq/subscriptions/peek-messages", post(routes::mq::peek_messages))
         .route("/mq/subscriptions/expire-messages", post(routes::mq::expire_messages))
         .route("/mq/producers/list", post(routes::mq::list_producers))
         .route("/mq/consumers/list", post(routes::mq::list_consumers))
         .route("/mq/topics/unload", post(routes::mq::unload_topic))
+        .route("/mq/client-connections/list", post(routes::mq::list_client_connections))
+        .route("/mq/client-connections/close", post(routes::mq::close_client_connection))
+        .route("/mq/channels/list", post(routes::mq::list_client_channels))
         .route("/mq/policies/publish-rate", post(routes::mq::set_publish_rate))
         .route("/mq/policies/dispatch-rate", post(routes::mq::set_dispatch_rate))
         .route("/mq/policies/subscribe-rate", post(routes::mq::set_subscribe_rate))
         .route("/mq/policies/backlog-quota", post(routes::mq::set_backlog_quota))
         .route("/mq/policies/retention", post(routes::mq::set_retention))
         .route("/mq/policies/effective", post(routes::mq::get_effective_policies))
+        .route("/mq/policies/list", post(routes::mq::list_policies))
+        .route("/mq/policies/set", post(routes::mq::set_policy))
+        .route("/mq/policies/delete", post(routes::mq::delete_policy))
         .route("/mq/permissions/grant", post(routes::mq::grant_permission))
         .route("/mq/permissions/revoke", post(routes::mq::revoke_permission))
         .route("/mq/permissions/list", post(routes::mq::list_permissions))
+        .route("/mq/users/list", post(routes::mq::list_users))
+        .route("/mq/users/create", post(routes::mq::create_user))
+        .route("/mq/users/delete", post(routes::mq::delete_user))
+        .route("/mq/user-permissions/list", post(routes::mq::list_user_permissions))
+        .route("/mq/user-permissions/grant", post(routes::mq::grant_user_permission))
+        .route("/mq/user-permissions/revoke", post(routes::mq::revoke_user_permission))
         .route("/mq/tokens/issue", post(routes::mq::issue_token))
         .route("/mq/tokens/list", post(routes::mq::list_token_records))
         .route("/mq/monitoring/backlog", post(routes::mq::get_backlog))
         .route("/mq/monitoring/cluster-info", post(routes::mq::get_cluster_info))
+        .route("/mq/overview", post(routes::mq::get_overview))
+        .route("/mq/nodes", post(routes::mq::list_nodes))
         .route("/mq/raw", post(routes::mq::raw_request))
         .route("/mq/send-message", post(routes::mq::send_message))
 }
@@ -171,6 +204,28 @@ async fn main() {
         let db_path = data_dir.join("dbx.db");
         let storage = Storage::open(&db_path).await.expect("Failed to open storage");
         storage.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
+
+        // Initialize core dialect registry and load external plugin dialects
+        register_core_dialects();
+        let registry = DialectRegistry::global();
+        let plugin_dirs = vec![data_dir.join("plugins").join("dialects")];
+        let load_result = DialectPluginLoader::scan_and_load(registry, &plugin_dirs);
+        log::info!(
+            "Dialect plugins loaded: {} success, {} errors, {} skipped",
+            load_result.loaded.len(),
+            load_result.errors.len(),
+            load_result.skipped.len()
+        );
+
+        // Start dialect YAML hot-reload watcher
+        let watch_dirs = plugin_dirs.clone();
+        tokio::spawn(async move {
+            if let Err(e) = DialectHotReload::run_forever(watch_dirs, DialectRegistry::global()).await {
+                log::error!("Dialect hot-reload watcher exited: {e}");
+            }
+        });
+        log::info!("Dialect hot-reload watcher started");
+
         Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             data_dir.join("plugins"),
@@ -203,10 +258,16 @@ async fn main() {
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
+        transfer_progress_channels: RwLock::new(HashMap::new()),
+        table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
+        nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
+        ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
     });
+
+    ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
 
     // API routes
     let api = Router::new()
@@ -218,7 +279,10 @@ async fn main() {
         .route("/auth/logout", post(auth::logout))
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
+        .route("/connection/test-info", post(routes::connection::test_connection_with_info))
         .route("/connection/connect", post(routes::connection::connect_db))
+        .route("/connection/database-info", post(routes::connection::connected_database_info))
+        .route("/connection/database-info/save", post(routes::connection::save_connection_database_info))
         .route("/connection/final-proxy-port", post(routes::connection::connection_final_proxy_port))
         .route("/connection/disconnect", post(routes::connection::disconnect_db))
         .route("/connection/check-health", post(routes::connection::check_connection_health))
@@ -226,6 +290,8 @@ async fn main() {
         .route("/connection/close-database", post(routes::connection::close_database_connection))
         .route("/connection/save", post(routes::connection::save_connections))
         .route("/connection/list", get(routes::connection::load_connections))
+        .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
+        .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
         .route("/plugins", get(routes::plugins::list_plugins))
         // JDBC
         .route("/jdbc/drivers", get(routes::jdbc::list_jdbc_drivers).post(routes::jdbc::import_jdbc_drivers))
@@ -245,6 +311,8 @@ async fn main() {
         // System
         .route("/system/fonts", get(routes::jdbc::list_system_fonts))
         .route("/ssh/config-hosts", get(routes::ssh_config::list_ssh_config_hosts))
+        .route("/ssh/prompts", get(routes::ssh_prompt::stream_ssh_prompts))
+        .route("/ssh/prompts/resolve", post(routes::ssh_prompt::resolve_ssh_prompt))
         // Tunnel profiles
         .route("/tunnel-profiles/list", get(routes::tunnel_profiles::load_tunnel_profiles))
         .route("/tunnel-profiles/save", post(routes::tunnel_profiles::save_tunnel_profiles))
@@ -262,7 +330,8 @@ async fn main() {
         .route("/agents/upgrade-all", post(routes::agents::upgrade_all_agents))
         .route("/agents/uninstall", post(routes::agents::uninstall_agent))
         .route("/agents/import-offline", post(routes::agents::import_agents_from_zip))
-        .route("/agents/import-jar", post(routes::agents::import_agent_jar))
+        .route("/agents/import-driver", post(routes::agents::import_agent_driver_file))
+        .route("/agents/import-jar", post(routes::agents::import_agent_driver_file))
         .route(
             "/agents/java-runtime",
             get(routes::agents::get_agent_java_runtime_config).post(routes::agents::set_agent_java_runtime_config),
@@ -273,12 +342,14 @@ async fn main() {
         .route("/agents/progress/{operationId}", get(routes::agents::agent_progress))
         // Schema
         .route("/schema/databases", get(routes::schema::list_databases))
+        .route("/schema/database-storage", post(routes::schema::list_database_storage))
         .route("/schema/doris/catalogs", get(routes::schema::list_doris_catalogs))
         .route("/schema/doris/catalog-databases", get(routes::schema::list_doris_catalog_databases))
         .route("/schema/sqlserver/linked-servers", get(routes::schema::list_sqlserver_linked_servers))
         .route("/schema/sqlserver/linked-server-catalogs", get(routes::schema::list_sqlserver_linked_server_catalogs))
         .route("/schema/sqlserver/linked-server-schemas", get(routes::schema::list_sqlserver_linked_server_schemas))
         .route("/schema/sqlserver/linked-server-tables", get(routes::schema::list_sqlserver_linked_server_tables))
+        .route("/schema/sqlserver/column-metadata", get(routes::schema::get_sqlserver_column_metadata))
         .route("/schema/schemas", get(routes::schema::list_schemas))
         .route("/schema/tables", get(routes::schema::list_tables))
         .route("/schema/objects", get(routes::schema::list_objects))
@@ -291,6 +362,9 @@ async fn main() {
         .route("/schema/indexes", get(routes::schema::list_indexes))
         .route("/schema/foreign-keys", get(routes::schema::list_foreign_keys))
         .route("/schema/triggers", get(routes::schema::list_triggers))
+        .route("/schema/constraints", get(routes::schema::list_constraints))
+        .route("/schema/partitions", get(routes::schema::list_partitions))
+        .route("/schema/subpartitions", get(routes::schema::list_subpartitions))
         .route("/schema/functions", get(routes::schema::list_functions))
         .route("/schema/sequences", get(routes::schema::list_sequences))
         .route("/schema/rules", get(routes::schema::list_rules))
@@ -298,6 +372,7 @@ async fn main() {
         .route("/schema/extensions", get(routes::schema::list_extensions))
         .route("/schema/available-extensions", get(routes::schema::list_available_extensions))
         .route("/schema/ddl", get(routes::schema::get_ddl))
+        .route("/dialect/data-types", get(routes::dialect::list_data_types))
         .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
         .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))
         .route(
@@ -311,12 +386,16 @@ async fn main() {
                 .get(routes::tab_runtime_cache::load_tab_runtime_cache)
                 .delete(routes::tab_runtime_cache::delete_tab_runtime_cache),
         )
+        .route("/tab-runtime-cache/metadata", get(routes::tab_runtime_cache::list_tab_runtime_cache_metadata))
+        .route("/tab-runtime-cache/prune", post(routes::tab_runtime_cache::prune_tab_runtime_cache))
+        .route("/tab-runtime-cache/owner", delete(routes::tab_runtime_cache::delete_tab_runtime_cache_owner))
         // Query
         .route("/query/execute", post(routes::query::execute_query))
         .route("/query/execute-multi", post(routes::query::execute_multi))
         .route("/query/execute-batch", post(routes::query::execute_batch))
         .route("/query/execute-script", post(routes::query::execute_script))
         .route("/query/execute-in-transaction", post(routes::query::execute_in_transaction))
+        .route("/query/execute-script-2pc", post(routes::query::execute_script_with_2pc))
         .route("/query/analyze-sql-references", post(routes::query::analyze_sql_references))
         .route("/query/find-statement-at-cursor", post(routes::query::find_statement_at_cursor))
         .route("/query/prepare-pagination-plan", post(routes::query::prepare_query_pagination_execution_plan))
@@ -330,7 +409,7 @@ async fn main() {
         .route("/query/build-search-result-where", post(routes::query::build_search_result_where))
         .route("/query/build-rename-object-sql", post(routes::query::build_rename_object_sql))
         .route("/query/build-create-database-sql", post(routes::query::build_create_database_sql))
-        .route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql))
+        .route("/query/build-sqlite-attach-database-sql", post(routes::query::build_sqlite_attach_database_sql))
         .route("/query/build-drop-object-sql", post(routes::query::build_drop_object_sql))
         .route("/query/build-drop-table-sql", post(routes::query::build_drop_table_sql))
         .route("/query/build-drop-table-child-object-sql", post(routes::query::build_drop_table_child_object_sql))
@@ -363,6 +442,12 @@ async fn main() {
         .route("/query/build-single-column-alter-sql", post(routes::query::build_single_column_alter_sql))
         .route("/query/analyze-editability", post(routes::query::analyze_editable_query_editability))
         .route("/query/prepare-data-grid-save", post(routes::query::prepare_data_grid_save))
+        .route("/query/data-grid-extractor-openapi.json", get(openapi_json))
+        .route(
+            "/query/extract-data-grid-selection",
+            post(routes::query::extract_data_grid_selection)
+                .layer(DefaultBodyLimit::max(DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES)),
+        )
         .route(
             "/query/build-data-grid-copy-update-statements",
             post(routes::query::build_data_grid_copy_update_statements),
@@ -407,6 +492,9 @@ async fn main() {
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
+        .route("/redis/get-stream-groups", post(routes::redis::get_stream_groups))
+        .route("/redis/get-stream-consumers", post(routes::redis::get_stream_consumers))
+        .route("/redis/get-stream-pending", post(routes::redis::get_stream_pending))
         .route("/redis/load-more", post(routes::redis::load_more))
         .route("/redis/set-string", post(routes::redis::set_string))
         .route("/redis/delete-key", post(routes::redis::delete_key))
@@ -421,6 +509,8 @@ async fn main() {
         .route("/redis/stream-add", post(routes::redis::stream_add))
         .route("/redis/json-set", post(routes::redis::json_set))
         .route("/redis/check-json-module", post(routes::redis::check_json_module))
+        .route("/redis/set-ttl", post(routes::redis::set_ttl))
+        .route("/redis/set-expire-at", post(routes::redis::set_expire_at))
         .route("/redis/delete-keys", post(routes::redis::delete_keys))
         .route("/redis/flush-db", post(routes::redis::flush_db))
         .route("/redis/execute-command", post(routes::redis::execute_command))
@@ -430,15 +520,27 @@ async fn main() {
         .route("/redis/slowlog-get", post(routes::redis::slowlog_get))
         .route("/redis/cluster-master-nodes", post(routes::redis::cluster_master_nodes))
         // etcd
+        .route("/etcd/supports-ttl", post(routes::etcd::supports_ttl))
         .route("/etcd/list-prefix", post(routes::etcd::list_prefix))
         .route("/etcd/get", post(routes::etcd::get))
         .route("/etcd/put", post(routes::etcd::put))
         .route("/etcd/delete", post(routes::etcd::delete))
+        .route("/etcd/rename", post(routes::etcd::rename))
+        .route("/etcd/history", post(routes::etcd::history))
+        .route("/etcd/status", post(routes::etcd::status))
         // ZooKeeper
         .route("/zookeeper/list-prefix", post(routes::zookeeper::list_prefix))
         .route("/zookeeper/get", post(routes::zookeeper::get))
         .route("/zookeeper/put", post(routes::zookeeper::put))
         .route("/zookeeper/delete", post(routes::zookeeper::delete))
+        // HBase REST
+        .route("/hbase/table-schema", post(routes::hbase::get_table_schema))
+        .route("/hbase/scan-rows", post(routes::hbase::scan_rows))
+        .route("/hbase/get-row", post(routes::hbase::get_row))
+        .route("/hbase/put-row", post(routes::hbase::put_row))
+        .route("/hbase/delete-row", post(routes::hbase::delete_row))
+        .route("/hbase/create-table", post(routes::hbase::create_table))
+        .route("/hbase/delete-table", post(routes::hbase::delete_table))
         // Nacos
         .route("/nacos/test-connection", post(routes::nacos::test_connection))
         .route("/nacos/namespaces/list", post(routes::nacos::list_namespaces))
@@ -451,10 +553,20 @@ async fn main() {
         .route("/nacos/configs/history/list", post(routes::nacos::list_config_history))
         .route("/nacos/configs/history/get", post(routes::nacos::get_config_history))
         .route("/nacos/configs/history/rollback", post(routes::nacos::rollback_config))
+        .route("/nacos/rnacos-console/captcha", post(routes::nacos::get_rnacos_console_captcha))
+        .route("/nacos/rnacos-console/login", post(routes::nacos::login_rnacos_console))
         .route("/nacos/services/list", post(routes::nacos::list_services))
         .route("/nacos/instances/list", post(routes::nacos::list_instances))
         .route("/nacos/instances/update", post(routes::nacos::update_instance))
+        .route("/nacos/dashboard", post(routes::nacos::get_dashboard))
         .route("/nacos/raw", post(routes::nacos::raw_request))
+        .route("/nacos/configs/search", post(routes::nacos::search_config_content))
+        .route("/nacos/configs/search/cancel", post(routes::nacos::cancel_operation))
+        .route("/nacos/configs/export", post(routes::nacos::export_configs))
+        .route("/nacos/configs/import/preview", post(routes::nacos::preview_config_import))
+        .route("/nacos/configs/import/apply", post(routes::nacos::apply_config_import))
+        .route("/nacos/configs/copy/preview", post(routes::nacos::preview_config_transfer))
+        .route("/nacos/configs/copy/apply", post(routes::nacos::apply_config_transfer))
         // MongoDB
         .route("/mongo/list-databases", post(routes::mongo::list_databases))
         .route("/mongo/list-collections", post(routes::mongo::list_collections))
@@ -462,9 +574,14 @@ async fn main() {
         .route("/mongo/create-database", post(routes::mongo::create_database))
         .route("/mongo/drop-database", post(routes::mongo::drop_database))
         .route("/mongo/drop-collection", post(routes::mongo::drop_collection))
+        .route("/mongo/rename-collection", post(routes::mongo::rename_collection))
         .route("/document-store/list-databases", post(routes::document_store::list_databases))
         .route("/document-store/list-collections", post(routes::document_store::list_collections))
         .route("/document-store/find-documents", post(routes::document_store::find_documents))
+        .route(
+            "/document-store/elasticsearch-count-documents",
+            post(routes::document_store::elasticsearch_count_documents),
+        )
         .route("/document-store/list-gridfs-buckets", post(routes::document_store::list_gridfs_buckets))
         .route("/document-store/create-gridfs-bucket", post(routes::document_store::create_gridfs_bucket))
         .route("/document-store/delete-gridfs-bucket", post(routes::document_store::delete_gridfs_bucket))
@@ -476,10 +593,13 @@ async fn main() {
         .route("/document-store/update-document", post(routes::document_store::update_document))
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
+        .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
+        .route("/mongo/find-one", post(routes::mongo::find_one))
         .route("/mongo/count-documents", post(routes::mongo::count_documents))
         .route("/mongo/server-version", post(routes::mongo::server_version))
         .route("/mongo/collection-stats", post(routes::mongo::collection_stats))
         .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
+        .route("/mongo/distinct", post(routes::mongo::distinct))
         .route("/mongo/create-index", post(routes::mongo::create_index))
         .route("/mongo/drop-indexes", post(routes::mongo::drop_indexes))
         .route("/mongo/insert-document", post(routes::mongo::insert_document))
@@ -488,9 +608,14 @@ async fn main() {
         .route("/mongo/update-documents", post(routes::mongo::update_documents))
         .route("/mongo/delete-document", post(routes::mongo::delete_document))
         .route("/mongo/delete-documents", post(routes::mongo::delete_documents))
+        .route("/mongo/find-one-and-update", post(routes::mongo::find_one_and_update))
+        .route("/mongo/find-one-and-replace", post(routes::mongo::find_one_and_replace))
+        .route("/mongo/find-one-and-delete", post(routes::mongo::find_one_and_delete))
         // History
         .route("/history", get(routes::history::load_history).delete(routes::history::clear_history))
         .route("/history/save", post(routes::history::save_history))
+        .route("/history/search", post(routes::history::search_history))
+        .route("/history/options", get(routes::history::load_history_connection_options))
         .route("/history/{id}", delete(routes::history::delete_history_entry))
         // Saved SQL
         .route(
@@ -507,6 +632,11 @@ async fn main() {
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
         .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
         .route("/ai/provider-configs", get(routes::ai::load_ai_provider_configs))
+        .route("/ai/chat-selection", post(routes::ai::save_ai_chat_selection).get(routes::ai::load_ai_chat_selection))
+        .route("/ai/configs", post(routes::ai::save_ai_configs).get(routes::ai::load_ai_configs))
+        .route("/ai/default-config", post(routes::ai::set_default_ai_config))
+        .route("/ai/config-item", post(routes::ai::save_ai_config_item))
+        .route("/ai/config/{config_id}", delete(routes::ai::delete_ai_config))
         .route("/ai/conversation", post(routes::ai::save_ai_conversation))
         .route("/ai/conversations", get(routes::ai::load_ai_conversations))
         .route("/ai/conversation/{id}", delete(routes::ai::delete_ai_conversation))
@@ -516,6 +646,17 @@ async fn main() {
         .route("/ai/cancel-stream", post(routes::ai::ai_cancel_stream))
         .route("/ai/test-connection", post(routes::ai::ai_test_connection))
         .route("/ai/models", post(routes::ai::ai_list_models))
+        .route("/ai/model-effort", post(routes::ai::ai_resolve_model_effort))
+        // Prompt templates
+        .route(
+            "/prompt-templates",
+            get(routes::prompt_template::load_prompt_templates).post(routes::prompt_template::save_prompt_template),
+        )
+        .route("/prompt-templates/{id}", delete(routes::prompt_template::delete_prompt_template))
+        .route(
+            "/prompt-templates/global-instructions",
+            get(routes::prompt_template::get_global_instructions).put(routes::prompt_template::set_global_instructions),
+        )
         // Transfer
         .route("/transfer/start", post(routes::transfer::start_transfer))
         .route("/transfer/ownership-preview", post(routes::transfer::preview_transfer_ownership))
@@ -544,12 +685,18 @@ async fn main() {
         )
         .route("/export/query-result/cancel", post(routes::query_result_export::cancel_query_result_export))
         // SQL file
-        .route("/sql-file/preview", post(routes::sql_file::preview_sql_file))
+        .route(
+            "/sql-file/preview",
+            post(routes::sql_file::preview_sql_file)
+                .layer(DefaultBodyLimit::max(routes::sql_file::SQL_FILE_UPLOAD_MAX_BYTES.saturating_add(1024 * 1024))),
+        )
         .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
         // Table import
         .route("/import/preview", post(routes::table_import::preview_import))
+        .route("/import/preview-source", post(routes::table_import::preview_uploaded_import))
+        .route("/import/source/release", post(routes::table_import::release_import_source))
         .route("/import/execute", post(routes::table_import::execute_import))
         .route("/import/progress/{importId}", get(routes::table_import::import_progress))
         .route("/import/cancel", post(routes::table_import::cancel_import))
@@ -563,6 +710,14 @@ async fn main() {
         .route(
             "/app-settings/pinned-tree-node-ids",
             get(routes::app_settings::load_pinned_tree_node_ids).post(routes::app_settings::save_pinned_tree_node_ids),
+        )
+        .route(
+            "/app-settings/mcp-policy",
+            get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
+        )
+        .route(
+            "/app-settings/max-agent-turns",
+            get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
         )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync
@@ -588,6 +743,11 @@ async fn main() {
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 
+    // Do not expose DuckDB-only handlers from builds that intentionally omit bundled DuckDB.
+    #[cfg(feature = "duckdb-bundled")]
+    let api =
+        api.route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql));
+
     let api = add_mq_routes(api)
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
@@ -596,6 +756,7 @@ async fn main() {
     let mut app = Router::new()
         .nest("/api", api)
         .layer(DefaultBodyLimit::max(web_body_limit_bytes()))
+        .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     // Static file serving
@@ -625,5 +786,71 @@ async fn main() {
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
-    axum::serve(listener, app).await.expect("Server error");
+    let shutdown_state = web_state.app.clone();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                tracing::warn!("Failed to listen for shutdown signal: {error}");
+            }
+        })
+        .await
+        .expect("Server error");
+    shutdown_state.shutdown_background_tasks(std::time::Duration::from_secs(3)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate, XLSX_CONTENT_TYPE};
+    use axum::body::Body;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::Response;
+    use tower_http::compression::predicate::Predicate;
+
+    fn compression_response(content_type: &str) -> Response<Body> {
+        Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
+    }
+
+    #[test]
+    fn web_compression_skips_streams_and_precompressed_exports() {
+        let predicate = web_compression_predicate();
+
+        assert!(predicate.should_compress(&compression_response("application/json")));
+        assert!(!predicate.should_compress(&compression_response("text/event-stream")));
+        assert!(!predicate.should_compress(&compression_response(XLSX_CONTENT_TYPE)));
+    }
+
+    #[test]
+    fn normalize_public_base_path_defaults_to_root() {
+        assert_eq!(normalize_public_base_path(None), "/");
+        assert_eq!(normalize_public_base_path(Some("".to_string())), "/");
+        assert_eq!(normalize_public_base_path(Some("/".to_string())), "/");
+    }
+
+    #[test]
+    fn normalize_public_base_path_trims_and_preserves_segments() {
+        assert_eq!(normalize_public_base_path(Some("dbx".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/dbx/".to_string())), "/dbx");
+        assert_eq!(normalize_public_base_path(Some("/tools/dbx/?v=1".to_string())), "/tools/dbx");
+    }
+
+    #[test]
+    #[should_panic(expected = "DBX_PUBLIC_BASE_PATH contains invalid characters")]
+    fn normalize_public_base_path_rejects_invalid_characters() {
+        normalize_public_base_path(Some("/dbx admin".to_string()));
+    }
+
+    #[test]
+    fn web_agent_dir_defaults_under_data_dir() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(web_agent_dir_from_env(&data_dir, None), data_dir.join("agents"));
+    }
+
+    #[test]
+    fn web_agent_dir_uses_explicit_env_override() {
+        let data_dir = std::path::PathBuf::from("/app/data");
+        assert_eq!(
+            web_agent_dir_from_env(&data_dir, Some("/custom/agents".to_string())),
+            std::path::PathBuf::from("/custom/agents")
+        );
+    }
 }

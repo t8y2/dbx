@@ -2,6 +2,7 @@ import { ref } from "vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
+import { invoke } from "@tauri-apps/api/core";
 
 export type AppCloseAction = "quit" | "hide";
 type AppCloseRequestTarget = "settings" | "quit";
@@ -62,7 +63,12 @@ export function useCloseActionPrompt(options: { requestClose: (action: AppCloseA
     void import("@tauri-apps/api/event").then(({ listen }) => {
       listen<AppCloseRequestTarget>("dbx-app-close-requested", (event: AppCloseRequestPayload) => {
         handleCloseRequest(event.payload === "quit" ? "quit" : "settings");
-      }).then((unlisten) => unlistenHandles.push(unlisten));
+      }).then((unlisten) => {
+        unlistenHandles.push(unlisten);
+        // Rust falls back to native Quit until this listener is installed, so a
+        // failed WebView2 startup cannot leave the tray request waiting forever.
+        void invoke("mark_frontend_ready");
+      });
     });
   }
 

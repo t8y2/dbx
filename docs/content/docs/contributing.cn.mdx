@@ -33,6 +33,8 @@ description: 从零搭建 DBX 开发环境，运行桌面版，完成第一次�
 
 认领成功后，机器人会把 Issue 分配给你。如果你准备采用的方案可能影响现有行为，先在 Issue 中简要说明思路，等维护者确认后再开始大规模修改。
 
+如果后续不准备继续或暂时无法完成，可以单独评论 `/unclaim`，也兼容 `/unclaimed`。工作流只会移除你自己的 assignee，之后其他贡献者可以重新认领。
+
 ## 2. 安装开发环境
 
 DBX 桌面版基于 Tauri、Vue 和 Rust。仓库当前要求：
@@ -41,7 +43,7 @@ DBX 桌面版基于 Tauri、Vue 和 Rust。仓库当前要求：
 | --- | --- |
 | Node.js | 22.13.0 或更高版本 |
 | pnpm | 10.27.0 |
-| Rust | 1.77 或更高版本 |
+| Rust | 1.88 或更高版本 |
 | Git | 当前稳定版本 |
 | Make | macOS 和 Linux 推荐使用 |
 
@@ -157,6 +159,10 @@ make
 make dev-fast
 ```
 
+开发版可以与已安装的 DBX 同时运行。两者使用同一份本地 DBX 数据，因此连接和历史记录会同时可用；请避免在两个窗口中同时修改同一个连接、收藏 SQL 或全局设置。
+
+测试 MCP bridge 时，后启动的实例会写入共享的 `mcp-bridge-port` 发现文件并接收 MCP 请求。Redis PubSub 优先使用端口 `4224`（设置 `DBX_PORT` 时优先使用该端口）；端口被占用时会自动回退到可用的本地端口，前端会使用实际监听端口。
+
 ### Windows
 
 在 PowerShell 中执行：
@@ -181,6 +187,19 @@ pnpm tauri dev -- --no-default-features
 3. 关闭窗口后再次启动，确认开发环境可重复运行
 
 如果端口 `1420` 已被占用，先关闭旧的 DBX/Vite 开发进程再重新启动。
+
+## 本地数据库测试环境
+
+涉及数据库驱动、连接流程、元数据查询或数据库专用 UI 的改动，应尽可能通过真实实例验证。仓库为此提供了固定版本的本地 Docker Compose 配方：
+
+```bash
+make db-list
+make db DB=mysql@8.4
+make db-verify DB=mysql@8.4
+make db-down DB=mysql@8.4
+```
+
+服务端口默认监听 `127.0.0.1`；在共享网络中暴露主机前，请设置 `DB_BIND_ADDRESS=0.0.0.0`、使用强 `DB_PASSWORD` 并配置防火墙。所有支持的配方、覆盖变量和重置安全要求请参阅[数据库测试实验室](/cn/docs/database-lab)。
 
 ## 5. 认识项目结构
 
@@ -268,7 +287,7 @@ make cargo-test-fast
 Agent 是独立进程，通过 stdin/stdout JSON-RPC 与 DBX 通信。Java/JDBC Agent 通常使用 JDK 21；原生 Agent 使用 Go 或 Rust。开始前先阅读：
 
 - [`agents/README.zh-CN.md`](https://github.com/t8y2/dbx/blob/main/agents/README.zh-CN.md)
-- [`agents/docs/agent-authoring.md`](https://github.com/t8y2/dbx/blob/main/agents/docs/agent-authoring.md)
+- [`agents/docs/agent-authoring.zh-CN.md`](https://github.com/t8y2/dbx/blob/main/agents/docs/agent-authoring.zh-CN.md)
 
 #### 修改现有 Java/JDBC Agent
 
@@ -326,7 +345,7 @@ agents/drivers/<驱动模块名>/build/libs/
 
 #### 原生 Agent
 
-`oracle`、`xugu` 等原生 Agent 使用 `agent` 可执行文件，而不是 `agent.jar`。在对应模块目录运行 Go 测试和构建，并按模块 README 替换本地运行时可执行文件：
+`oracle`、`kingbase`、`xugu` 等原生 Agent 使用 `agent` 可执行文件，而不是 `agent.jar`。在对应模块目录运行 Go 测试和构建，并按模块 README 替换本地运行时可执行文件：
 
 ```bash
 cd agents/drivers/<原生模块>
@@ -403,6 +422,8 @@ PR 描述至少写清：
 6. 数据库改动的数据库名称、版本和验证步骤
 
 提交 PR 后，如果 CI 失败，点击失败任务查看日志，在原分支继续提交修复即可，不需要重新创建 PR。
+
+关联 PR 合并到默认分支后，如果 Issue 仍然处于打开状态，可以在 Issue 下单独评论 `/close`。工作流只会在评论者是当前 assignee，并且是已合并关联 PR 的作者时关闭 Issue。
 
 ## 10. 根据 Review 更新代码
 

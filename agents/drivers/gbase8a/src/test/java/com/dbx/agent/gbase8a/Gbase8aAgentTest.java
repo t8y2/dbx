@@ -99,6 +99,25 @@ class Gbase8aAgentTest {
     }
 
     @Test
+    void getTableDdlUsesShowCreateToPreserveNativeColumnClauses() {
+        List<String> sql = new ArrayList<>();
+        String nativeDdl = "CREATE TABLE \"orders`archive\" (\n" +
+            "  \"UPDATE_TIME\" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'updated at'\n" +
+            ") ENGINE=EXPRESS DEFAULT CHARSET=utf8";
+        Gbase8aAgent agent = new Gbase8aAgent();
+        TestSupport.setPrivateConnection(agent, statementConnection(sql, resultSet(
+            new String[]{"Table", "Create Table"},
+            new Object[][]{{"orders`archive", nativeDdl}}
+        )));
+
+        String ddl = agent.getTableDdl("app`prod", "orders`archive");
+
+        Assertions.assertEquals(nativeDdl, ddl);
+        Assertions.assertTrue(ddl.contains("ON UPDATE CURRENT_TIMESTAMP"), ddl);
+        Assertions.assertEquals("SHOW CREATE TABLE `app``prod`.`orders``archive`", sql.get(0));
+    }
+
+    @Test
     void getObjectSourceUsesShowCreateForRoutines() {
         List<String> sql = new ArrayList<>();
         Gbase8aAgent agent = new Gbase8aAgent();

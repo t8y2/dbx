@@ -12,8 +12,9 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::models::connection::DatabaseType;
-use crate::sql::starts_with_executable_sql_keyword;
+use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
+use crate::schema::{table_name_filter_matches, TableNameFilter};
+use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
@@ -53,7 +54,7 @@ fn quote_value(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
-fn quote_identifier(s: &str) -> String {
+pub(super) fn quote_identifier(s: &str) -> String {
     format!("`{}`", s.replace('`', "``"))
 }
 
@@ -73,27 +74,33 @@ where
     row.get_opt::<T, I>(index).and_then(|result| result.ok())
 }
 
-fn get_str(row: &mysql_async::Row, idx: usize) -> String {
+/// 字节转 String：合法 UTF-8（绝大多数场景）时直接复用入参缓冲零拷贝，
+/// 仅在非法序列时退化为 lossy 替换。from_utf8_lossy(&b).to_string() 即使
+/// 对合法输入也会多一次分配+拷贝。
+pub(super) fn bytes_to_string_lossy(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+}
+
+pub(super) fn get_str(row: &mysql_async::Row, idx: usize) -> String {
     row_get::<String, _>(row, idx)
-        .or_else(|| row_get::<Vec<u8>, _>(row, idx).map(|b| String::from_utf8_lossy(&b).to_string()))
+        .or_else(|| row_get::<Vec<u8>, _>(row, idx).map(bytes_to_string_lossy))
         .unwrap_or_default()
 }
 
-fn get_str_by_name(row: &mysql_async::Row, name: &str) -> String {
+pub(super) fn get_str_by_name(row: &mysql_async::Row, name: &str) -> String {
     row_get::<String, _>(row, name)
-        .or_else(|| row_get::<Vec<u8>, _>(row, name).map(|b| String::from_utf8_lossy(&b).to_string()))
+        .or_else(|| row_get::<Vec<u8>, _>(row, name).map(bytes_to_string_lossy))
         .unwrap_or_default()
 }
 
-fn get_opt_str(row: &mysql_async::Row, name: &str) -> Option<String> {
-    row_get::<String, _>(row, name)
-        .or_else(|| row_get::<Vec<u8>, _>(row, name).map(|b| String::from_utf8_lossy(&b).to_string()))
+pub(super) fn get_opt_str(row: &mysql_async::Row, name: &str) -> Option<String> {
+    row_get::<String, _>(row, name).or_else(|| row_get::<Vec<u8>, _>(row, name).map(bytes_to_string_lossy))
 }
 
 /// First non-empty string value among the named columns (e.g. Doris `CatalogName`
 /// vs StarRocks `Catalog`). Returns an empty string when none of the columns
 /// are present or all are empty.
-fn first_nonempty_str_by_name(row: &mysql_async::Row, names: &[&str]) -> String {
+pub(super) fn first_nonempty_str_by_name(row: &mysql_async::Row, names: &[&str]) -> String {
     for name in names {
         let value = get_str_by_name(row, name);
         if !value.is_empty() {
@@ -101,6 +108,55 @@ fn first_nonempty_str_by_name(row: &mysql_async::Row, names: &[&str]) -> String 
         }
     }
     String::new()
+}
+
+fn nonblank(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+async fn query_first_nonblank_string(conn: &mut mysql_async::Conn, sql: &str) -> Option<String> {
+    match conn.query_first::<String, _>(sql).await {
+        Ok(Some(value)) => nonblank(value),
+        Ok(None) => None,
+        Err(error) => {
+            log::debug!("Failed to read optional MySQL database information with `{sql}`: {error}");
+            None
+        }
+    }
+}
+
+pub async fn database_connection_info(
+    pool: &MySqlPool,
+    product_name: impl Into<String>,
+) -> Result<DatabaseConnectionInfo, String> {
+    let product_name = nonblank(product_name.into()).unwrap_or_else(|| "MySQL".to_string());
+    let mut conn = get_conn_with_health_check(pool).await?;
+
+    Ok(DatabaseConnectionInfo {
+        product_name: Some(product_name),
+        product_version: query_first_nonblank_string(&mut conn, "SELECT VERSION()").await,
+        current_database: query_first_nonblank_string(&mut conn, "SELECT COALESCE(DATABASE(), '')").await,
+        server_comment: query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await,
+        server_charset: query_first_nonblank_string(&mut conn, "SELECT @@character_set_server").await,
+        server_collation: query_first_nonblank_string(&mut conn, "SELECT @@collation_server").await,
+        ..DatabaseConnectionInfo::default()
+    })
+}
+
+pub fn protocol_product_name(config: &ConnectionConfig) -> String {
+    config.driver_label.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).unwrap_or_else(
+        || match config.db_type {
+            DatabaseType::Doris => "Doris".to_string(),
+            DatabaseType::StarRocks => "StarRocks".to_string(),
+            DatabaseType::ManticoreSearch => "Manticore Search".to_string(),
+            _ => "MySQL".to_string(),
+        },
+    )
 }
 
 fn get_opt_metadata_string(row: &mysql_async::Row, name: &str) -> Option<String> {
@@ -230,14 +286,22 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
             .map(serde_json::Value::String)
             .unwrap_or_else(|| super::binary_value_to_json(&bytes));
     }
-    serde_json::Value::String(String::from_utf8_lossy(&bytes).to_string())
+    serde_json::Value::String(bytes_to_string_lossy(bytes))
 }
 
 /// Map a MySQL column to a user-facing type name for the result-grid header.
 /// Returns the bare lowercase type name (no length/precision/signedness), which
 /// is enough for display; unknown variants fall back to a lowercased debug name.
-pub(crate) fn mysql_column_type_name(ty: ColumnType) -> String {
+///
+/// MySQL's wire protocol uses the same `MYSQL_TYPE_*BLOB` codes for TEXT and BLOB
+/// families. Binary charset (63) means BLOB; any other charset means TEXT. Value
+/// decoding already follows that rule — the header type must match, or TEXT
+/// columns flash as `blob` until table metadata arrives.
+pub(crate) fn mysql_column_type_name(column: &mysql_async::Column) -> String {
     use mysql_async::consts::ColumnType::*;
+    let ty = column.column_type();
+    let flags = column.flags();
+    let binary = is_mysql_binary_charset(column);
     match ty {
         MYSQL_TYPE_TINY => "tinyint",
         MYSQL_TYPE_SHORT => "smallint",
@@ -256,12 +320,54 @@ pub(crate) fn mysql_column_type_name(ty: ColumnType) -> String {
         MYSQL_TYPE_JSON => "json",
         MYSQL_TYPE_ENUM => "enum",
         MYSQL_TYPE_SET => "set",
-        MYSQL_TYPE_TINY_BLOB => "tinyblob",
-        MYSQL_TYPE_MEDIUM_BLOB => "mediumblob",
-        MYSQL_TYPE_LONG_BLOB => "longblob",
-        MYSQL_TYPE_BLOB => "blob",
-        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => "varchar",
-        MYSQL_TYPE_STRING => "char",
+        MYSQL_TYPE_TINY_BLOB => {
+            if binary {
+                "tinyblob"
+            } else {
+                "tinytext"
+            }
+        }
+        MYSQL_TYPE_MEDIUM_BLOB => {
+            if binary {
+                "mediumblob"
+            } else {
+                "mediumtext"
+            }
+        }
+        MYSQL_TYPE_LONG_BLOB => {
+            if binary {
+                "longblob"
+            } else {
+                "longtext"
+            }
+        }
+        MYSQL_TYPE_BLOB => {
+            if binary {
+                "blob"
+            } else {
+                "text"
+            }
+        }
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => {
+            if binary {
+                "varbinary"
+            } else {
+                "varchar"
+            }
+        }
+        MYSQL_TYPE_STRING => {
+            // MySQL reports ENUM/SET result columns as STRING plus a flag,
+            // rather than using the dedicated protocol type codes.
+            if flags.contains(mysql_async::consts::ColumnFlags::ENUM_FLAG) {
+                "enum"
+            } else if flags.contains(mysql_async::consts::ColumnFlags::SET_FLAG) {
+                "set"
+            } else if binary {
+                "binary"
+            } else {
+                "char"
+            }
+        }
         MYSQL_TYPE_GEOMETRY => "geometry",
         MYSQL_TYPE_NULL => "null",
         other => return format!("{:?}", other).to_lowercase(),
@@ -531,6 +637,72 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
     setup_mode: MySqlSetupMode,
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
+    let mut retry_url = url.to_string();
+    let mut retry_ca_cert_path = ca_cert_path;
+    let mut result = connect_pool_attempt(
+        url,
+        ca_cert_path,
+        timeout,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+        MySqlEofMode::Deprecate,
+    )
+    .await;
+
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_without_ssl(error)) {
+        if let Some(fallback_url) = ssl_fallback_url(url) {
+            log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
+            retry_url = fallback_url;
+            retry_ca_cert_path = None;
+            result = connect_pool_attempt(
+                &retry_url,
+                None,
+                timeout,
+                max_connections,
+                idle_timeout_secs,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                MySqlEofMode::Deprecate,
+            )
+            .await;
+        }
+    }
+
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+        log::info!("MySQL proxy returned legacy EOF packets; retrying with CLIENT_DEPRECATE_EOF disabled");
+        return connect_pool_attempt(
+            &retry_url,
+            retry_ca_cert_path,
+            timeout,
+            max_connections,
+            idle_timeout_secs,
+            setup_database,
+            extra_setup_queries,
+            setup_mode,
+            MySqlEofMode::Legacy,
+        )
+        .await;
+    }
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_pool_attempt(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+) -> Result<MySqlPool, String> {
     let pool = create_pool(
         url,
         ca_cert_path,
@@ -539,8 +711,9 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
+        eof_mode,
     )?;
-    let result = verify_pool_connection_with_setup_fallback(
+    verify_pool_connection_with_setup_fallback(
         pool,
         timeout,
         url,
@@ -550,39 +723,9 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
+        eof_mode,
     )
-    .await;
-
-    if let Err(ref e) = result {
-        if mysql_error_should_retry_without_ssl(e) {
-            if let Some(fallback_url) = ssl_fallback_url(url) {
-                log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
-                let fallback_pool = create_pool(
-                    &fallback_url,
-                    None,
-                    max_connections,
-                    idle_timeout_secs,
-                    setup_database,
-                    extra_setup_queries,
-                    setup_mode,
-                )?;
-                return verify_pool_connection_with_setup_fallback(
-                    fallback_pool,
-                    timeout,
-                    &fallback_url,
-                    None,
-                    max_connections,
-                    idle_timeout_secs,
-                    setup_database,
-                    extra_setup_queries,
-                    setup_mode,
-                )
-                .await;
-            }
-        }
-    }
-
-    result
+    .await
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -597,10 +740,24 @@ enum MySqlSetupMode {
     Compatible,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlEofMode {
+    Deprecate,
+    Legacy,
+}
+
+impl MySqlEofMode {
+    fn deprecate_eof(self) -> bool {
+        self == Self::Deprecate
+    }
+}
+
+const MYSQL_GROUP_CONCAT_MAX_LEN: u64 = 1_048_576;
+
 impl MySqlSetupMode {
-    fn group_concat_max_len_query(self) -> Option<&'static str> {
+    fn group_concat_max_len_query(self) -> Option<String> {
         match self {
-            Self::Standard => Some("SET SESSION group_concat_max_len = 1048576"),
+            Self::Standard => Some(format!("SET SESSION group_concat_max_len = {MYSQL_GROUP_CONCAT_MAX_LEN}")),
             Self::Compatible => None,
         }
     }
@@ -616,6 +773,7 @@ async fn verify_pool_connection_with_setup_fallback(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
 ) -> Result<MySqlPool, String> {
     match verify_pool_connection(&pool, timeout).await {
         Ok(()) => Ok(pool),
@@ -623,7 +781,9 @@ async fn verify_pool_connection_with_setup_fallback(
             let Some(fallback_mode) = mysql_group_concat_setup_fallback_mode(setup_mode, &err) else {
                 return Err(err);
             };
-            log::info!("MySQL server rejected group_concat_max_len setup syntax; retrying with {fallback_mode:?} mode");
+            log::info!(
+                "MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode"
+            );
             let fallback_pool = create_pool(
                 url,
                 ca_cert_path,
@@ -632,6 +792,7 @@ async fn verify_pool_connection_with_setup_fallback(
                 setup_database,
                 extra_setup_queries,
                 fallback_mode,
+                eof_mode,
             )?;
             verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
         }
@@ -644,7 +805,21 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     }
 
     let lower = error.to_ascii_lowercase();
-    if lower.contains("group_concat_max_len") && (lower.contains("1193") || lower.contains("unknown system variable")) {
+    let setup_query_rejected = lower.contains("1193")
+        || lower.contains("unknown system variable")
+        || lower.contains("syntax error")
+        || lower.contains("not supported");
+    let sphinxql_setup_query_rejected = lower.contains("sphinxql")
+        && lower.contains("only 0 and 1 could be used as boolean values")
+        && lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'"));
+    // Some MySQL gateways omit the variable name and report session-variable
+    // changes as a forbidden global-variable operation.
+    let gateway_session_variable_rejected =
+        lower.contains("error 10192 (hy000)") && lower.contains("set global variables is forbidden");
+    if (lower.contains("group_concat_max_len") && setup_query_rejected)
+        || sphinxql_setup_query_rejected
+        || gateway_session_variable_rejected
+    {
         return Some(MySqlSetupMode::Compatible);
     }
 
@@ -659,8 +834,10 @@ fn create_pool(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
+    let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
     let opts =
         mysql_async::Opts::from_url(&mysql_async_url(&tls_url.url)).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
     let tcp_host = mysql_async_tcp_host(opts.ip_or_hostname()).to_string();
@@ -690,10 +867,16 @@ fn create_pool(
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
-        .tcp_keepalive(Some(MYSQL_TCP_KEEPALIVE_MS))
+        .tcp_keepalive(Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))))
+        .deprecate_eof(eof_mode.deprecate_eof())
         .setup(setup_queries);
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
         builder = builder.ssl_opts(ssl_opts);
+    }
+    if !local_infile_paths.is_empty() {
+        // LOCAL INFILE lets the server request a client-side file. Restrict it
+        // to paths explicitly supplied by the user instead of enabling arbitrary reads.
+        builder = builder.local_infile_handler(Some(mysql_async::WhiteListFsHandler::new(local_infile_paths)));
     }
     Ok(MySqlPool::new(builder))
 }
@@ -838,12 +1021,15 @@ fn mysql_setup_queries_for_database_with_mode(
     if let Some(time_zone) = mysql_connection_time_zone(url) {
         queries.push(format!("SET time_zone = {}", quote_value(&time_zone)));
     }
+    if let Some(session_variables) = mysql_connection_session_variables(url) {
+        queries.push(session_variables);
+    }
     queries.push(format!("SET NAMES {charset}"));
     // MySQL defaults group_concat_max_len to 1024, which silently truncates
     // GROUP_CONCAT results. Skip it for MySQL protocol-compatible databases
     // such as old StarRocks versions that reject unknown MySQL variables.
     if let Some(query) = setup_mode.group_concat_max_len_query() {
-        queries.push(query.to_string());
+        queries.push(query);
     }
     // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
     // catalog. `SET catalog` must run *before* `USE <database>` (the database
@@ -955,6 +1141,114 @@ fn mysql_connection_catalog(url: &str) -> Option<String> {
         }
         percent_decode_str(value).decode_utf8().ok().map(|value| value.into_owned())
     })
+}
+
+fn mysql_connection_session_variables(url: &str) -> Option<String> {
+    let (_, query) = url.split_once('?')?;
+    let query = query.split('#').next().unwrap_or(query);
+    let value = query.split('&').find_map(|segment| {
+        let (key, value) = segment.split_once('=')?;
+        percent_decode_str(key).decode_utf8().ok().filter(|key| key.eq_ignore_ascii_case("sessionVariables"))?;
+        percent_decode_str(value).decode_utf8().ok().map(|value| value.into_owned())
+    })?;
+    let assignments = split_mysql_session_variables(&value);
+    if assignments.is_empty() {
+        return None;
+    }
+
+    // Match Connector/J: separators inside strings or expressions are preserved,
+    // while system variables receive SESSION and user variables keep their @ prefix.
+    Some(format!(
+        "SET {}",
+        assignments
+            .into_iter()
+            .map(|assignment| {
+                if assignment.starts_with('@') {
+                    assignment
+                } else {
+                    format!("SESSION {assignment}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
+
+fn mysql_local_infile_paths(url: &str) -> Vec<PathBuf> {
+    let Some((_, query)) = url.split_once('?') else {
+        return Vec::new();
+    };
+    let query = query.split('#').next().unwrap_or(query);
+    query
+        .split('&')
+        .filter_map(|segment| {
+            let (key, value) = segment.split_once('=')?;
+            percent_decode_str(key).decode_utf8().ok().filter(|key| key.eq_ignore_ascii_case("localInfilePath"))?;
+            let path = percent_decode_str(value).decode_utf8().ok()?.trim().to_string();
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        })
+        .collect()
+}
+
+fn split_mysql_session_variables(value: &str) -> Vec<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut assignments = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut parenthesis_depth = 0usize;
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(active_quote) = quote {
+            current.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                if chars.get(index + 1) == Some(&active_quote) {
+                    current.push(active_quote);
+                    index += 1;
+                } else {
+                    quote = None;
+                }
+            }
+            index += 1;
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            '(' => {
+                parenthesis_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                parenthesis_depth = parenthesis_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' | ';' if parenthesis_depth == 0 => {
+                let assignment = current.trim();
+                if !assignment.is_empty() {
+                    assignments.push(assignment.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+        index += 1;
+    }
+
+    let assignment = current.trim();
+    if !assignment.is_empty() {
+        assignments.push(assignment.to_string());
+    }
+    assignments
 }
 
 fn is_safe_mysql_charset_name(value: &str) -> bool {
@@ -1080,6 +1374,10 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
         // Some MySQL-compatible servers report a preferred-TLS attempt as a
         // normal server error instead of a TLS handshake error.
         || (error.contains("client asked for ssl") && error.contains("server does not have this capability"))
+}
+
+fn mysql_error_should_retry_with_legacy_eof(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("packets out of sync")
 }
 
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
@@ -1258,6 +1556,10 @@ fn is_jdbc_param(key: &str) -> bool {
             | "resultsetsizethreshold"
             | "nettimeoutforstreamingresults"
             | "useusageadvisor"
+            | "uselocalsessionstate"
+            | "rewritebatchedstatements"
+            | "prepstmtcachesqllimit"
+            | "prepstmtcachesize"
     )
 }
 
@@ -1276,6 +1578,8 @@ fn is_dbx_handled_mysql_url_param(key: &str) -> bool {
             | "connectiontimezone"
             | "servertimezone"
             | "forceconnectiontimezonetosession"
+            | "sessionvariables"
+            | "localinfilepath"
     )
 }
 
@@ -1411,9 +1715,36 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool =
-        create_pool(url, None, max_connections, None, setup_database, extra_setup_queries, MySqlSetupMode::Compatible)?;
-    verify_pool_connection(&pool, timeout).await.map(|_| pool)
+    let result = connect_pool_attempt(
+        url,
+        None,
+        timeout,
+        max_connections,
+        None,
+        setup_database,
+        extra_setup_queries,
+        MySqlSetupMode::Compatible,
+        MySqlEofMode::Deprecate,
+    )
+    .await;
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+        log::info!(
+            "MySQL proxy returned legacy EOF packets; retrying bare connection with CLIENT_DEPRECATE_EOF disabled"
+        );
+        return connect_pool_attempt(
+            url,
+            None,
+            timeout,
+            max_connections,
+            None,
+            setup_database,
+            extra_setup_queries,
+            MySqlSetupMode::Compatible,
+            MySqlEofMode::Legacy,
+        )
+        .await;
+    }
+    result
 }
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
@@ -1444,7 +1775,7 @@ pub async fn list_databases_show(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, 
     Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), true))
 }
 
-fn database_infos_from_names(
+pub(super) fn database_infos_from_names(
     names: impl IntoIterator<Item = String>,
     include_catalogless_when_blank: bool,
 ) -> Vec<DatabaseInfo> {
@@ -1465,7 +1796,7 @@ fn database_infos_from_names(
 }
 
 pub async fn list_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
-    list_tables_filtered(pool, database, None, None, None, None).await
+    list_tables_filtered(pool, database, None, None, None, None, None).await
 }
 
 pub async fn list_tables_filtered(
@@ -1475,8 +1806,9 @@ pub async fn list_tables_filtered(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<TableInfo>, String> {
-    let sql = list_tables_sql(database, filter, limit, offset, object_types);
+    let sql = list_tables_sql(database, filter, limit, offset, object_types, table_name_filter);
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let result = match conn.query_iter(&sql).await {
         Ok(result) => result,
@@ -1484,9 +1816,9 @@ pub async fn list_tables_filtered(
             log::debug!(
                 "Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES failed: {err}"
             );
-            return list_tables_show(pool, database)
-                .await
-                .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types));
+            return list_tables_show_filtered(pool, database, filter).await.map(|tables| {
+                filter_list_tables_fallback(tables, filter, limit, offset, object_types, table_name_filter)
+            });
         }
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -1507,21 +1839,14 @@ pub async fn list_tables_filtered(
         })
         .collect();
 
-    if tables.is_empty() && should_fallback_empty_list_tables(filter) {
+    if tables.is_empty() {
         log::debug!("Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables");
-        return list_tables_show(pool, database)
+        return list_tables_show_filtered(pool, database, filter)
             .await
-            .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types));
+            .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types, table_name_filter));
     }
 
     Ok(tables)
-}
-
-fn should_fallback_empty_list_tables(filter: Option<&str>) -> bool {
-    // MySQL proxies such as MyCat can return an empty information_schema.TABLES
-    // even when SHOW TABLES exposes objects. Avoid the fallback for active
-    // searches so normal MySQL "no match" queries do not rescan large schemas.
-    !filter.is_some_and(|filter| !filter.trim().is_empty())
 }
 
 fn filter_list_tables_fallback(
@@ -1530,6 +1855,7 @@ fn filter_list_tables_fallback(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> Vec<TableInfo> {
     let filter = filter.unwrap_or("").trim();
     let normalized_object_types: Vec<String> = object_types
@@ -1548,6 +1874,7 @@ fn filter_list_tables_fallback(
             crate::sql::contains_or_fuzzy_match(&table.name, filter)
                 || table.comment.as_deref().is_some_and(|comment| crate::sql::contains_or_fuzzy_match(comment, filter))
         })
+        .filter(|table| table_name_filter_matches(&table.name, table_name_filter))
         .filter(|table| if table.table_type.eq_ignore_ascii_case("VIEW") { wants_view } else { wants_table })
         .skip(offset.unwrap_or(0))
         .take(limit.unwrap_or(usize::MAX))
@@ -1560,6 +1887,7 @@ fn list_tables_sql(
     limit: Option<usize>,
     offset: Option<usize>,
     object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
 ) -> String {
     let mut sql = format!(
         "SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = {}",
@@ -1603,6 +1931,7 @@ fn list_tables_sql(
             ));
         }
     }
+    append_table_name_filter_sql(&mut sql, table_name_filter);
     sql.push_str(" ORDER BY TABLE_NAME");
     if let Some(limit) = limit {
         sql.push_str(&format!(" LIMIT {}", limit));
@@ -1611,6 +1940,34 @@ fn list_tables_sql(
         sql.push_str(&format!(" OFFSET {}", offset));
     }
     sql
+}
+
+fn quote_table_name_like_pattern(pattern: &str) -> String {
+    quote_value(&pattern.trim().to_ascii_lowercase())
+}
+
+fn append_table_name_filter_sql(sql: &mut String, filter: Option<&TableNameFilter>) {
+    let Some(filter) = filter.filter(|filter| !filter.is_empty()) else {
+        return;
+    };
+    let include_patterns: Vec<&str> =
+        filter.include_patterns.iter().map(|pattern| pattern.trim()).filter(|pattern| !pattern.is_empty()).collect();
+    let exclude_patterns: Vec<&str> =
+        filter.exclude_patterns.iter().map(|pattern| pattern.trim()).filter(|pattern| !pattern.is_empty()).collect();
+    if !include_patterns.is_empty() {
+        let clauses = include_patterns
+            .iter()
+            .map(|pattern| format!("LOWER(TABLE_NAME) LIKE {} ESCAPE '\\\\'", quote_table_name_like_pattern(pattern)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        sql.push_str(&format!(" AND ({clauses})"));
+    }
+    for pattern in exclude_patterns {
+        sql.push_str(&format!(
+            " AND LOWER(TABLE_NAME) NOT LIKE {} ESCAPE '\\\\'",
+            quote_table_name_like_pattern(pattern)
+        ));
+    }
 }
 
 pub async fn completion_assistant_search(
@@ -1646,6 +2003,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1671,6 +2029,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1696,6 +2055,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: get_opt_str(&row, "data_type"),
+                signature: None,
             });
         }
     }
@@ -1717,6 +2077,7 @@ pub async fn completion_assistant_search(
                         .map(|s| fix_potential_double_encoding(&s))
                         .filter(|s| !s.is_empty()),
                     data_type: Some(get_str_by_name(&row, "data_type")),
+                    signature: None,
                 });
             }
         }
@@ -1866,11 +2227,33 @@ struct TableStatusMeta {
 }
 
 async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<HashMap<String, TableStatusMeta>, String> {
-    let sql = if database.trim().is_empty() {
-        "SHOW TABLE STATUS".to_string()
-    } else {
-        format!("SHOW TABLE STATUS FROM {}", quote_identifier(database))
-    };
+    query_table_status_show(pool, database, None).await
+}
+
+async fn list_table_status_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+) -> Result<HashMap<String, TableStatusMeta>, String> {
+    match query_table_status_show(pool, database, filter).await {
+        Ok(status) => Ok(status),
+        Err(filtered_err) => {
+            log::debug!(
+                "Falling back to unfiltered SHOW TABLE STATUS for database `{database}` after filtered SHOW failed: {filtered_err}"
+            );
+            query_table_status_show(pool, database, None)
+                .await
+                .map(|status| filter_table_status_fallback(status, filter))
+        }
+    }
+}
+
+async fn query_table_status_show(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+) -> Result<HashMap<String, TableStatusMeta>, String> {
+    let sql = show_table_status_sql(database, filter);
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -1892,17 +2275,53 @@ async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<Hash
         .collect())
 }
 
+fn filter_table_status_fallback(
+    status: HashMap<String, TableStatusMeta>,
+    filter: Option<&str>,
+) -> HashMap<String, TableStatusMeta> {
+    let filter = filter.unwrap_or("").trim();
+    status
+        .into_iter()
+        .filter(|(name, meta)| {
+            crate::sql::contains_or_fuzzy_match(name, filter)
+                || meta.comment.as_deref().is_some_and(|comment| crate::sql::contains_or_fuzzy_match(comment, filter))
+        })
+        .collect()
+}
+
 async fn list_table_names_show(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
-    let sql = show_tables_sql(database, true);
+    list_table_names_show_filtered(pool, database, None, &[]).await
+}
+
+async fn list_table_names_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+    exact_names: &[String],
+) -> Result<Vec<TableInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let rows: Vec<mysql_async::Row> = match conn.query_iter(&sql).await {
-        Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
-        Err(_) => {
-            let sql = show_tables_sql(database, false);
-            let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-            result.collect_and_drop().await.map_err(|e| e.to_string())?
+    let mut last_error = None;
+    let mut rows = None;
+    for attempt in show_tables_query_attempts(database, filter, exact_names) {
+        match conn.query_iter(&attempt.sql).await {
+            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+                Ok(result_rows) => {
+                    rows = Some(result_rows);
+                    break;
+                }
+                Err(err) => last_error = Some(err.to_string()),
+            },
+            Err(err) => {
+                if attempt.server_filtered {
+                    log::debug!(
+                        "Filtered SHOW TABLES is unsupported for database `{database}`; trying a compatible SHOW form: {err}"
+                    );
+                }
+                last_error = Some(err.to_string());
+            }
         }
-    };
+    }
+    let rows = rows.ok_or_else(|| last_error.unwrap_or_else(|| "SHOW TABLES returned no result".to_string()))?;
     let mut tables: Vec<TableInfo> = rows
         .iter()
         .filter_map(|row| {
@@ -1924,13 +2343,99 @@ async fn list_table_names_show(pool: &MySqlPool, database: &str) -> Result<Vec<T
     Ok(tables)
 }
 
-fn show_tables_sql(database: &str, full: bool) -> String {
+struct ShowTablesQueryAttempt {
+    sql: String,
+    server_filtered: bool,
+}
+
+fn show_tables_query_attempts(
+    database: &str,
+    filter: Option<&str>,
+    exact_names: &[String],
+) -> Vec<ShowTablesQueryAttempt> {
+    // DBeaver-style server filtering is preferred for large schemas, but some
+    // MySQL proxies only implement bare SHOW TABLES forms.
+    let filtered_full = show_tables_filtered_sql(database, true, filter, exact_names);
+    let filtered_plain = show_tables_filtered_sql(database, false, filter, exact_names);
+    let unfiltered_full = show_tables_filtered_sql(database, true, None, &[]);
+    let unfiltered_plain = show_tables_filtered_sql(database, false, None, &[]);
+    let has_server_filter = filtered_full != unfiltered_full;
+    let mut attempts = Vec::with_capacity(if has_server_filter { 4 } else { 2 });
+    if has_server_filter {
+        attempts.push(ShowTablesQueryAttempt { sql: filtered_full, server_filtered: true });
+        attempts.push(ShowTablesQueryAttempt { sql: filtered_plain, server_filtered: true });
+    }
+    attempts.push(ShowTablesQueryAttempt { sql: unfiltered_full, server_filtered: false });
+    attempts.push(ShowTablesQueryAttempt { sql: unfiltered_plain, server_filtered: false });
+    attempts
+}
+
+fn show_tables_filtered_sql(database: &str, full: bool, filter: Option<&str>, exact_names: &[String]) -> String {
     let prefix = if full { "SHOW FULL TABLES" } else { "SHOW TABLES" };
-    if database.trim().is_empty() {
+    let mut sql = if database.trim().is_empty() {
         prefix.to_string()
     } else {
         format!("{prefix} FROM {}", quote_identifier(database))
+    };
+    let conditions = show_tables_filter_conditions(database, filter, exact_names);
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" OR "));
     }
+    sql
+}
+
+fn show_table_status_sql(database: &str, filter: Option<&str>) -> String {
+    let mut sql = if database.trim().is_empty() {
+        "SHOW TABLE STATUS".to_string()
+    } else {
+        format!("SHOW TABLE STATUS FROM {}", quote_identifier(database))
+    };
+    if let Some(filter) = filter.map(str::trim).filter(|filter| !filter.is_empty()) {
+        let patterns = mysql_fallback_like_patterns(filter);
+        let conditions = patterns
+            .iter()
+            .flat_map(|pattern| {
+                [
+                    format!("Name LIKE {} ESCAPE '\\\\'", quote_value(pattern)),
+                    format!("Comment LIKE {} ESCAPE '\\\\'", quote_value(pattern)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" OR "));
+    }
+    sql
+}
+
+fn show_tables_filter_conditions(database: &str, filter: Option<&str>, exact_names: &[String]) -> Vec<String> {
+    if database.trim().is_empty() {
+        // Catalogless services do not expose a stable Tables_in_<db> column name.
+        // Preserve the existing compatible SHOW syntax; local filtering still
+        // guarantees correctness for these uncommon endpoints.
+        return Vec::new();
+    }
+    let table_name_column = quote_identifier(&format!("Tables_in_{database}"));
+    let mut conditions = filter
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .into_iter()
+        .flat_map(mysql_fallback_like_patterns)
+        .map(|pattern| format!("{table_name_column} LIKE {} ESCAPE '\\\\'", quote_value(&pattern)))
+        .collect::<Vec<_>>();
+    conditions.extend(exact_names.iter().map(|name| format!("{table_name_column} = {}", quote_value(name))));
+    conditions
+}
+
+fn mysql_fallback_like_patterns(filter: &str) -> Vec<String> {
+    let escaped = filter.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let mut patterns = vec![format!("%{escaped}%")];
+    if crate::sql::fuzzy_filter_enabled(filter) {
+        patterns.push(crate::sql::fuzzy_like_pattern_with_escape(filter, |value| {
+            value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        }));
+    }
+    patterns
 }
 
 async fn list_tables_show_with_status(
@@ -1954,14 +2459,161 @@ async fn list_tables_show_with_status(
     Ok((tables, status))
 }
 
+async fn list_tables_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    filter: Option<&str>,
+) -> Result<Vec<TableInfo>, String> {
+    if filter.is_none_or(|filter| filter.trim().is_empty()) {
+        return list_tables_show(pool, database).await;
+    }
+
+    let status = match list_table_status_show_filtered(pool, database, filter).await {
+        Ok(status) => status,
+        Err(err) => {
+            log::warn!("Skipping filtered table status for database `{}`: {}", database, err);
+            HashMap::new()
+        }
+    };
+    let exact_names = status.keys().cloned().collect::<Vec<_>>();
+    // DBeaver also uses SHOW FULL TABLES with server-side WHERE/LIKE filtering.
+    // Keeping the filter on the SHOW query avoids turning a normal empty search
+    // into an unbounded scan while preserving TABLE/VIEW classification.
+    let mut tables = list_table_names_show_filtered(pool, database, filter, &exact_names).await?;
+    for table in &mut tables {
+        if let Some(meta) = status.get(&table.name) {
+            table.comment = meta.comment.clone();
+        }
+    }
+    Ok(tables)
+}
+
 pub async fn list_tables_show(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
     list_tables_show_with_status(pool, database).await.map(|(tables, _)| tables)
+}
+
+fn starrocks_materialized_views_sql(database: &str) -> String {
+    format!(
+        "SELECT TABLE_NAME FROM information_schema.materialized_views WHERE TABLE_SCHEMA = {}",
+        quote_value(database)
+    )
+}
+
+/// Fallback DDL source for StarRocks materialized views when `SHOW CREATE
+/// MATERIALIZED VIEW` fails (e.g. on versions predating starrocks/starrocks#73396,
+/// merged 2026-05-19, which reject the statement for sync MVs with "Table not
+/// found" because sync MVs are not registered as separate Tables).
+///
+/// `information_schema.materialized_views` is documented as the authoritative
+/// list of all materialized views, with a column distinguishing SYNC from
+/// ASYNC. See
+/// https://docs.starrocks.io/docs/sql-reference/information_schema/materialized_views/.
+///
+/// Made `pub(super)` so the dispatch site in `schema::mysql_object_source` can
+/// rely on it without rewriting the escape convention.
+pub(crate) fn mysql_materialized_view_definition_sql(database: &str, name: &str) -> String {
+    format!(
+        "SELECT MATERIALIZED_VIEW_DEFINITION \
+         FROM information_schema.materialized_views \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         LIMIT 1",
+        quote_value(database),
+        quote_value(name)
+    )
+}
+
+async fn list_starrocks_materialized_view_names(pool: &MySqlPool, database: &str) -> Result<HashSet<String>, String> {
+    let sql = starrocks_materialized_views_sql(database);
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect())
+}
+
+fn merge_starrocks_materialized_views(
+    tables: &mut Vec<TableInfo>,
+    materialized_view_names: Result<HashSet<String>, String>,
+    database: &str,
+) {
+    let materialized_view_names = match materialized_view_names {
+        Ok(names) => names,
+        Err(err) => {
+            // Older StarRocks versions and restricted accounts may not expose this
+            // information_schema view; keep the base SHOW TABLES result usable.
+            log::warn!("Skipping materialized view classification for StarRocks database `{database}`: {err}");
+            return;
+        }
+    };
+
+    // Snapshot the names already returned by SHOW FULL TABLES so the second pass can
+    // append MVs that are absent from SHOW FULL TABLES without duplicating rows.
+    let known_names: HashSet<String> = tables.iter().map(|table| table.name.clone()).collect();
+
+    // Step 1 — reclassify: rows whose name appears in `information_schema.materialized_views`
+    // are MVs even when SHOW FULL TABLES labeled them as VIEW (sync MVs) or BASE TABLE
+    // (async MVs). See https://docs.starrocks.io/docs/sql-reference/information_schema/materialized_views/
+    // for the authoritative distinction between the two MV kinds.
+    for table in tables.iter_mut() {
+        if materialized_view_names.contains(&table.name) {
+            table.table_type = "MATERIALIZED_VIEW".to_string();
+        }
+    }
+
+    // Step 2 — union: on StarRocks versions predating starrocks/starrocks#73396 (merged
+    // 2026-05-19), sync MVs "are not registered as separate Tables" so SHOW FULL TABLES
+    // omits them entirely. Append those rows from the system view so they appear in the
+    // sidebar and the DDL source path has something to resolve. Sort names so that
+    // the resulting table order is deterministic across runs.
+    let mut materialized_view_names_sorted: Vec<&String> = materialized_view_names.iter().collect();
+    materialized_view_names_sorted.sort();
+    for name in materialized_view_names_sorted {
+        if !known_names.contains(name.as_str()) {
+            tables.push(TableInfo {
+                name: name.clone(),
+                table_type: "MATERIALIZED_VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            });
+        }
+    }
+}
+
+async fn list_starrocks_tables_with_status(
+    pool: &MySqlPool,
+    database: &str,
+) -> Result<(Vec<TableInfo>, HashMap<String, TableStatusMeta>), String> {
+    let (tables, materialized_view_names) = tokio::join!(
+        list_tables_show_with_status(pool, database),
+        list_starrocks_materialized_view_names(pool, database)
+    );
+    let (mut tables, status) = tables?;
+    merge_starrocks_materialized_views(&mut tables, materialized_view_names, database);
+    Ok((tables, status))
+}
+
+pub async fn list_starrocks_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
+    list_starrocks_tables_with_status(pool, database).await.map(|(tables, _)| tables)
 }
 
 fn requested_object_type(object_types: Option<&[String]>, object_type: &str) -> bool {
     object_types.is_none_or(|types| {
         types.is_empty() || types.iter().any(|candidate| candidate.eq_ignore_ascii_case(object_type))
     })
+}
+
+fn wants_table_objects(object_types: Option<&[String]>) -> bool {
+    requested_object_type(object_types, "TABLE") || requested_object_type(object_types, "VIEW")
+}
+
+fn wants_routine_objects(object_types: Option<&[String]>) -> bool {
+    requested_object_type(object_types, "PROCEDURE") || requested_object_type(object_types, "FUNCTION")
 }
 
 fn sql_pagination(limit: Option<usize>, offset: Option<usize>) -> String {
@@ -2042,6 +2694,7 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         name: get_str_by_name(row, "object_name"),
         object_type: get_str_by_name(row, "object_type"),
         schema: Some(database.to_string()),
+        valid: None,
         signature: None,
         comment: get_opt_str(row, "object_comment")
             .map(|s| fix_potential_double_encoding(&s))
@@ -2085,36 +2738,49 @@ pub async fn list_objects(
     offset: Option<usize>,
 ) -> Result<PagedObjectList, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let wants_tables = requested_object_type(object_types, "TABLE") || requested_object_type(object_types, "VIEW");
-    let wants_routines =
-        requested_object_type(object_types, "PROCEDURE") || requested_object_type(object_types, "FUNCTION");
+    let wants_tables = wants_table_objects(object_types);
+    let wants_routines = wants_routine_objects(object_types);
     let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
     let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
     let mut objects = Vec::new();
 
     if wants_tables {
         let tables_sql = list_tables_objects_sql(database, object_types, query_limit, query_offset);
-        let result = match conn.query_iter(&tables_sql).await {
-            Ok(result) => result,
+        let table_rows = match conn.query_iter(&tables_sql).await {
+            Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+                Ok(rows) if !rows.is_empty() => Some(rows),
+                Ok(_) => {
+                    log::debug!(
+                        "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES returned no named tables"
+                    );
+                    None
+                }
+                Err(err) => {
+                    log::debug!(
+                        "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES rows failed: {err}"
+                    );
+                    None
+                }
+            },
             Err(err) => {
                 log::debug!(
                     "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES failed: {err}"
                 );
-                return list_table_objects_show(pool, database)
-                    .await
-                    .map(|objects| PagedObjectList { objects, paging_applied: false });
+                None
             }
         };
-        let table_rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-        if table_rows.is_empty() && !wants_routines {
-            log::debug!(
-                "Falling back to SHOW TABLES for object browser database `{database}` after information_schema.TABLES returned no named tables"
+        if let Some(table_rows) = table_rows {
+            objects.extend(table_rows.iter().map(|row| row_to_object(row, database)));
+        } else {
+            drop(conn);
+            objects.extend(
+                list_table_objects_show_filtered(pool, database, object_types, query_limit, query_offset).await?,
             );
-            return list_table_objects_show(pool, database)
-                .await
-                .map(|objects| PagedObjectList { objects, paging_applied: false });
+            if !wants_routines {
+                return Ok(PagedObjectList { objects, paging_applied });
+            }
+            conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
         }
-        objects.extend(table_rows.iter().map(|row| row_to_object(row, database)));
     }
 
     // Routines are queried separately: some MySQL-compatible servers (sharding proxies,
@@ -2169,14 +2835,78 @@ pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result
     let (tables, routines) =
         tokio::join!(list_tables_show_with_status(pool, database), list_routine_objects(pool, database));
     let (tables, status) = tables?;
-    let mut objects: Vec<ObjectInfo> = tables
+    let mut objects = table_infos_to_objects(tables, &status, database);
+
+    match routines {
+        Ok(routines) => objects.extend(routines),
+        Err(err) => log::warn!("Skipping routines for database `{}` in object browser: {}", database, err),
+    }
+
+    Ok(objects)
+}
+
+async fn list_table_objects_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<ObjectInfo>, String> {
+    let (tables, status) = list_tables_show_with_status(pool, database).await?;
+    Ok(filter_table_objects_fallback(table_infos_to_objects(tables, &status, database), object_types, limit, offset))
+}
+
+fn filter_table_objects_fallback(
+    objects: Vec<ObjectInfo>,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Vec<ObjectInfo> {
+    let wants_table = requested_object_type(object_types, "TABLE");
+    let wants_view = requested_object_type(object_types, "VIEW");
+    objects
+        .into_iter()
+        .filter(|object| if object.object_type.eq_ignore_ascii_case("VIEW") { wants_view } else { wants_table })
+        .skip(offset.unwrap_or(0))
+        .take(limit.unwrap_or(usize::MAX))
+        .collect()
+}
+
+pub async fn list_starrocks_table_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
+    let (tables, routines) =
+        tokio::join!(list_starrocks_tables_with_status(pool, database), list_routine_objects(pool, database));
+    let (tables, status) = tables?;
+    let mut objects = table_infos_to_objects(tables, &status, database);
+
+    match routines {
+        Ok(routines) => objects.extend(routines),
+        Err(err) => log::warn!("Skipping routines for database `{}` in object browser: {}", database, err),
+    }
+
+    Ok(objects)
+}
+
+fn table_infos_to_objects(
+    tables: Vec<TableInfo>,
+    status: &HashMap<String, TableStatusMeta>,
+    database: &str,
+) -> Vec<ObjectInfo> {
+    tables
         .into_iter()
         .map(|table| {
             let meta = status.get(&table.name);
             ObjectInfo {
                 name: table.name,
-                object_type: if table.table_type.eq_ignore_ascii_case("VIEW") { "VIEW" } else { "TABLE" }.to_string(),
+                object_type: if table.table_type.eq_ignore_ascii_case("MATERIALIZED_VIEW") {
+                    "MATERIALIZED_VIEW"
+                } else if table.table_type.eq_ignore_ascii_case("VIEW") {
+                    "VIEW"
+                } else {
+                    "TABLE"
+                }
+                .to_string(),
                 schema: Some(database.to_string()),
+                valid: None,
                 signature: None,
                 comment: table.comment,
                 created_at: meta.and_then(|meta| meta.created_at.clone()),
@@ -2185,14 +2915,7 @@ pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result
                 parent_name: table.parent_name,
             }
         })
-        .collect();
-
-    match routines {
-        Ok(routines) => objects.extend(routines),
-        Err(err) => log::warn!("Skipping routines for database `{}` in object browser: {}", database, err),
-    }
-
-    Ok(objects)
+        .collect()
 }
 
 async fn list_routine_objects(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectInfo>, String> {
@@ -2232,13 +2955,37 @@ fn columns_sql(database: &str, table: &str) -> String {
     format!(
         "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
          c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
-         c.CHARACTER_SET_NAME, c.COLLATION_NAME \
+         c.CHARACTER_SET_NAME, c.COLLATION_NAME, t.TABLE_COLLATION \
          FROM information_schema.COLUMNS c \
+         LEFT JOIN information_schema.TABLES t \
+           ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
          WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
          ORDER BY c.ORDINAL_POSITION",
         quote_value(database),
         quote_value(table),
     )
+}
+
+fn table_collation_sql(database: &str, table: &str) -> String {
+    format!(
+        "SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} LIMIT 1",
+        quote_value(database),
+        quote_value(table),
+    )
+}
+
+fn normalize_mysql_column_charset_metadata(columns: &mut [ColumnInfo], table_collation: Option<&str>) {
+    let Some(table_collation) = table_collation.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    for column in columns {
+        if column.collation.as_deref().is_some_and(|value| value.eq_ignore_ascii_case(table_collation)) {
+            // MySQL reports effective values and does not preserve whether an
+            // equivalent table-default collation was explicitly written.
+            column.character_set = None;
+            column.collation = None;
+        }
+    }
 }
 
 /// Attempt to reverse CP1252→UTF-8 double-encoding.
@@ -2250,7 +2997,7 @@ fn columns_sql(database: &str, table: &str) -> String {
 /// Example: "主键" → UTF-8 bytes [E4 B8 BB E9 94 AE]
 ///   → each byte → CP1252 char → UTF-8 re-encoded → garbled text
 ///   → reversal: map each char back to its CP1252 byte, decode as UTF-8
-fn fix_potential_double_encoding(s: &str) -> String {
+pub(super) fn fix_potential_double_encoding(s: &str) -> String {
     // Map each character to its CP1252 byte value
     let mut bytes = Vec::with_capacity(s.len());
     for c in s.chars() {
@@ -2378,7 +3125,9 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    let columns: Vec<ColumnInfo> = rows
+    let table_collation =
+        rows.iter().find_map(|row| get_opt_str(row, "TABLE_COLLATION").filter(|value| !value.trim().is_empty()));
+    let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
             let name = get_str_by_name(row, "COLUMN_NAME").trim().to_string();
@@ -2422,6 +3171,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
         return get_columns_show(pool, database, table).await;
     }
 
+    normalize_mysql_column_charset_metadata(&mut columns, table_collation.as_deref());
     Ok(columns)
 }
 
@@ -2436,7 +3186,12 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
             result.collect_and_drop().await.map_err(|e| e.to_string())?
         }
     };
-    Ok(rows
+    let table_collation = if database.trim().is_empty() {
+        None
+    } else {
+        query_first_nonblank_string(&mut conn, &table_collation_sql(database, table)).await
+    };
+    let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
             let name = get_str_by_name(row, "Field").trim().to_string();
@@ -2466,7 +3221,9 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
                 collation,
             })
         })
-        .collect())
+        .collect();
+    normalize_mysql_column_charset_metadata(&mut columns, table_collation.as_deref());
+    Ok(columns)
 }
 
 fn show_columns_sql(database: &str, table: &str, full: bool) -> String {
@@ -2553,7 +3310,7 @@ fn parse_usize_token(sql: &str, i: &mut usize) -> Option<usize> {
     std::str::from_utf8(&bytes[start..*i]).ok()?.parse().ok()
 }
 
-fn mysql_keyword_at(sql: &str, i: usize, keyword: &str) -> bool {
+pub(super) fn mysql_keyword_at(sql: &str, i: usize, keyword: &str) -> bool {
     let end = i + keyword.len();
     if end > sql.len() {
         return false;
@@ -2567,11 +3324,11 @@ fn mysql_keyword_at(sql: &str, i: usize, keyword: &str) -> bool {
         && (end == sql.len() || !is_mysql_identifier_byte(sql.as_bytes()[end]))
 }
 
-fn is_mysql_identifier_byte(byte: u8) -> bool {
+pub(super) fn is_mysql_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
-fn skip_mysql_quoted(sql: &str, start: usize, quote: u8) -> usize {
+pub(super) fn skip_mysql_quoted(sql: &str, start: usize, quote: u8) -> usize {
     let bytes = sql.as_bytes();
     let mut i = start + 1;
     while i < bytes.len() {
@@ -2724,11 +3481,11 @@ async fn execute_result_set_with_text_protocol_on_conn(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
 
     if should_collect_text_result_set(sql, row_limit, max_rows) {
         let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -2749,6 +3506,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             truncated,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 
@@ -2783,6 +3541,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -2806,8 +3565,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -2840,6 +3598,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -2913,8 +3672,7 @@ async fn stream_query_result_text(
         return Ok(0);
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
     on_item(MySqlQueryStreamItem::Columns { columns, column_types })?;
 
     let mut stream = result
@@ -2952,8 +3710,7 @@ async fn stream_query_result_prepared(
     if columns.is_empty() {
         return Ok(0);
     }
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
     on_item(MySqlQueryStreamItem::Columns { columns, column_types })?;
 
     let mut stream = result
@@ -3083,6 +3840,7 @@ pub async fn execute_query_on_conn_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -3094,8 +3852,11 @@ fn prefers_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
 }
 
 fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
-    starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH", "CALL"])
-        || dialect.supports_admin_show_results && is_admin_show_query(sql)
+    starts_with_executable_sql_keyword_for_database(
+        sql,
+        &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH", "CALL"],
+        DatabaseType::Mysql,
+    ) || dialect.supports_admin_show_results && is_admin_show_query(sql)
 }
 
 fn requires_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
@@ -3103,12 +3864,11 @@ fn requires_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
         return true;
     }
 
-    if !starts_with_executable_sql_keyword(sql, &["SHOW"]) {
+    if !starts_with_executable_sql_keyword_for_database(sql, &["SHOW"], DatabaseType::Mysql) {
         return false;
     }
 
-    let tokens =
-        sql.trim().trim_end_matches(';').split_whitespace().map(|token| token.to_ascii_lowercase()).collect::<Vec<_>>();
+    let tokens = leading_sql_word_tokens(sql, 3);
     if tokens.len() >= 2 && tokens[0] == "show" && tokens[1] == "grants" {
         return true;
     }
@@ -3182,72 +3942,75 @@ fn skip_sql_whitespace_and_comments(bytes: &[u8], mut i: usize) -> usize {
     }
 }
 
-pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
-    let sql = format!(
-        "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns, \
-         MIN(NON_UNIQUE) = 0 AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary, \
-         INDEX_TYPE, MAX(NULLIF(INDEX_COMMENT, '')) AS INDEX_COMMENT \
+fn mysql_list_indexes_sql(database: &str, table: &str, include_expression: bool) -> String {
+    let expression_column = if include_expression { "EXPRESSION, " } else { "" };
+    format!(
+        "SELECT INDEX_NAME, COLUMN_NAME, {expression_column}SEQ_IN_INDEX, NON_UNIQUE, INDEX_TYPE, INDEX_COMMENT \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-         GROUP BY INDEX_NAME, INDEX_TYPE \
-         ORDER BY INDEX_NAME",
+         ORDER BY INDEX_NAME, SEQ_IN_INDEX",
         quote_value(database),
         quote_value(table),
-    );
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let cols_str = get_str_by_name(row, "columns");
-            IndexInfo {
-                name: get_str_by_name(row, "INDEX_NAME"),
-                columns: cols_str.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect(),
-                is_unique: row.get::<bool, &str>("is_unique").unwrap_or(false),
-                is_primary: row.get::<bool, &str>("is_primary").unwrap_or(false),
-                filter: None,
-                index_type: Some(get_str_by_name(row, "INDEX_TYPE")),
-                included_columns: None,
-                comment: get_opt_str(row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
-            }
-        })
-        .collect())
+    )
 }
 
-pub async fn list_doris_family_indexes(
-    pool: &MySqlPool,
-    database: &str,
-    table: &str,
-) -> Result<Vec<IndexInfo>, String> {
-    let statistics_result = list_indexes(pool, database, table).await;
-    let mut indexes = match &statistics_result {
-        Ok(indexes) => indexes.clone(),
-        Err(err) => {
-            log::debug!(
-                "Falling back to SHOW CREATE TABLE for Doris-family indexes on `{database}`.`{table}` after information_schema.STATISTICS failed: {err}"
-            );
-            Vec::new()
-        }
-    };
+fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> bool {
+    matches!(error, mysql_async::Error::Server(server_error) if server_error.code == 1054)
+}
 
-    match show_create_table_ddl(pool, database, table).await {
-        Ok(ddl) => {
-            merge_index_infos(&mut indexes, doris_indexes_from_create_table_ddl(&ddl));
-            Ok(indexes)
+pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let expression_sql = mysql_list_indexes_sql(database, table, true);
+    let legacy_sql = mysql_list_indexes_sql(database, table, false);
+    let (result, include_expression) = match conn.query_iter(&expression_sql).await {
+        Ok(result) => (result, true),
+        Err(error) if mysql_statistics_expression_is_unsupported(&error) => {
+            // MySQL 5.7 and older compatible servers do not expose EXPRESSION; keep the legacy metadata path.
+            log::debug!("MySQL index expressions are unavailable, retrying without EXPRESSION: {error}");
+            (conn.query_iter(&legacy_sql).await.map_err(|e| e.to_string())?, false)
         }
-        Err(ddl_err) => {
-            if indexes.is_empty() {
-                if let Err(statistics_err) = statistics_result {
-                    return Err(format!(
-                        "{statistics_err}; SHOW CREATE TABLE fallback failed for Doris-family indexes: {ddl_err}"
-                    ));
-                }
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut indexes = Vec::new();
+    let mut index_positions = HashMap::new();
+
+    result
+        .for_each_and_drop(|row| {
+            let name = get_str_by_name(&row, "INDEX_NAME");
+            let index_position = if let Some(index_position) = index_positions.get(&name) {
+                *index_position
+            } else {
+                let index_position = indexes.len();
+                index_positions.insert(name.clone(), index_position);
+                indexes.push(IndexInfo {
+                    name: name.clone(),
+                    columns: Vec::new(),
+                    is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
+                    is_primary: name == "PRIMARY",
+                    filter: None,
+                    index_type: Some(get_str_by_name(&row, "INDEX_TYPE")),
+                    included_columns: None,
+                    comment: get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
+                });
+                index_position
+            };
+
+            let index_part = if include_expression {
+                get_opt_str(&row, "EXPRESSION")
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|expression| format!("({})", expression.trim()))
+                    .or_else(|| get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty()))
+            } else {
+                get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty())
+            };
+            if let Some(index_part) = index_part {
+                indexes[index_position].columns.push(index_part);
             }
-            Ok(indexes)
-        }
-    }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(indexes)
 }
 
 pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str) -> Result<String, String> {
@@ -3258,463 +4021,8 @@ pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str
     let row = rows.first().ok_or("DDL not found")?;
     row.get_opt::<String, usize>(1)
         .and_then(|result| result.ok())
-        .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(1)
-                .and_then(|result| result.ok())
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-        })
+        .or_else(|| row.get_opt::<Vec<u8>, usize>(1).and_then(|result| result.ok()).map(bytes_to_string_lossy))
         .ok_or_else(|| "Failed to read DDL".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Doris / StarRocks multi-catalog support.
-//
-// These engines expose external catalogs (iceberg, hive, jdbc, ...) alongside
-// the native `internal` catalog via `SHOW CATALOGS`. The functions below address
-// objects in a specific catalog using 3-part qualified names
-// (`<catalog>.<database>.<table>`), which the engines accept directly without
-// needing to `SWITCH` the session catalog.
-// ---------------------------------------------------------------------------
-
-/// Build a 2-part qualified identifier `` `<catalog>`.`<database>` ``.
-fn doris_catalog_database_ref(catalog: &str, database: &str) -> String {
-    format!("{}.{}", quote_identifier(catalog), quote_identifier(database))
-}
-
-/// Build a 3-part qualified identifier `` `<catalog>`.`<database>`.`<table>` ``.
-fn doris_catalog_table_ref(catalog: &str, database: &str, table: &str) -> String {
-    format!("{}.{}.{}", quote_identifier(catalog), quote_identifier(database), quote_identifier(table))
-}
-
-/// `SHOW CATALOGS` → list of catalogs visible to the current user.
-///
-/// Column layouts differ between engines: Doris exposes `CatalogName` (with
-/// `CatalogId`/`IsCurrent`/`CreateTime`/`LastUpdateTime`), while StarRocks
-/// exposes `Catalog` (only `Type`/`Comment`, no `IsCurrent`). The name is read
-/// from either column; missing trailing columns degrade gracefully to
-/// empty/None. The built-in catalog is named `internal` in Doris and
-/// `default_catalog` in StarRocks (both with `Type=internal`); detection is
-/// type-based (see `CatalogInfo::is_internal`), not name-based.
-pub async fn list_doris_catalogs(pool: &MySqlPool) -> Result<Vec<crate::db::CatalogInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter("SHOW CATALOGS").await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let catalogs: Vec<crate::db::CatalogInfo> = rows
-        .iter()
-        .filter_map(|row| {
-            // Doris column is `CatalogName`; StarRocks column is `Catalog`.
-            let name = first_nonempty_str_by_name(row, &["CatalogName", "Catalog"]).trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let catalog_type = get_str_by_name(row, "Type").trim().to_string();
-            let is_current = {
-                let value = get_str_by_name(row, "IsCurrent").trim().to_ascii_lowercase();
-                !value.is_empty() && value != "no" && value != "false" && value != "0"
-            };
-            let comment = get_opt_str(row, "Comment").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            Some(crate::db::CatalogInfo { name, catalog_type, is_current, comment })
-        })
-        .collect();
-    Ok(normalize_doris_catalogs(catalogs))
-}
-
-/// Sort with the built-in catalog first, then the rest alphabetically by name.
-/// The built-in catalog is identified by `CatalogInfo::is_internal` (type-based)
-/// rather than by name, so StarRocks `default_catalog` sorts first just like
-/// Doris `internal`. No synthetic catalog is injected: `SHOW CATALOGS` always
-/// lists the built-in catalog on both engines, and a single-catalog result is
-/// handled by the flat-sidebar fallback in the caller.
-fn normalize_doris_catalogs(mut catalogs: Vec<crate::db::CatalogInfo>) -> Vec<crate::db::CatalogInfo> {
-    catalogs.sort_by(|a, b| match (a.is_internal(), b.is_internal()) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.cmp(&b.name),
-    });
-    catalogs
-}
-
-/// `SHOW DATABASES FROM <catalog>` → databases in the given catalog.
-pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let sql = format!("SHOW DATABASES FROM {}", quote_identifier(catalog));
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), false))
-}
-
-/// `SHOW TABLES FROM <catalog>.<database>` → tables in an external catalog.
-///
-/// External catalogs do not support `SHOW TABLE STATUS`, so comments/status are
-/// not fetched (the caller only needs names + types for browsing).
-pub async fn list_tables_show_from(pool: &MySqlPool, catalog: &str, database: &str) -> Result<Vec<TableInfo>, String> {
-    let sql = format!("SHOW TABLES FROM {}", doris_catalog_database_ref(catalog, database));
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let mut tables: Vec<TableInfo> = rows
-        .iter()
-        .filter_map(|row| {
-            let name = get_str(row, 0).trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            // SHOW FULL TABLES exposes a type column; plain SHOW TABLES does not.
-            let table_type = get_str(row, 1);
-            Some(TableInfo {
-                name,
-                table_type: if table_type.trim().is_empty() { "TABLE".to_string() } else { table_type },
-                comment: None,
-                parent_schema: None,
-                parent_name: None,
-            })
-        })
-        .collect();
-    tables.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(tables)
-}
-
-/// `SHOW COLUMNS FROM <catalog>.<database>.<table>` → columns of an external
-/// catalog table. Falls back to `DESCRIBE` if `SHOW COLUMNS` is rejected.
-pub async fn get_columns_show_from(
-    pool: &MySqlPool,
-    catalog: &str,
-    database: &str,
-    table: &str,
-) -> Result<Vec<ColumnInfo>, String> {
-    let qualified = doris_catalog_table_ref(catalog, database, table);
-    let full_sql = format!("SHOW FULL COLUMNS FROM {qualified}");
-    let plain_sql = format!("SHOW COLUMNS FROM {qualified}");
-    let describe_sql = format!("DESCRIBE {qualified}");
-    let mut conn = get_conn_with_health_check(pool).await?;
-    let rows: Vec<mysql_async::Row> = match conn.query_iter(&full_sql).await {
-        Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
-        Err(_) => match conn.query_iter(&plain_sql).await {
-            Ok(result) => result.collect_and_drop().await.map_err(|e| e.to_string())?,
-            Err(_) => {
-                let result = conn.query_iter(&describe_sql).await.map_err(|e| e.to_string())?;
-                result.collect_and_drop().await.map_err(|e| e.to_string())?
-            }
-        },
-    };
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let name = get_str_by_name(row, "Field").trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let key = get_str_by_name(row, "Key");
-            let collation = get_opt_str(row, "Collation").filter(|s| !s.is_empty());
-            Some(ColumnInfo {
-                name,
-                data_type: get_str_by_name(row, "Type"),
-                is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
-                column_default: get_opt_str(row, "Default"),
-                is_primary_key: key.eq_ignore_ascii_case("PRI"),
-                extra: get_opt_str(row, "Extra"),
-                comment: get_opt_str(row, "Comment")
-                    .map(|s| fix_potential_double_encoding(&s))
-                    .filter(|s| !s.is_empty()),
-                numeric_precision: None,
-                numeric_scale: None,
-                character_maximum_length: None,
-                enum_values: None,
-                character_set: collation
-                    .as_deref()
-                    .and_then(|c| c.split_once('_').map(|(charset, _)| charset.to_string()))
-                    .filter(|s| !s.is_empty()),
-                collation,
-            })
-        })
-        .collect())
-}
-
-/// `SHOW CREATE TABLE <catalog>.<database>.<table>` → DDL for an external
-/// catalog table.
-pub async fn show_create_table_ddl_from(
-    pool: &MySqlPool,
-    catalog: &str,
-    database: &str,
-    table: &str,
-) -> Result<String, String> {
-    let sql = format!("SHOW CREATE TABLE {}", doris_catalog_table_ref(catalog, database, table));
-    let mut conn = get_conn_with_health_check(pool).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let row = rows.first().ok_or("DDL not found")?;
-    row.get_opt::<String, usize>(1)
-        .and_then(|result| result.ok())
-        .or_else(|| {
-            row.get_opt::<Vec<u8>, usize>(1)
-                .and_then(|result| result.ok())
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-        })
-        .ok_or_else(|| "Failed to read DDL".to_string())
-}
-
-/// Best-effort index listing for an external catalog table. External catalogs
-/// generally do not expose MySQL-style index metadata via `information_schema`
-/// (that view is scoped to the internal catalog), so indexes are derived from
-/// `SHOW CREATE TABLE` parsing. Returns empty on failure (graceful degradation
-/// — indexes are informational for external tables).
-pub async fn list_doris_catalog_indexes(
-    pool: &MySqlPool,
-    catalog: &str,
-    database: &str,
-    table: &str,
-) -> Result<Vec<IndexInfo>, String> {
-    let ddl = show_create_table_ddl_from(pool, catalog, database, table).await?;
-    Ok(doris_indexes_from_create_table_ddl(&ddl))
-}
-
-fn merge_index_infos(target: &mut Vec<IndexInfo>, parsed: Vec<IndexInfo>) {
-    let mut seen_names: HashSet<String> = target.iter().map(|index| index.name.to_ascii_lowercase()).collect();
-    for index in parsed {
-        if index.columns.is_empty() {
-            continue;
-        }
-        if seen_names.contains(&index.name.to_ascii_lowercase())
-            || target.iter().any(|existing| {
-                existing.is_unique == index.is_unique
-                    && existing.is_primary == index.is_primary
-                    && existing.columns == index.columns
-            })
-        {
-            continue;
-        }
-        seen_names.insert(index.name.to_ascii_lowercase());
-        target.push(index);
-    }
-}
-
-fn doris_indexes_from_create_table_ddl(ddl: &str) -> Vec<IndexInfo> {
-    let mut indexes = Vec::new();
-    for raw_line in ddl.lines() {
-        let line = trim_ddl_definition_line(raw_line);
-        if line.is_empty() {
-            continue;
-        }
-        let upper = line.to_ascii_uppercase();
-        if upper.starts_with("PRIMARY KEY") {
-            if let Some(index) = doris_table_key_index("PRIMARY", line, true, true, "PRIMARY KEY") {
-                indexes.push(index);
-            }
-        } else if upper.starts_with("UNIQUE KEY") {
-            if let Some(index) = doris_table_key_index("UNIQUE KEY", line, true, false, "UNIQUE KEY") {
-                indexes.push(index);
-            }
-        } else if upper.starts_with("INDEX ") {
-            if let Some(index) = doris_secondary_index(line) {
-                indexes.push(index);
-            }
-        }
-    }
-    indexes
-}
-
-fn trim_ddl_definition_line(line: &str) -> &str {
-    let mut trimmed = line.trim();
-    if let Some(rest) = trimmed.strip_prefix(',') {
-        trimmed = rest.trim_start();
-    }
-    while let Some(rest) = trimmed.strip_suffix(',') {
-        trimmed = rest.trim_end();
-    }
-    trimmed
-}
-
-fn doris_table_key_index(
-    name: &str,
-    line: &str,
-    is_unique: bool,
-    is_primary: bool,
-    index_type: &str,
-) -> Option<IndexInfo> {
-    let columns = parse_mysql_index_columns(first_parenthesized_content(line)?);
-    if columns.is_empty() {
-        return None;
-    }
-    Some(IndexInfo {
-        name: name.to_string(),
-        columns,
-        is_unique,
-        is_primary,
-        filter: None,
-        index_type: Some(index_type.to_string()),
-        included_columns: None,
-        comment: None,
-    })
-}
-
-fn doris_secondary_index(line: &str) -> Option<IndexInfo> {
-    let (_, rest) = split_keyword_prefix(line, "INDEX")?;
-    let (name, after_name) = read_mysql_identifier(rest.trim_start())?;
-    let columns = parse_mysql_index_columns(first_parenthesized_content(after_name)?);
-    if columns.is_empty() {
-        return None;
-    }
-    Some(IndexInfo {
-        name,
-        columns,
-        is_unique: false,
-        is_primary: false,
-        filter: None,
-        index_type: mysql_keyword_argument(after_name, "USING").or_else(|| Some("INDEX".to_string())),
-        included_columns: None,
-        comment: mysql_quoted_string_argument(after_name, "COMMENT"),
-    })
-}
-
-fn split_keyword_prefix<'a>(line: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
-    if line.len() < keyword.len() || !line[..keyword.len()].eq_ignore_ascii_case(keyword) {
-        return None;
-    }
-    let rest = &line[keyword.len()..];
-    if !rest.is_empty() && is_mysql_identifier_byte(rest.as_bytes()[0]) {
-        return None;
-    }
-    Some((&line[..keyword.len()], rest))
-}
-
-fn read_mysql_identifier(input: &str) -> Option<(String, &str)> {
-    let input = input.trim_start();
-    if input.is_empty() {
-        return None;
-    }
-    let bytes = input.as_bytes();
-    if bytes[0] == b'`' {
-        let mut i = 1;
-        let mut value = String::new();
-        while i < bytes.len() {
-            if bytes[i] == b'`' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'`' {
-                    value.push('`');
-                    i += 2;
-                    continue;
-                }
-                return Some((value, &input[i + 1..]));
-            }
-            let ch = input[i..].chars().next()?;
-            value.push(ch);
-            i += ch.len_utf8();
-        }
-        return None;
-    }
-
-    let end = input.find(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',')).unwrap_or(input.len());
-    if end == 0 {
-        return None;
-    }
-    Some((input[..end].to_string(), &input[end..]))
-}
-
-fn first_parenthesized_content(input: &str) -> Option<&str> {
-    let bytes = input.as_bytes();
-    let mut depth = 0usize;
-    let mut start = None;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' | b'`' => {
-                i = skip_mysql_quoted(input, i, bytes[i]);
-                continue;
-            }
-            b'(' => {
-                if depth == 0 {
-                    start = Some(i + 1);
-                }
-                depth += 1;
-            }
-            b')' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    return start.map(|start| &input[start..i]);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-fn split_top_level_csv(input: &str) -> Vec<&str> {
-    let bytes = input.as_bytes();
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' | b'`' => {
-                i = skip_mysql_quoted(input, i, bytes[i]);
-                continue;
-            }
-            b'(' => depth += 1,
-            b')' if depth > 0 => depth -= 1,
-            b',' if depth == 0 => {
-                parts.push(input[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    parts.push(input[start..].trim());
-    parts
-}
-
-fn parse_mysql_index_columns(input: &str) -> Vec<String> {
-    split_top_level_csv(input)
-        .into_iter()
-        .filter_map(|part| read_mysql_identifier(part).map(|(column, _)| column))
-        .filter(|column| !column.is_empty())
-        .collect()
-}
-
-fn mysql_keyword_argument(input: &str, keyword: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' | b'`' => {
-                i = skip_mysql_quoted(input, i, bytes[i]);
-                continue;
-            }
-            _ if mysql_keyword_at(input, i, keyword) => {
-                return read_mysql_identifier(&input[i + keyword.len()..]).map(|(value, _)| value);
-            }
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-fn mysql_quoted_string_argument(input: &str, keyword: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' | b'`' => {
-                i = skip_mysql_quoted(input, i, bytes[i]);
-                continue;
-            }
-            _ if mysql_keyword_at(input, i, keyword) => {
-                let rest = input[i + keyword.len()..].trim_start();
-                if rest.as_bytes().first().copied() != Some(b'\'') {
-                    return None;
-                }
-                let end = skip_mysql_quoted(rest, 0, b'\'');
-                if end <= 1 || end > rest.len() {
-                    return None;
-                }
-                return Some(rest[1..end - 1].replace("\\'", "'").replace("''", "'"));
-            }
-            _ => i += 1,
-        }
-    }
-    None
 }
 
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
@@ -3804,25 +4112,117 @@ mod tests {
     use crate::db::connection_timeout;
     use mysql_async::consts::ColumnFlags;
 
+    fn mysql_test_object(name: &str, object_type: &str) -> ObjectInfo {
+        ObjectInfo {
+            name: name.to_string(),
+            object_type: object_type.to_string(),
+            schema: Some("app".to_string()),
+            valid: None,
+            signature: None,
+            comment: None,
+            created_at: None,
+            updated_at: None,
+            parent_schema: None,
+            parent_name: None,
+        }
+    }
+
+    #[test]
+    fn bytes_to_string_reuses_valid_utf8_and_falls_back_lossy() {
+        assert_eq!(super::bytes_to_string_lossy("héllo 世界".as_bytes().to_vec()), "héllo 世界");
+        assert_eq!(super::bytes_to_string_lossy(vec![]), "");
+        // 非法 UTF-8 序列退化为替换字符，与 from_utf8_lossy 语义一致
+        let invalid = vec![0x66, 0x6f, 0xff, 0x6f];
+        assert_eq!(super::bytes_to_string_lossy(invalid.clone()), String::from_utf8_lossy(&invalid));
+    }
+
     #[test]
     fn mysql_column_type_names_map_to_friendly_names() {
         use mysql_async::consts::ColumnType::*;
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_TINY), "tinyint");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONG), "int");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONGLONG), "bigint");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_NEWDECIMAL), "decimal");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VARCHAR), "varchar");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VAR_STRING), "varchar");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_STRING), "char");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_DATETIME), "datetime");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_JSON), "json");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_BLOB), "blob");
+        let utf8 = 45u16;
+        let binary = 63u16;
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_TINY, utf8, ColumnFlags::empty(), 4)),
+            "tinyint"
+        );
+        assert_eq!(mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONG, utf8, ColumnFlags::empty(), 11)), "int");
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONGLONG, utf8, ColumnFlags::empty(), 20)),
+            "bigint"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_NEWDECIMAL, utf8, ColumnFlags::empty(), 10)),
+            "decimal"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VARCHAR, utf8, ColumnFlags::empty(), 255)),
+            "varchar"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VAR_STRING, utf8, ColumnFlags::empty(), 255)),
+            "varchar"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::empty(), 16)),
+            "char"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::ENUM_FLAG, 16)),
+            "enum"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::SET_FLAG, 16)),
+            "set"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_DATETIME, utf8, ColumnFlags::empty(), 19)),
+            "datetime"
+        );
+        assert_eq!(mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_JSON, utf8, ColumnFlags::empty(), 0)), "json");
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_BLOB, binary, ColumnFlags::BLOB_FLAG, 65_535)),
+            "blob"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_BLOB, utf8, ColumnFlags::empty(), 65_535)),
+            "text"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_TINY_BLOB, utf8, ColumnFlags::empty(), 255)),
+            "tinytext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_MEDIUM_BLOB, utf8, ColumnFlags::empty(), 16_777_215)),
+            "mediumtext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONG_BLOB, utf8, ColumnFlags::empty(), 4_294_967_295)),
+            "longtext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VAR_STRING, binary, ColumnFlags::BINARY_FLAG, 16)),
+            "varbinary"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, binary, ColumnFlags::BINARY_FLAG, 16)),
+            "binary"
+        );
     }
 
     #[test]
     fn mysql_with_queries_are_treated_as_result_sets() {
         let sql = "WITH RECURSIVE org_tree AS (SELECT 1 AS id) SELECT id FROM org_tree";
         assert!(is_result_set_query(sql, MySqlQueryDialect::default()));
+    }
+
+    #[test]
+    fn mysql_hash_comments_before_queries_preserve_result_sets_per_issue_3830() {
+        let dialect = MySqlQueryDialect::default();
+
+        assert!(is_result_set_query("# 注释\nSELECT NOW()", dialect));
+        assert!(prefers_text_protocol_query("# 注释\nSELECT NOW()", dialect));
+        assert!(requires_text_protocol_query("# inspect sessions\nSHOW PROCESSLIST", dialect));
+        assert!(!is_result_set_query("# update row\nUPDATE users SET name = 'Ada' WHERE id = 1", dialect));
     }
 
     #[test]
@@ -3913,7 +4313,7 @@ mod tests {
 
     #[test]
     fn mysql_list_tables_sql_applies_filter_limit_and_offset() {
-        let sql = list_tables_sql("app", Some("user_%"), Some(101), Some(200), None);
+        let sql = list_tables_sql("app", Some("user_%"), Some(101), Some(200), None, None);
 
         assert!(sql.contains("FROM information_schema.TABLES"));
         assert!(sql.contains("TABLE_SCHEMA = 'app'"));
@@ -3928,7 +4328,7 @@ mod tests {
 
     #[test]
     fn mysql_list_tables_sql_adds_fuzzy_filter_pattern() {
-        let sql = list_tables_sql("app", Some("sysu"), Some(100), None, None);
+        let sql = list_tables_sql("app", Some("sysu"), Some(100), None, None, None);
 
         assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%sysu%' ESCAPE '\\\\'"));
         assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%sysu%' ESCAPE '\\\\'"));
@@ -3938,7 +4338,7 @@ mod tests {
 
     #[test]
     fn mysql_list_tables_sql_skips_fuzzy_filter_for_single_character() {
-        let sql = list_tables_sql("app", Some("u"), Some(100), None, None);
+        let sql = list_tables_sql("app", Some("u"), Some(100), None, None, None);
 
         assert!(sql.contains("LOWER(TABLE_NAME) LIKE '%u%' ESCAPE '\\\\'"));
         assert!(sql.contains("LOWER(TABLE_COMMENT) LIKE '%u%' ESCAPE '\\\\'"));
@@ -3950,22 +4350,86 @@ mod tests {
     #[test]
     fn mysql_list_tables_sql_filters_table_type_before_pagination() {
         let tables = vec!["TABLE".to_string()];
-        let table_sql = list_tables_sql("app", None, Some(1000), None, Some(&tables));
+        let table_sql = list_tables_sql("app", None, Some(1000), None, Some(&tables), None);
         assert!(table_sql.contains("TABLE_TYPE <> 'VIEW'"));
         assert!(table_sql.find("TABLE_TYPE <> 'VIEW'") < table_sql.find("ORDER BY TABLE_NAME"));
         assert!(table_sql.find("ORDER BY TABLE_NAME") < table_sql.find("LIMIT 1000"));
 
         let views = vec!["VIEW".to_string()];
-        let view_sql = list_tables_sql("app", None, Some(1000), None, Some(&views));
+        let view_sql = list_tables_sql("app", None, Some(1000), None, Some(&views), None);
         assert!(view_sql.contains("TABLE_TYPE = 'VIEW'"));
     }
 
     #[test]
-    fn mysql_empty_list_tables_fallback_allows_sidebar_paging_and_type_filters() {
-        assert!(should_fallback_empty_list_tables(None));
-        assert!(should_fallback_empty_list_tables(Some("")));
-        assert!(should_fallback_empty_list_tables(Some("  ")));
-        assert!(!should_fallback_empty_list_tables(Some("missing")));
+    fn mysql_filtered_show_fallback_is_server_bounded() {
+        let tables_sql = show_tables_filtered_sql("app", true, Some("missing_%"), &[]);
+        let status_sql = show_table_status_sql("app", Some("missing_%"));
+
+        assert!(tables_sql.starts_with("SHOW FULL TABLES FROM `app` WHERE "));
+        assert!(tables_sql.contains("`Tables_in_app` LIKE"));
+        assert!(tables_sql.contains("missing"));
+        assert!(tables_sql.contains("ESCAPE"));
+        assert!(status_sql.starts_with("SHOW TABLE STATUS FROM `app` WHERE "));
+        assert!(status_sql.contains("Name LIKE"));
+        assert!(status_sql.contains("Comment LIKE"));
+        assert!(status_sql.contains("missing"));
+        assert!(status_sql.contains("ESCAPE"));
+        assert!(!tables_sql.eq(&show_tables_filtered_sql("app", true, None, &[])));
+    }
+
+    #[test]
+    fn mysql_filtered_show_fallback_attempts_bare_show_after_syntax_errors() {
+        let attempts = show_tables_query_attempts("app", Some("orders"), &[]);
+
+        assert_eq!(attempts.len(), 4);
+        assert!(attempts[0].server_filtered);
+        assert!(attempts[0].sql.starts_with("SHOW FULL TABLES FROM `app` WHERE "));
+        assert!(attempts[1].server_filtered);
+        assert!(attempts[1].sql.starts_with("SHOW TABLES FROM `app` WHERE "));
+        assert!(!attempts[2].server_filtered);
+        assert_eq!(attempts[2].sql, "SHOW FULL TABLES FROM `app`");
+        assert!(!attempts[3].server_filtered);
+        assert_eq!(attempts[3].sql, "SHOW TABLES FROM `app`");
+    }
+
+    #[test]
+    fn mysql_unfiltered_show_avoids_duplicate_attempts() {
+        let attempts = show_tables_query_attempts("app", None, &[]);
+
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].sql, "SHOW FULL TABLES FROM `app`");
+        assert_eq!(attempts[1].sql, "SHOW TABLES FROM `app`");
+        assert!(attempts.iter().all(|attempt| !attempt.server_filtered));
+    }
+
+    #[test]
+    fn mysql_unfiltered_status_fallback_is_filtered_locally_once() {
+        let status = HashMap::from([
+            (
+                "orders".to_string(),
+                TableStatusMeta { comment: Some("purchase history".to_string()), ..Default::default() },
+            ),
+            ("users".to_string(), TableStatusMeta::default()),
+        ]);
+
+        let filtered = filter_table_status_fallback(status, Some("purchase"));
+
+        assert_eq!(filtered.keys().map(String::as_str).collect::<Vec<_>>(), vec!["orders"]);
+    }
+
+    #[test]
+    fn mysql_list_tables_sql_applies_table_name_filter_before_pagination() {
+        let filter = TableNameFilter {
+            include_patterns: vec!["ads_cp%".to_string(), "user_%".to_string()],
+            exclude_patterns: vec!["%_bak".to_string()],
+        };
+        let sql = list_tables_sql("app", None, Some(100), Some(200), None, Some(&filter));
+
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE 'ads_cp%' ESCAPE '\\\\'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) LIKE 'user_%' ESCAPE '\\\\'"));
+        assert!(sql.contains("LOWER(TABLE_NAME) NOT LIKE '%_bak' ESCAPE '\\\\'"));
+        assert!(sql.find("LOWER(TABLE_NAME) LIKE").unwrap() < sql.find("ORDER BY TABLE_NAME").unwrap());
+        assert!(sql.find("ORDER BY TABLE_NAME").unwrap() < sql.find("LIMIT 100").unwrap());
     }
 
     #[test]
@@ -3993,7 +4457,8 @@ mod tests {
                 parent_name: None,
             },
         ];
-        let filtered = filter_list_tables_fallback(rows, Some("audit"), Some(1), Some(1), Some(&["TABLE".to_string()]));
+        let filtered =
+            filter_list_tables_fallback(rows, Some("audit"), Some(1), Some(1), Some(&["TABLE".to_string()]), None);
 
         assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["audit_2025"]);
 
@@ -4004,9 +4469,226 @@ mod tests {
             parent_schema: None,
             parent_name: None,
         }];
-        let filtered = filter_list_tables_fallback(rows, Some("ood"), None, None, Some(&["TABLE".to_string()]));
+        let filtered = filter_list_tables_fallback(rows, Some("ood"), None, None, Some(&["TABLE".to_string()]), None);
 
         assert_eq!(filtered.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec!["t_0001"]);
+    }
+
+    #[test]
+    fn mysql_object_browser_fallback_keeps_tables_views_and_routines_by_default() {
+        let table_objects = vec![mysql_test_object("orders", "TABLE"), mysql_test_object("orders_view", "VIEW")];
+        let mut objects = filter_table_objects_fallback(table_objects, None, None, None);
+        objects.push(mysql_test_object("refresh_orders", "PROCEDURE"));
+
+        assert_eq!(
+            objects.iter().map(|object| object.object_type.as_str()).collect::<Vec<_>>(),
+            vec!["TABLE", "VIEW", "PROCEDURE"]
+        );
+    }
+
+    #[test]
+    fn mysql_object_browser_routine_only_does_not_use_table_fallback() {
+        let object_types = vec!["PROCEDURE".to_string(), "FUNCTION".to_string()];
+
+        assert!(!wants_table_objects(Some(&object_types)));
+        assert!(wants_routine_objects(Some(&object_types)));
+        assert!(filter_table_objects_fallback(
+            vec![mysql_test_object("orders", "TABLE")],
+            Some(&object_types),
+            None,
+            None,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn mysql_object_browser_fallback_filters_type_limit_and_offset() {
+        let objects = vec![
+            mysql_test_object("a_table", "TABLE"),
+            mysql_test_object("b_view", "VIEW"),
+            mysql_test_object("c_table", "TABLE"),
+        ];
+        let object_types = vec!["TABLE".to_string()];
+
+        let filtered = filter_table_objects_fallback(objects, Some(&object_types), Some(1), Some(1));
+
+        assert_eq!(filtered.iter().map(|object| object.name.as_str()).collect::<Vec<_>>(), vec!["c_table"]);
+    }
+
+    #[test]
+    fn starrocks_materialized_views_are_classified_without_duplicating_tables() {
+        let mut tables = vec![
+            TableInfo {
+                name: "orders".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_view".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_mv".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let materialized_views = HashSet::from(["orders_mv".to_string(), "orders_mv".to_string()]);
+
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+
+        assert_eq!(tables.len(), 3);
+        assert_eq!(
+            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
+            vec![("orders", "BASE TABLE"), ("orders_view", "VIEW"), ("orders_mv", "MATERIALIZED_VIEW")]
+        );
+    }
+
+    #[test]
+    fn starrocks_async_materialized_views_reported_as_base_table_are_reclassified() {
+        // Async materialized views (StarRocks >= 2.5) appear as `BASE TABLE` in
+        // `SHOW FULL TABLES`. Classification must trust the
+        // `information_schema.materialized_views` source.
+        let mut tables = vec![
+            TableInfo {
+                name: "orders".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_async_mv".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+        let materialized_views = HashSet::from(["orders_async_mv".to_string()]);
+
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+
+        assert_eq!(
+            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
+            vec![("orders", "BASE TABLE"), ("orders_async_mv", "MATERIALIZED_VIEW")]
+        );
+    }
+
+    #[test]
+    fn starrocks_materialized_view_lookup_failure_keeps_base_types() {
+        let mut tables = vec![TableInfo {
+            name: "orders_mv".to_string(),
+            table_type: "VIEW".to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }];
+
+        merge_starrocks_materialized_views(&mut tables, Err("permission denied".to_string()), "analytics");
+
+        assert_eq!(tables[0].table_type, "VIEW");
+    }
+
+    #[test]
+    fn starrocks_sync_mv_absent_from_show_full_tables_is_appended_from_information_schema() {
+        // StarRocks versions predating starrocks/starrocks#73396 (merged
+        // 2026-05-19) report sync MVs as "not registered as separate Tables",
+        // so SHOW FULL TABLES omits them. The merger must union names from
+        // information_schema.materialized_views so the sidebar and DDL path
+        // still resolve them.
+        let mut tables = vec![TableInfo {
+            name: "orders".to_string(),
+            table_type: "BASE TABLE".to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        }];
+        let materialized_views = HashSet::from([
+            "orders_mv".to_string(),       // already present (reclassify path)
+            "daily_orders_mv".to_string(), // absent from SHOW FULL TABLES (union path)
+        ]);
+
+        merge_starrocks_materialized_views(&mut tables, Ok(materialized_views), "analytics");
+
+        assert_eq!(tables.len(), 3);
+        assert_eq!(
+            tables.iter().map(|table| (table.name.as_str(), table.table_type.as_str())).collect::<Vec<_>>(),
+            vec![
+                ("orders", "BASE TABLE"),
+                ("daily_orders_mv", "MATERIALIZED_VIEW"),
+                ("orders_mv", "MATERIALIZED_VIEW"),
+            ]
+        );
+    }
+
+    #[test]
+    fn starrocks_materialized_view_query_is_scoped_to_database() {
+        let sql = starrocks_materialized_views_sql("tenant's analytics");
+
+        assert_eq!(
+            sql,
+            "SELECT TABLE_NAME FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics'"
+        );
+    }
+
+    #[test]
+    fn mysql_materialized_view_definition_fallback_is_scoped_to_db_and_name() {
+        // StarRocks predating PR 73396 (merged 2026-05-19) rejects
+        // `SHOW CREATE MATERIALIZED VIEW` for sync MVs with "Table not found"
+        // because sync MVs are not registered as separate Tables. The fallback
+        // path queries information_schema.materialized_views directly. The
+        // regression guards the SQL shape and the value escaping used by that
+        // fallback so the wire format isn't accidentally regressed.
+        assert_eq!(
+            mysql_materialized_view_definition_sql("shop", "daily_sales_mv"),
+            "SELECT MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'shop' AND TABLE_NAME = 'daily_sales_mv' LIMIT 1"
+        );
+        assert_eq!(
+            mysql_materialized_view_definition_sql("tenant's analytics", "weird'name"),
+            "SELECT MATERIALIZED_VIEW_DEFINITION FROM information_schema.materialized_views WHERE TABLE_SCHEMA = 'tenant\\'s analytics' AND TABLE_NAME = 'weird\\'name' LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn starrocks_object_conversion_preserves_table_view_and_materialized_view_types() {
+        let tables = vec![
+            TableInfo {
+                name: "orders".to_string(),
+                table_type: "BASE TABLE".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_view".to_string(),
+                table_type: "VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+            TableInfo {
+                name: "orders_mv".to_string(),
+                table_type: "MATERIALIZED_VIEW".to_string(),
+                comment: None,
+                parent_schema: None,
+                parent_name: None,
+            },
+        ];
+
+        let objects = table_infos_to_objects(tables, &HashMap::new(), "analytics");
+
+        assert_eq!(
+            objects.iter().map(|object| (object.name.as_str(), object.object_type.as_str())).collect::<Vec<_>>(),
+            vec![("orders", "TABLE"), ("orders_view", "VIEW"), ("orders_mv", "MATERIALIZED_VIEW")]
+        );
     }
 
     #[test]
@@ -4035,9 +4717,9 @@ mod tests {
 
     #[test]
     fn mysql_show_metadata_sql_supports_catalogless_services() {
-        assert_eq!(show_tables_sql("", true), "SHOW FULL TABLES");
-        assert_eq!(show_tables_sql("", false), "SHOW TABLES");
-        assert_eq!(show_tables_sql("app", true), "SHOW FULL TABLES FROM `app`");
+        assert_eq!(show_tables_filtered_sql("", true, None, &[]), "SHOW FULL TABLES");
+        assert_eq!(show_tables_filtered_sql("", false, None, &[]), "SHOW TABLES");
+        assert_eq!(show_tables_filtered_sql("app", true, None, &[]), "SHOW FULL TABLES FROM `app`");
         assert_eq!(show_columns_sql("", "idx", true), "SHOW FULL COLUMNS FROM `idx`");
         assert_eq!(show_columns_sql("app", "idx", false), "SHOW COLUMNS FROM `app`.`idx`");
     }
@@ -4124,10 +4806,12 @@ mod tests {
     }
 
     #[test]
-    fn mysql_columns_sql_uses_column_key_for_primary_keys_without_join() {
+    fn mysql_columns_sql_uses_column_key_and_table_default_collation() {
         let sql = columns_sql("app", "users");
 
         assert!(sql.contains("information_schema.COLUMNS"));
+        assert!(sql.contains("information_schema.TABLES"));
+        assert!(sql.contains("t.TABLE_COLLATION"));
         assert!(!sql.contains("KEY_COLUMN_USAGE"));
         assert!(!sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
         assert!(sql.contains("c.COLUMN_KEY"));
@@ -4135,6 +4819,47 @@ mod tests {
         assert!(sql.contains("c.COLUMN_TYPE"));
         assert!(!sql.contains("COLLATE"));
         assert!(!sql.contains("AS ENUM_VALUES"));
+    }
+
+    #[test]
+    fn mysql_column_charset_metadata_clears_values_matching_table_default() {
+        let mut columns = vec![
+            ColumnInfo {
+                name: "inherited_name".to_string(),
+                character_set: Some("utf8mb4".to_string()),
+                collation: Some("utf8mb4_unicode_ci".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "explicit_other".to_string(),
+                character_set: Some("latin1".to_string()),
+                collation: Some("latin1_bin".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo { name: "numeric_value".to_string(), ..Default::default() },
+        ];
+
+        normalize_mysql_column_charset_metadata(&mut columns, Some("utf8mb4_unicode_ci"));
+
+        assert_eq!((columns[0].character_set.as_deref(), columns[0].collation.as_deref()), (None, None));
+        assert_eq!(columns[1].character_set.as_deref(), Some("latin1"));
+        assert_eq!(columns[1].collation.as_deref(), Some("latin1_bin"));
+        assert_eq!((columns[2].character_set.as_deref(), columns[2].collation.as_deref()), (None, None));
+    }
+
+    #[test]
+    fn mysql_column_charset_metadata_preserves_values_without_table_default() {
+        let mut columns = vec![ColumnInfo {
+            name: "name".to_string(),
+            character_set: Some("utf8mb4".to_string()),
+            collation: Some("utf8mb4_unicode_ci".to_string()),
+            ..Default::default()
+        }];
+
+        normalize_mysql_column_charset_metadata(&mut columns, None);
+
+        assert_eq!(columns[0].character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(columns[0].collation.as_deref(), Some("utf8mb4_unicode_ci"));
     }
 
     #[test]
@@ -4150,57 +4875,6 @@ mod tests {
             Some(vec!["it's".to_string(), "quote\"d".to_string(), "back\\slash".to_string()])
         );
         assert_eq!(parse_mysql_enum_values("varchar(255)"), None);
-    }
-
-    #[test]
-    fn doris_create_table_ddl_indexes_include_unique_key_and_inverted_indexes() {
-        let ddl = r#"
-CREATE TABLE `bfm_org` (
-  `org_id` bigint NULL,
-  `ORG_CODE` varchar(255) NULL,
-  `ORG_NAME` varchar(255) NULL,
-  INDEX org_id_idx (`org_id`) USING INVERTED,
-  INDEX org_code_idx (`ORG_CODE`) USING INVERTED,
-  INDEX org_name_idx (`ORG_NAME`) USING INVERTED
-) ENGINE=OLAP
-UNIQUE KEY(`org_id`)
-COMMENT '部门信息表'
-DISTRIBUTED BY HASH(`org_id`) BUCKETS 4
-"#;
-
-        let indexes = doris_indexes_from_create_table_ddl(ddl);
-
-        assert_eq!(indexes.len(), 4);
-        assert_eq!(indexes[0].name, "org_id_idx");
-        assert_eq!(indexes[0].columns, vec!["org_id"]);
-        assert!(!indexes[0].is_unique);
-        assert_eq!(indexes[0].index_type.as_deref(), Some("INVERTED"));
-        assert_eq!(indexes[3].name, "UNIQUE KEY");
-        assert_eq!(indexes[3].columns, vec!["org_id"]);
-        assert!(indexes[3].is_unique);
-        assert!(!indexes[3].is_primary);
-        assert_eq!(indexes[3].index_type.as_deref(), Some("UNIQUE KEY"));
-    }
-
-    #[test]
-    fn doris_create_table_ddl_index_parser_handles_quoted_names_and_comments() {
-        let ddl = r#"
-CREATE TABLE `search_test` (
-  `name``part` varchar(64) NULL,
-  INDEX `idx``name` (`name``part`) USING NGRAM_BF COMMENT 'name''s index'
-) ENGINE=OLAP
-UNIQUE KEY(`tenant_id`, `name``part`)
-"#;
-
-        let indexes = doris_indexes_from_create_table_ddl(ddl);
-
-        assert_eq!(indexes.len(), 2);
-        assert_eq!(indexes[0].name, "idx`name");
-        assert_eq!(indexes[0].columns, vec!["name`part"]);
-        assert_eq!(indexes[0].index_type.as_deref(), Some("NGRAM_BF"));
-        assert_eq!(indexes[0].comment.as_deref(), Some("name's index"));
-        assert_eq!(indexes[1].columns, vec!["tenant_id", "name`part"]);
-        assert!(indexes[1].is_unique);
     }
 
     #[test]
@@ -4361,12 +5035,27 @@ UNIQUE KEY(`tenant_id`, `name``part`)
         let error = "MySQL connection failed: Input/output error: Input/output error: packet out of order";
 
         assert!(mysql_error_should_retry_without_ssl(error));
+        assert!(!mysql_error_should_retry_with_legacy_eof(error));
+    }
+
+    #[test]
+    fn mysql_packets_out_of_sync_retries_with_legacy_eof() {
+        let error = "MySQL connection failed: Input/output error: Input/output error: Packets out of sync";
+
+        assert!(mysql_error_should_retry_with_legacy_eof(error));
+        assert!(!mysql_error_should_retry_without_ssl(error));
+    }
+
+    #[test]
+    fn mysql_async_builder_can_disable_deprecated_eof_protocol() {
+        let opts = mysql_async::Opts::from(mysql_async::OptsBuilder::default().deprecate_eof(false));
+
+        assert!(!opts.deprecate_eof());
     }
 
     #[test]
     fn mysql_tcp_keepalive_uses_milliseconds_not_seconds() {
         assert_eq!(MYSQL_TCP_KEEPALIVE_MS, 30_000);
-        assert!(MYSQL_TCP_KEEPALIVE_MS >= 1_000);
     }
 
     #[test]
@@ -4488,6 +5177,95 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     }
 
     #[test]
+    fn mysql_cnch_group_concat_syntax_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR HY000 (1105): unknown error: Error 62 (HY000): Code: 62, e.displayText() = DB::Exception: host = cnch-server-2: Syntax error: failed at position 13 ('group_concat_max_len'): group_concat_max_len = 1048576. Expected one of: Dot, token, Equals SQLSTATE: 42000 (version 21.8.7.1)'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_index_metadata_query_has_expression_compatibility_fallback() {
+        let with_expression = mysql_list_indexes_sql("db", "users", true);
+        assert!(with_expression.contains("EXPRESSION, SEQ_IN_INDEX"));
+
+        let without_expression = mysql_list_indexes_sql("db", "users", false);
+        assert!(!without_expression.contains("EXPRESSION"));
+        assert!(without_expression.contains("ORDER BY INDEX_NAME, SEQ_IN_INDEX"));
+    }
+
+    #[test]
+    fn mysql_index_metadata_falls_back_only_for_unknown_expression_column() {
+        let unsupported = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1054,
+            message: "Unknown column 'EXPRESSION'".to_string(),
+            state: "42S22".to_string(),
+        });
+        let permission_denied = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1044,
+            message: "Access denied".to_string(),
+            state: "42000".to_string(),
+        });
+
+        assert!(mysql_statistics_expression_is_unsupported(&unsupported));
+        assert!(!mysql_statistics_expression_is_unsupported(&permission_denied));
+    }
+
+    #[test]
+    fn mysql_group_concat_not_supported_error_retries_without_session_variable() {
+        let error =
+            "MySQL connection failed: Server error: `ERROR 1235 (42000): SET of group_concat_max_len is not supported'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_gateway_forbidden_global_variables_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR 10192 (HY000): SET GLOBAL VARIABLES is forbidden'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_gateway_setup_retry_requires_exact_error_code_and_message() {
+        for error in [
+            "Server error: ERROR 10192 (HY000): operation is forbidden",
+            "Server error: ERROR 1227 (42000): SET GLOBAL VARIABLES is forbidden",
+            "Server error: ERROR 101920 (HY000): SET GLOBAL VARIABLES is forbidden",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
+        }
+    }
+
+    #[test]
+    fn mysql_sphinxql_group_concat_boolean_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near '1048576'`";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_sphinxql_boolean_error_retry_stays_scoped_to_group_concat_setup() {
+        for error in [
+            "Server error: sphinxql: only 0 and 1 could be used as boolean values near '42'",
+            "Server error: only 0 and 1 could be used as boolean values near '1048576'",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
+        }
+    }
+
+    #[test]
     fn mysql_proxy_parse_tablename_1105_does_not_disable_group_concat() {
         let error = "MySQL connection failed: Server error: `ERROR 07000 (1105): SQL操作失败 (operate fail ) ：解析表名出错 ( parse tablename error ) '";
 
@@ -4562,6 +5340,16 @@ UNIQUE KEY(`tenant_id`, `name``part`)
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4", &[]);
 
         assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+    }
+
+    #[test]
+    fn mysql_setup_queries_preserve_database_identifier_whitespace() {
+        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/%20analytics%20?charset=utf8mb4", &[]);
+
+        assert_eq!(
+            queries,
+            vec!["USE ` analytics `", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+        );
     }
 
     #[test]
@@ -4702,6 +5490,32 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     }
 
     #[test]
+    fn mysql_async_url_accepts_reported_doris_jdbc_params() {
+        let url = "mysql://host:9030/db?useLocalSessionState=true&rewriteBatchedStatements=true&prepStmtCacheSqlLimit=2048&prepStmtCacheSize=250&sessionVariables=query_timeout%3D60";
+
+        assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:9030/db");
+    }
+
+    #[test]
+    fn mysql_local_infile_paths_are_explicit_and_removed_from_driver_url() {
+        let url = "mysql://host:9030/db?localInfilePath=%2Ftmp%2Fone.csv&require_ssl=true&localinfilepath=C%3A%5Cdata%5Ctwo.csv";
+
+        assert_eq!(
+            mysql_local_infile_paths(url),
+            vec![PathBuf::from("/tmp/one.csv"), PathBuf::from(r"C:\data\two.csv")]
+        );
+        assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:9030/db?require_ssl=true");
+    }
+
+    #[test]
+    fn mysql_local_infile_paths_ignore_empty_or_unrelated_values() {
+        let url = "mysql://host:9030/db?localInfilePath=&charset=utf8mb4&other=%2Ftmp%2Fignored.csv";
+
+        assert!(mysql_local_infile_paths(url).is_empty());
+        assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:9030/db?other=%2Ftmp%2Fignored.csv");
+    }
+
+    #[test]
     fn mysql_async_url_normalizes_cleartext_password_auth_alias() {
         let url = "mysql://host:3306/db?allowCleartextPasswords=true&charset=utf8mb4";
         assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:3306/db?enable_cleartext_plugin=true");
@@ -4787,6 +5601,30 @@ UNIQUE KEY(`tenant_id`, `name``part`)
                 "SET SESSION group_concat_max_len = 1048576",
                 "SET ob_query_timeout = 30000000"
             ]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_apply_connector_j_session_variables() {
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:9030/db?sessionVariables=query_timeout%3D60%2Csql_mode%3D%27STRICT%2CTRADITIONAL%27%3B%40trace_id%3Dconcat%28%27a%2Cb%27%2C%27c%27%29",
+                &[],
+            ),
+            vec![
+                "USE `db`",
+                "SET SESSION query_timeout=60,SESSION sql_mode='STRICT,TRADITIONAL',@trace_id=concat('a,b','c')",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = 1048576",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_ignore_empty_session_variables() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:9030/db?sessionVariables=%20%2C%20%3B%20", &[]),
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
         );
     }
 
@@ -4906,90 +5744,5 @@ UNIQUE KEY(`tenant_id`, `name``part`)
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4", &[]),
             vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
         );
-    }
-
-    fn doris_catalog_info(name: &str, catalog_type: &str, is_current: bool) -> crate::db::CatalogInfo {
-        crate::db::CatalogInfo {
-            name: name.to_string(),
-            catalog_type: catalog_type.to_string(),
-            is_current,
-            comment: None,
-        }
-    }
-
-    #[test]
-    fn doris_catalog_database_ref_backtick_qualifies_two_parts() {
-        assert_eq!(doris_catalog_database_ref("iceberg_catalog", "sales"), "`iceberg_catalog`.`sales`");
-    }
-
-    #[test]
-    fn doris_catalog_table_ref_backtick_qualifies_three_parts() {
-        assert_eq!(doris_catalog_table_ref("iceberg_catalog", "sales", "orders"), "`iceberg_catalog`.`sales`.`orders`");
-    }
-
-    #[test]
-    fn doris_catalog_refs_escape_embedded_backticks() {
-        assert_eq!(doris_catalog_database_ref("a`b", "c`d"), "`a``b`.`c``d`");
-        assert_eq!(doris_catalog_table_ref("a`b", "c`d", "e`f"), "`a``b`.`c``d`.`e``f`");
-    }
-
-    #[test]
-    fn normalize_doris_catalogs_does_not_inject_missing_internal() {
-        // SHOW CATALOGS always lists the built-in catalog on both engines, so a
-        // missing internal catalog is not synthesized — the caller's flat-sidebar
-        // fallback handles a single/empty result instead.
-        let catalogs = vec![
-            doris_catalog_info("iceberg_catalog", "iceberg", true),
-            doris_catalog_info("hive_catalog", "hive", false),
-        ];
-        let normalized = normalize_doris_catalogs(catalogs);
-        let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["hive_catalog", "iceberg_catalog"]);
-        assert!(!normalized.iter().any(|c| c.is_internal()));
-    }
-
-    #[test]
-    fn normalize_doris_catalogs_keeps_existing_internal_first() {
-        let catalogs = vec![
-            doris_catalog_info("iceberg_catalog", "iceberg", false),
-            doris_catalog_info("internal", "internal", true),
-            doris_catalog_info("hive_catalog", "hive", false),
-        ];
-        let normalized = normalize_doris_catalogs(catalogs);
-        let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["internal", "hive_catalog", "iceberg_catalog"]);
-    }
-
-    #[test]
-    fn normalize_doris_catalogs_sorts_starrocks_default_catalog_first() {
-        // StarRocks names its built-in catalog `default_catalog` (Type=Internal);
-        // detection is type-based, so it sorts first just like Doris `internal`.
-        let catalogs = vec![
-            doris_catalog_info("hive_catalog", "hive", false),
-            doris_catalog_info("default_catalog", "Internal", true),
-        ];
-        let normalized = normalize_doris_catalogs(catalogs);
-        let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["default_catalog", "hive_catalog"]);
-        assert!(normalized[0].is_internal());
-        assert!(!normalized[1].is_internal());
-    }
-
-    #[test]
-    fn normalize_doris_catalogs_detects_internal_by_type_not_name() {
-        // A catalog literally named `internal` but with an external type is NOT
-        // the built-in catalog and must not sort first.
-        let catalogs =
-            vec![doris_catalog_info("internal", "iceberg", false), doris_catalog_info("hive_catalog", "hive", false)];
-        let normalized = normalize_doris_catalogs(catalogs);
-        let names: Vec<&str> = normalized.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["hive_catalog", "internal"]);
-        assert!(!normalized.iter().any(|c| c.is_internal()));
-    }
-
-    #[test]
-    fn normalize_doris_catalogs_handles_empty_input() {
-        let normalized = normalize_doris_catalogs(Vec::new());
-        assert!(normalized.is_empty());
     }
 }

@@ -274,6 +274,106 @@ test("search scope excludes non-selected node self matches", () => {
   assert.equal(filtered.length, 0);
 });
 
+function scopedSearchNodes(): TreeNode[] {
+  return [
+    {
+      id: "conn:1",
+      label: "warehouse",
+      type: "connection",
+      connectionId: "conn:1",
+      isExpanded: true,
+      children: [
+        {
+          id: "conn:1:db",
+          label: "inventory",
+          type: "database",
+          connectionId: "conn:1",
+          database: "inventory",
+          isExpanded: true,
+          children: [
+            {
+              id: "conn:1:db:sales-order",
+              label: "sales_order",
+              type: "schema",
+              connectionId: "conn:1",
+              database: "inventory",
+              schema: "sales_order",
+              isExpanded: true,
+              children: [
+                {
+                  id: "conn:1:db:sales-order:orders",
+                  label: "orders",
+                  type: "table",
+                  connectionId: "conn:1",
+                  database: "inventory",
+                  schema: "sales_order",
+                },
+              ],
+            },
+            {
+              id: "conn:1:db:audit",
+              label: "audit",
+              type: "schema",
+              connectionId: "conn:1",
+              database: "inventory",
+              schema: "audit",
+              isExpanded: true,
+              children: [
+                {
+                  id: "conn:1:db:audit:order-log",
+                  label: "order_log",
+                  type: "table",
+                  connectionId: "conn:1",
+                  database: "inventory",
+                  schema: "audit",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+test("filters the sidebar by node type without a text query", () => {
+  const filtered = filterSidebarTree(scopedSearchNodes(), "", new Set(), new Set(["schema"]));
+
+  const schemas = filtered[0]?.children?.[0]?.children;
+  assert.deepEqual(
+    schemas?.map((node) => node.label),
+    ["sales_order", "audit"],
+  );
+  assert.deepEqual(
+    schemas?.map((node) => node.children),
+    [[], []],
+  );
+});
+
+test("combines text search with the selected node types", () => {
+  const filtered = filterSidebarTree(scopedSearchNodes(), "order", new Set(), new Set(["schema"]));
+
+  assert.deepEqual(
+    filtered[0]?.children?.[0]?.children?.map((node) => node.label),
+    ["sales_order"],
+  );
+});
+
+test("clearing the type filter restores default text search", () => {
+  const filtered = filterSidebarTree(scopedSearchNodes(), "order", new Set());
+
+  assert.deepEqual(
+    filtered[0]?.children?.[0]?.children?.map((node) => node.label),
+    ["sales_order", "audit"],
+  );
+});
+
+test("clearing all search criteria preserves the original tree", () => {
+  const nodes = scopedSearchNodes();
+
+  assert.equal(filterSidebarTree(nodes, "", new Set()), nodes);
+});
+
 test("connection search results stay visible before connecting", () => {
   const nodes: TreeNode[] = [
     {

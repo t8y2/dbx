@@ -48,6 +48,44 @@ export interface EditableQuerySource {
   alias?: string;
 }
 
+const POSTGRES_FOLDED_IDENTIFIER_TYPES = new Set(["postgres", "redshift", "gaussdb", "highgo", "uxdb", "vastbase", "kwdb", "opengauss", "questdb"]);
+const ORACLE_FOLDED_IDENTIFIER_TYPES = new Set(["oracle", "dameng", "oceanbase-oracle"]);
+
+/**
+ * Resolve a SQL source identifier to the canonical name returned by table
+ * metadata. Quoted identifiers are always exact. PostgreSQL-compatible
+ * unquoted identifiers fold to lower case, while Oracle-compatible identifiers
+ * fold to upper case. Other dialects may use a case-insensitive match only when
+ * it identifies exactly one physical column.
+ */
+export function resolveMetadataColumnName(databaseType: string, sourceName: string, sourceNameQuoted: boolean | undefined, metadataColumns: readonly string[]): string | undefined {
+  if (sourceNameQuoted) return metadataColumns.find((column) => column === sourceName);
+
+  // Result-set labels are already database-resolved names rather than SQL
+  // source tokens. Preserve exact PostgreSQL/Oracle casing instead of folding
+  // a physical quoted column such as `"ID"` to `id`.
+  if (sourceNameQuoted === undefined) {
+    const exact = metadataColumns.find((column) => column === sourceName);
+    if (exact || POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType) || ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) return exact;
+    const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
+    return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+  }
+
+  if (POSTGRES_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
+    const folded = sourceName.toLowerCase();
+    return metadataColumns.find((column) => column === folded);
+  }
+  if (ORACLE_FOLDED_IDENTIFIER_TYPES.has(databaseType)) {
+    const folded = sourceName.toUpperCase();
+    return metadataColumns.find((column) => column === folded);
+  }
+
+  const exact = metadataColumns.find((column) => column === sourceName);
+  if (exact) return exact;
+  const caseOnlyMatches = metadataColumns.filter((column) => column.toLowerCase() === sourceName.toLowerCase());
+  return caseOnlyMatches.length === 1 ? caseOnlyMatches[0] : undefined;
+}
+
 export type QueryEditabilityReason = "not-select" | "cte" | "set-operation" | "aggregation" | "external-source" | "complex-source" | "computed-columns" | "no-table" | "no-primary-key" | "primary-key-not-returned" | "aliased-columns" | "metadata-unavailable";
 
 export type QueryEditability = { editable: true; analysis: EditableQueryInfo } | { editable: false; reason: QueryEditabilityReason };
@@ -74,7 +112,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   if (!normalized) return { editable: false, reason: "not-select" };
   if (/^\s*WITH\b/i.test(normalized)) return { editable: false, reason: "cte" };
   if (!/^SELECT\b/i.test(normalized)) return { editable: false, reason: "not-select" };
-  if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT"])) {
+  if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) {
     return { editable: false, reason: "set-operation" };
   }
   if (normalized.includes(";")) return { editable: false, reason: "complex-source" };
@@ -94,7 +132,11 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   const havingIndex = findTopLevelKeyword(normalized, "HAVING", fromIndex + 4);
   if (groupIndex >= 0 || havingIndex >= 0) return { editable: false, reason: "aggregation" };
 
-  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH"], fromIndex + 4);
+  const forIndex = findTopLevelKeyword(normalized, "FOR", fromIndex + 4);
+  // Row-locking FOR clauses change concurrency behavior, not the base-row
+  // mapping. Output/read-only FOR modes must stay non-editable.
+  if (forIndex >= 0 && !/^FOR\s+(?:UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(normalized.slice(forIndex))) return { editable: false, reason: "complex-source" };
+  const fromEnd = firstTopLevelKeywordIndex(normalized, ["WHERE", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR"], fromIndex + 4);
   const fromBody = normalized.slice(fromIndex + 4, fromEnd < 0 ? normalized.length : fromEnd).trim();
   if (isExternalFromSource(fromBody)) return { editable: false, reason: "external-source" };
   const sources = parseFromSources(fromBody);
@@ -451,7 +493,9 @@ function escapeRegExp(value: string): string {
 
 /**
  * Check if all primary key columns are present in the result set columns.
- * Comparison is case-insensitive.
+ * Source names must already be resolved to canonical metadata names. Exact
+ * comparison prevents `id` from being mistaken for a distinct quoted `"ID"`
+ * column in PostgreSQL.
  */
 export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: string[], analysis?: EditableQueryInfo, sourceKey?: string): boolean {
   if (analysis && !analysis.selectStar) {
@@ -459,26 +503,24 @@ export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: stri
       analysis.columns.flatMap((column) => {
         if (!column.sourceName) return [];
         if (sourceKey && column.sourceKey !== sourceKey) return [];
-        return [column.sourceName.toLowerCase()];
+        return [column.sourceName];
       }),
     );
-    return primaryKeys.every((pk) => sourceColumns.has(pk.toLowerCase()));
+    return primaryKeys.every((pk) => sourceColumns.has(pk));
   }
-  const colSet = new Set(resultColumns.map((c) => c.toLowerCase()));
-  return primaryKeys.every((pk) => colSet.has(pk.toLowerCase()));
+  const colSet = new Set(resultColumns);
+  return primaryKeys.every((pk) => colSet.has(pk));
 }
 
 function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[]): EditableQueryColumn[] | undefined {
   const matches: EditableQueryColumn[] = [];
   let searchFrom = 0;
   for (const resultColumn of resultColumns) {
-    const normalized = resultColumn.toLowerCase();
-    let matchIndex = -1;
-    for (let index = searchFrom; index < analysis.columns.length; index++) {
-      if (analysis.columns[index]!.resultName.toLowerCase() === normalized) {
-        matchIndex = index;
-        break;
-      }
+    let matchIndex = analysis.columns.findIndex((column, index) => index >= searchFrom && column.resultName === resultColumn);
+    if (matchIndex < 0) {
+      const normalized = resultColumn.toLowerCase();
+      const caseOnlyMatches = analysis.columns.flatMap((column, index) => (index >= searchFrom && column.resultName.toLowerCase() === normalized ? [index] : []));
+      if (caseOnlyMatches.length === 1) matchIndex = caseOnlyMatches[0]!;
     }
     if (matchIndex < 0) return undefined;
     matches.push(analysis.columns[matchIndex]!);

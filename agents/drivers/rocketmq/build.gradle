@@ -1,0 +1,13 @@
+dependencies {
+    implementation 'com.google.code.gson:gson:2.12.1'
+    implementation 'org.apache.rocketmq:rocketmq-client:5.3.1'
+    implementation 'org.apache.rocketmq:rocketmq-tools:5.3.1'
+    runtimeOnly 'org.slf4j:slf4j-simple:1.7.36'
+}
+
+tasks.named('shadowJar') {
+    mergeServiceFiles()
+    manifest {
+        attributes('Agent-Label': 'Apache RocketMQ', 'Main-Class': 'com.dbx.agent.rocketmq.RocketMqAgent')
+    }
+}

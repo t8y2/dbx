@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
-use dbx_core::db::mongo_driver::MongoDocumentResult;
+use dbx_core::db::document_result::DocumentQueryResult;
 use dbx_core::document_ops::CollectionInfo;
 
 pub(crate) async fn run_cancellable<T, F>(
@@ -58,7 +58,7 @@ pub async fn document_find_documents(
     projection: Option<String>,
     sort: Option<String>,
     execution_id: Option<String>,
-) -> Result<MongoDocumentResult, String> {
+) -> Result<DocumentQueryResult, String> {
     let app = state.inner().clone();
     run_cancellable(
         &app,
@@ -79,15 +79,41 @@ pub async fn document_find_documents(
 }
 
 #[tauri::command]
+pub async fn elasticsearch_count_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    filter: Option<String>,
+    execution_id: Option<String>,
+) -> Result<u64, String> {
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::document_ops::count_elasticsearch_documents_core(&app, &connection_id, &index, filter.as_deref()),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn document_insert_document(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
     collection: String,
     doc_json: String,
+    routing: Option<String>,
 ) -> Result<String, String> {
     ensure_connection_writable(&state, &connection_id, "Insert").await?;
-    dbx_core::document_ops::insert_document_core(&state, &connection_id, &database, &collection, &doc_json).await
+    dbx_core::document_ops::insert_document_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &doc_json,
+        routing.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

@@ -170,6 +170,75 @@ describe("connectionStore timeout recovery", () => {
     expect(node.isLoading).toBe(false);
   }, 10_000);
 
+  it("uses a shared SSH profile timeout and cleans up a late backend success", async () => {
+    let resolveConnect!: (connectionId: string) => void;
+    const connectDb = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveConnect = resolve;
+        }),
+    );
+    const disconnectDb = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      disconnectDb,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useTunnelProfileStore } = await import("@/stores/tunnelProfileStore");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    useTunnelProfileStore().profiles = [
+      {
+        type: "ssh",
+        id: "slow-bastion",
+        host: "bastion.example.com",
+        port: 22,
+        user: "dbx",
+        connect_timeout_secs: 4,
+      },
+    ];
+    const store = useConnectionStore();
+    const connection = postgresConnection({
+      connect_timeout_secs: 1,
+      transport_layers: [
+        {
+          type: "ssh",
+          id: "connection-hop",
+          profile_id: "slow-bastion",
+          host: "",
+          port: 22,
+          user: "root",
+          connect_timeout_secs: 1,
+        },
+      ],
+    });
+    store.connections = [connection];
+
+    let settled = false;
+    const connect = store.connect(connection).catch((error) => error);
+    void connect.finally(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(3001);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(3000);
+    const error = await connect;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("timed out after 6s");
+
+    resolveConnect(connection.id);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(disconnectDb).toHaveBeenCalledWith(connection.id);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+  }, 10_000);
+
   it("allows reconnecting the same connection while a scoped cancel is pending", async () => {
     let resolveDisconnect!: () => void;
     const pendingConnect = new Promise<string>(() => undefined);

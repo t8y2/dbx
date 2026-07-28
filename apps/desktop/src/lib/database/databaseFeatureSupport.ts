@@ -1,10 +1,14 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { canEditTableStructure } from "@/lib/table/tableStructureCapabilities";
-import { DATABASE_OBJECT_TREE_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { CLEARABLE_QUERY_SCHEMA_TYPES, DATABASE_OBJECT_TREE_TYPES, DATABASE_SCHEMA_QUALIFIED_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
 
 export function isSchemaAware(dbType?: DatabaseType): boolean {
   return !!dbType && SCHEMA_AWARE_TYPES.has(dbType);
+}
+
+export function supportsDatabaseSchemaQualifier(dbType?: DatabaseType): boolean {
+  return !!dbType && DATABASE_SCHEMA_QUALIFIED_TYPES.has(dbType);
 }
 
 /**
@@ -40,6 +44,12 @@ export function usesTreeSchemaMode(dbType?: DatabaseType): boolean {
   return !!dbType && TREE_SCHEMA_TYPES.has(dbType);
 }
 
+export function canConfigureVisibleSchemasForTreeNode(dbType: DatabaseType | undefined, nodeType: TreeNodeType, database?: string | null): boolean {
+  if (!isSchemaAware(dbType)) return false;
+  if (nodeType === "database") return database != null;
+  return nodeType === "connection" && !usesTreeSchemaMode(dbType);
+}
+
 export function usesDatabaseObjectTreeMode(dbType?: DatabaseType): boolean {
   return !!dbType && DATABASE_OBJECT_TREE_TYPES.has(dbType);
 }
@@ -57,6 +67,14 @@ export function databaseObjectTreeNodeSchema(dbType: DatabaseType | undefined, d
 
 export function isSingleDatabase(dbType?: DatabaseType): boolean {
   return !!dbType && SINGLE_DATABASE_TYPES.has(dbType);
+}
+
+export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
+  return !!dbType && CLEARABLE_QUERY_SCHEMA_TYPES.has(dbType);
+}
+
+export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
+  return dbType !== "nacos" && dbType !== "hbase";
 }
 
 export function usesFetchFirst(dbType?: DatabaseType): boolean {

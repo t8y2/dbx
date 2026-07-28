@@ -1,11 +1,14 @@
-import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, SshTunnelConfig } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
+type MongoReplicaMember = { host: string; port: number };
+
 type ParsedNode = {
   tag: string;
   values: Record<string, string>;
+  members: MongoReplicaMember[];
 };
 
 const typeMap: Record<string, { dbType: DatabaseType; profile: string; label: string; port: number; user: string }> = {
@@ -21,8 +24,8 @@ const typeMap: Record<string, { dbType: DatabaseType; profile: string; label: st
   redis: { dbType: "redis", profile: "redis", label: "Redis", port: 6379, user: "" },
   mongodb: { dbType: "mongodb", profile: "mongodb", label: "MongoDB", port: 27017, user: "" },
   mongo: { dbType: "mongodb", profile: "mongodb", label: "MongoDB", port: 27017, user: "" },
-  dameng: { dbType: "dameng", profile: "dm", label: "DM (Dameng)", port: 5236, user: "SYSDBA" },
-  dm: { dbType: "dameng", profile: "dm", label: "DM (Dameng)", port: 5236, user: "SYSDBA" },
+  dameng: { dbType: "dameng", profile: "dm", label: "达梦 Dameng", port: 5236, user: "SYSDBA" },
+  dm: { dbType: "dameng", profile: "dm", label: "达梦 Dameng", port: 5236, user: "SYSDBA" },
   clickhouse: { dbType: "clickhouse", profile: "clickhouse", label: "ClickHouse", port: 8123, user: "default" },
   snowflake: { dbType: "snowflake", profile: "snowflake", label: "Snowflake", port: 443, user: "" },
   kingbase: { dbType: "kingbase", profile: "kingbase", label: "KingbaseES", port: 54321, user: "SYSTEM" },
@@ -63,6 +66,10 @@ function truthyNavicatFlag(value: string) {
   return ["1", "true", "yes", "y", "on", "checked"].includes(normalized);
 }
 
+function optionalNavicatFlag(value: string): boolean | undefined {
+  return value.trim() ? truthyNavicatFlag(value) : undefined;
+}
+
 function hexToBytes(hex: string) {
   const clean = hex.trim();
   if (!clean || clean.length % 2 !== 0 || /[^0-9a-f]/i.test(clean)) return null;
@@ -97,6 +104,40 @@ async function decryptNavicatPassword(value: string) {
   }
 }
 
+function parseNavicatPort(value: string, fallback: number) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+async function parseSshTunnel(values: Record<string, string>): Promise<({ type: "ssh" } & SshTunnelConfig) | null> {
+  const enabled = getAny(values, ["ssh", "useSsh", "sshEnabled", "enableSsh", "useSshTunnel", "sshTunnelEnabled"]);
+  if (!truthyNavicatFlag(enabled)) return null;
+
+  const host = getAny(values, ["sshHost", "sshTunnelHost", "tunnelHost"]);
+  const user = getAny(values, ["sshUserName", "sshUsername", "sshUser", "sshTunnelUserName", "sshTunnelUsername", "tunnelUserName"]);
+  // A half-populated tunnel makes an otherwise valid imported connection unusable.
+  if (!host || !user) return null;
+
+  const authValue = normalizeKey(getAny(values, ["sshAuthenMethod", "sshAuthMethod", "sshAuthenticationMethod", "sshAuthentication", "sshAuthType"]));
+  const keyPath = getAny(values, ["sshPrivateKey", "sshKeyFile", "sshKeyPath", "sshIdentityFile", "sshTunnelPrivateKey"]);
+  const usesKey = authValue.includes("key") || (!authValue.includes("password") && !!keyPath);
+  const password = usesKey ? "" : await decryptNavicatPassword(getAny(values, ["sshPassword", "sshTunnelPassword"]));
+  const keyPassphrase = usesKey ? await decryptNavicatPassword(getAny(values, ["sshPassphrase", "sshKeyPassphrase", "sshPrivateKeyPassphrase"])) : "";
+
+  return {
+    type: "ssh",
+    id: uuid(),
+    enabled: true,
+    host,
+    port: parseNavicatPort(getAny(values, ["sshPort", "sshTunnelPort", "tunnelPort"]), 22),
+    user,
+    password,
+    key_path: usesKey ? keyPath : "",
+    key_passphrase: keyPassphrase,
+    auth_method: usesKey ? "key" : "password",
+  };
+}
+
 function inferProfile(rawType: string, tag: string, port?: number) {
   const key = normalizeKey(rawType || tag);
   for (const [needle, profile] of Object.entries(typeMap)) {
@@ -117,11 +158,23 @@ function inferProfile(rawType: string, tag: string, port?: number) {
 
 function readNode(element: Element): ParsedNode {
   const values: Record<string, string> = {};
+  const members: MongoReplicaMember[] = [];
   for (const attr of Array.from(element.attributes)) {
     values[normalizeKey(attr.name)] = attr.value;
   }
 
   for (const child of Array.from(element.children)) {
+    const childTag = normalizeKey(child.tagName);
+    if (childTag === "member") {
+      const childValues = valuesFromElement(child);
+      const memberHost = getAny(childValues, ["hostname", "host", "address"]);
+      if (memberHost) {
+        members.push({ host: memberHost, port: parseNavicatPort(getAny(childValues, ["port"]), 27017) });
+      }
+      // Skip flattening so multiple members don't collapse onto one key.
+      continue;
+    }
+
     const key = getAny(valuesFromElement(child), ["name", "key", "property", "field"]);
     const value = getAny(valuesFromElement(child), ["value", "val", "text", "data"]) || child.textContent?.trim() || "";
     if (key && value) values[normalizeKey(key)] = value;
@@ -134,7 +187,7 @@ function readNode(element: Element): ParsedNode {
     }
   }
 
-  return { tag: element.tagName, values };
+  return { tag: element.tagName, values, members };
 }
 
 function valuesFromElement(element: Element) {
@@ -146,11 +199,73 @@ function valuesFromElement(element: Element) {
 }
 
 function isConnectionCandidate(node: ParsedNode) {
+  // <Member>/<Advance> are nested metadata, not standalone connections.
+  if (["member", "advance"].includes(normalizeKey(node.tag))) return false;
   const type = getAny(node.values, ["connType", "databaseType", "driver", "connectionType", "type"]);
   const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]);
   const host = getAny(node.values, ["host", "server", "hostname", "serverHost", "address"]);
   const file = getSqlitePath(node.values);
   return !!(name || host || file) && !!(type || host || file);
+}
+
+function encodeMongoUrlPart(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function normalizeMongoAuthMechanism(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  // "Password" is the SCRAM default; let the driver negotiate it.
+  if (/^(password|default|none|scram)$/i.test(trimmed)) return "";
+  return trimmed.toUpperCase();
+}
+
+function normalizeMongoReadPreference(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || /^primary$/i.test(trimmed)) return "";
+  return trimmed.charAt(0).toLowerCase() + trimmed.slice(1);
+}
+
+function buildMongoReplicaSetConnectionString(opts: {
+  useSrv: boolean;
+  username: string;
+  password: string;
+  members: MongoReplicaMember[];
+  database: string;
+  replicaSet: string;
+  authSource: string;
+  authMechanism: string;
+  readPreference: string;
+  retryReads?: boolean;
+  retryWrites?: boolean;
+  ssl: boolean;
+}): string {
+  const scheme = opts.useSrv ? "mongodb+srv://" : "mongodb://";
+  const userInfo = opts.username ? `${encodeMongoUrlPart(opts.username)}:${encodeMongoUrlPart(opts.password)}@` : "";
+
+  let hosts: string;
+  if (opts.useSrv) {
+    // SRV forbids ports; DNS resolves the seed list.
+    const srvHost = opts.members[0]?.host ?? "";
+    hosts = encodeMongoUrlPart(srvHost);
+  } else {
+    hosts = opts.members.map((member) => (member.host.includes(":") ? `[${member.host}]:${member.port}` : `${member.host}:${member.port}`)).join(",");
+  }
+
+  const path = opts.database ? `/${encodeMongoUrlPart(opts.database)}` : "";
+  const params = new URLSearchParams();
+  if (opts.replicaSet) params.set("replicaSet", opts.replicaSet);
+  if (opts.authSource) params.set("authSource", opts.authSource);
+  const authMechanism = normalizeMongoAuthMechanism(opts.authMechanism);
+  if (authMechanism) params.set("authMechanism", authMechanism);
+  const readPreference = normalizeMongoReadPreference(opts.readPreference);
+  if (readPreference) params.set("readPreference", readPreference);
+  if (opts.retryWrites !== undefined) params.set("retryWrites", String(opts.retryWrites));
+  if (opts.retryReads !== undefined) params.set("retryReads", String(opts.retryReads));
+  if (opts.ssl) params.set("tls", "true");
+  const query = params.toString();
+
+  return `${scheme}${userInfo}${hosts}${path}${query ? `?${query}` : ""}`;
 }
 
 async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | null> {
@@ -160,7 +275,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
   const profile = inferProfile(rawType, node.tag, port);
   if (!profile) {
     const name = getAny(node.values, ["name", "connectionName", "connName", "caption", "title"]) || "(unnamed)";
-    console.warn(`[Navicat Import] 跳过无法识别类型的连接: "${name}" (type="${rawType}", tag="${node.tag}", port=${port ?? "N/A"})`);
+    console.warn(`[Navicat Import] Skipped connection with unrecognised type: "${name}" (type="${rawType}", tag="${node.tag}", port=${port ?? "N/A"})`);
     return null;
   }
 
@@ -194,6 +309,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
   const keepaliveFlag = getAny(node.values, ["keepAlive", "keepalive", "useKeepAlive", "enableKeepAlive"]);
   const keepaliveEnabled = !keepaliveFlag || truthyNavicatFlag(keepaliveFlag);
   const keepaliveInterval = Number.isFinite(keepaliveValue) && keepaliveValue > 0 && keepaliveEnabled ? keepaliveValue : 0;
+  const sshTunnel = await parseSshTunnel(node.values);
 
   const config: PartialConnection = {
     name,
@@ -207,7 +323,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     password,
     database: database || undefined,
     color: "",
-    transport_layers: [],
+    transport_layers: sshTunnel ? [sshTunnel] : [],
     connect_timeout_secs: 10,
     query_timeout_secs: 30,
     keepalive_interval_secs: keepaliveInterval,
@@ -217,6 +333,31 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     jdbc_driver_class: undefined,
     jdbc_driver_paths: [],
   };
+
+  // Navicat leaves <Connection Host> as a "localhost" placeholder; rebuild a
+  // multi-host URL from the real <Member> seeds.
+  if (effectiveProfile.dbType === "mongodb" && node.members.length > 0) {
+    const replicaDatabase = getAny(node.values, ["advanceDatabase", "database", "databaseName"]);
+    const useSrv = truthyNavicatFlag(getAny(node.values, ["useSRVRecord", "srvRecord"]));
+    config.connection_string = buildMongoReplicaSetConnectionString({
+      useSrv,
+      username,
+      password,
+      members: node.members,
+      database: replicaDatabase,
+      replicaSet: getAny(node.values, ["replicaSetName", "replicaSet"]),
+      authSource: getAny(node.values, ["authSource"]),
+      authMechanism: getAny(node.values, ["authMechanism"]),
+      readPreference: getAny(node.values, ["readPreference"]),
+      retryReads: optionalNavicatFlag(getAny(node.values, ["retryReads"])),
+      retryWrites: optionalNavicatFlag(getAny(node.values, ["retryWrites"])),
+      ssl: truthyNavicatFlag(getAny(node.values, ["ssl", "useSsl"])),
+    });
+    config.host = node.members[0].host;
+    config.port = node.members[0].port;
+    config.database = replicaDatabase || undefined;
+    config.url_params = "";
+  }
 
   return { ...config, id: uuid() };
 }
@@ -233,7 +374,7 @@ export async function parseNavicatConnections(content: string): Promise<Connecti
     if (!isConnectionCandidate(node)) continue;
     const config = await parseConnection(node);
     if (!config) continue;
-    const key = [config.name, config.db_type, config.host, config.port, config.database || ""].join("\u0000");
+    const key = [config.name, config.db_type, config.host, config.port, config.database || "", config.connection_string || ""].join("\u0000");
     if (seen.has(key)) continue;
     seen.add(key);
     configs.push(config);

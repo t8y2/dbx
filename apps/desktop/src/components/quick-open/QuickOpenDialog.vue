@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
-import { Command } from "@lucide/vue";
+import { Command, FileCode, FileText } from "@lucide/vue";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
@@ -16,7 +16,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery } = useQuickOpen();
+const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles } = useQuickOpen();
 const inputRef = ref<HTMLInputElement | null>(null);
 
 const dialogOpen = computed({
@@ -107,9 +107,19 @@ function getTypeLabel(type: string): string {
       return t("common.package");
     case "package-body":
       return t("common.packageBody");
+    case "sql_file":
+      return t("quickOpen.sqlFile");
+    case "sql_library_file":
+      return t("quickOpen.sqlLibraryFile");
     default:
       return type;
   }
+}
+
+function getItemIcon(type: string) {
+  if (type === "sql_file") return FileCode;
+  if (type === "sql_library_file") return FileText;
+  return null;
 }
 
 watch(
@@ -117,6 +127,8 @@ watch(
   (newOpen) => {
     if (newOpen) {
       setQuery("");
+      // Eagerly load external SQL files so they appear in the initial list
+      void loadExternalSqlFiles();
       nextTick(() => {
         inputRef.value?.focus();
       });
@@ -145,17 +157,20 @@ watch(
           <div v-else class="divide-y">
             <div v-for="(item, index) in filteredItems" :key="item.id" :class="['px-4 py-2 cursor-pointer', index === selectedIndex ? 'bg-accent' : 'hover:bg-muted']" @click="handleSelect(item)" @mouseenter="selectedIndex = index">
               <div class="flex items-center justify-between gap-3">
-                <div class="flex-1 min-w-0">
-                  <div class="text-sm font-medium truncate">
-                    <template v-for="(part, i) in getHighlightedLabel(item)" :key="i">
-                      <span v-if="typeof part === 'object'" :class="{ 'bg-yellow-200 dark:bg-yellow-800 font-semibold': part.highlight }">
-                        {{ part.text }}
-                      </span>
-                      <span v-else>{{ part }}</span>
-                    </template>
-                  </div>
-                  <div v-if="item.description" class="text-xs text-muted-foreground truncate">
-                    {{ item.description }}
+                <div class="flex items-center gap-2 flex-1 min-w-0">
+                  <component v-if="getItemIcon(item.type)" :is="getItemIcon(item.type)" class="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-medium truncate">
+                      <template v-for="(part, i) in getHighlightedLabel(item)" :key="i">
+                        <span v-if="typeof part === 'object'" :class="{ 'bg-yellow-200 dark:bg-yellow-800 font-semibold': part.highlight }">
+                          {{ part.text }}
+                        </span>
+                        <span v-else>{{ part }}</span>
+                      </template>
+                    </div>
+                    <div v-if="item.description" class="text-xs text-muted-foreground truncate">
+                      {{ item.description }}
+                    </div>
                   </div>
                 </div>
                 <div class="text-xs px-2 py-1 rounded bg-muted text-muted-foreground whitespace-nowrap">

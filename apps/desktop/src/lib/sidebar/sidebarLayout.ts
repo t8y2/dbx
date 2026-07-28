@@ -6,6 +6,49 @@ export function emptyLayout(): SidebarLayout {
   return { groups: [], order: [] };
 }
 
+function folderPathSegments(path: string | undefined): string[] {
+  return (path ?? "").split("/").filter((segment) => segment.length > 0);
+}
+
+export function buildSidebarLayoutFromFolderPaths(connectionIds: string[], folderPaths: Iterable<string>, connectionFolderPaths: ReadonlyMap<string, string>): SidebarLayout | undefined {
+  const groups: ConnectionGroup[] = [];
+  const order: SidebarOrderEntry[] = [];
+  const groupEntries = new Map<string, Extract<SidebarOrderEntry, { type: "group" }>>();
+
+  const ensureFolder = (path: string | undefined) => {
+    const segments = folderPathSegments(path);
+    let parentEntry: Extract<SidebarOrderEntry, { type: "group" }> | undefined;
+    let currentPath = "";
+
+    for (const segment of segments) {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      let entry = groupEntries.get(currentPath);
+      if (!entry) {
+        const groupId = uuid();
+        entry = { type: "group", id: groupId, children: [] };
+        groupEntries.set(currentPath, entry);
+        groups.push({ id: groupId, name: segment, collapsed: false });
+        if (parentEntry) parentEntry.children!.push(entry);
+        else order.push(entry);
+      }
+      parentEntry = entry;
+    }
+
+    return parentEntry;
+  };
+
+  for (const folderPath of folderPaths) ensureFolder(folderPath);
+
+  for (const connectionId of connectionIds) {
+    const connectionEntry: SidebarOrderEntry = { type: "connection", id: connectionId };
+    const folderEntry = ensureFolder(connectionFolderPaths.get(connectionId));
+    if (folderEntry) folderEntry.children!.push(connectionEntry);
+    else order.push(connectionEntry);
+  }
+
+  return groups.length ? { groups, order } : undefined;
+}
+
 function entryChildren(entry: Extract<SidebarOrderEntry, { type: "group" }>): SidebarOrderEntry[] {
   return entry.children ?? entry.connectionIds?.map((id) => ({ type: "connection" as const, id })) ?? [];
 }

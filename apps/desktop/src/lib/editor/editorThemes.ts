@@ -9,6 +9,7 @@ type LucideIconNode = Array<[string, Record<string, string>]>;
 
 export const EDITOR_FONT_SIZE_CSS_VAR = "--dbx-editor-font-size";
 export const EDITOR_FONT_FAMILY_CSS_VAR = "--dbx-editor-font-family";
+export const SQL_TABLE_COLOR_CSS_VAR = "--dbx-sql-table-color";
 const EDITOR_SELECTION_BACKGROUND_CSS_VAR = "--dbx-editor-selection-background";
 
 export function createRunStatementButtonDom(ariaLabel = "Execute statement"): HTMLButtonElement {
@@ -19,6 +20,14 @@ export function createRunStatementButtonDom(ariaLabel = "Execute statement"): HT
   marker.innerHTML =
     '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"></path></svg>';
   return marker;
+}
+
+export function sqlSemanticHighlightTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
+  return EditorView.theme({
+    ".cm-sql-table-name, .cm-sql-table-name *": {
+      color: `var(${SQL_TABLE_COLOR_CSS_VAR}) !important`,
+    },
+  });
 }
 
 const SUPPORTS_COLOR_MIX = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "color-mix(in oklch, black 50%, white)");
@@ -72,11 +81,8 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
       c.variable = colors.field;
       c.property = colors.field;
     }
-    if (colors.table) {
-      // 表名通常被识别为 propertyName，如果单独设置了表名颜色则覆盖
-      c.property = colors.table;
-    }
   }
+  const tableColor = colors?.table || c.property;
 
   const theme = EditorView.theme(
     {
@@ -84,6 +90,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
         backgroundColor: c.background,
         color: c.foreground,
         [EDITOR_SELECTION_BACKGROUND_CSS_VAR]: c.selection,
+        [SQL_TABLE_COLOR_CSS_VAR]: tableColor,
       },
       ".cm-content": {
         caretColor: c.cursor,
@@ -212,6 +219,7 @@ type IdeEditorThemeColors = {
   operator: string;
   punctuation: string;
   property: string;
+  table: string;
   builtin: string;
   meta: string;
   invalid: string;
@@ -247,6 +255,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#080808",
     punctuation: "#080808",
     property: "#871094",
+    table: "#871094",
     builtin: "#0033b3",
     meta: "#9e880d",
     invalid: "#f50000",
@@ -280,6 +289,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#cc7832",
     punctuation: "#a9b7c6",
     property: "#9876aa",
+    table: "#9876aa",
     builtin: "#cc7832",
     meta: "#bbb529",
     invalid: "#ff0000",
@@ -310,6 +320,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#080808",
     punctuation: "#080808",
     property: "#871094",
+    table: "#871094",
     builtin: "#0033b3",
     meta: "#9e880d",
     invalid: "#f50000",
@@ -343,6 +354,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#bcbec4",
     punctuation: "#bcbec4",
     property: "#c77dbb",
+    table: "#c77dbb",
     builtin: "#cf8e6d",
     meta: "#b3ae60",
     invalid: "#f75464",
@@ -373,6 +385,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#b3003f",
     punctuation: "#141414eb",
     property: "#1f8a65",
+    table: "#1f8a65",
     builtin: "#206595",
     meta: "#1f8a65",
     invalid: "#cf2d56",
@@ -403,6 +416,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#d6d6dd",
     punctuation: "#d6d6dd",
     property: "#82d2ce",
+    table: "#aaa0fa",
     builtin: "#a8cc7c",
     meta: "#a8cc7c",
     invalid: "#e34671",
@@ -433,6 +447,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#6b5544",
     punctuation: "#6b5544",
     property: "#9a4f2e",
+    table: "#7a5aa8",
     builtin: "#4f7d5d",
     meta: "#8f6b2e",
     invalid: "#c3493d",
@@ -463,6 +478,7 @@ const IDE_EDITOR_THEMES = {
     operator: "#e0d0c0",
     punctuation: "#c9b9a7",
     property: "#d28a5f",
+    table: "#a08fcd",
     builtin: "#74b195",
     meta: "#d4ae63",
     invalid: "#e2675f",
@@ -479,6 +495,7 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
         backgroundColor: c.background,
         color: c.foreground,
         [EDITOR_SELECTION_BACKGROUND_CSS_VAR]: c.selection,
+        [SQL_TABLE_COLOR_CSS_VAR]: c.table,
       },
       ".cm-scroller": {
         backgroundColor: c.background,
@@ -763,7 +780,7 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       alignItems: "center",
       background: "transparent",
       border: "1px solid transparent",
-      borderRadius: "6px",
+      borderRadius: "var(--dbx-radius-fixed-6)",
       boxSizing: "border-box",
       color: "transparent",
       display: "inline-flex",
@@ -773,6 +790,7 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       margin: "0",
       outline: "none",
       padding: "0",
+      position: "relative",
       transition: "color 0.15s, background-color 0.15s",
       userSelect: "none",
       verticalAlign: "middle",
@@ -788,12 +806,37 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       background: "rgb(16 185 129 / 0.2)",
       color: "rgb(6 95 70)",
     },
-    "&.cm-editor .cm-run-statement-marker svg": {
+    "&.cm-editor .cm-run-statement-marker > svg": {
       display: "block",
       flexShrink: "0",
       height: "min(14px, 70%)",
       pointerEvents: "none",
       width: "min(14px, 70%)",
+    },
+    ".cm-statement-execution-badge": {
+      alignItems: "center",
+      borderRadius: "9999px",
+      bottom: "-1px",
+      boxShadow: "0 0 0 1px rgb(255 255 255 / 0.9)",
+      color: "white",
+      display: "inline-flex",
+      height: "min(9px, 45%)",
+      justifyContent: "center",
+      pointerEvents: "none",
+      position: "absolute",
+      right: "-1px",
+      width: "min(9px, 45%)",
+    },
+    ".cm-statement-execution-badge--success": {
+      background: "rgb(5 150 105)",
+    },
+    ".cm-statement-execution-badge--error": {
+      background: "rgb(220 38 38)",
+    },
+    ".cm-statement-execution-badge svg": {
+      display: "block",
+      height: "75%",
+      width: "75%",
     },
     "&.cm-editor.cm-focused .cm-run-statement-marker:focus-visible": {
       outline: "1px solid var(--ring)",
@@ -826,7 +869,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       background: "var(--popover)",
       backgroundClip: "padding-box",
       border: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 18%)"),
-      borderRadius: "8px",
+      borderRadius: "var(--dbx-radius-md)",
       boxShadow: "0 8px 18px rgb(0 0 0 / 0.14)",
       color: "var(--popover-foreground)",
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
@@ -855,7 +898,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     },
     ".cm-tooltip.cm-tooltip-autocomplete > ul > li": {
       alignItems: "center",
-      borderRadius: "6px",
+      borderRadius: "var(--dbx-radius-sm)",
       color: "var(--popover-foreground)",
       display: "flex",
       fontSize: `clamp(12px, var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px), 14px)`,
@@ -952,7 +995,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       fontSize: `clamp(11px, calc(var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px) - 1px), 13px)`,
       fontWeight: "500",
       fontStyle: "normal",
-      flex: "1 1 auto",
+      flex: "1 1 0",
       marginLeft: "10px",
       minWidth: "0",
       opacity: "1",

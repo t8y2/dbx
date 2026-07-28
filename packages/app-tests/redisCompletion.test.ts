@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import {
-  buildRedisCompletionItems,
-  getRedisCompletionContext,
-  getRedisCompletionResultValidFor,
-  shouldAutoOpenRedisCompletion,
-  takesKeyArgument,
-} from "../../apps/desktop/src/lib/redis/redisCompletion.ts";
+import { buildRedisCompletionItems, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument } from "../../apps/desktop/src/lib/redis/redisCompletion.ts";
 
 function labels(items: { label: string }[]): string[] {
   return items.map((item) => item.label);
@@ -58,6 +52,16 @@ test("subcommand mode: filters subcommands by prefix", () => {
   assert.ok(names.includes("CREATE"));
   assert.ok(names.includes("CREATECONSUMER"));
   assert.ok(!names.includes("DESTROY"));
+});
+
+test("OBJECT completion uses Redis space-delimited subcommands", () => {
+  const commandNames = labels(buildRedisCompletionItems("OBJECT", 6));
+  assert.ok(commandNames.includes("OBJECT"));
+  assert.ok(!commandNames.some((name) => name.startsWith("OBJECT_")));
+
+  const subcommands = labels(buildRedisCompletionItems("OBJECT ", 7));
+  assert.deepEqual(new Set(subcommands), new Set(["ENCODING", "FREQ", "IDLETIME", "REFCOUNT", "HELP"]));
+  assert.ok(!subcommands.some((name) => name.includes("_")));
 });
 
 test("argument mode: offers key names for key-taking commands", () => {

@@ -34,6 +34,14 @@ test("parses KWDB connection URLs", () => {
   });
 });
 
+test("uses the Dameng display name without changing its connection profile", () => {
+  const parsed = parseConnectionUrl("dm://SYSDBA:password@127.0.0.1:5236/DAMENG");
+
+  assert.equal(parsed.dbType, "dameng");
+  assert.equal(parsed.driverProfile, "dm");
+  assert.equal(parsed.driverLabel, "达梦 Dameng");
+});
+
 test.each(["kingbase", "kingbase8", "jdbc:kingbase8"])("parses %s connection URLs as native KingBase connections", (scheme) => {
   assert.deepEqual(parseConnectionUrl(`${scheme}://framework:secret@172.21.203.70:443/hq_official?sslmode=disable`), {
     dbType: "kingbase",

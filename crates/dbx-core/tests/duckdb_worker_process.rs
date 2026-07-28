@@ -19,6 +19,45 @@ use tokio_util::sync::CancellationToken;
 static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_process_reads_view_source() {
+    let _guard = duckdb_worker_process_test_guard().await;
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));
+    let db_path = temp_duckdb_path();
+    let _ = std::fs::remove_file(&db_path);
+
+    let client =
+        DuckDbWorkerClient::open_with_executable(executable, db_path.to_string_lossy().to_string(), Vec::new(), None)
+            .await
+            .expect("worker process connects");
+    client
+        .execute(
+            None,
+            "CREATE VIEW active_orders AS SELECT 1 AS id".to_string(),
+            None,
+            None,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("create view");
+
+    let source = client
+        .get_object_source(
+            "main".to_string(),
+            "main".to_string(),
+            "active_orders".to_string(),
+            dbx_core::db::ObjectSourceKind::View,
+        )
+        .await
+        .expect("get view source");
+
+    assert!(source.starts_with("CREATE VIEW"));
+    assert!(source.contains("active_orders"));
+
+    client.shutdown().await;
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_process_recovers_immediately_after_cancelled_long_query() {
     let _guard = duckdb_worker_process_test_guard().await;
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_duckdb-worker-test-host"));

@@ -1,48 +1,25 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import * as api from "@/lib/backend/api";
-import { normalizeColumnFormatter, normalizeCustomColumnFormatter, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
+import { generateId, getConfigKey, aiConfigToItem } from "@/lib/ai/aiConfigList";
+import { normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyExtractorId, normalizeDataGridExtractorOptions, type DataGridCopyExtractorId, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
+import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } from "@/lib/sql/sqlVariableSyntax";
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
-import type { SqlSnippet } from "@/types/database";
+import type { SqlSnippet, TableInfoTab } from "@/types/database";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
-import { DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
+import type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference } from "@/types/ai";
 
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
-export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
-export type AiAuthMethod = "api-key" | "bearer";
-export type AiReasoningLevel = "default" | "minimal" | "low" | "medium" | "high";
-
-export interface AiConfig {
-  provider: AiProvider;
-  apiKey: string;
-  authMethod: AiAuthMethod;
-  endpoint: string;
-  model: string;
-  apiStyle: AiApiStyle;
-  proxyEnabled?: boolean;
-  proxyUrl?: string;
-  enableThinking?: boolean;
-  reasoningLevel?: AiReasoningLevel;
-  contextWindow?: number;
-  codexCliPath?: string | null;
-  codexCliEnv?: Record<string, string>;
-}
-
-export interface AiTestConnectionResult {
-  success: boolean;
-  message: string;
-  latencyMs?: number;
-  modelUsed: string;
-  errorCategory?: string;
-}
+export type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem, AiChatSelectionState, AiEffortSelection };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -59,11 +36,18 @@ export interface DesktopSettings {
   sidebar_table_page_size?: number | null;
 }
 
+export interface McpGlobalPolicy {
+  readOnly: boolean;
+  allowDangerousSql: boolean;
+  allowedConnectionIds: string[] | null;
+  configured: boolean;
+}
+
 export type DesktopIconTheme = "default" | "black";
 
 export type InterfaceLayout = "separated" | "classic";
 
-export type UpdateDownloadSource = "official" | "cnb" | "atomgit";
+export type UpdateDownloadSource = "official" | "cnb";
 export type SqlSemanticDiagnosticsMode = "auto" | "enabled" | "disabled";
 export type OpenTabsRestoreMode = "all" | "pinned" | "none";
 
@@ -87,6 +71,23 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   agent_store_dir: null,
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
 };
+
+export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
+  readOnly: false,
+  allowDangerousSql: false,
+  allowedConnectionIds: null,
+  configured: false,
+};
+
+export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
+  const allowedConnectionIds = policy?.allowedConnectionIds === null || policy?.allowedConnectionIds === undefined ? null : [...new Set(policy.allowedConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+  return {
+    readOnly: policy?.readOnly === true,
+    allowDangerousSql: policy?.allowDangerousSql === true,
+    allowedConnectionIds,
+    configured: policy?.configured === true,
+  };
+}
 
 export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | null | undefined): DesktopSettings {
   const iconTheme = settings?.icon_theme === "black" ? "black" : DEFAULT_DESKTOP_SETTINGS.icon_theme;
@@ -187,12 +188,32 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     model: "",
     apiStyle: "completions",
     authMethod: "bearer",
-    requiresApiKey: true,
+    requiresApiKey: false,
+  },
+  "claude-code-cli": {
+    label: "Claude Code CLI",
+    iconSlug: "claudecode",
+    provider: "claude-code-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
   },
   "codex-cli": {
     label: "Codex CLI",
     iconSlug: "codex",
     provider: "codex-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
+  "pi-agent-cli": {
+    label: "Pi Coding Agent",
+    iconSlug: "pi",
+    provider: "pi-agent-cli",
     endpoint: "",
     model: "default",
     apiStyle: "completions",
@@ -206,7 +227,7 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     model: "",
     apiStyle: "completions",
     authMethod: "bearer",
-    requiresApiKey: true,
+    requiresApiKey: false,
   },
 };
 
@@ -217,7 +238,7 @@ const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.from
   }),
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
 
-const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high"];
+const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high", "xhigh", "max"];
 const AI_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function normalizeAiReasoningLevel(value: unknown): AiReasoningLevel {
@@ -239,9 +260,9 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
   const provider = config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
   return {
     ...defaultConfigs[provider],
-    apiKey: config?.apiKey ?? "",
     ...config,
     provider,
+    apiKey: (config?.apiKey ?? "").trim(),
     apiStyle: config?.apiStyle ?? defaultConfigs[provider].apiStyle,
     authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
@@ -251,7 +272,15 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     contextWindow: config?.contextWindow ?? undefined,
     codexCliPath: config?.codexCliPath?.trim() || undefined,
     codexCliEnv: normalizeAiEnv(config?.codexCliEnv),
+    claudeCodeCliPath: config?.claudeCodeCliPath?.trim() || undefined,
+    claudeCodeCliEnv: normalizeAiEnv(config?.claudeCodeCliEnv),
+    piAgentCliPath: config?.piAgentCliPath?.trim() || undefined,
+    piAgentCliEnv: normalizeAiEnv(config?.piAgentCliEnv),
   };
+}
+
+function normalizeAiConfigItem(config: AiConfigItem): AiConfigItem {
+  return { ...config, ...normalizeAiConfig(config) };
 }
 
 function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined): AiProvider {
@@ -293,10 +322,14 @@ const COLUMN_WIDTH_DENSITIES = ["compact", "standard", "comfortable"] as const;
 export type ColumnWidthDensity = (typeof COLUMN_WIDTH_DENSITIES)[number];
 const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right"] as const;
 export type CellDetailPanelLayout = (typeof CELL_DETAIL_PANEL_LAYOUTS)[number];
+const TAB_LAYOUT_MODES = ["scroll", "wrap"] as const;
+export type TabLayoutMode = (typeof TAB_LAYOUT_MODES)[number];
 const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
+const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
+export type ResultRunDisplayMode = (typeof RESULT_RUN_DISPLAY_MODES)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
 export const TABLE_FONT_SIZE_MAX = 16;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
@@ -362,6 +395,8 @@ export interface CustomTheme {
 
 export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [{ id: "default", name: "Custom", colors: { ...DEFAULT_CUSTOM_THEME_COLORS }, ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS } }];
 
+export type SidebarObjectInfoMode = "comment-inline" | "comment-aligned" | "comment-right" | "size" | "hidden";
+
 export interface EditorSettings {
   fontFamily: string;
   fontSize: number;
@@ -372,11 +407,13 @@ export interface EditorSettings {
   customThemes: CustomTheme[];
   activeCustomThemeId: string;
   executeMode: "all" | "current";
+  executeModeDefaultVersion: number;
   showExecutionTargetPicker: boolean;
   showStatementRunButtons: boolean;
   showCurrentStatementFrame: boolean;
   showInsertValueHints: boolean;
   autoAliasTables: boolean;
+  insertSpaceAfterCompletion: boolean;
   wordWrap: boolean;
   vimModeEnabled: boolean;
   autoCloseBrackets: boolean;
@@ -385,8 +422,10 @@ export interface EditorSettings {
   confirmDangerousSqlExecution: boolean;
   confirmUnsavedSqlClose: boolean;
   compactTabTitle: boolean;
+  tabLayout: TabLayoutMode;
   appLayout: "separated" | "classic";
   pageSize: number;
+  tableOpenPageSize: number;
   infiniteScroll: boolean;
   infiniteScrollMaxRows: number;
   autoCalculateTotalRows: boolean;
@@ -398,8 +437,17 @@ export interface EditorSettings {
   dataGridQuickEntry: boolean;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
+  dataGridCopyExtractor: DataGridCopyExtractorId;
+  dataGridExtractorOptions: DataGridExtractorOptions;
+  resultRunDisplayMode: ResultRunDisplayMode;
+  dataGridAutoTransposeSingleRow: boolean;
+  dataGridMultiRowTranspose: boolean;
+  dataGridHideNullColumns: boolean;
+  numericColumnRightAlign: boolean;
+  tableFontFamily: string;
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
+  tableInfoActiveTab: TableInfoTab;
   tableInfoDrawerWidth: number;
   cellDetailDrawerWidth: number;
   cellDetailPanelLayout: CellDetailPanelLayout;
@@ -408,6 +456,7 @@ export interface EditorSettings {
   shortcuts: ShortcutSettings;
   sqlFormatter: SqlFormatterSettings;
   sidebarActivation: SidebarActivation;
+  sidebarConnectionSortMode: ConnectionListSortMode;
   sidebarObjectDisplay: "grouped" | "simple";
   sidebarTableSearchEnabled: boolean;
   autoSelectActiveSidebarNode: boolean;
@@ -417,10 +466,13 @@ export interface EditorSettings {
   prefillNewQueryWithSelect: boolean;
   updateNotificationsEnabled: boolean;
   sidebarHiddenTablePrefixes: string[];
-  sidebarHideTableComments: boolean;
+  sidebarObjectInfoMode: SidebarObjectInfoMode;
   sidebarAllowHorizontalScroll: boolean;
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
+  globalDateTimeDisplayFormat: string;
+  globalDateTimeExportFormat: string;
+  globalDateTimeImportFormat: string;
   snippets: SqlSnippet[];
   tableColumnTemplateFields: string[];
   exportBatchSize: number;
@@ -448,6 +500,7 @@ export interface ToolbarItems {
   ai: boolean;
   theme: boolean;
   github: boolean;
+  exclusiveRightSidebarPanels: boolean;
 }
 
 export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
@@ -463,7 +516,27 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   ai: true,
   theme: true,
   github: true,
+  exclusiveRightSidebarPanels: true,
 };
+
+export const RIGHT_SIDEBAR_PANEL_IDS = ["ai", "history", "sqlLibrary", "sqlFile"] as const;
+export type RightSidebarPanelId = (typeof RIGHT_SIDEBAR_PANEL_IDS)[number];
+export type RightSidebarPanelState = Record<RightSidebarPanelId, boolean>;
+
+export function transitionRightSidebarPanels(current: RightSidebarPanelState, panel: RightSidebarPanelId, open: boolean, exclusive: boolean): RightSidebarPanelState {
+  const next = { ...current };
+  if (open && exclusive) {
+    for (const panelId of RIGHT_SIDEBAR_PANEL_IDS) next[panelId] = false;
+  }
+  next[panel] = open;
+  return next;
+}
+
+export function enforceRightSidebarPanelExclusivity(current: RightSidebarPanelState, preferred?: RightSidebarPanelId): RightSidebarPanelState {
+  const panelToKeep = preferred && current[preferred] ? preferred : RIGHT_SIDEBAR_PANEL_IDS.find((panelId) => current[panelId]);
+  if (!panelToKeep) return { ...current };
+  return transitionRightSidebarPanels(current, panelToKeep, true, true);
+}
 
 export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }[] = [
   { value: "app", label: "Follow app theme", dark: false },
@@ -490,15 +563,7 @@ export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }
 
 const EDITOR_THEME_VALUES = new Set<EditorTheme>(EDITOR_THEMES.map((theme) => theme.value));
 
-export const FONT_FAMILIES: { value: string; label: string }[] = [
-  { value: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace", label: "Fira Code" },
-  { value: "'JetBrains Mono', 'Fira Code', monospace", label: "JetBrains Mono" },
-  { value: "'Cascadia Code', 'Cascadia Mono', monospace", label: "Cascadia Code" },
-  { value: "'Source Code Pro', monospace", label: "Source Code Pro" },
-  { value: "'SF Mono', 'Menlo', monospace", label: "SF Mono / Menlo" },
-  { value: "'Consolas', 'Courier New', monospace", label: "Consolas" },
-  { value: "monospace", label: "System Monospace" },
-];
+export const EXECUTE_MODE_CURRENT_DEFAULT_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
@@ -509,12 +574,14 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   customThemeColors: { ...DEFAULT_CUSTOM_THEME_COLORS },
   customThemes: [...DEFAULT_CUSTOM_THEMES],
   activeCustomThemeId: "default",
-  executeMode: "all",
+  executeMode: "current",
+  executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   showExecutionTargetPicker: false,
   showStatementRunButtons: true,
   showCurrentStatementFrame: true,
   showInsertValueHints: true,
   autoAliasTables: true,
+  insertSpaceAfterCompletion: true,
   wordWrap: false,
   vimModeEnabled: false,
   autoCloseBrackets: true,
@@ -523,8 +590,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   confirmDangerousSqlExecution: true,
   confirmUnsavedSqlClose: true,
   compactTabTitle: false,
+  tabLayout: "scroll",
   appLayout: "classic",
   pageSize: 100,
+  tableOpenPageSize: 100,
   infiniteScroll: false,
   infiniteScrollMaxRows: 5000,
   autoCalculateTotalRows: false,
@@ -536,8 +605,17 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridQuickEntry: false,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
+  dataGridCopyExtractor: "tsv",
+  dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
+  resultRunDisplayMode: "tabs",
+  dataGridAutoTransposeSingleRow: false,
+  dataGridMultiRowTranspose: false,
+  dataGridHideNullColumns: false,
+  numericColumnRightAlign: true,
+  tableFontFamily: DEFAULT_DATA_GRID_FONT_FAMILY,
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
+  tableInfoActiveTab: "ddl",
   tableInfoDrawerWidth: 320,
   cellDetailDrawerWidth: 380,
   cellDetailPanelLayout: "bottom",
@@ -546,6 +624,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   shortcuts: normalizeShortcutSettings(),
   sqlFormatter: normalizeSqlFormatterSettings(DEFAULT_SQL_FORMATTER_SETTINGS),
   sidebarActivation: "single",
+  sidebarConnectionSortMode: "manual",
   sidebarObjectDisplay: "grouped",
   sidebarTableSearchEnabled: false,
   autoSelectActiveSidebarNode: false,
@@ -555,10 +634,13 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   prefillNewQueryWithSelect: true,
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
-  sidebarHideTableComments: false,
+  sidebarObjectInfoMode: "comment-aligned",
   sidebarAllowHorizontalScroll: false,
   columnFormatters: {},
   customColumnFormatters: {},
+  globalDateTimeDisplayFormat: "",
+  globalDateTimeExportFormat: "",
+  globalDateTimeImportFormat: "",
   snippets: DEFAULT_SQL_SNIPPETS,
   tableColumnTemplateFields: [...DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS],
   exportBatchSize: 2000,
@@ -603,6 +685,10 @@ function normalizeColumnWidthDensity(value: unknown): ColumnWidthDensity {
   return COLUMN_WIDTH_DENSITIES.includes(value as ColumnWidthDensity) ? (value as ColumnWidthDensity) : DEFAULT_EDITOR_SETTINGS.columnWidthDensity;
 }
 
+function normalizeTabLayout(value: unknown): TabLayoutMode {
+  return TAB_LAYOUT_MODES.includes(value as TabLayoutMode) ? (value as TabLayoutMode) : DEFAULT_EDITOR_SETTINGS.tabLayout;
+}
+
 function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
   return CELL_DETAIL_PANEL_LAYOUTS.includes(value as CellDetailPanelLayout) ? (value as CellDetailPanelLayout) : DEFAULT_EDITOR_SETTINGS.cellDetailPanelLayout;
 }
@@ -615,13 +701,18 @@ function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
   return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
 }
 
+function normalizeResultRunDisplayMode(value: unknown): ResultRunDisplayMode {
+  return RESULT_RUN_DISPLAY_MODES.includes(value as ResultRunDisplayMode) ? (value as ResultRunDisplayMode) : DEFAULT_EDITOR_SETTINGS.resultRunDisplayMode;
+}
+
 function normalizeTableFontSize(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return TABLE_FONT_SIZE_DEFAULT;
   return Math.min(TABLE_FONT_SIZE_MAX, Math.max(TABLE_FONT_SIZE_MIN, Math.round(value)));
 }
 
 function normalizeUpdateDownloadSource(value: unknown): UpdateDownloadSource {
-  if (value === "atomgit") return "atomgit";
+  // Preserve the intent of users who previously selected the mainland-China mirror.
+  if (value === "atomgit") return "cnb";
   return value === "cnb" ? "cnb" : DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
 }
 
@@ -653,6 +744,18 @@ function normalizeOpenTabsRestoreMode(value: unknown, legacyRestoreOpenTabsOnLau
   if (value === "all" || value === "pinned" || value === "none") return value;
   if (typeof legacyRestoreOpenTabsOnLaunch === "boolean") return legacyRestoreOpenTabsOnLaunch ? "all" : "none";
   return DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
+}
+
+function normalizeConnectionListSortMode(value: unknown): ConnectionListSortMode {
+  return value === "asc" || value === "desc" ? value : "manual";
+}
+
+function normalizeSidebarObjectInfoMode(value: unknown, legacyCommentLayout?: unknown, legacyHideTableComments?: unknown, legacyShowDatabaseSizes?: unknown): SidebarObjectInfoMode {
+  if (value === "comment-inline" || value === "comment-aligned" || value === "comment-right" || value === "size" || value === "hidden") return value;
+  if (legacyCommentLayout === "hidden" || legacyHideTableComments === true) return "hidden";
+  if (legacyShowDatabaseSizes === true) return "size";
+  if (legacyCommentLayout === "aligned") return "comment-aligned";
+  return DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
 }
 
 function normalizeColumnFormatters(value: unknown): Record<string, ColumnFormatterConfig> {
@@ -709,11 +812,22 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     ai: items.ai ?? defaults.ai,
     theme: items.theme ?? defaults.theme,
     github: items.github ?? defaults.github,
+    // Saved settings from before right-sidebar exclusivity must adopt the new default.
+    exclusiveRightSidebarPanels: items.exclusiveRightSidebarPanels !== false,
   };
+}
+
+const TABLE_INFO_TABS = new Set<TableInfoTab>(["ddl", "columns", "indexes", "foreignKeys", "triggers"]);
+
+function normalizeTableInfoTab(value: unknown): TableInfoTab {
+  return typeof value === "string" && TABLE_INFO_TABS.has(value as TableInfoTab) ? (value as TableInfoTab) : DEFAULT_EDITOR_SETTINGS.tableInfoActiveTab;
 }
 
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
   const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
+  const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
+  const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
+  const hasCurrentExecuteModeDefault = executeModeDefaultVersion === savedExecuteModeDefaultVersion;
   return {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
@@ -747,12 +861,14 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
         : [];
     })(),
     activeCustomThemeId: settings.activeCustomThemeId ?? "default",
-    executeMode: settings.executeMode ?? DEFAULT_EDITOR_SETTINGS.executeMode,
+    executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
+    executeModeDefaultVersion,
     showExecutionTargetPicker: settings.showExecutionTargetPicker ?? DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker,
     showStatementRunButtons: typeof settings.showStatementRunButtons === "boolean" ? settings.showStatementRunButtons : DEFAULT_EDITOR_SETTINGS.showStatementRunButtons,
     showCurrentStatementFrame: typeof settings.showCurrentStatementFrame === "boolean" ? settings.showCurrentStatementFrame : DEFAULT_EDITOR_SETTINGS.showCurrentStatementFrame,
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
+    insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
@@ -761,8 +877,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     confirmDangerousSqlExecution: settings.confirmDangerousSqlExecution ?? DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution,
     confirmUnsavedSqlClose: settings.confirmUnsavedSqlClose ?? DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose,
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
+    tabLayout: normalizeTabLayout(settings.tabLayout),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
+    tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
     infiniteScroll: settings.infiniteScroll ?? DEFAULT_EDITOR_SETTINGS.infiniteScroll,
     infiniteScrollMaxRows: typeof settings.infiniteScrollMaxRows === "number" && settings.infiniteScrollMaxRows >= 1000 && settings.infiniteScrollMaxRows <= 50000 ? Math.round(settings.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows,
     autoCalculateTotalRows: settings.autoCalculateTotalRows ?? DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows,
@@ -774,8 +892,17 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
+    dataGridCopyExtractor: normalizeDataGridCopyExtractorId(settings.dataGridCopyExtractor),
+    dataGridExtractorOptions: normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions),
+    resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
+    dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
+    dataGridMultiRowTranspose: settings.dataGridMultiRowTranspose === true,
+    dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
+    numericColumnRightAlign: typeof settings.numericColumnRightAlign === "boolean" ? settings.numericColumnRightAlign : DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign,
+    tableFontFamily: normalizeFontFamily(settings.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily),
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
+    tableInfoActiveTab: normalizeTableInfoTab(settings.tableInfoActiveTab),
     tableInfoDrawerWidth: normalizeDrawerWidth(settings.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth),
     cellDetailDrawerWidth: normalizeDrawerWidth(settings.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth),
     cellDetailPanelLayout: normalizeCellDetailPanelLayout(settings.cellDetailPanelLayout),
@@ -784,6 +911,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     shortcuts: normalizeShortcutSettings(settings.shortcuts),
     sqlFormatter: normalizeSqlFormatterSettings(settings.sqlFormatter),
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
+    sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
@@ -793,10 +921,18 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
-    sidebarHideTableComments: settings.sidebarHideTableComments ?? DEFAULT_EDITOR_SETTINGS.sidebarHideTableComments,
+    sidebarObjectInfoMode: normalizeSidebarObjectInfoMode(
+      settings.sidebarObjectInfoMode,
+      (settings as Partial<EditorSettings> & { sidebarTableCommentLayout?: string }).sidebarTableCommentLayout,
+      (settings as Partial<EditorSettings> & { sidebarHideTableComments?: boolean }).sidebarHideTableComments,
+      (settings as Partial<EditorSettings> & { sidebarShowDatabaseSizes?: boolean }).sidebarShowDatabaseSizes,
+    ),
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
+    globalDateTimeDisplayFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeDisplayFormat),
+    globalDateTimeExportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeExportFormat),
+    globalDateTimeImportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeImportFormat),
     snippets: normalizeSqlSnippets(settings.snippets, existing?.snippets),
     tableColumnTemplateFields: normalizeTableColumnTemplateFields(settings.tableColumnTemplateFields),
     exportBatchSize: typeof settings.exportBatchSize === "number" && settings.exportBatchSize >= 100 && settings.exportBatchSize <= 100000 ? Math.round(settings.exportBatchSize) : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
@@ -838,26 +974,62 @@ function clearLegacyEditorSettings() {
   safeLocalStorageRemove(EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY);
 }
 
+function editorSettingsSnapshot(settings: EditorSettings): EditorSettings {
+  return JSON.parse(JSON.stringify(settings)) as EditorSettings;
+}
+
 function saveEditorSettings(settings: EditorSettings) {
-  void api.saveEditorSettings(settings).catch(() => {});
+  void api.saveEditorSettings(editorSettingsSnapshot(settings)).catch(() => {});
+}
+
+export interface SettingsNavigationRequest {
+  id: number;
+  tab: string;
+  section?: string;
 }
 
 export const useSettingsStore = defineStore("settings", () => {
   const settingsPageActive = ref(false);
-  const aiConfig = ref<AiConfig>(normalizeAiConfig({ provider: "claude" }));
+  const settingsNavigationRequest = ref<SettingsNavigationRequest | null>(null);
+  const activeModel = ref<{ configId: string; modelId: string } | null>(null);
+  const effortPreferences = ref<AiModelEffortPreference[]>([]);
   const isAiConfigLoaded = ref(false);
-  const aiProviderConfigs = ref<Partial<Record<AiProvider, AiConfig>>>({});
+  const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
+  const mcpGlobalPolicy = ref<McpGlobalPolicy>({ ...DEFAULT_MCP_GLOBAL_POLICY });
   const isDesktopSettingsLoaded = ref(false);
+  const isMcpGlobalPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
+  let pendingAiChatSelection: AiChatSelectionState | null = null;
+  let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+
+  function requestSettingsNavigation(tab: string, section?: string) {
+    settingsNavigationRequest.value = {
+      id: Date.now(),
+      tab,
+      section,
+    };
+  }
+
+  function clearSettingsNavigationRequest(id: number) {
+    if (settingsNavigationRequest.value?.id === id) settingsNavigationRequest.value = null;
+  }
 
   async function initEditorSettings() {
     if (isEditorSettingsLoaded.value) return;
     const saved = await api.loadEditorSettings().catch(() => null);
     if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-      editorSettings.value = normalizeEditorSettings(saved as Partial<EditorSettings>);
+      const savedSettings = saved as Partial<EditorSettings>;
+      const normalized = normalizeEditorSettings(savedSettings);
+      editorSettings.value = normalized;
+      const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
+      const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
+      if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration) {
+        // Persist one-time migrations so removed or unsafe defaults cannot reappear.
+        await api.saveEditorSettings(normalized).catch(() => {});
+      }
       isEditorSettingsLoaded.value = true;
       return;
     }
@@ -901,71 +1073,205 @@ export const useSettingsStore = defineStore("settings", () => {
     }
   }
 
-  async function initAiConfig() {
+  async function initMcpGlobalPolicy(force = false) {
+    if (isMcpGlobalPolicyLoaded.value && !force) return;
+    mcpGlobalPolicy.value = normalizeMcpGlobalPolicy(await api.loadMcpGlobalPolicy());
+    isMcpGlobalPolicyLoaded.value = true;
+  }
+
+  async function updateMcpGlobalPolicy(partial: Partial<Omit<McpGlobalPolicy, "configured">>) {
+    const previous = mcpGlobalPolicy.value;
+    const next = normalizeMcpGlobalPolicy({
+      ...previous,
+      ...partial,
+      configured: true,
+    });
+    mcpGlobalPolicy.value = next;
+    try {
+      await api.saveMcpGlobalPolicy({
+        readOnly: next.readOnly,
+        allowDangerousSql: next.allowDangerousSql,
+        allowedConnectionIds: next.allowedConnectionIds,
+      });
+    } catch (error) {
+      mcpGlobalPolicy.value = previous;
+      throw error;
+    }
+  }
+
+  async function initAiConfigs(): Promise<void> {
     if (isAiConfigLoaded.value) return;
-    const legacy = localStorage.getItem("dbx-ai-config");
-    const [savedActive, savedProviderConfigs] = await Promise.all([api.loadAiConfig().catch(() => null), api.loadAiProviderConfigs().catch(() => null) as Promise<Partial<Record<AiProvider, AiConfig>> | null>]);
 
-    if (savedActive) {
-      aiConfig.value = normalizeAiConfig(savedActive);
-    } else if (legacy) {
-      aiConfig.value = normalizeAiConfig(JSON.parse(legacy));
-      await api.saveAiConfig(aiConfig.value).catch(() => {});
-      localStorage.removeItem("dbx-ai-config");
+    // 尝试加载新格式
+    const newConfigs = await api.loadAiConfigs();
+
+    if (newConfigs.length > 0) {
+      aiConfigs.value = newConfigs.map(normalizeAiConfigItem);
+    } else {
+      // 迁移旧格式
+      aiConfigs.value = [];
+      await migrateToMultiConfig();
     }
 
-    if (savedProviderConfigs) {
-      aiProviderConfigs.value = savedProviderConfigs;
-    }
+    const savedSelection = await api.loadAiChatSelection().catch(() => null);
+    effortPreferences.value = (savedSelection?.effortPreferences ?? []).filter((preference) => aiConfigs.value.some((config) => config.id === preference.configId));
 
-    // Ensure active config is reflected in provider map (overwrite if exists, to guarantee consistency)
-    const activeProvider = aiConfig.value.provider;
-    aiProviderConfigs.value[activeProvider] = { ...aiConfig.value };
+    const savedActive = savedSelection?.active;
+    const savedConfig = savedActive ? aiConfigs.value.find((config) => config.id === savedActive.configId) : undefined;
+    if (savedConfig && savedActive?.modelId.trim()) {
+      activeModel.value = { configId: savedConfig.id, modelId: savedActive.modelId.trim() };
+    } else {
+      const fallback = aiConfigs.value.find((config) => config.isDefault) || aiConfigs.value[0];
+      activeModel.value = fallback?.model.trim() ? { configId: fallback.id, modelId: fallback.model.trim() } : null;
+      if (activeModel.value) persistAiChatSelection();
+    }
 
     isAiConfigLoaded.value = true;
   }
 
-  function updateAiConfig(config: Partial<AiConfig>) {
-    const previousProvider = aiConfig.value.provider;
-    const targetProvider = config.provider;
-    const switchingProvider = !!targetProvider && targetProvider !== previousProvider;
+  async function reloadAiConfigs(): Promise<void> {
+    isAiConfigLoaded.value = false;
+    await initAiConfigs();
+  }
 
-    if (switchingProvider) {
-      // Save current provider's config before switching
-      aiProviderConfigs.value[previousProvider] = { ...aiConfig.value };
-      api.saveAiProviderConfig(previousProvider, aiConfig.value).catch(() => {});
+  async function migrateToMultiConfig(): Promise<void> {
+    const oldActiveConfig = await api.loadAiConfig().catch(() => null);
+    const oldProviderConfigs = await api.loadAiProviderConfigs().catch(() => null);
 
-      // Restore saved config for target provider, or use preset defaults
-      const savedConfig = aiProviderConfigs.value[targetProvider];
-      if (savedConfig) {
-        aiConfig.value = normalizeAiConfig({ ...savedConfig, provider: targetProvider });
-      } else {
-        aiConfig.value = normalizeAiConfig({ provider: targetProvider });
-      }
-      // Don't merge caller fields when switching — caller passes only { provider }
-    } else {
-      // Not switching provider — apply partial update
-      Object.assign(aiConfig.value, config);
+    if (!oldActiveConfig && (!oldProviderConfigs || Object.keys(oldProviderConfigs).length === 0)) {
+      return;
     }
 
-    aiProviderConfigs.value[aiConfig.value.provider] = { ...aiConfig.value };
-    api.saveAiConfig(aiConfig.value).catch(() => {});
-    api.saveAiProviderConfig(aiConfig.value.provider, aiConfig.value).catch(() => {});
+    const newConfigs: AiConfigItem[] = [];
+    const seenKeys = new Set<string>();
+
+    if (oldActiveConfig) {
+      const item = aiConfigToItem(normalizeAiConfig(oldActiveConfig), generateId(), oldActiveConfig.provider);
+      item.isDefault = true;
+      newConfigs.push(item);
+      seenKeys.add(getConfigKey(oldActiveConfig));
+    }
+
+    if (oldProviderConfigs) {
+      for (const [provider, config] of Object.entries(oldProviderConfigs)) {
+        const key = getConfigKey(config);
+        if (!seenKeys.has(key)) {
+          const item = aiConfigToItem(normalizeAiConfig(config), generateId(), provider);
+          item.isDefault = false;
+          newConfigs.push(item);
+          seenKeys.add(key);
+        }
+      }
+    }
+
+    if (newConfigs.length > 0) {
+      await api.saveAiConfigs(newConfigs);
+      aiConfigs.value = newConfigs;
+    }
   }
 
-  function isConfigured(): boolean {
-    const preset = AI_PROVIDER_PRESETS[aiConfig.value.provider];
-    if (aiConfig.value.provider === "codex-cli") return true;
-    return !!aiConfig.value.endpoint && !!aiConfig.value.model && (!preset.requiresApiKey || !!aiConfig.value.apiKey);
+  async function createAiConfig(config: AiConfigItem): Promise<void> {
+    const normalized = normalizeAiConfigItem(config);
+    await api.saveAiConfigItem(normalized);
+    aiConfigs.value.push(normalized);
+    if (aiConfigs.value.length === 1 && normalized.model.trim()) {
+      activeModel.value = { configId: normalized.id, modelId: normalized.model };
+      persistAiChatSelection();
+    }
   }
 
-  function isAiProviderConfigured(provider: AiProvider): boolean {
-    const config = aiProviderConfigs.value[provider];
+  async function updateAiConfigItem(id: string, config: Partial<AiConfigItem>): Promise<void> {
+    const index = aiConfigs.value.findIndex((c) => c.id === id);
+    if (index !== -1) {
+      const previous = aiConfigs.value[index];
+      const updated = normalizeAiConfigItem({ ...previous, ...config });
+      await api.saveAiConfigItem(updated);
+      aiConfigs.value[index] = updated;
+      if (previous.provider !== updated.provider) {
+        effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== id);
+        if (activeModel.value?.configId === id) activeModel.value = null;
+        persistAiChatSelection();
+      }
+    }
+  }
+
+  async function deleteAiConfig(id: string): Promise<void> {
+    await api.deleteAiConfig(id);
+    aiConfigs.value = aiConfigs.value.filter((c) => c.id !== id);
+    effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== id);
+    if (activeModel.value?.configId === id) {
+      const fallback = aiConfigs.value.find((config) => config.isDefault) || aiConfigs.value[0];
+      activeModel.value = fallback?.model.trim() ? { configId: fallback.id, modelId: fallback.model.trim() } : null;
+    }
+    persistAiChatSelection();
+  }
+
+  async function setDefaultAiConfig(id: string): Promise<void> {
+    await api.setDefaultAiConfig(id);
+    aiConfigs.value.forEach((c) => {
+      c.isDefault = c.id === id;
+    });
+  }
+
+  function updateActiveModel(model: { configId: string; modelId: string }) {
+    activeModel.value = { configId: model.configId, modelId: model.modelId.trim() };
+    persistAiChatSelection();
+  }
+
+  const activeEffort = computed<AiEffortSelection | null>(() => {
+    const active = activeModel.value;
+    if (!active) return null;
+    return effortPreferences.value.find((preference) => preference.configId === active.configId && preference.modelId === active.modelId)?.selection ?? null;
+  });
+
+  function updateActiveEffort(selection: AiEffortSelection | null) {
+    const active = activeModel.value;
+    if (!active) return;
+    effortPreferences.value = effortPreferences.value.filter((preference) => preference.configId !== active.configId || preference.modelId !== active.modelId);
+    if (selection) {
+      effortPreferences.value.push({
+        configId: active.configId,
+        modelId: active.modelId,
+        selection,
+      });
+    }
+    persistAiChatSelection();
+  }
+
+  function persistAiChatSelection() {
+    pendingAiChatSelection = {
+      version: 1,
+      active: activeModel.value ? { ...activeModel.value } : undefined,
+      effortPreferences: effortPreferences.value.map((preference) => ({
+        ...preference,
+        selection: { ...preference.selection },
+      })),
+    };
+    if (!aiChatSelectionSaveRunning) void flushAiChatSelection();
+  }
+
+  async function flushAiChatSelection() {
+    aiChatSelectionSaveRunning = true;
+    try {
+      while (pendingAiChatSelection) {
+        const selection = pendingAiChatSelection;
+        pendingAiChatSelection = null;
+        await api.saveAiChatSelection(selection).catch(() => {});
+      }
+    } finally {
+      aiChatSelectionSaveRunning = false;
+      if (pendingAiChatSelection) void flushAiChatSelection();
+    }
+  }
+
+  const isConfigured = computed((): boolean => {
+    if (!activeModel.value) return false;
+    const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
-    if (provider === "codex-cli") return true;
-    const preset = AI_PROVIDER_PRESETS[provider];
-    return !!config.endpoint?.trim() && !!config.model?.trim() && (!preset.requiresApiKey || !!config.apiKey?.trim());
-  }
+    const preset = AI_PROVIDER_PRESETS[config.provider];
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli" || config.provider === "pi-agent-cli") return true;
+    return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
+  });
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
     if (partial.fontFamily !== undefined) editorSettings.value.fontFamily = normalizeFontFamily(partial.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily);
@@ -999,6 +1305,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showCurrentStatementFrame !== undefined) editorSettings.value.showCurrentStatementFrame = partial.showCurrentStatementFrame === true;
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
+    if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
@@ -1010,8 +1317,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.confirmDangerousSqlExecution !== undefined) editorSettings.value.confirmDangerousSqlExecution = partial.confirmDangerousSqlExecution;
     if (partial.confirmUnsavedSqlClose !== undefined) editorSettings.value.confirmUnsavedSqlClose = partial.confirmUnsavedSqlClose;
     if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
+    if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
+    if (partial.tableOpenPageSize !== undefined) editorSettings.value.tableOpenPageSize = normalizeResultPageSize(partial.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize);
     if (partial.infiniteScroll !== undefined) editorSettings.value.infiniteScroll = partial.infiniteScroll;
     if (partial.infiniteScrollMaxRows !== undefined)
       editorSettings.value.infiniteScrollMaxRows = typeof partial.infiniteScrollMaxRows === "number" && partial.infiniteScrollMaxRows >= 1000 && partial.infiniteScrollMaxRows <= 50000 ? Math.round(partial.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
@@ -1024,8 +1333,17 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
+    if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyExtractorId(partial.dataGridCopyExtractor);
+    if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
+    if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
+    if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
+    if (partial.dataGridMultiRowTranspose !== undefined) editorSettings.value.dataGridMultiRowTranspose = partial.dataGridMultiRowTranspose === true;
+    if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
+    if (partial.numericColumnRightAlign !== undefined) editorSettings.value.numericColumnRightAlign = partial.numericColumnRightAlign === true;
+    if (partial.tableFontFamily !== undefined) editorSettings.value.tableFontFamily = normalizeFontFamily(partial.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily);
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
+    if (partial.tableInfoActiveTab !== undefined) editorSettings.value.tableInfoActiveTab = normalizeTableInfoTab(partial.tableInfoActiveTab);
     if (partial.tableInfoDrawerWidth !== undefined) editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth);
     if (partial.cellDetailDrawerWidth !== undefined) editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth);
     if (partial.cellDetailPanelLayout !== undefined) editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
@@ -1034,6 +1352,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.shortcuts !== undefined) editorSettings.value.shortcuts = normalizeShortcutSettings(partial.shortcuts);
     if (partial.sqlFormatter !== undefined) editorSettings.value.sqlFormatter = normalizeSqlFormatterSettings(partial.sqlFormatter);
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
+    if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
@@ -1043,10 +1362,13 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);
-    if (partial.sidebarHideTableComments !== undefined) editorSettings.value.sidebarHideTableComments = partial.sidebarHideTableComments;
+    if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
+    if (partial.globalDateTimeDisplayFormat !== undefined) editorSettings.value.globalDateTimeDisplayFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeDisplayFormat);
+    if (partial.globalDateTimeExportFormat !== undefined) editorSettings.value.globalDateTimeExportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeExportFormat);
+    if (partial.globalDateTimeImportFormat !== undefined) editorSettings.value.globalDateTimeImportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeImportFormat);
     if (partial.snippets !== undefined) editorSettings.value.snippets = normalizeSqlSnippets(partial.snippets);
     if (partial.tableColumnTemplateFields !== undefined) editorSettings.value.tableColumnTemplateFields = normalizeTableColumnTemplateFields(partial.tableColumnTemplateFields);
     if (partial.exportBatchSize !== undefined) editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
@@ -1060,6 +1382,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sqlVariableSyntaxOverrides !== undefined) editorSettings.value.sqlVariableSyntaxOverrides = normalizeSqlVariableSyntaxOverrides(partial.sqlVariableSyntaxOverrides);
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     saveEditorSettings(editorSettings.value);
+  }
+
+  async function persistEditorSettings(): Promise<void> {
+    await api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
   }
 
   function updateColumnFormatter(key: string, formatter: ColumnFormatterConfig | undefined) {
@@ -1098,20 +1424,34 @@ export const useSettingsStore = defineStore("settings", () => {
 
   return {
     settingsPageActive,
-    aiConfig,
+    settingsNavigationRequest,
+    requestSettingsNavigation,
+    clearSettingsNavigationRequest,
+    activeModel,
+    activeEffort,
     isAiConfigLoaded,
-    aiProviderConfigs,
-    initAiConfig,
-    updateAiConfig,
+    aiConfigs,
+    initAiConfigs,
+    reloadAiConfigs,
+    migrateToMultiConfig,
+    createAiConfig,
+    updateAiConfigItem,
+    deleteAiConfig,
+    setDefaultAiConfig,
+    updateActiveModel,
+    updateActiveEffort,
     isConfigured,
-    isAiProviderConfigured,
     isEditorSettingsLoaded,
     editorSettings,
     desktopSettings,
+    mcpGlobalPolicy,
     initEditorSettings,
     updateEditorSettings,
+    persistEditorSettings,
     initDesktopSettings,
     updateDesktopSettings,
+    initMcpGlobalPolicy,
+    updateMcpGlobalPolicy,
     updateColumnFormatter,
     upsertCustomColumnFormatter,
     deleteCustomColumnFormatter,

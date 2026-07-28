@@ -1,0 +1,97 @@
+dialect:
+  name: "KwDB"
+  display_name: "KwDB"
+  versions:
+    - version: "2.0"
+      status: "RECOMMENDED"
+
+types:
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT"]
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "REAL"
+    category: "FLOAT"
+  - name: "DOUBLE PRECISION"
+    category: "FLOAT"
+  - name: "NUMERIC"
+    category: "DECIMAL"
+    has_precision: true
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+  - name: "TEXT"
+    category: "STRING"
+  - name: "BYTEA"
+    category: "BINARY"
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  create_index: true
+  drop_index: true
+  foreign_key: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_sequence: true
+  drop_sequence: true
+  if_not_exists: true
+  transactional_ddl: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} ALTER COLUMN {column} TYPE {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+
+online_safety:
+  add_column:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 1600
+  max_indexes_per_table: 100
+  max_query_size_bytes: 268435456
+  supports_sequences: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: true
+  max_length: 63
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = '{schema}'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = '{schema}' AND table_name = '{table}' ORDER BY ordinal_position"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT tc.table_name, ccu.table_name AS ref_table FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = '{schema}'"
+    depth_support: 2
+    performance_profile: "HEAVY"

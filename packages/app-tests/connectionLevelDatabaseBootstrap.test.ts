@@ -32,9 +32,20 @@ test("allows install scripts that create and switch databases before table DDL",
   assert.equal(canExecuteWithoutSelectedDatabase(connection("mysql"), sql), true);
 });
 
+test("allows connection-scoped SHOW without a selected database", () => {
+  assert.equal(canExecuteWithoutSelectedDatabase(connection("mysql"), "SHOW DATABASES"), true);
+  assert.equal(canExecuteWithoutSelectedDatabase(connection("mysql"), "SHOW SCHEMAS; SHOW VARIABLES LIKE 'version%'"), true);
+  assert.equal(canExecuteWithoutSelectedDatabase(connection("doris"), "show databases"), true);
+  assert.equal(canExecuteWithoutSelectedDatabase(connection("goldendb"), "SHOW PROCESSLIST"), true);
+});
+
 test("blocks scripts that never establish database context", () => {
   const sql = "CREATE DATABASE app_db; CREATE TABLE users(id INT)";
   assert.equal(canExecuteWithoutSelectedDatabase(connection("mysql"), sql), false);
+});
+
+test("blocks SHOW followed by table DDL without a database context", () => {
+  assert.equal(canExecuteWithoutSelectedDatabase(connection("mysql"), "SHOW DATABASES; CREATE TABLE users(id INT)"), false);
 });
 
 test("blocks malformed USE statements that trail into other SQL", () => {

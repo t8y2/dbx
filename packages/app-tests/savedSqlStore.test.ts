@@ -48,6 +48,66 @@ test("concurrent saved SQL folder creates reuse the same pending folder", async 
   assert.equal(store.folders[0]?.id, firstFolder.id);
 });
 
+test("creates a nested SQL folder under the requested parent", async () => {
+  const root: SavedSqlFolder = {
+    id: "root",
+    connectionId: "conn-1",
+    name: "Root",
+    orderIndex: 0,
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+  };
+  const sibling: SavedSqlFolder = {
+    id: "child-1",
+    connectionId: "conn-1",
+    parentFolderId: "root",
+    name: "Existing child",
+    orderIndex: 0,
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [root, sibling], files: [] });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+  const child = await store.createFolder("conn-1", "Nested child", "root");
+
+  assert.equal(child.parentFolderId, "root");
+  assert.equal(child.connectionId, "conn-1");
+  assert.equal(child.orderIndex, 1);
+  assert.equal(apiMock.saveSavedSqlFolder.mock.calls.at(-1)?.[0].parentFolderId, "root");
+  assert.deepEqual(
+    store.listChildFolders("conn-1", "root").map((folder) => folder.id),
+    ["child-1", child.id],
+  );
+});
+
+test("does not move a SQL folder into its own descendant", async () => {
+  const root: SavedSqlFolder = {
+    id: "root",
+    connectionId: "conn-1",
+    name: "Root",
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+  };
+  const child: SavedSqlFolder = {
+    id: "child",
+    connectionId: "conn-1",
+    parentFolderId: "root",
+    name: "Child",
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+  };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [root, child], files: [] });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+  await store.moveFolderToFolder("root", "child");
+
+  assert.equal(store.allFolders.find((folder) => folder.id === "root")?.parentFolderId, undefined);
+  assert.equal(apiMock.saveSavedSqlFolder.mock.calls.length, 0);
+});
+
 test("saved SQL summaries load file content on demand", async () => {
   const summaryFile: SavedSqlFile = {
     id: "sql-1",

@@ -27,6 +27,24 @@ test("classifies Elasticsearch GET mapping and POST JSON responses", () => {
   });
 });
 
+test("classifies Elasticsearch HEAD responses", () => {
+  const response = jsonResponse({ rows: [[200, "null"]] });
+
+  assert.deepEqual(elasticsearchJsonResponseForResult("elasticsearch", "HEAD /products", response), {
+    status: 200,
+    body: "null",
+  });
+});
+
+test("classifies Elasticsearch responses after leading comments", () => {
+  const response = jsonResponse();
+
+  assert.deepEqual(elasticsearchJsonResponseForResult("elasticsearch", "/* mapping */\nGET /products/_mapping", response), {
+    status: 200,
+    body: '{\n  "acknowledged": true\n}',
+  });
+});
+
 test("rejects SQL and non-JSON Elasticsearch result shapes", () => {
   const response = jsonResponse();
 

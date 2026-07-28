@@ -1,7 +1,7 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 
-type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">>;
+type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info">>;
 
 const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
 
@@ -12,6 +12,9 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
   { type: "hive", patterns: [/org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
   { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /kyuubi/i, /hive2/i] },
+  { type: "gaussdb", patterns: [/jdbc:gaussdb:/i, /com\.huawei\.gaussdb/i, /gaussdb/i] },
+  { type: "dameng", patterns: [/jdbc:dm:/i, /dm\.jdbc\.driver/i, /dameng/i] },
+  { type: "opengauss", patterns: [/jdbc:opengauss:/i, /org\.opengauss/i, /opengauss/i] },
   { type: "postgres", patterns: [/jdbc:postgresql:/i, /postgres/i] },
   { type: "sqlserver", patterns: [/jdbc:sqlserver:/i, /sqlserver/i, /mssql/i] },
   { type: "oracle", patterns: [/jdbc:oracle:/i, /oracle/i] },
@@ -22,6 +25,11 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "informix", patterns: [/jdbc:informix/i, /informix/i] },
   { type: "iris", patterns: [/jdbc:(?:iris|cache):/i, /com\.intersystems\.jdbc\.(?:IRIS|Cache)Driver/i, /intersystems-jdbc/i] },
 ];
+
+// ASE uses Transact-SQL, but treating it as SQL Server globally would also
+// enable SQL Server metadata, pagination, and identifier rules. Keep this
+// narrower matcher exclusively for editor syntax parsing.
+const JDBC_ASE_PROFILE_PATTERNS = [/(?:^|[\s_-])ase(?:$|[\s_-])/i, /\bsap[\s_-]+ase\b/i, /\badaptive server enterprise\b/i];
 
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
@@ -48,6 +56,13 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   return inferJdbcDialect(connection) ?? "jdbc";
 }
 
+export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
+  // ASE uses T-SQL snippets, but mapping it globally to SQL Server would also
+  // enable incompatible SQL Server metadata and pagination behavior.
+  if (isJdbcAseProfile(connection)) return "sqlserver";
+  return effectiveDatabaseTypeForConnection(connection);
+}
+
 export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection) return undefined;
   if (connection.db_type === "gbase" && !isGbase8sProfile(connection.driver_profile)) return "gbase";
@@ -62,6 +77,10 @@ export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectCon
   if (dialect === "hive" || dialect === "trino") return false;
   if (dialect === "databend") return true;
   return !usesTreeSchemaMode(dialect);
+}
+
+export function connectionShouldDiscoverJdbcSchemas(connection?: JdbcDialectConnection): boolean {
+  return connection?.db_type === "jdbc" && !inferJdbcDialect(connection);
 }
 
 export function connectionUsesSchemaExecutionContext(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): boolean {
@@ -92,10 +111,10 @@ export function metadataSchemaForConnection(connection: JdbcDialectConnection | 
 
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
-  if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   if (schema) return schema;
   const type = effectiveDatabaseTypeForConnection(connection);
+  if (type === "sqlite") return database;
   return isSchemaAware(type) ? database : undefined;
 }
 
@@ -104,6 +123,17 @@ export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" 
   if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss") return "postgres";
   if (dbType === "sqlserver") return "sqlserver";
   return "mysql";
+}
+
+export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): "mysql" | "postgres" | "sqlserver" {
+  if (isJdbcAseProfile(connection)) return "sqlserver";
+  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connection));
+}
+
+function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {
+  if (connection?.db_type !== "jdbc") return false;
+  const explicitIdentity = [connection.driver_profile, connection.driver_label, connection.database_info?.productName].filter(Boolean).join("\n");
+  return JDBC_ASE_PROFILE_PATTERNS.some((pattern) => pattern.test(explicitIdentity));
 }
 
 function isGbase8sProfile(driverProfile?: string): boolean {

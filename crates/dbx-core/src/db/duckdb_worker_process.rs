@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db;
 use crate::db::duckdb_worker_protocol::{
-    DuckDbWorkerConnectParams, DuckDbWorkerError, DuckDbWorkerExecuteParams, DuckDbWorkerMethod, DuckDbWorkerRequest,
-    DuckDbWorkerResponse,
+    DuckDbWorkerConnectParams, DuckDbWorkerError, DuckDbWorkerExecuteParams, DuckDbWorkerMethod,
+    DuckDbWorkerObjectSourceParams, DuckDbWorkerRequest, DuckDbWorkerResponse,
 };
 use crate::models::connection::AttachedDatabaseConfig;
 use crate::storage::{normalize_duckdb_worker_max_processes, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
@@ -242,6 +242,20 @@ impl DuckDbWorkerClient {
         self.metadata_request(
             DuckDbWorkerMethod::ListColumns,
             serde_json::json!({ "database": database, "schema": schema, "table": table }),
+        )
+        .await
+    }
+
+    pub async fn get_object_source(
+        &self,
+        database: String,
+        schema: String,
+        name: String,
+        object_type: db::ObjectSourceKind,
+    ) -> Result<String, String> {
+        self.metadata_request(
+            DuckDbWorkerMethod::GetObjectSource,
+            DuckDbWorkerObjectSourceParams { database, schema, name, object_type },
         )
         .await
     }
@@ -499,7 +513,8 @@ impl DuckDbWorkerClient {
             let mut pending = self.inner.pending.lock().await;
             let ids = pending
                 .iter()
-                .filter_map(|(id, request)| (request.generation == generation).then(|| id.clone()))
+                .filter(|&(_id, request)| request.generation == generation)
+                .map(|(id, _request)| id.clone())
                 .collect::<Vec<_>>();
             ids.into_iter().filter_map(|id| pending.remove(&id).map(|request| (id, request.sender))).collect::<Vec<_>>()
         };
@@ -617,7 +632,8 @@ fn spawn_stdout_reader(
             let mut pending = pending.lock().await;
             let ids = pending
                 .iter()
-                .filter_map(|(id, request)| (request.generation == generation).then(|| id.clone()))
+                .filter(|&(_id, request)| request.generation == generation)
+                .map(|(id, _request)| id.clone())
                 .collect::<Vec<_>>();
             ids.into_iter().filter_map(|id| pending.remove(&id).map(|request| (id, request.sender))).collect::<Vec<_>>()
         };

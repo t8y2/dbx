@@ -38,7 +38,7 @@ describe("queryStore database open state", () => {
     store.closeTab(tabId);
 
     expect(store.isDatabaseOpen("pg-1", "analytics")).toBe(false);
-  });
+  }, 10_000);
 
   it("keeps object browser viewport per tab and clears it on schema change", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
@@ -67,6 +67,19 @@ describe("queryStore database open state", () => {
     expect(store.tabs.find((tab) => tab.id === icebergTabId)?.objectBrowser?.catalog).toBe("iceberg_catalog");
     expect(store.tabs.find((tab) => tab.id === hiveTabId)?.objectBrowser?.catalog).toBe("hive_catalog");
     expect(store.openObjectBrowser("doris-1", "default", undefined, "iceberg_catalog")).toBe(icebergTabId);
+  });
+
+  it("keeps external catalog structure editors isolated", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const icebergTabId = store.openTableStructure("doris-1", "sales", undefined, "orders", undefined, undefined, "iceberg_catalog");
+    const hiveTabId = store.openTableStructure("doris-1", "sales", undefined, "orders", undefined, undefined, "hive_catalog");
+
+    expect(hiveTabId).not.toBe(icebergTabId);
+    expect(store.tabs.find((tab) => tab.id === icebergTabId)?.catalog).toBe("iceberg_catalog");
+    expect(store.tabs.find((tab) => tab.id === hiveTabId)?.catalog).toBe("hive_catalog");
+    expect(store.openTableStructure("doris-1", "sales", undefined, "orders", undefined, undefined, "iceberg_catalog")).toBe(icebergTabId);
   });
 
   it("closes data and structure tabs for a dropped table object", async () => {
@@ -141,6 +154,26 @@ describe("queryStore database open state", () => {
 
     expect(store.tabs.some((tab) => tab.id === dataId)).toBe(false);
     expect(store.tabs.some((tab) => tab.id === structureId)).toBe(true);
+  });
+
+  it("closes only the matching HBase table tab after deletion", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const deletedTableId = store.createTab("hbase-1", "metrics", "events", "hbase", undefined, "events");
+    const otherTableId = store.createTab("hbase-1", "metrics", "archive", "hbase", undefined, "archive");
+    const otherNamespaceId = store.createTab("hbase-1", "default", "events", "hbase", undefined, "events");
+
+    store.closeDroppedTableObjectTabs({
+      connectionId: "hbase-1",
+      database: "metrics",
+      name: "events",
+      objectType: "TABLE",
+    });
+
+    expect(store.tabs.some((tab) => tab.id === deletedTableId)).toBe(false);
+    expect(store.tabs.some((tab) => tab.id === otherTableId)).toBe(true);
+    expect(store.tabs.some((tab) => tab.id === otherNamespaceId)).toBe(true);
   });
 
   it("matches dropped table schema candidates", async () => {

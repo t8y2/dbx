@@ -1,5 +1,6 @@
 import { ref, computed, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
-import { allCellsSelectionRange, extractColumnsSelection, extractSelection, isCellInSelection, normalizeSelectionRange, normalizeSelectedColumnIndexes, rowSelectionRange, type CellPosition, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
+import { allCellsSelectionRange, extractColumnsSelection, extractSelection, isCellInSelection, normalizeSelectionRange, normalizeSelectedColumnIndexes, type CellPosition, type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
+import type { DataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 
 type CellValue = string | number | boolean | null;
 
@@ -24,20 +25,29 @@ export interface UseDataGridSelectionOptions {
   gridRef: Ref<HTMLDivElement | undefined>;
   getScrollElement?: () => HTMLElement | null;
   cellFromClientPoint?: (clientX: number, clientY: number) => CellPosition | null;
+  rowFromClientPoint?: (clientX: number, clientY: number) => number | null;
+  onUserCellSelection?: () => void;
+  runtimeScope?: DataGridRuntimeScope;
 }
 
 const AUTO_SCROLL_EDGE_SIZE = 40;
 const AUTO_SCROLL_MAX_SPEED = 28;
+type RowSelectionOperation = "replace" | "add" | "remove";
 
 export function useDataGridSelection(options: UseDataGridSelectionOptions) {
-  const { columns, displayItems, editingCell, showTranspose, transposeRowIndex, gridRef, getScrollElement, cellFromClientPoint } = options;
+  const { columns, displayItems, editingCell, showTranspose, transposeRowIndex, gridRef, getScrollElement, cellFromClientPoint, rowFromClientPoint } = options;
 
   const selectionAnchor = ref<CellPosition | null>(null);
   const selectionFocus = ref<CellPosition | null>(null);
   const isSelectingCells = ref(false);
+  const isSelectingRows = ref(false);
   let selectionPointerClientX = 0;
   let selectionPointerClientY = 0;
   let selectionAutoScrollFrame = 0;
+  let rowSelectionRangeAnchorIndex = -1;
+  let rowSelectionFocusIndex = -1;
+  let rowSelectionBaseIds = new Set<number>();
+  let rowSelectionOperation: RowSelectionOperation = "replace";
 
   const isSelectingAll = ref(false);
   const selectedCellKeys = ref<Set<string>>(new Set());
@@ -84,6 +94,53 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     });
   });
 
+  function buildCellSelectionMatrix(rowIndexes: number[], columnIndexes: number[]): CellSelectionMatrix | null {
+    const normalizedRows = normalizeSelectedColumnIndexes(rowIndexes).filter((index) => index < displayItems.value.length && !displayItems.value[index]?.isDraft);
+    const normalizedColumns = normalizeSelectedColumnIndexes(columnIndexes).filter((index) => index < columns.value.length);
+    if (normalizedRows.length === 0 || normalizedColumns.length === 0) return null;
+    return {
+      rowIndexes: normalizedRows,
+      columnIndexes: normalizedColumns,
+      columns: normalizedColumns.map((index) => columns.value[index]),
+      rows: normalizedRows.map((rowIndex) => normalizedColumns.map((columnIndex) => displayItems.value[rowIndex]?.data[columnIndex] ?? null)),
+    };
+  }
+
+  const selectedCellMatrix = computed<CellSelectionMatrix | null>(() => {
+    if (hasColumnSelection.value) {
+      return buildCellSelectionMatrix(
+        displayItems.value.map((_, index) => index),
+        [...selectedColumnIndexes.value],
+      );
+    }
+
+    if (selectedCellKeys.value.size > 0) {
+      const columnsByRow = new Map<number, number[]>();
+      for (const key of selectedCellKeys.value) {
+        const position = parseCellKey(key);
+        if (!position || position.rowIndex >= displayItems.value.length || position.colIndex >= columns.value.length || displayItems.value[position.rowIndex]?.isDraft) continue;
+        const selectedColumns = columnsByRow.get(position.rowIndex) ?? [];
+        selectedColumns.push(position.colIndex);
+        columnsByRow.set(position.rowIndex, selectedColumns);
+      }
+      const rowIndexes = [...columnsByRow.keys()].sort((a, b) => a - b);
+      const columnIndexes = normalizeSelectedColumnIndexes(columnsByRow.get(rowIndexes[0]) ?? []);
+      if (rowIndexes.length === 0 || columnIndexes.length === 0) return null;
+      const hasConsistentColumns = rowIndexes.every((rowIndex) => {
+        const rowColumns = normalizeSelectedColumnIndexes(columnsByRow.get(rowIndex) ?? []);
+        return rowColumns.length === columnIndexes.length && rowColumns.every((columnIndex, index) => columnIndex === columnIndexes[index]);
+      });
+      return hasConsistentColumns ? buildCellSelectionMatrix(rowIndexes, columnIndexes) : null;
+    }
+
+    const range = selectedRange.value;
+    if (!range) return null;
+    return buildCellSelectionMatrix(
+      Array.from({ length: range.endRow - range.startRow + 1 }, (_, index) => range.startRow + index),
+      Array.from({ length: range.endCol - range.startCol + 1 }, (_, index) => range.startCol + index),
+    );
+  });
+
   const selectedCellCount = computed(() => selectedCells.value.rows.reduce((count, row) => count + row.length, 0));
   const hasCellSelection = computed(() => selectedCellCount.value > 0);
 
@@ -110,19 +167,11 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   }
 
   function selectRow(rowIndex: number) {
-    const range = rowSelectionRange(rowIndex, columns.value.length);
-    if (!range) return;
-    selectedCellKeys.value = new Set();
-    selectionAnchor.value = { rowIndex: range.startRow, colIndex: range.startCol };
-    selectionFocus.value = { rowIndex: range.endRow, colIndex: range.endCol };
-  }
-
-  function selectRows(startRow: number, endRow: number) {
-    const range = rowSelectionRange(startRow, columns.value.length, endRow);
-    if (!range) return;
-    selectedCellKeys.value = new Set();
-    selectionAnchor.value = { rowIndex: range.startRow, colIndex: range.startCol };
-    selectionFocus.value = { rowIndex: range.endRow, colIndex: range.endCol };
+    const item = displayItems.value[rowIndex];
+    if (!item) return;
+    clearCellSelection();
+    selectedRowIds.value = new Set([item.id]);
+    lastClickedRowIndex.value = rowIndex;
   }
 
   function selectColumns(startCol: number, endCol: number, options?: { merge?: boolean }) {
@@ -221,47 +270,104 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
         next.add(rowId);
       }
       selectedRowIds.value = next;
-      selectContiguousRowIds(next);
       lastClickedRowIndex.value = rowIndex;
     } else if (isShift && lastClickedRowIndex.value !== null) {
-      const start = Math.min(lastClickedRowIndex.value, rowIndex);
-      const end = Math.max(lastClickedRowIndex.value, rowIndex);
-      const next = new Set(selectedRowIds.value);
-      for (let i = start; i <= end; i++) {
-        const item = displayItems.value[i];
-        if (item) next.add(item.id);
-      }
-      selectedRowIds.value = next;
-      selectRows(start, end);
+      selectedRowIds.value = rowIdsInRange(lastClickedRowIndex.value, rowIndex);
     } else {
       selectedRowIds.value = new Set([rowId]);
-      selectRow(rowIndex);
       lastClickedRowIndex.value = rowIndex;
     }
   }
 
-  function selectContiguousRowIds(rowIds: Set<number>) {
-    if (rowIds.size === 0) {
-      clearCellSelection();
-      return;
+  function rowIdsInRange(startRow: number, endRow: number): Set<number> {
+    const ids = new Set<number>();
+    const start = Math.max(0, Math.min(startRow, endRow));
+    const end = Math.min(displayItems.value.length - 1, Math.max(startRow, endRow));
+    for (let index = start; index <= end; index++) {
+      const item = displayItems.value[index];
+      if (item) ids.add(item.id);
     }
+    return ids;
+  }
 
-    const indexes = displayItems.value.reduce<number[]>((selectedIndexes, item, index) => {
-      if (rowIds.has(item.id)) selectedIndexes.push(index);
-      return selectedIndexes;
-    }, []);
-    if (indexes.length !== rowIds.size) {
-      clearCellSelection();
-      return;
+  function applyDraggedRowRange(focusRowIndex: number) {
+    if (focusRowIndex === rowSelectionFocusIndex) return;
+    const previousFocusIndex = rowSelectionFocusIndex;
+    const previousStart = previousFocusIndex < 0 ? 0 : Math.min(rowSelectionRangeAnchorIndex, previousFocusIndex);
+    const previousEnd = previousFocusIndex < 0 ? -1 : Math.max(rowSelectionRangeAnchorIndex, previousFocusIndex);
+    const nextStart = Math.min(rowSelectionRangeAnchorIndex, focusRowIndex);
+    const nextEnd = Math.max(rowSelectionRangeAnchorIndex, focusRowIndex);
+    const changedStart = previousFocusIndex < 0 ? nextStart : Math.min(previousStart, nextStart);
+    const changedEnd = Math.max(previousEnd, nextEnd);
+    const selectedIds = selectedRowIds.value;
+    for (let index = changedStart; index <= changedEnd; index++) {
+      const wasInRange = index >= previousStart && index <= previousEnd;
+      const isInRange = index >= nextStart && index <= nextEnd;
+      if (wasInRange === isInRange) continue;
+      const item = displayItems.value[index];
+      if (!item) continue;
+      if (isInRange) {
+        if (rowSelectionOperation === "remove") selectedIds.delete(item.id);
+        else selectedIds.add(item.id);
+      } else if (rowSelectionOperation !== "replace" && rowSelectionBaseIds.has(item.id)) {
+        selectedIds.add(item.id);
+      } else {
+        selectedIds.delete(item.id);
+      }
     }
+    rowSelectionFocusIndex = focusRowIndex;
+  }
 
-    const start = Math.min(...indexes);
-    const end = Math.max(...indexes);
-    if (end - start + 1 !== indexes.length) {
-      clearCellSelection();
-      return;
+  function updateRowSelectionFromPointer() {
+    const rowIndex = rowFromClientPoint?.(selectionPointerClientX, selectionPointerClientY);
+    if (rowIndex === null || rowIndex === undefined) return;
+    applyDraggedRowRange(rowIndex);
+  }
+
+  function handleRowSelectionPointerMove(event: MouseEvent) {
+    if (!isSelectingRows.value) return;
+    selectionPointerClientX = event.clientX;
+    selectionPointerClientY = event.clientY;
+    if (!selectionAutoScrollFrame) selectionAutoScrollFrame = requestAnimationFrame(runSelectionAutoScroll);
+  }
+
+  function finishRowSelection(event?: MouseEvent) {
+    if (!isSelectingRows.value) return;
+    if (event) {
+      selectionPointerClientX = event.clientX;
+      selectionPointerClientY = event.clientY;
     }
-    selectRows(start, end);
+    updateRowSelectionFromPointer();
+    isSelectingRows.value = false;
+    // Keep the range origin stable across repeated Shift selections. For a
+    // plain or meta selection this is the row where the gesture started; for
+    // Shift it remains the previous anchor.
+    lastClickedRowIndex.value = rowSelectionRangeAnchorIndex >= 0 ? rowSelectionRangeAnchorIndex : lastClickedRowIndex.value;
+    document.removeEventListener("mouseup", finishRowSelection);
+    document.removeEventListener("mousemove", handleRowSelectionPointerMove);
+    stopSelectionAutoScroll();
+  }
+
+  function beginRowSelection(rowIndex: number, rowId: number, event: MouseEvent) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    focusGridWithoutScrolling();
+    clearCellSelection();
+
+    const isMeta = event.metaKey || event.ctrlKey;
+    const isShift = event.shiftKey;
+    rowSelectionRangeAnchorIndex = isShift && lastClickedRowIndex.value !== null ? lastClickedRowIndex.value : rowIndex;
+    rowSelectionFocusIndex = -1;
+    rowSelectionBaseIds = new Set(selectedRowIds.value);
+    rowSelectionOperation = isMeta ? (rowSelectionBaseIds.has(rowId) ? "remove" : "add") : "replace";
+    selectedRowIds.value = rowSelectionOperation === "replace" ? new Set() : new Set(rowSelectionBaseIds);
+    applyDraggedRowRange(rowIndex);
+
+    isSelectingRows.value = true;
+    selectionPointerClientX = event.clientX;
+    selectionPointerClientY = event.clientY;
+    document.addEventListener("mouseup", finishRowSelection);
+    document.addEventListener("mousemove", handleRowSelectionPointerMove);
   }
 
   function finishCellSelection() {
@@ -294,20 +400,24 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function runSelectionAutoScroll() {
     selectionAutoScrollFrame = 0;
-    if (!isSelectingCells.value) return;
+    if (!isSelectingCells.value && !isSelectingRows.value) return;
 
     const scroller = getScrollElement?.();
-    if (!scroller) return;
+    if (!scroller) {
+      if (isSelectingRows.value) updateRowSelectionFromPointer();
+      else updateSelectionFromPointer();
+      return;
+    }
     const rect = scroller.getBoundingClientRect();
-    const deltaX = selectionScrollVelocity(selectionPointerClientX, rect.left, rect.right);
+    const deltaX = isSelectingCells.value ? selectionScrollVelocity(selectionPointerClientX, rect.left, rect.right) : 0;
     const deltaY = selectionScrollVelocity(selectionPointerClientY, rect.top, rect.bottom);
     const previousLeft = scroller.scrollLeft;
     const previousTop = scroller.scrollTop;
 
     scroller.scrollLeft += deltaX;
     scroller.scrollTop += deltaY;
-    updateSelectionFromPointer();
-
+    if (isSelectingRows.value) updateRowSelectionFromPointer();
+    else updateSelectionFromPointer();
     if (scroller.scrollLeft !== previousLeft || scroller.scrollTop !== previousTop) {
       selectionAutoScrollFrame = requestAnimationFrame(runSelectionAutoScroll);
     }
@@ -341,7 +451,13 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     document.addEventListener("mousemove", handleSelectionPointerMove);
   }
 
-  if (getCurrentScope()) onScopeDispose(finishCellSelection);
+  function finishSelection() {
+    finishCellSelection();
+    finishRowSelection();
+  }
+
+  if (options.runtimeScope) options.runtimeScope.addCleanup(finishSelection);
+  else if (getCurrentScope()) onScopeDispose(finishSelection);
 
   function extendCellSelection(rowIndex: number, colIndex: number) {
     if (!isSelectingCells.value || !selectionAnchor.value) return;
@@ -351,6 +467,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   function handleDataCellMousedown(rowIndex: number, colIndex: number, _rowId: number, event: MouseEvent) {
     if (event.button !== 0) return;
     if (editingCell.value) return;
+    options.onUserCellSelection?.();
 
     const isMeta = event.metaKey || event.ctrlKey;
     const isShift = event.shiftKey;
@@ -402,8 +519,10 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectionAnchor,
     selectionFocus,
     isSelectingCells,
+    isSelectingRows,
     selectedRange,
     selectedCells,
+    selectedCellMatrix,
     selectedCellCount,
     hasCellSelection,
     isSelectingAll,
@@ -429,6 +548,8 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     hasColumnSelection,
     clearRowSelection,
     handleRowClick,
+    beginRowSelection,
+    finishRowSelection,
     handleDataCellMousedown,
     isRowSelected,
   };

@@ -1,0 +1,13 @@
+{
+  "database": "redis",
+  "name": "Redis",
+  "version": "7.4.9",
+  "displayVersion": "7.4",
+  "image": "docker.cnb.cool/znb/images/redis:7.4.9-alpine",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 6379,
+  "connection": { "host": "127.0.0.1", "port": 6380, "username": "default", "password": "123456", "database": 0 },
+  "shell": ["redis-cli", "-a", "${DB_PASSWORD}"],
+  "smoke": { "steps": [{ "name": "seed smoke key", "command": ["redis-cli", "-a", "${DB_PASSWORD}", "SET", "dbx:smoke", "DBX smoke"], "expect": "OK" }, { "name": "read smoke key", "command": ["redis-cli", "-a", "${DB_PASSWORD}", "GET", "dbx:smoke"], "expect": "DBX smoke" }] }
+}

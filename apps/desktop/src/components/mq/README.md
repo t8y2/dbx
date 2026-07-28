@@ -19,9 +19,9 @@
 </template>
 
 <script setup lang="ts">
-import MqAdminConsole from '@/components/mq/MqAdminConsole.vue'
+import MqAdminConsole from "@/components/mq/MqAdminConsole.vue";
 
-const connectionId = 'your-mq-connection-id'
+const connectionId = "your-mq-connection-id";
 </script>
 ```
 

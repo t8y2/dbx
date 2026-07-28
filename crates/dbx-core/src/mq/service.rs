@@ -21,8 +21,8 @@ const MAX_PEEK_MESSAGES: u32 = 100;
 pub async fn mq_test_connection_core(state: &AppState, conn_id: &str) -> Result<MqClusterInfo, String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     let mqc = state.mq_admin_config_for_connection(conn_id, &cfg).await?;
-    let kafka_launch = resolve_kafka_launch_spec(&mqc, state);
-    let adapter = match state.mq_registry.get_or_build_config(conn_id, mqc, kafka_launch).await {
+    let agent_launch = resolve_mq_agent_launch_spec(&mqc, state);
+    let adapter = match state.mq_registry.get_or_build_config(conn_id, mqc, agent_launch).await {
         Ok(adapter) => adapter,
         Err(err) => {
             state.mq_registry.drop_connection(conn_id).await;
@@ -174,6 +174,211 @@ pub async fn mq_get_topic_internal_stats_core(
     adapter.get_topic_internal_stats(&topic).await
 }
 
+// ---- Exchanges / bindings (RabbitMQ) ----
+
+pub async fn mq_list_exchanges_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+) -> Result<Vec<MqExchangeInfo>, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_exchanges(&ns).await
+}
+
+pub async fn mq_create_exchange_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    name: &str,
+    exchange_type: &str,
+    durable: bool,
+    auto_delete: bool,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Create exchange").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.create_exchange(&ns, name, exchange_type, durable, auto_delete).await
+}
+
+pub async fn mq_delete_exchange_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    name: &str,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Delete exchange").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.delete_exchange(&ns, name).await
+}
+
+pub async fn mq_list_bindings_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    exchange: Option<String>,
+    queue: Option<String>,
+) -> Result<Vec<MqBindingInfo>, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_bindings(&ns, exchange.as_deref(), queue.as_deref()).await
+}
+
+pub async fn mq_bind_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    binding: MqBindingInfo,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Create binding").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.bind_queue(&ns, &binding).await
+}
+
+pub async fn mq_unbind_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    binding: MqBindingInfo,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Delete binding").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.unbind_queue(&ns, &binding).await
+}
+
+// ---- Client connections / channels (RabbitMQ) ----
+
+pub async fn mq_list_client_connections_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+) -> Result<Vec<MqClientConnectionInfo>, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_client_connections(&ns).await
+}
+
+pub async fn mq_list_client_channels_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    connection: Option<String>,
+) -> Result<Vec<MqChannelInfo>, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_client_channels(&ns, connection).await
+}
+
+pub async fn mq_close_client_connection_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    name: &str,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Close client connection").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.close_client_connection(&ns, name).await
+}
+
+// ---- Users & virtual-host permissions (RabbitMQ) ----
+
+pub async fn mq_list_users_core(state: &AppState, conn_id: &str) -> Result<Vec<MqUserInfo>, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_users().await
+}
+
+pub async fn mq_create_user_core(
+    state: &AppState,
+    conn_id: &str,
+    name: &str,
+    password: &str,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Create user").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.create_user(name, password, tags).await
+}
+
+pub async fn mq_delete_user_core(state: &AppState, conn_id: &str, name: &str) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Delete user").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.delete_user(name).await
+}
+
+pub async fn mq_list_user_permissions_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+) -> Result<Vec<MqVhostPermission>, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_user_permissions(&ns).await
+}
+
+pub async fn mq_grant_user_permission_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    user: &str,
+    configure: &str,
+    write: &str,
+    read: &str,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Grant user permission").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.grant_user_permission(&ns, user, configure, write, read).await
+}
+
+pub async fn mq_revoke_user_permission_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    user: &str,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Revoke user permission").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.revoke_user_permission(&ns, user).await
+}
+
+// ---- Policies (RabbitMQ) ----
+
+pub async fn mq_list_policies_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+) -> Result<Vec<MqPolicyInfo>, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_policies(&ns).await
+}
+
+pub async fn mq_set_policy_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    policy: MqPolicyInfo,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Set policy").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.set_policy(&ns, &policy).await
+}
+
+pub async fn mq_delete_policy_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    name: &str,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Delete policy").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.delete_policy(&ns, name).await
+}
+
+// ---- Cluster monitoring (RabbitMQ) ----
+
+pub async fn mq_get_overview_core(state: &AppState, conn_id: &str) -> Result<MqOverviewInfo, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.get_overview().await
+}
+
+pub async fn mq_list_nodes_core(state: &AppState, conn_id: &str) -> Result<Vec<MqNodeInfo>, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_nodes().await
+}
+
 // ---- Subscriptions ----
 
 pub async fn mq_list_subscriptions_core(
@@ -242,6 +447,26 @@ pub async fn mq_clear_backlog_core(
     ensure_connection_writable(state, conn_id, "Clear backlog").await?;
     let adapter = get_adapter(state, conn_id).await?;
     adapter.clear_backlog(&topic, &sub).await
+}
+
+pub async fn mq_get_consumer_group_config_core(
+    state: &AppState,
+    conn_id: &str,
+    group_id: String,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.get_consumer_group_config(&group_id).await
+}
+
+pub async fn mq_alter_consumer_group_config_core(
+    state: &AppState,
+    conn_id: &str,
+    group_id: String,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Alter consumer group config").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.alter_consumer_group_config(&group_id, config).await
 }
 
 pub async fn mq_peek_messages_core(
@@ -467,6 +692,81 @@ pub async fn mq_get_cluster_info_core(state: &AppState, conn_id: &str) -> Result
     adapter.get_cluster_info().await
 }
 
+pub async fn mq_get_topic_route_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.get_topic_route(&topic).await
+}
+
+pub async fn mq_alter_topic_config_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+    configs: serde_json::Value,
+) -> Result<(), String> {
+    ensure_connection_writable(state, conn_id, "Alter topic config").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.alter_topic_config(&topic, configs).await
+}
+
+pub async fn mq_skip_topic_accumulation_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+) -> Result<serde_json::Value, String> {
+    ensure_connection_writable(state, conn_id, "Skip topic accumulation").await?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.skip_topic_accumulation(&topic).await
+}
+
+pub async fn mq_view_message_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+    msg_id: String,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.view_message(&topic, &msg_id).await
+}
+
+pub async fn mq_query_messages_by_key_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+    key: String,
+    begin: i64,
+    end: i64,
+    max_num: u32,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.query_messages_by_key(&topic, &key, begin, end, max_num).await
+}
+
+pub async fn mq_query_messages_by_topic_core(
+    state: &AppState,
+    conn_id: &str,
+    topic: TopicRef,
+    begin: i64,
+    end: i64,
+    max_num: u32,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.query_messages_by_topic(&topic, begin, end, max_num).await
+}
+
+pub async fn mq_query_message_trace_core(
+    state: &AppState,
+    conn_id: &str,
+    msg_id: String,
+    trace_topic: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.query_message_trace(&msg_id, trace_topic.as_deref()).await
+}
+
 // ---- Raw request (escape hatch) ----
 
 pub async fn mq_raw_request_core(state: &AppState, conn_id: &str, req: MqRawRequest) -> Result<MqRawResponse, String> {
@@ -500,29 +800,37 @@ async fn get_adapter(
 ) -> Result<std::sync::Arc<dyn crate::mq::port::MessageQueueAdmin>, String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
     let mqc = state.mq_admin_config_for_connection(conn_id, &cfg).await?;
-    let kafka_launch = resolve_kafka_launch_spec(&mqc, state);
-    state.mq_registry.get_or_build_config(conn_id, mqc, kafka_launch).await
+    let agent_launch = resolve_mq_agent_launch_spec(&mqc, state);
+    state.mq_registry.get_or_build_config(conn_id, mqc, agent_launch).await
 }
 
-/// Resolve the Kafka agent launch spec if the config targets Kafka.
-/// Returns `None` for non-Kafka systems so the registry skips agent resolution.
-pub fn resolve_kafka_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Option<AgentLaunchSpec> {
-    if mqc.system_kind != MqSystemKind::Kafka {
-        return None;
-    }
+/// Resolve the MQ agent launch spec for agent-backed systems (Kafka, RocketMQ, RabbitMQ).
+/// Returns `None` for native REST systems so the registry skips agent resolution.
+pub fn resolve_mq_agent_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Option<AgentLaunchSpec> {
+    let agent_key = match mqc.system_kind {
+        MqSystemKind::Kafka => "kafka",
+        MqSystemKind::RocketMq => "rocketmq",
+        MqSystemKind::RabbitMq => "rabbitmq",
+        _ => return None,
+    };
     let agent_state = state.agent_manager.load_state();
     let jre_key = agent_state
         .installed_drivers
-        .get("kafka")
+        .get(agent_key)
         .map(|driver| driver.jre.as_str())
         .unwrap_or(crate::agent_manager::DEFAULT_JRE_KEY);
-    match state.agent_manager.resolve_agent_launch_spec(&agent_state, "kafka", jre_key) {
+    match state.agent_manager.resolve_agent_launch_spec(&agent_state, agent_key, jre_key) {
         Ok(launch) => Some(launch),
         Err(err) => {
-            log::warn!("Failed to resolve Kafka agent launch spec: {err}");
+            log::warn!("Failed to resolve {agent_key} agent launch spec: {err}");
             None
         }
     }
+}
+
+#[deprecated(note = "use resolve_mq_agent_launch_spec")]
+pub fn resolve_kafka_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Option<AgentLaunchSpec> {
+    resolve_mq_agent_launch_spec(mqc, state)
 }
 
 async fn ensure_connection_writable(state: &AppState, conn_id: &str, operation: &str) -> Result<(), String> {
@@ -549,6 +857,7 @@ mod tests {
         ConnectionConfig {
             id: "readonly-mq".to_string(),
             name: "Read only MQ".to_string(),
+            note: String::new(),
             db_type: DatabaseType::MessageQueue,
             driver_profile: Some("pulsar".to_string()),
             driver_label: Some("Apache Pulsar".to_string()),
@@ -561,6 +870,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -599,6 +909,7 @@ mod tests {
             read_only,
             is_production: false,
             production_databases: Vec::new(),
+            database_info: None,
         }
     }
 
@@ -639,11 +950,26 @@ mod tests {
                 topic: "orders".to_string(),
                 persistent: true,
                 partitioned: None,
+                message_type: None,
+                ..TopicRef::default()
             },
             None,
         )
         .await
         .expect_err("read-only write should fail");
+
+        assert!(err.contains("Read-only mode"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mutating_exchange_calls_block_read_only_connections_before_adapter_build() {
+        let (state, dir) = test_state_with(mq_connection(true)).await;
+        let ns = NamespaceRef { tenant: "_rabbitmq".to_string(), namespace: "_rabbitmq".to_string() };
+
+        let err = mq_create_exchange_core(&state, "readonly-mq", ns, "dbx-events", "topic", true, false)
+            .await
+            .expect_err("read-only exchange create should fail");
 
         assert!(err.contains("Read-only mode"));
         let _ = std::fs::remove_dir_all(dir);
@@ -670,6 +996,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mutating_user_permission_calls_block_read_only_connections_before_adapter_build() {
+        let (state, dir) = test_state_with(mq_connection(true)).await;
+        let ns = NamespaceRef { tenant: "_rabbitmq".to_string(), namespace: "orders".to_string() };
+
+        let err = mq_create_user_core(&state, "readonly-mq", "dbx-app", "secret", vec![])
+            .await
+            .expect_err("read-only user create should fail");
+        assert!(err.contains("Read-only mode"));
+
+        let err =
+            mq_delete_user_core(&state, "readonly-mq", "dbx-app").await.expect_err("read-only user delete should fail");
+        assert!(err.contains("Read-only mode"));
+
+        let err = mq_grant_user_permission_core(&state, "readonly-mq", ns.clone(), "dbx-app", ".*", ".*", ".*")
+            .await
+            .expect_err("read-only permission grant should fail");
+        assert!(err.contains("Read-only mode"));
+
+        let err = mq_revoke_user_permission_core(&state, "readonly-mq", ns, "dbx-app")
+            .await
+            .expect_err("read-only permission revoke should fail");
+        assert!(err.contains("Read-only mode"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mutating_policy_calls_block_read_only_connections_before_adapter_build() {
+        let (state, dir) = test_state_with(mq_connection(true)).await;
+        let ns = NamespaceRef { tenant: "_rabbitmq".to_string(), namespace: "orders".to_string() };
+        let policy =
+            MqPolicyInfo { name: "dbx-ttl".to_string(), pattern: "^dbx-".to_string(), ..MqPolicyInfo::default() };
+
+        let err = mq_set_policy_core(&state, "readonly-mq", ns.clone(), policy)
+            .await
+            .expect_err("read-only policy set should fail");
+        assert!(err.contains("Read-only mode"));
+
+        let err = mq_delete_policy_core(&state, "readonly-mq", ns, "dbx-ttl")
+            .await
+            .expect_err("read-only policy delete should fail");
+        assert!(err.contains("Read-only mode"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn peek_messages_rejects_counts_above_service_limit_before_adapter_call() {
         let (state, dir) = test_state_with(mq_connection(false)).await;
         let err = mq_peek_messages_core(
@@ -681,6 +1054,8 @@ mod tests {
                 topic: "orders".to_string(),
                 persistent: true,
                 partitioned: None,
+                message_type: None,
+                ..TopicRef::default()
             },
             "sub-a".to_string(),
             101,

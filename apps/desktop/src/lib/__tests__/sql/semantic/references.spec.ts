@@ -51,4 +51,12 @@ describe("sqlSemanticReferences shared consumers", () => {
     expect(diagnosticRefs).toEqual(expect.arrayContaining([expect.objectContaining({ name: "recent_orders", alias: "ro", columns: ["id", "total"] })]));
     expect(navigationTarget).toEqual(expect.objectContaining({ name: "recent_orders", alias: "ro", columns: ["id", "total"] }));
   });
+
+  it("resolves full SQL Server table navigation to the qualified database", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM [DatabaseA].[OUT].[orders] a JOIN [DatabaseB].[OUT].[orders] b ON a.id = b.id|");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "sqlserver" });
+    const target = resolveSqlSemanticNavigationTarget(model, ["DatabaseB", "OUT", "orders"]);
+
+    expect(target).toEqual(expect.objectContaining({ name: "orders", database: "DatabaseB", schema: "OUT", alias: "b" }));
+  });
 });

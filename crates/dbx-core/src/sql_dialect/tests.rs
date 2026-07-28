@@ -50,6 +50,7 @@ fn qualifies_schema_only_for_schema_aware_databases() {
         "\"DBX_TEST\".\"PRODUCTS\""
     );
     assert_eq!(qualified_table_name(Some(DatabaseType::Oscar), Some("SYSDBA"), "EMPLOYEE"), "\"SYSDBA\".\"EMPLOYEE\"");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Sqlite), Some("analytics"), "users"), "\"analytics\".\"users\"");
     assert_eq!(qualified_table_name(Some(DatabaseType::Jdbc), Some("cbsdw_dwd"), "dwd_test_df"), "dwd_test_df");
     assert_eq!(qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "device2"), "root.test.device2");
     assert_eq!(
@@ -315,7 +316,7 @@ fn builds_table_data_where_and_schema_queries() {
         build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Kingbase),
             identifier_quote: Some("`".to_string()),
-            schema: Some("cqbq_ls".to_string()),
+            schema: Some("nacos-v3".to_string()),
             table_name: "actionlogs".to_string(),
             table_type: None,
             primary_keys: Vec::new(),
@@ -328,7 +329,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT * FROM `cqbq_ls`.`actionlogs` LIMIT 100;"
+        "SELECT * FROM `nacos-v3`.`actionlogs` LIMIT 100;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -786,6 +787,24 @@ fn builds_oracle_and_neo4j_table_data_queries() {
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            schema: Some("APP".to_string()),
+            table_name: "DATA_REPORT_SUB_TASK".to_string(),
+            table_type: Some("TABLE".to_string()),
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: vec!["ID".to_string(), "SMC_RESPONSE".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"__DBX_ROWID\", \"ID\", \"SMC_RESPONSE\" FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"APP\".\"DATA_REPORT_SUB_TASK\" t) WHERE ROWNUM <= 100"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Oracle),
             schema: Some("DBXTEST".to_string()),
             table_name: "DBX_JOIN_VIEW".to_string(),
@@ -800,7 +819,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             include_row_id: true,
             ..Default::default()
         }),
-        "SELECT \"ID\", \"NAME\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\") WHERE ROWNUM <= 100"
+        "SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\""
     );
     assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -820,6 +839,44 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             }),
             "MATCH (n:`Employee`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`first name` AS `first name`, n.`role` AS `role` LIMIT 100;"
         );
+}
+
+#[test]
+fn oracle_view_first_page_preserves_filter_and_sort_without_rownum() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_JOIN_VIEW".to_string(),
+            table_type: Some("VIEW".to_string()),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            order_by: Some("\"ID\" DESC".to_string()),
+            limit: Some(100),
+            offset: Some(0),
+            where_input: Some("STATUS = 'A'".to_string()),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\" WHERE (STATUS = 'A') ORDER BY \"ID\" DESC"
+    );
+}
+
+#[test]
+fn oracle_view_later_pages_keep_rownum_pagination() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_JOIN_VIEW".to_string(),
+            table_type: Some("VIEW".to_string()),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            limit: Some(100),
+            offset: Some(100),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"ID\", \"NAME\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\") dbx_inner WHERE ROWNUM <= 200) WHERE \"__dbx_row_num\" > 100"
+    );
 }
 
 #[test]

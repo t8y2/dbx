@@ -2,27 +2,43 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { evaluateAgentVersionBump, getAgentVersionChanges, isAgentPublishRelevantFile, parseLegacyStandaloneProjects } from "../.github/scripts/bump-agent-versions.mjs";
 
 const REPO = "t8y2/dbx";
 const PACKAGES_WORKFLOW = "mcp-release.yml";
 const APP_PUBLISH_WORKFLOW = "publish-packages.yml";
+const APP_CNB_SYNC_WORKFLOW = "sync-cnb-release-assets.yml";
+const APP_DOCKER_ROLLBACK_WORKFLOW = "rollback-docker-latest.yml";
 const PACKAGE_TAG_PREFIX = "packages-v";
 const AGENT_TAG_PREFIX = "agents-v";
 const APP_TAG_PREFIX = "v";
 const PACKAGE_RELEASE_PATHS = [
-  "packages/node-core/src/",
-  "packages/node-core/README.md",
-  "packages/node-core/package.json",
-  "packages/node-core/tsconfig.json",
   "packages/cli/src/",
   "packages/cli/README.md",
   "packages/cli/package.json",
-  "packages/cli/tsconfig.json",
-  "packages/mcp-server/src/",
+  "packages/cli/bin/",
+  "packages/cli-darwin-arm64/",
+  "packages/cli-darwin-x64/",
+  "packages/cli-linux-arm64-gnu/",
+  "packages/cli-linux-x64-gnu/",
+  "packages/cli-win32-arm64/",
+  "packages/cli-win32-x64/",
+  "packages/mcp-server/bin/",
   "packages/mcp-server/README.md",
   "packages/mcp-server/package.json",
   "packages/mcp-server/server.json",
-  "packages/mcp-server/tsconfig.json",
+  "packages/mcp-darwin-arm64/",
+  "packages/mcp-darwin-x64/",
+  "packages/mcp-linux-arm64-gnu/",
+  "packages/mcp-linux-x64-gnu/",
+  "packages/mcp-win32-arm64/",
+  "packages/mcp-win32-x64/",
+  "crates/dbx-mcp/",
+  "crates/dbx-cli/",
+  "crates/dbx-core/src/mongo_shell.rs",
+  "Cargo.toml",
+  "Cargo.lock",
+  ".github/workflows/mcp-release.yml",
 ];
 const AGENT_RELEASE_PATHS = [
   "agents/build.gradle",
@@ -103,7 +119,7 @@ if (!skipFetch) {
 
 if (!target) {
   if (!process.stdin.isTTY) {
-    fail("Release target is required in a non-interactive shell. Use packages, agents, or app.");
+    fail("Release target is required in a non-interactive shell. Use packages, agents, app, or rollback.");
   }
   target = await promptTarget();
 }
@@ -114,6 +130,8 @@ if (target === "packages") {
   await releaseAgents(requestedBump ?? "patch");
 } else if (target === "app") {
   await publishApp(requestedBump);
+} else if (target === "rollback") {
+  await rollbackApp(requestedBump);
 } else {
   fail(`Unknown release target: ${target}`);
 }
@@ -162,6 +180,7 @@ async function releaseAgents(bump) {
   console.log(kv("Release target", "Agents", bold));
   console.log(kv("Current agent tag", `${latest.tag}${latest.source ? ` (${latest.source})` : ""}`, yellow));
   printReleaseStatus(status);
+  printAgentVersionChanges(latest.tag, status.changedFiles);
   if (!status.needed && !force) {
     console.log(yellow("No agents release needed; publish-relevant agent runtime files have not changed."));
     console.log(dim("Use --force to create the tag anyway."));
@@ -207,6 +226,40 @@ async function publishApp(tagInput) {
   console.log(green(`Triggered Publish Packages for ${releaseTag}.`));
 }
 
+async function rollbackApp(tagInput) {
+  const releaseTag = resolveRollbackTag(tagInput ?? (await promptRollbackTag()));
+  const publishArgs = ["workflow", "run", APP_PUBLISH_WORKFLOW, "--repo", REPO, "-f", `tag=${releaseTag}`, "-f", "notify=false"];
+  const cnbArgs = ["workflow", "run", APP_CNB_SYNC_WORKFLOW, "--repo", REPO, "-f", `tag=${releaseTag}`];
+  const dockerArgs = ["workflow", "run", APP_DOCKER_ROLLBACK_WORKFLOW, "--repo", REPO, "-f", `tag=${releaseTag}`];
+
+  console.log(kv("Release target", "Emergency app rollback", bold));
+  console.log(kv("Rollback tag", releaseTag, yellow));
+  console.log(yellow("This stops further rollout but does not downgrade clients that already installed a newer version."));
+  console.log(kv("GitHub / R2 / Homebrew / Scoop", `gh ${publishArgs.join(" ")}`, dim));
+  console.log(kv("CNB release assets", `gh ${cnbArgs.join(" ")}`, dim));
+  console.log(kv("Docker latest", `gh ${dockerArgs.join(" ")}`, dim));
+
+  if (dryRun) {
+    console.log(dim("Dry run only; rollback workflows were not triggered and release metadata was not changed."));
+    return;
+  }
+
+  ensureGhWorkflowsReady([APP_PUBLISH_WORKFLOW, APP_CNB_SYNC_WORKFLOW, APP_DOCKER_ROLLBACK_WORKFLOW]);
+  const latestRelease = getGithubRelease();
+  const rollbackRelease = getGithubRelease(releaseTag);
+  validateRollbackRelease(rollbackRelease, latestRelease);
+
+  console.log(kv("Current latest release", latestRelease.tagName, red));
+  console.log(kv("Rollback release", rollbackRelease.tagName, green));
+  await confirmRollbackOrExit(releaseTag);
+
+  // Dispatch existing credential-owning workflows instead of handling release secrets locally.
+  run("gh", publishArgs, { stdio: "inherit" });
+  run("gh", cnbArgs, { stdio: "inherit" });
+  run("gh", dockerArgs, { stdio: "inherit" });
+  console.log(green(`Triggered emergency rollback to ${releaseTag}. Monitor all three workflows before announcing completion.`));
+}
+
 async function promptTarget() {
   const packageStatus = getPackageReleaseStatus();
   const agentStatus = getAgentReleaseStatus(getLatestAgentTag());
@@ -214,13 +267,22 @@ async function promptTarget() {
   ${cyan("1")}. Node packages / MCP (${formatStatusSummary(packageStatus)})
   ${cyan("2")}. Agents (${formatStatusSummary(agentStatus)})
   ${cyan("3")}. App distribution
+  ${cyan("4")}. Emergency app rollback
 ${dim("Choice")} [1]: `);
 
   const normalized = answer.trim().toLowerCase();
   if (!normalized || normalized === "1" || normalized === "packages" || normalized === "mcp") return "packages";
   if (normalized === "2" || normalized === "agents" || normalized === "agent") return "agents";
   if (normalized === "3" || normalized === "app" || normalized === "desktop" || normalized === "publish") return "app";
+  if (normalized === "4" || normalized === "rollback" || normalized === "revert") return "rollback";
   fail(`Unknown release target: ${answer}`);
+}
+
+async function promptRollbackTag() {
+  if (!process.stdin.isTTY) {
+    fail("Rollback tag is required in a non-interactive shell. Use rollback vX.Y.Z.");
+  }
+  return ask(`Rollback to published app tag ${dim("(for example v0.5.63)")}: `);
 }
 
 async function confirmOrExit(message) {
@@ -231,6 +293,20 @@ async function confirmOrExit(message) {
 
   const answer = await ask(message);
   if (!["y", "yes"].includes(answer.trim().toLowerCase())) {
+    console.log(dim("Cancelled."));
+    process.exit(0);
+  }
+}
+
+async function confirmRollbackOrExit(releaseTag) {
+  if (yes) return;
+  if (!process.stdin.isTTY) {
+    fail("Refusing to trigger rollback without confirmation in a non-interactive shell. Re-run with --yes if this is intentional.");
+  }
+
+  // A typed tag makes accidental selection of this destructive menu action much less likely.
+  const answer = await ask(`Type ${bold(releaseTag)} to confirm the emergency rollback: `);
+  if (answer.trim() !== releaseTag) {
     console.log(dim("Cancelled."));
     process.exit(0);
   }
@@ -247,7 +323,49 @@ function normalizeTarget(value) {
   if (["package", "packages", "node-packages", "node", "mcp"].includes(value)) return "packages";
   if (["agent", "agents"].includes(value)) return "agents";
   if (["app", "desktop", "publish", "publish-packages", "distribution"].includes(value)) return "app";
+  if (["rollback", "revert", "emergency-rollback"].includes(value)) return "rollback";
   return null;
+}
+
+function resolveRollbackTag(value) {
+  const releaseTag = resolveAppTag(value);
+  if (!/^v\d+\.\d+\.\d+$/.test(releaseTag)) {
+    fail("Emergency rollback only supports stable vX.Y.Z app releases.");
+  }
+  return releaseTag;
+}
+
+function getGithubRelease(tag) {
+  const releaseArgs = ["release", "view"];
+  if (tag) releaseArgs.push(tag);
+  releaseArgs.push("--repo", REPO, "--json", "tagName,isDraft,isPrerelease,publishedAt,assets");
+  return JSON.parse(run("gh", releaseArgs).stdout);
+}
+
+function validateRollbackRelease(rollbackRelease, latestRelease) {
+  if (rollbackRelease.isDraft || rollbackRelease.isPrerelease || !rollbackRelease.publishedAt) {
+    fail(`Rollback target ${rollbackRelease.tagName} must be a published stable release.`);
+  }
+
+  const rollbackVersion = parseVersion(rollbackRelease.tagName.replace(/^v/, ""));
+  const latestVersion = parseVersion(latestRelease.tagName.replace(/^v/, ""));
+  if (!rollbackVersion || !latestVersion || compareVersions(rollbackVersion, latestVersion) >= 0) {
+    fail(`Rollback target ${rollbackRelease.tagName} must be older than the current latest release ${latestRelease.tagName}.`);
+  }
+
+  const version = formatVersion(rollbackVersion);
+  const requiredAssets = [
+    "latest.json",
+    `DBX_${version}_aarch64.dmg`,
+    `DBX_${version}_x64.dmg`,
+    `DBX_${version}_x64-setup.exe`,
+    `DBX_${version}_arm64-setup.exe`,
+  ];
+  const assetNames = new Set(rollbackRelease.assets.map((asset) => asset.name));
+  const missingAssets = requiredAssets.filter((asset) => !assetNames.has(asset));
+  if (missingAssets.length > 0) {
+    fail(`Rollback target ${rollbackRelease.tagName} is missing required distribution assets: ${missingAssets.join(", ")}`);
+  }
 }
 
 function getLatestPackageVersion() {
@@ -255,9 +373,14 @@ function getLatestPackageVersion() {
   if (tag) return tag.versionText;
 
   const packageVersions = [
-    "packages/node-core/package.json",
     "packages/cli/package.json",
     "packages/mcp-server/package.json",
+    "packages/mcp-darwin-arm64/package.json",
+    "packages/mcp-darwin-x64/package.json",
+    "packages/mcp-linux-arm64-gnu/package.json",
+    "packages/mcp-linux-x64-gnu/package.json",
+    "packages/mcp-win32-arm64/package.json",
+    "packages/mcp-win32-x64/package.json",
   ].map((path) => JSON.parse(readFileSync(path, "utf8")).version);
 
   const uniqueVersions = [...new Set(packageVersions)];
@@ -330,7 +453,7 @@ function getAgentReleaseStatus(latest = getLatestAgentTag()) {
     };
   }
 
-  const changedFiles = getChangedFilesSince(latest.tag, AGENT_RELEASE_PATHS);
+  const changedFiles = getChangedFilesSince(latest.tag, AGENT_RELEASE_PATHS).filter(isAgentPublishRelevantFile);
   return {
     needed: changedFiles.length > 0,
     baseline: latest.tag,
@@ -366,6 +489,33 @@ function printReleaseStatus(status) {
     if (status.changedFiles.length > 20) {
       console.log(dim(`  ... and ${status.changedFiles.length - 20} more`));
     }
+  }
+}
+
+function printAgentVersionChanges(baselineTag, changedFiles) {
+  if (changedFiles.length === 0 || !refExists(`refs/tags/${baselineTag}`)) return;
+
+  const currentVersions = JSON.parse(readFileSync("agents/versions.json", "utf8"));
+  const previousVersions = JSON.parse(run("git", ["show", `${baselineTag}:agents/versions.json`]).stdout);
+  const legacyStandaloneModules = parseLegacyStandaloneProjects(readFileSync("agents/build.gradle", "utf8"));
+  const result = evaluateAgentVersionBump({
+    versions: currentVersions,
+    prevVersions: previousVersions,
+    changedFiles,
+    legacyStandaloneModules,
+    manualVersionsChanged: changedFiles.includes("agents/versions.json"),
+  });
+  const changes = getAgentVersionChanges(previousVersions, result.versions)
+    .map(({ moduleName, previousVersion, nextVersion }) => `${moduleName}: ${previousVersion ?? "new"} -> ${nextVersion}`);
+
+  if (changes.length === 0) {
+    console.log(dim("No automatic driver version changes detected."));
+    return;
+  }
+
+  console.log(dim("Expected driver version changes:"));
+  for (const change of changes) {
+    console.log(`  ${dim("-")} ${change}`);
   }
 }
 
@@ -483,6 +633,13 @@ function ensureGhReady(workflow) {
   run("gh", ["workflow", "view", workflow, "--repo", REPO], { stdio: "inherit" });
 }
 
+function ensureGhWorkflowsReady(workflows) {
+  run("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "inherit" });
+  for (const workflow of workflows) {
+    run("gh", ["workflow", "view", workflow, "--repo", REPO], { stdio: "inherit" });
+  }
+}
+
 function fetchReleaseTags() {
   run("git", [
     "fetch",
@@ -524,14 +681,15 @@ function fail(message) {
 }
 
 function printHelp() {
-  console.log(`Usage: node scripts/release.mjs [packages|agents|app] [patch|minor|major|version] [options]
+  console.log(`Usage: node scripts/release.mjs [packages|agents|app|rollback] [patch|minor|major|version] [options]
 
-Unified release trigger for DBX packages, agents, and app distribution.
+Unified release and emergency rollback trigger for DBX packages, agents, and app distribution.
 
 Targets:
   packages              Trigger Node Packages Release via gh workflow run
   agents                Create and push an agents-v* tag
   app                   Trigger Publish Packages for an existing v* app release tag
+  rollback              Roll app distribution channels back to an older published v* tag
 
 Arguments:
   patch                 Bump the latest target tag by one patch version (default)
@@ -541,6 +699,7 @@ Arguments:
   packages-v0.4.14      Explicit package tag style, for packages
   agents-v0.4.14        Explicit agent tag style, for agents
   v0.5.38               Existing app release tag, for app
+  rollback v0.5.63      Emergency rollback target tag
 
 Options:
   --dry-run             Print the release command without triggering it

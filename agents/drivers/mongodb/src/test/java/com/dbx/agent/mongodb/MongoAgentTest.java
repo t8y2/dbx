@@ -12,15 +12,23 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.MongoClientSettings;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
+import java.util.Map;
 import org.bson.Document;
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.BeforeAll;
@@ -142,6 +150,53 @@ class MongoAgentTest {
     }
 
     @Test
+    void collectionTotalUsesEstimatedCountForEmptyFilter() {
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(collection, new Document());
+
+        assertEquals(10_000_000L, total.value());
+        assertFalse(total.exact());
+        assertEquals(List.of("estimatedDocumentCount"), calls);
+    }
+
+    @Test
+    void collectionTotalUsesExactCountForNonEmptyFilter() {
+        List<String> calls = new ArrayList<>();
+        MongoCollection<Document> collection = recordingCountCollection(calls);
+        Document filter = new Document("status", "active");
+
+        MongoAgent.CollectionTotal total = MongoAgent.collectionTotal(collection, filter);
+
+        assertEquals(42L, total.value());
+        assertTrue(total.exact());
+        assertEquals(List.of("countDocuments:{\"status\": \"active\"}"), calls);
+    }
+
+    @Test
+    void estimatedDocumentQueryResultMarksTotalAsInexact() {
+        Map<String, Object> result = MongoAgent.documentQueryResult(
+            List.of(new Document("_id", 1)),
+            new MongoAgent.CollectionTotal(10_000_000L, false)
+        );
+
+        assertEquals(10_000_000L, result.get("total"));
+        assertEquals(false, result.get("total_is_exact"));
+    }
+
+    @Test
+    void exactDocumentQueryResultKeepsExistingWireShape() {
+        Map<String, Object> result = MongoAgent.documentQueryResult(
+            List.of(new Document("_id", 1)),
+            new MongoAgent.CollectionTotal(42L, true)
+        );
+
+        assertEquals(42L, result.get("total"));
+        assertFalse(result.containsKey("total_is_exact"));
+    }
+
+    @Test
     void parsesOptionalDocumentParameters() {
         JsonObject params = new JsonObject();
         params.addProperty("projection", "{\"title\":1,\"_id\":0}");
@@ -172,10 +227,12 @@ class MongoAgentTest {
     void preservesLongDocumentIdTypeForGridUpdates() {
         Object id = MongoAgent.convertDocumentFieldValue("_id", 2_048_938_405_781_032_962L);
         Object value = MongoAgent.convertDocumentFieldValue("snowflake", 2_048_938_405_781_032_962L);
+        ObjectId objectId = new ObjectId("507f1f77bcf86cd799439011");
 
         assertEquals(Collections.singletonMap("$numberLong", "2048938405781032962"), id);
         assertEquals("2048938405781032962", value);
         assertEquals(2_048_938_405_781_032_962L, MongoAgent.parseId("{\"$numberLong\":\"2048938405781032962\"}"));
+        assertEquals(objectId, MongoAgent.parseId("{\"$oid\":\"507f1f77bcf86cd799439011\"}"));
     }
 
     @Test
@@ -187,6 +244,23 @@ class MongoAgentTest {
             MongoAgent.parseId("{\"$numberLong\":\"2048938405781032962\",\"tenant\":1}")
         );
         assertEquals("{\"$numberLong\":\"invalid\"}", MongoAgent.parseId("{\"$numberLong\":\"invalid\"}"));
+    }
+
+    @Test
+    void documentUpdateDistinguishesNoMatchFromUnchangedValue() {
+        MongoAgent.requireMatchedDocument(
+            "{\"$oid\":\"507f1f77bcf86cd799439011\"}",
+            UpdateResult.acknowledged(1, 0L, null)
+        );
+
+        IllegalStateException error = assertThrows(
+            IllegalStateException.class,
+            () -> MongoAgent.requireMatchedDocument(
+                "{\"$oid\":\"507f1f77bcf86cd799439012\"}",
+                UpdateResult.acknowledged(0, 0L, null)
+            )
+        );
+        assertTrue(error.getMessage().startsWith("No document matched _id"));
     }
 
     @Test
@@ -253,6 +327,38 @@ class MongoAgentTest {
         assertEquals(10, json.get("id").getAsInt());
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+    }
+
+    @Test
+    void updateDocumentsRpcUsesDocumentOverloads() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingMongoClient(calls);
+
+        assertRpcModifiedCount(client, 20, "{\"$set\":{\"status\":\"done\"}}", false);
+        assertRpcModifiedCount(client, 21, "{\"$unset\":{\"legacy\":1}}", true);
+
+        assertEquals(List.of("updateOne:document", "updateMany:document"), calls);
+    }
+
+    @Test
+    void updateDocumentsRpcUsesPipelineOverloads() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingMongoClient(calls);
+
+        assertRpcModifiedCount(client, 22, "[{\"$set\":{\"status\":\"$source\"}}]", false);
+        assertRpcModifiedCount(client, 23, "[{\"$unset\":\"legacy\"}]", true);
+
+        assertEquals(List.of("updateOne:pipeline", "updateMany:pipeline"), calls);
+    }
+
+    @Test
+    void updatePipelineRejectsNonDocumentStages() {
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.updatePipelineForWrite("[{\"$set\":{\"a\":1}}, 2]")
+        );
+
+        assertEquals("Each update pipeline stage must be an object", error.getMessage());
     }
 
     @Test
@@ -514,6 +620,27 @@ class MongoAgentTest {
     }
 
     @Test
+    void bsonToExtendedJsonWrapsUnsafeLongsForJsonClients() {
+        Document doc = new Document("_id", 144_115_205_316_939_462L)
+            .append("nested", new Document("sequence", -144_115_205_316_939_462L))
+            .append("items", List.of(144_115_205_316_939_462L))
+            .append("safe", 42L);
+
+        JsonObject json = MongoAgent.bsonToExtendedJson(doc);
+
+        assertEquals("144115205316939462", json.getAsJsonObject("_id").get("$numberLong").getAsString());
+        assertEquals(
+            "-144115205316939462",
+            json.getAsJsonObject("nested").getAsJsonObject("sequence").get("$numberLong").getAsString()
+        );
+        assertEquals(
+            "144115205316939462",
+            json.getAsJsonArray("items").get(0).getAsJsonObject().get("$numberLong").getAsString()
+        );
+        assertEquals(42L, json.get("safe").getAsLong());
+    }
+
+    @Test
     void documentForWriteParsesMongoShellIsoDateStrings() {
         Document doc = MongoAgent.documentForWrite("{\"$set\":{\"CreateDate\":\"ISODate(\\\"2026-06-10T13:59:31.287Z\\\")\"}}");
 
@@ -530,12 +657,52 @@ class MongoAgentTest {
     }
 
     @Test
-    void documentForWriteParsesLegacyDateDisplayStrings() {
-        Document doc = MongoAgent.documentForWrite("{\"$set\":{\"CreateDate\":\"2025-08-14 02:25:43.718\"}}");
+    void documentForWritePreservesDateShapedStrings() {
+        Document doc = MongoAgent.documentForWrite(
+            "{\"$set\":{\"CreateDate\":\"2025-08-14 02:25:43.718\"," +
+                "\"nested\":{\"updated\":\"2025-08-14T02:25:43\"}," +
+                "\"items\":[\"2025-08-14 02:25:43\"]}}"
+        );
 
         Document set = (Document) doc.get("$set");
-        assertTrue(set.get("CreateDate") instanceof Date);
-        assertEquals(1_755_138_343_718L, ((Date) set.get("CreateDate")).getTime());
+        assertEquals("2025-08-14 02:25:43.718", set.getString("CreateDate"));
+        assertEquals("2025-08-14T02:25:43", ((Document) set.get("nested")).getString("updated"));
+        assertEquals("2025-08-14 02:25:43", ((List<?>) set.get("items")).get(0));
+    }
+
+    @Test
+    void documentForWriteParsesExtendedJsonDates() {
+        Document doc = MongoAgent.documentForWrite(
+            "{\"created\":{\"$date\":\"2026-06-10T13:59:31.287Z\"}," +
+                "\"items\":[{\"updated\":{\"$date\":{\"$numberLong\":\"1781100000000\"}}}]}"
+        );
+
+        assertTrue(doc.get("created") instanceof Date);
+        Document item = (Document) ((List<?>) doc.get("items")).get(0);
+        assertTrue(item.get("updated") instanceof Date);
+    }
+
+    @Test
+    void updatePipelinePreservesStringsAndParsesExplicitDates() {
+        List<Document> pipeline = MongoAgent.updatePipelineForWrite(
+            "[{\"$set\":{\"label\":\"2025-08-14 02:25:43.718\"," +
+                "\"created\":\"ISODate(\\\"2026-06-10T13:59:31.287Z\\\")\"}}]"
+        );
+
+        Document set = (Document) pipeline.get(0).get("$set");
+        assertEquals("2025-08-14 02:25:43.718", set.getString("label"));
+        assertTrue(set.get("created") instanceof Date);
+    }
+
+    @Test
+    void filterDocumentsPreserveDateShapedStrings() {
+        Document filter = MongoAgent.documentForWrite(
+            "{\"created\":\"2025-08-14 02:25:43.718\"," +
+                "\"updated\":{\"$date\":\"2026-06-10T13:59:31.287Z\"}}"
+        );
+
+        assertEquals("2025-08-14 02:25:43.718", filter.getString("created"));
+        assertTrue(filter.get("updated") instanceof Date);
     }
 
     @Test
@@ -550,6 +717,83 @@ class MongoAgentTest {
     }
 
     // ─── helpers ───
+
+    @SuppressWarnings("unchecked")
+    private static MongoCollection<Document> recordingCountCollection(List<String> calls) {
+        return (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("estimatedDocumentCount".equals(method.getName())) {
+                    calls.add("estimatedDocumentCount");
+                    return 10_000_000L;
+                }
+                if ("countDocuments".equals(method.getName())) {
+                    Document filter = (Document) args[0];
+                    calls.add("countDocuments:" + filter.toJson());
+                    return 42L;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
+    private static void assertRpcModifiedCount(MongoClient client, int id, String updateJson, boolean many) {
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("collection", "orders");
+        params.addProperty("filter_json", "{}");
+        params.addProperty("update_json", updateJson);
+        params.addProperty("many", many);
+
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", id);
+        request.addProperty("method", "update_documents");
+        request.add("params", params);
+
+        JsonObject response = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, response.getAsJsonObject("result").get("modified_count").getAsLong());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingMongoClient(List<String> calls) {
+        MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("updateOne".equals(method.getName()) || "updateMany".equals(method.getName())) {
+                    calls.add(method.getName() + ":" + (args[1] instanceof List<?> ? "pipeline" : "document"));
+                    return UpdateResult.acknowledged(1, 1L, null);
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("getCollection".equals(method.getName())) {
+                    return collection;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        return (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    return database;
+                }
+                if ("close".equals(method.getName())) {
+                    return null;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
 
     private static JsonObject minimalConnection() {
         JsonObject conn = new JsonObject();

@@ -1,6 +1,7 @@
 import type { AiConfig } from "@/stores/settingsStore";
 import { uuid } from "@/lib/common/utils";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, QueryResult, QueryTab } from "@/types/database";
+import type { PromptTemplate } from "@/types/promptTemplate";
 import * as api from "@/lib/backend/api";
 import { currentLocale, type Locale } from "@/i18n";
 import { aiTableMentionKey, type AiTableMention } from "@/lib/ai/aiTableMentions";
@@ -94,11 +95,37 @@ export interface AiRequestInput {
   instruction: string;
   context: AiContext;
   allowWriteSql?: boolean;
+  /** When allowWriteSql is true, the specific write SQL the user confirmed. */
+  confirmedWriteSql?: string;
+  /** Connection/database snapshot at confirmation time; verified at backend. */
+  confirmedConnectionId?: string;
+  confirmedDatabase?: string;
 }
 
-function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[]): { messages: api.AiMessage[]; systemPrompt: string; taskContract: api.AiTaskContract; maxTokens: number } {
+export interface CustomPromptContext {
+  globalInstructions?: string;
+  activeTemplates?: PromptTemplate[];
+}
+
+function buildCustomInstructionLines(custom: CustomPromptContext | undefined, isZh: boolean): string[] {
+  const global = custom?.globalInstructions?.trim() ?? "";
+  const templates = (custom?.activeTemplates ?? []).filter((t) => t.content.trim());
+  if (!global && templates.length === 0) return [];
+
+  const parts: string[] = [];
+  if (global) parts.push(global);
+  parts.push(...templates.map((t) => `### ${t.name}\n${t.content}`));
+
+  return [
+    isZh
+      ? `## 用户自定义规范（补充性）\n以下为用户定义的规范与模板；上方核心安全及方言规则优先级更高。\n\n${parts.join("\n\n")}`
+      : `## Custom Instructions (supplementary)\nThe following are user-defined conventions and templates. Core safety and dialect rules above take precedence.\n\n${parts.join("\n\n")}`,
+  ];
+}
+
+function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[], custom?: CustomPromptContext): { messages: api.AiMessage[]; systemPrompt: string; taskContract: api.AiTaskContract; maxTokens: number } {
   const isZh = isChineseLocale(currentLocale());
-  const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode);
+  const systemPrompt = buildSystemPrompt(input.action, input.context, input.mode, custom);
   const userPrompt = buildUserPrompt(input.action, input.context, input.instruction, isZh);
   const taskContract: api.AiTaskContract = {
     action: input.action,
@@ -113,8 +140,8 @@ function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[]): { 
   return { messages, systemPrompt, taskContract, maxTokens };
 }
 
-export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[]): Promise<string> {
-  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history);
+export async function runAiAction(input: AiRequestInput, history?: api.AiMessage[], custom?: CustomPromptContext): Promise<string> {
+  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history, custom);
   return api.aiComplete({
     config: input.config,
     systemPrompt,
@@ -124,8 +151,8 @@ export async function runAiAction(input: AiRequestInput, history?: api.AiMessage
   });
 }
 
-export async function runAiStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onDelta: (delta: string) => void, sessionId?: string, onReasoningDelta?: (delta: string) => void): Promise<void> {
-  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history);
+export async function runAiStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onDelta: (delta: string) => void, sessionId?: string, onReasoningDelta?: (delta: string) => void, custom?: CustomPromptContext): Promise<void> {
+  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history, custom);
   const sid = sessionId || uuid();
 
   await api.aiStream(
@@ -146,8 +173,8 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
   );
 }
 
-export async function runAgentStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onEvent: (event: AgentEvent) => void, sessionId?: string): Promise<string> {
-  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history);
+export async function runAgentStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onEvent: (event: AgentEvent) => void, sessionId?: string, custom?: CustomPromptContext): Promise<string> {
+  const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history, custom);
   const sid = sessionId || uuid();
 
   return api.aiAgentStream(
@@ -165,6 +192,9 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     onEvent,
     input.mode || "ask",
     input.allowWriteSql || false,
+    input.confirmedWriteSql,
+    input.confirmedConnectionId,
+    input.confirmedDatabase,
   );
 }
 
@@ -199,9 +229,9 @@ export function extractSql(text: string): string {
   return text.trim();
 }
 
-export function buildSystemPrompt(action: AiAction, context: AiContext, mode: AiAssistantMode = "ask"): string {
+export function buildSystemPrompt(action: AiAction, context: AiContext, mode: AiAssistantMode = "ask", custom?: CustomPromptContext): string {
   if (isVectorDbType(context.databaseType)) {
-    return buildVectorSystemPrompt(context, mode);
+    return buildVectorSystemPrompt(context, mode, custom);
   }
   const schema = formatSchema(context);
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
@@ -211,7 +241,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
 
   const isZh = isChineseLocale(currentLocale());
 
-  const lines: string[] = [...buildBasePromptLines(isZh), ...buildModePromptLines(mode, isZh), ...buildActionPromptLines(action, isZh)];
+  const lines: string[] = [...buildBasePromptLines(isZh), ...buildModePromptLines(mode, isZh), ...buildActionPromptLines(action, isZh), ...buildCustomInstructionLines(custom, isZh)];
 
   if (schemaScope === "focused_table") {
     lines.push(
@@ -271,7 +301,7 @@ function buildBasePromptLines(isZh: boolean): string[] {
   ];
 }
 
-function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode): string {
+function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode, custom?: CustomPromptContext): string {
   const isZh = isChineseLocale(currentLocale());
   const schema = formatSchema(context);
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
@@ -281,6 +311,7 @@ function buildVectorSystemPrompt(context: AiContext, mode: AiAssistantMode): str
     isZh ? `你是 DBX 内置的向量数据库助手。当前连接的是 ${dbLabel(context.databaseType)} 数据库。用中文回复。` : `You are DBX's vector database assistant. Connected to ${dbLabel(context.databaseType)}. Reply in English.`,
     isZh ? "数据存储在集合（collections）中，每条记录包含唯一标识及可选的元数据负载（payload/metadata）。" : "Data is stored in collections. Each record has a unique identifier and optional metadata payload.",
     ...buildVectorModePromptLines(context, mode, isZh),
+    ...buildCustomInstructionLines(custom, isZh),
     "",
     `Database type: ${context.databaseType}`,
     `Connection: ${context.connectionName}`,
@@ -325,8 +356,8 @@ function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
         ? "用户提出数据查询意图时，必须调用 execute_query 工具执行 SQL，不要只输出 SQL 文本后停止。先用 list_tables/get_columns 了解 schema，再调用 execute_query 获取真实结果，最后基于结果回答用户。"
         : "When the user expresses a data query intent, you MUST call the execute_query tool to run the SQL — do NOT just output SQL text and stop. Use list_tables/get_columns to understand the schema first, then call execute_query to get real results, then answer based on the actual data.",
       isZh
-        ? "只有 SELECT、WITH、SHOW、DESCRIBE、EXPLAIN 可以通过 execute_query 执行。如果用户要求写入操作，先解释原因，不要执行。"
-        : "Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN can be executed via execute_query. If the user requests a write operation, explain why it is blocked instead of executing.",
+        ? "当用户要求写入操作（INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE 等）时，先在一个 ```sql 代码块中给出精确的写 SQL，再在回复末尾用问句明确询问用户是否确认执行（例如'需要我执行这条 CREATE TABLE 语句吗？'）。待用户明确确认后再调用 execute_query，并原样使用该代码块中的 SQL，不得改写、重新格式化或补充语句。禁止不经确认直接执行写入。"
+        : "When the user requests a write operation (INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE, etc.), first put the exact proposed write SQL in one ```sql code block, then ask for explicit confirmation at the end of your reply with a question that names the specific operation (e.g., 'Should I execute this CREATE TABLE?'). Only call execute_query for writes after the user explicitly confirms, and use the exact SQL from that code block without rewriting, reformatting, or adding statements. Never execute writes without confirmation.",
       isZh ? "如果安全执行条件不满足，先说明原因，再给只读预览或澄清问题。" : "If safe execution requirements are not met, explain why first, then provide a read-only preview or a clarifying question.",
     ];
   }

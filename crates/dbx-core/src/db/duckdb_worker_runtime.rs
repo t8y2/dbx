@@ -7,7 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use crate::db;
 use crate::db::duckdb_worker_protocol::{
     DuckDbWorkerColumnParams, DuckDbWorkerConnectParams, DuckDbWorkerDatabaseParams, DuckDbWorkerError,
-    DuckDbWorkerExecuteParams, DuckDbWorkerMethod, DuckDbWorkerRequest, DuckDbWorkerResponse, DuckDbWorkerTableParams,
+    DuckDbWorkerExecuteParams, DuckDbWorkerMethod, DuckDbWorkerObjectSourceParams, DuckDbWorkerRequest,
+    DuckDbWorkerResponse, DuckDbWorkerTableParams,
 };
 use crate::models::connection::AttachedDatabaseConfig;
 use crate::path_utils::expand_tilde;
@@ -103,6 +104,19 @@ impl DuckDbWorkerSession {
         )
     }
 
+    pub fn get_object_source(&self, params: DuckDbWorkerObjectSourceParams) -> Result<String, String> {
+        let connection = self.connection.as_ref().ok_or("DuckDB worker is not connected")?.clone();
+        let locked = connection.lock().map_err(|e| e.to_string())?;
+        crate::schema::duckdb_object_source_with_attached(
+            &locked,
+            &params.database,
+            &params.schema,
+            &params.name,
+            &params.object_type,
+            &self.attached_names,
+        )
+    }
+
     pub fn attach_database(&mut self, attached: AttachedDatabaseConfig) -> Result<(), String> {
         let connection = self.connection.as_ref().ok_or("DuckDB worker is not connected")?.clone();
         let locked = connection.lock().map_err(|e| e.to_string())?;
@@ -181,6 +195,10 @@ impl DuckDbWorkerRuntime {
             DuckDbWorkerMethod::ListColumns => self.handle_session_request(request, |session, request| {
                 let params = request.parse_params()?;
                 Ok(DuckDbWorkerResponse::ok(request.id, session.list_columns(params)?))
+            }),
+            DuckDbWorkerMethod::GetObjectSource => self.handle_session_request(request, |session, request| {
+                let params = request.parse_params()?;
+                Ok(DuckDbWorkerResponse::ok(request.id, session.get_object_source(params)?))
             }),
             DuckDbWorkerMethod::AttachDatabase => self.handle_session_request(request, |session, request| {
                 session.attach_database(request.parse_params()?)?;
@@ -426,6 +444,37 @@ mod tests {
         assert!(schemas.iter().any(|schema| schema == "main"));
         assert!(tables.iter().any(|table| table.name == "users"));
         assert!(columns.iter().any(|column| column.name == "id" && column.is_primary_key));
+    }
+
+    #[test]
+    fn worker_session_reads_view_source() {
+        let mut session = DuckDbWorkerSession::default();
+        session
+            .connect(DuckDbWorkerConnectParams {
+                path: ":memory:".to_string(),
+                attached_databases: Vec::new(),
+                init_script: None,
+            })
+            .expect("connect");
+        session
+            .execute(DuckDbWorkerExecuteParams {
+                sql: "CREATE VIEW active_orders AS SELECT 1 AS id".to_string(),
+                database: None,
+                max_rows: None,
+            })
+            .expect("create view");
+
+        let source = session
+            .get_object_source(DuckDbWorkerObjectSourceParams {
+                database: "main".to_string(),
+                schema: "main".to_string(),
+                name: "active_orders".to_string(),
+                object_type: db::ObjectSourceKind::View,
+            })
+            .expect("get view source");
+
+        assert!(source.starts_with("CREATE VIEW"));
+        assert!(source.contains("active_orders"));
     }
 
     #[test]

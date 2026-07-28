@@ -1,6 +1,15 @@
 dependencies {
     implementation 'com.google.code.gson:gson:2.12.1'
     implementation 'org.apache.kafka:kafka-clients:3.9.0'
+    implementation('org.apache.zookeeper:zookeeper:3.8.4') {
+        exclude group: 'log4j', module: 'log4j'
+        exclude group: 'org.slf4j', module: 'slf4j-log4j12'
+        // The agent stdout is a JSON-RPC transport; Logback's default appender
+        // writes Kafka/ZooKeeper logs to stdout and corrupts that protocol.
+        exclude group: 'ch.qos.logback', module: 'logback-classic'
+        exclude group: 'ch.qos.logback', module: 'logback-core'
+    }
+    implementation 'io.dropwizard.metrics:metrics-core:4.1.12.1'
     runtimeOnly 'org.slf4j:slf4j-simple:1.7.36'
 }
 

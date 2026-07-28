@@ -4,20 +4,61 @@ use crate::models::connection::ConnectionConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[derive(Default)]
 pub enum NacosAuthConfig {
+    #[default]
     None,
-    UsernamePassword { username: String, password: String },
+    UsernamePassword {
+        username: String,
+        password: String,
+    },
 }
 
-impl Default for NacosAuthConfig {
-    fn default() -> Self {
-        Self::None
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosImplementation {
+    #[default]
+    Nacos,
+    #[serde(rename = "rnacos")]
+    RNacos,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosVersionMode {
+    #[default]
+    Auto,
+    V2,
+    V3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosMetricsMode {
+    #[default]
+    Auto,
+    Disabled,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NacosRNacosConsoleAuth {
+    #[default]
+    Inherit,
+    UsernamePassword {
+        username: String,
+        password: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NacosAdminConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<NacosImplementation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_mode: Option<NacosVersionMode>,
     pub server_addr: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub display_server_addr: String,
@@ -25,10 +66,26 @@ pub struct NacosAdminConfig {
     pub namespace: String,
     #[serde(default)]
     pub context_path: String,
+    /// Optional r-nacos authenticated-console address. This is separate from
+    /// the OpenAPI server address because r-nacos exposes console-only APIs
+    /// (including config history plus config type and description metadata) on
+    /// its console service, normally port 10848.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rnacos_console_addr: String,
+    /// `None` preserves legacy records where supplying a console address
+    /// implicitly enabled configuration history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rnacos_history_enabled: Option<bool>,
+    #[serde(default)]
+    pub rnacos_console_auth: NacosRNacosConsoleAuth,
     #[serde(default)]
     pub auth: NacosAuthConfig,
     #[serde(default)]
     pub tls_skip_verify: bool,
+    #[serde(default)]
+    pub metrics_mode: NacosMetricsMode,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub metrics_url: String,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
     #[serde(skip)]
@@ -54,16 +111,23 @@ impl NacosAdminConfig {
         } else {
             let scheme = if cfg.ssl { "https" } else { "http" };
             NacosAdminConfig {
+                implementation: None,
+                version_mode: None,
                 server_addr: format!("{scheme}://{}:{}", cfg.host.trim(), cfg.port),
                 display_server_addr: String::new(),
                 namespace: cfg.database.clone().unwrap_or_default(),
                 context_path: String::new(),
+                rnacos_console_addr: String::new(),
+                rnacos_history_enabled: None,
+                rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,
                 auth: if cfg.username.trim().is_empty() {
                     NacosAuthConfig::None
                 } else {
                     NacosAuthConfig::UsernamePassword { username: cfg.username.clone(), password: cfg.password.clone() }
                 },
                 tls_skip_verify: false,
+                metrics_mode: NacosMetricsMode::Auto,
+                metrics_url: String::new(),
                 page_size: default_page_size(),
                 connect_override: None,
             }
@@ -72,16 +136,45 @@ impl NacosAdminConfig {
     }
 
     pub fn validate(mut self) -> Result<Self, String> {
-        self.server_addr = self.server_addr.trim().trim_end_matches('/').to_string();
+        self.server_addr = normalize_endpoint_url(&self.server_addr, "Nacos server address")?;
         if self.server_addr.is_empty() {
             return Err("Nacos server address is empty".to_string());
         }
         if self.display_server_addr.trim().is_empty() {
             self.display_server_addr = self.server_addr.clone();
         } else {
-            self.display_server_addr = self.display_server_addr.trim().trim_end_matches('/').to_string();
+            self.display_server_addr = normalize_endpoint_url(&self.display_server_addr, "Nacos display address")?;
         }
+        let context_path_is_explicit_root = self.context_path.trim() == "/";
         self.context_path = normalize_context_path(&self.context_path);
+        // Nacos 3 separates the console (normally :8080) from the server-side
+        // Admin API (normally :8848/nacos). Older DBX connection records did
+        // not persist the default server context, so repair only explicit
+        // Nacos 3 profiles here while preserving custom contexts.
+        if self.context_path.is_empty()
+            && !context_path_is_explicit_root
+            && matches!(self.implementation, Some(NacosImplementation::Nacos))
+            && matches!(self.version_mode, Some(NacosVersionMode::V3))
+        {
+            self.context_path = "/nacos".to_string();
+        }
+        self.rnacos_console_addr = if self.rnacos_console_addr.trim().is_empty() {
+            String::new()
+        } else {
+            normalize_endpoint_url(&self.rnacos_console_addr, "r-nacos console address")?
+        };
+        if !self.rnacos_console_addr.is_empty() {
+            // Normalization above validates the URL and rejects userinfo.
+        }
+        if let NacosRNacosConsoleAuth::UsernamePassword { username, .. } = &self.rnacos_console_auth {
+            if username.trim().is_empty() {
+                return Err("r-nacos console username is empty".to_string());
+            }
+        }
+        self.metrics_url = match self.metrics_mode {
+            NacosMetricsMode::Custom => normalize_metrics_url(&self.metrics_url)?,
+            NacosMetricsMode::Auto | NacosMetricsMode::Disabled => String::new(),
+        };
         if self.page_size == 0 {
             self.page_size = default_page_size();
         }
@@ -103,6 +196,73 @@ impl NacosAdminConfig {
         self.connect_override = None;
         Ok(self)
     }
+
+    pub fn with_rnacos_console_endpoint(mut self, host: &str, port: u16) -> Result<Self, String> {
+        let mut url = reqwest::Url::parse(&self.rnacos_console_addr)
+            .map_err(|e| format!("r-nacos console address is invalid: {e}"))?;
+        url.set_host(Some(host)).map_err(|_| format!("r-nacos console address host is invalid: {host}"))?;
+        url.set_port(Some(port)).map_err(|_| format!("r-nacos console address port is invalid: {port}"))?;
+        self.rnacos_console_addr = url.to_string().trim_end_matches('/').to_string();
+        Ok(self)
+    }
+
+    pub fn rnacos_history_enabled(&self) -> bool {
+        self.rnacos_history_enabled.unwrap_or(!self.rnacos_console_addr.is_empty())
+    }
+
+    pub fn effective_rnacos_console_credentials(&self) -> Result<(&str, &str), String> {
+        match &self.rnacos_console_auth {
+            NacosRNacosConsoleAuth::Inherit => match &self.auth {
+                NacosAuthConfig::UsernamePassword { username, password } if !username.trim().is_empty() => {
+                    Ok((username, password))
+                }
+                _ => Err("r-nacos console credentials are unavailable".to_string()),
+            },
+            NacosRNacosConsoleAuth::UsernamePassword { username, password } => {
+                if username.trim().is_empty() {
+                    return Err("r-nacos console username is empty".to_string());
+                }
+                Ok((username, password))
+            }
+        }
+    }
+
+    pub fn has_effective_rnacos_console_credentials(&self) -> bool {
+        match &self.rnacos_console_auth {
+            NacosRNacosConsoleAuth::Inherit => {
+                matches!(&self.auth, NacosAuthConfig::UsernamePassword { username, .. } if !username.trim().is_empty())
+            }
+            NacosRNacosConsoleAuth::UsernamePassword { username, .. } => !username.trim().is_empty(),
+        }
+    }
+}
+
+fn normalize_metrics_url(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Nacos Prometheus metrics URL is empty".to_string());
+    }
+    let url = reqwest::Url::parse(value).map_err(|e| format!("Nacos Prometheus metrics URL is invalid: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Nacos Prometheus metrics URL must use http or https".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Nacos Prometheus metrics URL must not contain embedded credentials".to_string());
+    }
+    if url.fragment().is_some() {
+        return Err("Nacos Prometheus metrics URL must not contain a fragment".to_string());
+    }
+    Ok(url.to_string())
+}
+
+fn normalize_endpoint_url(value: &str, label: &str) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(value.trim()).map_err(|e| format!("{label} is invalid: {e}"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("{label} must not contain embedded credentials"));
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
 pub fn normalize_context_path(path: &str) -> String {
@@ -126,6 +286,7 @@ mod tests {
         ConnectionConfig {
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -138,6 +299,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -172,6 +334,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -193,9 +356,103 @@ mod tests {
     }
 
     #[test]
+    fn parses_rnacos_console_address() {
+        let cfg = connection_with_external(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8848",
+            "rnacosConsoleAddr": " http://127.0.0.1:10848/ ",
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.rnacos_console_addr, "http://127.0.0.1:10848");
+    }
+
+    #[test]
+    fn accepts_optional_profile_fields_and_rejects_endpoint_userinfo() {
+        let parsed = NacosAdminConfig::from_connection(&connection_with_external(serde_json::json!({
+            "implementation": "rnacos",
+            "versionMode": "auto",
+            "serverAddr": "http://127.0.0.1:8848",
+            "rnacosConsoleAddr": "http://127.0.0.1:10848/rnacos/",
+            "rnacosHistoryEnabled": true,
+            "rnacosConsoleAuth": { "kind": "usernamePassword", "username": "console", "password": "secret" }
+        })))
+        .unwrap();
+        assert!(parsed.rnacos_history_enabled());
+        assert_eq!(parsed.effective_rnacos_console_credentials().unwrap().0, "console");
+
+        let err = NacosAdminConfig::from_connection(&connection_with_external(serde_json::json!({
+            "serverAddr": "http://user:secret@127.0.0.1:8848"
+        })))
+        .unwrap_err();
+        assert!(err.contains("must not contain embedded credentials"));
+    }
+
+    #[test]
+    fn defaults_prometheus_metrics_to_auto_and_validates_custom_urls() {
+        let parsed = NacosAdminConfig::from_connection(&connection_with_external(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8818"
+        })))
+        .unwrap();
+        assert_eq!(parsed.metrics_mode, NacosMetricsMode::Auto);
+        assert!(parsed.metrics_url.is_empty());
+
+        let parsed = NacosAdminConfig::from_connection(&connection_with_external(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8848",
+            "metricsMode": "custom",
+            "metricsUrl": "http://127.0.0.1:8818/nacos/actuator/prometheus?node=a"
+        })))
+        .unwrap();
+        assert_eq!(parsed.metrics_mode, NacosMetricsMode::Custom);
+        assert_eq!(parsed.metrics_url, "http://127.0.0.1:8818/nacos/actuator/prometheus?node=a");
+
+        for metrics_url in [
+            "",
+            "file:///tmp/metrics",
+            "http://user:secret@127.0.0.1:8818/metrics",
+            "http://127.0.0.1:8818/metrics#private",
+            "http://127.0.0.1:8818/metrics#",
+        ] {
+            let error = NacosAdminConfig::from_connection(&connection_with_external(serde_json::json!({
+                "serverAddr": "http://127.0.0.1:8848",
+                "metricsMode": "custom",
+                "metricsUrl": metrics_url
+            })))
+            .unwrap_err();
+            assert!(error.contains("Prometheus metrics URL"));
+        }
+    }
+
+    #[test]
     fn missing_external_context_path_defaults_to_root() {
         let cfg = connection_with_external(serde_json::json!({
             "serverAddr": "http://127.0.0.1:8848",
+            "auth": { "kind": "none" }
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.context_path, "");
+    }
+
+    #[test]
+    fn explicit_nacos_v3_defaults_to_server_admin_context() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "serverAddr": "http://127.0.0.1:8848",
+            "auth": { "kind": "none" }
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.context_path, "/nacos");
+    }
+
+    #[test]
+    fn explicit_nacos_v3_root_context_is_preserved() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "serverAddr": "http://127.0.0.1:8848",
+            "contextPath": "/",
             "auth": { "kind": "none" }
         }));
 
@@ -229,5 +486,19 @@ mod tests {
         assert_eq!(parsed.server_addr, "https://127.0.0.1:49152/nacos");
         assert_eq!(parsed.context_path, "/console");
         assert!(parsed.connect_override.is_none());
+    }
+
+    #[test]
+    fn with_rnacos_console_endpoint_rewrites_only_host_and_port() {
+        let cfg = connection_with_external(serde_json::json!({
+            "serverAddr": "https://192.168.2.51:8848",
+            "rnacosConsoleAddr": "https://192.168.2.51:10848/gateway",
+            "auth": { "kind": "none" }
+        }));
+
+        let parsed =
+            NacosAdminConfig::from_connection(&cfg).unwrap().with_rnacos_console_endpoint("127.0.0.1", 49153).unwrap();
+
+        assert_eq!(parsed.rnacos_console_addr, "https://127.0.0.1:49153/gateway");
     }
 }

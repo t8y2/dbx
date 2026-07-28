@@ -37,10 +37,23 @@ function isMysqlTlsLikeFailure(message: string): boolean {
   );
 }
 
+export function isJdbcMissingRuntimeDependencyError(message: string): boolean {
+  return /Missing Java class|NoClassDefFoundError|ClassNotFoundException/i.test(message);
+}
+
+function appendHint(message: string, hint: string): string {
+  return message.includes(hint) ? message : `${message}\n\n${hint}`;
+}
+
 export function appendConnectionErrorHints(config: ConnectionConfig | undefined, message: string, t: Translate): string {
-  if (!config || config.db_type !== "mysql") return message;
+  if (!config) return message;
+  let result = message;
+  if (config.db_type === "jdbc" && isJdbcMissingRuntimeDependencyError(message)) {
+    result = appendHint(result, t("connection.jdbcMissingRuntimeDependencyHint"));
+  }
+  if (config.db_type !== "mysql") return result;
   if (mysqlTlsMode(config) === "disabled") return message;
   if (!isMysqlTlsLikeFailure(message)) return message;
   const hint = t("connection.mysqlTlsConnectionFailureHint");
-  return message.includes(hint) ? message : `${message}\n\n${hint}`;
+  return appendHint(message, hint);
 }

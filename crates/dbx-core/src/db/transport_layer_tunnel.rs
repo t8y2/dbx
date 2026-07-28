@@ -79,6 +79,8 @@ pub async fn start_transport_layers(
                     &layer_id,
                     &connect_endpoint.host,
                     connect_endpoint.port,
+                    &resolved.host,
+                    resolved.port,
                     &resolved.user,
                     &resolved.password,
                     &resolved.key_path,
@@ -276,6 +278,7 @@ mod tests {
             port,
             username: String::new(),
             password: String::new(),
+            test_target: None,
         })
     }
 

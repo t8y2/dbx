@@ -12,6 +12,7 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             name: t.name.clone(),
             object_type: t.table_type.clone(),
             schema: None,
+            valid: None,
             signature: None,
             comment: t.comment.clone(),
             created_at: None,
@@ -22,12 +23,23 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
         .collect())
 }
 
-/// try query `table`, `view` and `materialized view` using statement supported by the newer version.
-/// if there is an error, rollback to the previous version of the statement
-pub async fn list_tables(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>, String> {
-    match list_tables_new_version(pool, _schema).await {
-        Ok(ddl) => Ok(ddl),
-        Err(_) => list_tables_older_version(pool, _schema).await,
+/// Query the richest table metadata supported by the connected QuestDB version.
+pub async fn list_tables(pool: &Pool, schema: &str) -> Result<Vec<TableInfo>, String> {
+    match list_tables_new_version(pool, schema).await {
+        Ok(tables) => Ok(tables),
+        Err(new_version_error) => match list_tables_mat_view_version(pool, schema).await {
+            Ok(tables) => Ok(tables),
+            Err(mat_view_version_error) => {
+                // QuestDB 8.2.x predates both `matView` and `table_type`, but
+                // still exposes `table_name`; retain basic table browsing.
+                list_tables_basic(pool, schema).await.map_err(|basic_error| {
+                    format!(
+                        "QuestDB table metadata queries failed: table_type={new_version_error}; \
+                         matView={mat_view_version_error}; table_name={basic_error}"
+                    )
+                })
+            }
+        },
     }
 }
 
@@ -58,13 +70,13 @@ async fn list_tables_new_version(pool: &Pool, _schema: &str) -> Result<Vec<Table
 }
 
 fn questdb_tables_sql_new_version() -> &'static str {
-    "SELECT table_name, table_type FROM tables"
+    "SELECT table_name, table_type FROM tables()"
 }
 
-async fn list_tables_older_version(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>, String> {
+async fn list_tables_mat_view_version(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>, String> {
     let client = pool.get().await.map_err(|e| e.to_string())?;
 
-    let stmt = client.prepare_cached(questdb_tables_sql_older_version()).await.map_err(|e| e.to_string())?;
+    let stmt = client.prepare_cached(questdb_tables_sql_mat_view_version()).await.map_err(|e| e.to_string())?;
     let rows = client.query(&stmt, &[]).await.map_err(|e| e.to_string())?;
 
     Ok(rows
@@ -83,8 +95,29 @@ async fn list_tables_older_version(pool: &Pool, _schema: &str) -> Result<Vec<Tab
         .collect())
 }
 
-fn questdb_tables_sql_older_version() -> &'static str {
-    "SELECT table_name, matView FROM tables"
+fn questdb_tables_sql_mat_view_version() -> &'static str {
+    "SELECT table_name, matView FROM tables()"
+}
+
+async fn list_tables_basic(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let stmt = client.prepare_cached(questdb_tables_sql_basic()).await.map_err(|e| e.to_string())?;
+    let rows = client.query(&stmt, &[]).await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| TableInfo {
+            name: row.get::<_, String>(0),
+            table_type: "TABLE".to_string(),
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        })
+        .collect())
+}
+
+fn questdb_tables_sql_basic() -> &'static str {
+    "SELECT table_name FROM tables()"
 }
 
 pub async fn get_columns(pool: &Pool, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
@@ -184,4 +217,16 @@ fn first_string_cell(result: QueryResult) -> Result<String, String> {
         .and_then(|row| row.iter().find_map(|value| value.as_str().map(str::to_string)))
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "Object source not found".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_metadata_queries_cover_questdb_schema_generations() {
+        assert_eq!(questdb_tables_sql_new_version(), "SELECT table_name, table_type FROM tables()");
+        assert_eq!(questdb_tables_sql_mat_view_version(), "SELECT table_name, matView FROM tables()");
+        assert_eq!(questdb_tables_sql_basic(), "SELECT table_name FROM tables()");
+    }
 }

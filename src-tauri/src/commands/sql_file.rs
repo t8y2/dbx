@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::sql_file_import::{
-    execute_sql_file_path, mysql_like_sql_file_can_execute_without_selected_database, read_sql_file_preview,
-    sql_file_progress,
+    execute_sql_file_paths, mysql_like_sql_file_bootstrap_analysis, read_sql_file_preview, sql_file_progress,
+    SqlFileProgressEmitter,
 };
 
 pub use dbx_core::sql::{SqlFilePreview, SqlFileRequest, SqlFileStatus};
@@ -35,7 +35,7 @@ pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, Strin
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
     let prefix = read_sql_file_preview(&path, 1_000_000).await?;
-    let can_execute_without_selected_database = mysql_like_sql_file_can_execute_without_selected_database(&prefix);
+    let bootstrap_analysis = mysql_like_sql_file_bootstrap_analysis(&prefix);
     let preview = prefix.chars().take(20_000).collect();
 
     Ok(SqlFilePreview {
@@ -43,7 +43,8 @@ pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, Strin
         file_path,
         size_bytes: metadata.len(),
         preview,
-        can_execute_without_selected_database,
+        can_execute_without_selected_database: bootstrap_analysis.can_execute_without_selected_database,
+        establishes_database_context: bootstrap_analysis.establishes_database_context,
     })
 }
 
@@ -53,8 +54,21 @@ pub async fn execute_sql_file(
     state: State<'_, Arc<AppState>>,
     request: SqlFileRequest,
 ) -> Result<(), String> {
+    execute_sql_files(app, state, request.clone(), vec![request.file_path.clone()]).await
+}
+
+#[tauri::command]
+pub async fn execute_sql_files(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    request: SqlFileRequest,
+    file_paths: Vec<String>,
+) -> Result<(), String> {
     // Fast-fail: reject early if the connection is read-only (individual statements are also checked in do_execute)
     ensure_connection_writable(&state, &request.connection_id, "SQL file execution").await?;
+    if file_paths.is_empty() {
+        return Err("No SQL files selected".to_string());
+    }
     let token = CancellationToken::new();
     {
         let mut executions = sql_file_executions().write().await;
@@ -62,9 +76,7 @@ pub async fn execute_sql_file(
     }
 
     let started_at = Instant::now();
-    emit_progress(&app, &request.execution_id, SqlFileStatus::Started, 0, 0, 0, 0, started_at, "", None);
-
-    let result = execute_sql_file_inner(&app, &state, &request, token, started_at).await;
+    let result = execute_sql_files_inner(&app, &state, &request, &file_paths, token, started_at).await;
     {
         let mut executions = sql_file_executions().write().await;
         remove_sql_file_execution(&mut executions, &request.execution_id);
@@ -83,23 +95,33 @@ pub async fn cancel_sql_file_execution(execution_id: String) -> Result<bool, Str
     }
 }
 
-async fn execute_sql_file_inner(
+async fn execute_sql_files_inner(
     app: &AppHandle,
     state: &State<'_, Arc<AppState>>,
     request: &SqlFileRequest,
+    file_paths: &[String],
     token: CancellationToken,
     started_at: Instant,
 ) -> Result<(), String> {
-    execute_sql_file_path(
-        state.inner().as_ref(),
-        request,
-        PathBuf::from(&request.file_path).as_path(),
-        token,
+    let mut progress_emitter = SqlFileProgressEmitter::new(|progress| {
+        let _ = app.emit("sql-file-progress", progress);
+    });
+    progress_emitter.emit(sql_file_progress(
+        &request.execution_id,
+        SqlFileStatus::Started,
+        0,
+        0,
+        0,
+        0,
         started_at,
-        |progress| {
-            let _ = app.emit("sql-file-progress", progress);
-        },
-    )
+        "",
+        None,
+    ));
+    let paths: Vec<PathBuf> = file_paths.iter().map(PathBuf::from).collect();
+    let path_refs: Vec<&std::path::Path> = paths.iter().map(PathBuf::as_path).collect();
+    execute_sql_file_paths(state.inner().as_ref(), request, &path_refs, token, started_at, |progress| {
+        progress_emitter.emit(progress);
+    })
     .await
 }
 
@@ -118,35 +140,6 @@ fn register_sql_file_execution(
 
 fn remove_sql_file_execution(executions: &mut HashMap<String, CancellationToken>, execution_id: &str) {
     executions.remove(execution_id);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_progress(
-    app: &AppHandle,
-    execution_id: &str,
-    status: SqlFileStatus,
-    statement_index: usize,
-    success_count: usize,
-    failure_count: usize,
-    affected_rows: u64,
-    started_at: Instant,
-    statement_summary: &str,
-    error: Option<String>,
-) {
-    let _ = app.emit(
-        "sql-file-progress",
-        sql_file_progress(
-            execution_id,
-            status,
-            statement_index,
-            success_count,
-            failure_count,
-            affected_rows,
-            started_at,
-            statement_summary,
-            error,
-        ),
-    );
 }
 
 #[cfg(test)]
@@ -238,7 +231,6 @@ mod execution_tests {
         assert_eq!(summary.status, SqlFileStatus::Cancelled);
     }
 
-    #[test]
     #[test]
     fn duplicate_execution_id_is_rejected_without_replacing_token() {
         let mut executions = HashMap::new();

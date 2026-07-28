@@ -1,6 +1,61 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canGoNextDataGridPage } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+
+test("estimated display totals do not become pagination bounds", () => {
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      serverKnownTotalRowCount: 10_000_000,
+      totalRowCountIsExact: false,
+    }),
+    undefined,
+  );
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      serverKnownTotalRowCount: 10_000_000,
+      totalRowCountIsExact: true,
+    }),
+    10_000_000,
+  );
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      paginationTotalRowCount: 500,
+      serverKnownTotalRowCount: 10_000_000,
+      totalRowCountIsExact: false,
+    }),
+    500,
+  );
+});
+
+test("first query page is complete when its known total is already loaded", () => {
+  assert.equal(
+    hasCompleteLocalDataGridResult({
+      isResultsContext: true,
+      rowCount: 2,
+      pageLimit: 500,
+      pageOffset: 0,
+      totalRowCount: 2,
+      truncated: false,
+      hasMore: false,
+    }),
+    true,
+  );
+});
+
+test("local query result is incomplete when rows are truncated or start after the first page", () => {
+  const completeFirstPage = {
+    isResultsContext: true,
+    rowCount: 500,
+    pageLimit: 500,
+    pageOffset: 0,
+    totalRowCount: 500,
+    truncated: false,
+    hasMore: false,
+  };
+  assert.equal(hasCompleteLocalDataGridResult({ ...completeFirstPage, truncated: true }), false);
+  assert.equal(hasCompleteLocalDataGridResult({ ...completeFirstPage, pageOffset: 500, totalRowCount: 1000 }), false);
+  assert.equal(hasCompleteLocalDataGridResult({ ...completeFirstPage, totalRowCount: undefined }), false);
+});
 
 test("known total disables next page at the last exact page", () => {
   assert.equal(
@@ -42,6 +97,22 @@ test("backend hasMore takes precedence over a stale known total", () => {
 test("unknown total falls back to full-page heuristic", () => {
   assert.equal(canGoNextDataGridPage({ rowCount: 1, pageSize: 1 }), true);
   assert.equal(canGoNextDataGridPage({ rowCount: 0, pageSize: 1 }), false);
+});
+
+test("infinite scroll compares cumulative loaded rows with a known total", () => {
+  assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, totalRowCount: 2_000 }), true);
+  assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 2_000, pageSize: 1_000, totalRowCount: 2_000 }), false);
+});
+
+test("infinite scroll stops on a short unknown segment and probes a full unknown segment", () => {
+  assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 673, pageSize: 1_000 }), false);
+  assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000 }), true);
+  assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 2_000, pageSize: 1_000 }), true);
+});
+
+test("infinite scroll preserves authoritative has-more and complete-local-result signals", () => {
+  assert.equal(canFetchNextDataGridSegment({ hasMore: true, loadedRowCount: 673, pageSize: 1_000, totalRowCount: 673 }), true);
+  assert.equal(canFetchNextDataGridSegment({ loadedRowCount: 1_000, pageSize: 1_000, allRowsLoaded: true }), false);
 });
 
 // --- auto-redirect page calculation after refresh ---

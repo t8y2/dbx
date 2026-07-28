@@ -43,7 +43,7 @@ function createGhost(sourceEl: HTMLElement, x: number, y: number) {
     z-index: 9999;
     opacity: 0.9;
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-    border-radius: 6px;
+    border-radius: var(--dbx-radius-fixed-6);
     background: var(--background, #fff);
     border: 1px solid var(--border, #e5e7eb);
     max-width: 200px;

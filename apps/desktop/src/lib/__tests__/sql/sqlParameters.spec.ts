@@ -7,9 +7,10 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql)).toEqual(["start_date", "end_date"]);
   });
 
-  it("ignores placeholders inside strings, quoted identifiers, and comments", () => {
+  it("extracts quoted braced placeholders while ignoring backticks and comments", () => {
     const sql = `
       select '\${quoted}' as a, "\${identifier}" as b, \`\${mysql_identifier}\`
+      , 'prefix\${embedded}' as c, 'x#{partial}' as d
       -- \${line_comment}
       # \${hash_comment}
       #\${hash_comment_without_space}
@@ -18,7 +19,11 @@ describe("extractSqlParameters", () => {
       from t
       where id = \${id}
     `;
-    expect(extractSqlParameters(sql)).toEqual(["id"]);
+    expect(extractSqlParameters(sql)).toEqual(["quoted", "identifier", "embedded", "partial", "id"]);
+    expect(extractSqlParameterDescriptors("select * from t where dt='${date}' and flag=\"#{enabled}\"")).toEqual([
+      { key: "date", name: "date", syntax: "shell", token: "'${date}'" },
+      { key: "enabled", name: "enabled", syntax: "mybatis", token: '"#{enabled}"' },
+    ]);
   });
 
   it("ignores placeholders inside Postgres dollar-quoted strings", () => {
@@ -29,6 +34,16 @@ describe("extractSqlParameters", () => {
   it("extracts supported placeholder syntaxes in order", () => {
     const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e";
     expect(extractSqlParameters(sql)).toEqual(["?1", "named", "shell_name", "mybatis_name", "sql_server_name"]);
+  });
+
+  it("ignores npm scoped packages in JDBCX MCP command arguments", () => {
+    const sql = '{{ mcp(cmd=npx, args=-y @modelcontextprotocol/server-everything, tool=echo): {"message":"hello"} }}';
+    expect(extractSqlParameters(sql)).toEqual([]);
+    expect(substituteSqlParameters(sql, {})).toBe(sql);
+  });
+
+  it("keeps SQL Server parameters used in division expressions", () => {
+    expect(extractSqlParameters("select @amount/2, @total / 4")).toEqual(["amount", "total"]);
   });
 
   it("describes each placeholder syntax for the parameter dialog", () => {
@@ -270,6 +285,97 @@ describe("extractSqlParameters", () => {
   });
 });
 
+describe("Oracle and Dameng trigger pseudo-records", () => {
+  it("ignores Oracle default pseudo-record fields while keeping ordinary parameters", () => {
+    const sql = `
+      CREATE OR REPLACE TRIGGER audit_orders
+      BEFORE UPDATE ON orders
+      FOR EACH ROW
+      BEGIN
+        :NEW.updated_at := current_timestamp;
+        audit_change(:old.id, :PaReNt.order_id, :tenant_id);
+      END;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["tenant_id"]);
+  });
+
+  it("ignores Dameng default pseudo-record fields case-insensitively", () => {
+    const sql = `
+      create trigger audit_orders after update on orders
+      for each row
+      begin
+        insert into order_audit values (:new.id, :OLD.status, :EventInfo.event_type, :actor_id);
+      end;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["actor_id"]);
+  });
+
+  it("parses REFERENCING aliases without disabling default pseudo-records", () => {
+    const sql = `
+      create or replace trigger audit_orders
+      before update on orders
+      referencing old row as previous new as current
+      for each row
+      begin
+        audit_change(:previous.id, :CURRENT.status, :old.id, :new.status, :reason);
+      end;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["reason"]);
+  });
+
+  it("replaces ordinary trigger parameters but preserves pseudo-record fields", () => {
+    const sql = `create trigger audit_orders before update on orders
+      referencing new as inserted old as deleted
+      for each row begin
+        :inserted.updated_by := :user_id;
+        audit_change(:deleted.id, :NEW.id, :note);
+      end;`;
+
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          user_id: { kind: "number", value: "42" },
+          note: { kind: "string", value: "manual" },
+        },
+        { databaseType: "dameng" },
+      ),
+    ).toBe(`create trigger audit_orders before update on orders
+      referencing new as inserted old as deleted
+      for each row begin
+        :inserted.updated_by := 42;
+        audit_change(:deleted.id, :NEW.id, 'manual');
+      end;`);
+  });
+
+  it("does not apply trigger rules to other databases or statements outside triggers", () => {
+    const oracleScript = `create trigger audit_orders before update on orders
+      for each row begin :new.id := :value; end;
+      /
+      select :new, :outside_value from dual;`;
+
+    expect(extractSqlParameters(oracleScript, { databaseType: "oracle" })).toEqual(["value", "new", "outside_value"]);
+    expect(extractSqlParameters("create trigger t before update on x begin :NEW.id := :value; end;", { databaseType: "postgres" })).toEqual(["NEW", "value"]);
+    expect(extractSqlParameters("create trigger t before update on x begin NEW.id := :value; end;", { databaseType: "postgres" })).toEqual(["value"]);
+  });
+
+  it("keeps assignment, casts, comments, strings, and non-field pseudo-record tokens unchanged", () => {
+    const sql = `create trigger audit_orders before update on orders
+      for each row begin
+        :new := :actual_value;
+        value := :NEW.id;
+        select value::int into :target_value from dual;
+        -- :OLD.comment_field
+        note := ':EVENTINFO.string_field';
+      end;`;
+
+    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["new", "actual_value", "target_value"]);
+  });
+});
+
 describe("substituteSqlParameters", () => {
   it("replaces placeholders with SQL literals", () => {
     const sql = "select * from t where dt >= ${start_date} and amount > ${amount} and enabled = ${enabled}";
@@ -280,6 +386,76 @@ describe("substituteSqlParameters", () => {
         enabled: { kind: "boolean", value: "true" },
       }),
     ).toBe("select * from t where dt >= '2026-06-26' and amount > 100.50 and enabled = TRUE");
+  });
+
+  it("replaces exact quoted braced placeholders as whole tokens without double-quoting", () => {
+    const sql = "select * from t where dt = '${date}' and name = \"${name}\" and flag = '#{enabled}' and id = ${id}";
+    expect(
+      substituteSqlParameters(sql, {
+        date: { kind: "string", value: "2026-06-26" },
+        name: { kind: "string", value: "O'Reilly" },
+        enabled: { kind: "boolean", value: "true" },
+        id: { kind: "number", value: "7" },
+      }),
+    ).toBe("select * from t where dt = '2026-06-26' and name = 'O''Reilly' and flag = TRUE and id = 7");
+  });
+
+  it("replaces placeholders embedded in ordinary SQL string values", () => {
+    const sql = "select 'prefix${date}' as a, 'x#{id}y' as b, \"x#{identifier}y\" as c, ${real}";
+    expect(extractSqlParameters(sql)).toEqual(["date", "id", "real"]);
+    expect(
+      substituteSqlParameters(sql, {
+        real: { kind: "number", value: "1" },
+        date: { kind: "string", value: "O'Reilly" },
+        id: { kind: "number", value: "2" },
+        identifier: { kind: "string", value: "ignored" },
+      }),
+    ).toBe("select 'prefixO''Reilly' as a, 'x2y' as b, \"x#{identifier}y\" as c, 1");
+  });
+
+  it("supports embedded placeholders in the issue reproduction", () => {
+    const sql = "INSERT INTO ${dbSchema}.dbx_smoke (note) VALUES ('${FOO} DBX smoke 中文 🚀')";
+    expect(
+      substituteSqlParameters(sql, {
+        dbSchema: { kind: "raw", value: "public" },
+        FOO: { kind: "string", value: "O'Reilly" },
+      }),
+    ).toBe("INSERT INTO public.dbx_smoke (note) VALUES ('O''Reilly DBX smoke 中文 🚀')");
+  });
+
+  it("ignores prefixed string literals such as E/U&/B/X/N quotes", () => {
+    const sql = "select E'${path}' as a, U&'${unicode}' as b, B'${flag}' as c, X'${hex}' as d, N'${national}' as e, '${plain}' as f";
+    expect(extractSqlParameters(sql)).toEqual(["plain"]);
+    expect(
+      substituteSqlParameters(sql, {
+        path: { kind: "string", value: "C:\\new" },
+        flag: { kind: "boolean", value: "true" },
+        plain: { kind: "string", value: "ok" },
+      }),
+    ).toBe("select E'${path}' as a, U&'${unicode}' as b, B'${flag}' as c, X'${hex}' as d, N'${national}' as e, 'ok' as f");
+  });
+
+  it("ignores MySQL character-set introducers before quoted placeholders", () => {
+    const sql = "select _utf8mb4'${flag}' as a, _binary'#{amount}' as b, _custom_charset'${name}' as c, '${plain}' as d";
+    expect(extractSqlParameters(sql)).toEqual(["plain"]);
+    expect(
+      substituteSqlParameters(sql, {
+        flag: { kind: "boolean", value: "true" },
+        amount: { kind: "number", value: "12" },
+        name: { kind: "string", value: "ignored" },
+        plain: { kind: "string", value: "ok" },
+      }),
+    ).toBe("select _utf8mb4'${flag}' as a, _binary'#{amount}' as b, _custom_charset'${name}' as c, 'ok' as d");
+  });
+
+  it("handles doubled-quote continuations inside interpolated strings", () => {
+    const single = "select '${value}''suffix' as a, ${real}";
+    expect(extractSqlParameters(single)).toEqual(["value", "real"]);
+    expect(substituteSqlParameters(single, { value: { kind: "boolean", value: "true" }, real: { kind: "number", value: "1" } })).toBe("select 'true''suffix' as a, 1");
+
+    const double = 'select "${value}""suffix" as a, ${real}';
+    expect(extractSqlParameters(double)).toEqual(["real"]);
+    expect(substituteSqlParameters(double, { value: { kind: "boolean", value: "true" }, real: { kind: "number", value: "2" } })).toBe('select "${value}""suffix" as a, 2');
   });
 
   it("escapes string values and supports null and raw SQL", () => {
@@ -399,6 +575,20 @@ describe("enabledSyntaxes option", () => {
     expect(extractSqlParameters(sql, { databaseType: "saphana", enabledSyntaxes: ["named", "shell"] })).toEqual(["shell_name"]);
     // A non-saphana database with named disabled also drops :name.
     expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"] })).toEqual(["shell_name"]);
+  });
+
+  it("respects enabledSyntaxes for exact quoted braced placeholders", () => {
+    const sql = "select '${shell_name}' as a, \"#{mybatis_name}\" as b";
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"] })).toEqual(["shell_name"]);
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["mybatis"] })).toEqual(["mybatis_name"]);
+    expect(substituteSqlParameters(sql, { shell_name: { kind: "string", value: "x" } }, { enabledSyntaxes: ["named"] })).toBe(sql);
+  });
+
+  it("respects enabledSyntaxes for embedded quoted braced placeholders", () => {
+    const sql = "select 'x${shell_name}y' as a, 'x#{mybatis_name}y' as b";
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"] })).toEqual(["shell_name"]);
+    expect(extractSqlParameters(sql, { enabledSyntaxes: ["mybatis"] })).toEqual(["mybatis_name"]);
+    expect(substituteSqlParameters(sql, { shell_name: { kind: "string", value: "a" }, mybatis_name: { kind: "string", value: "b" } }, { enabledSyntaxes: ["named"] })).toBe(sql);
   });
 });
 

@@ -167,6 +167,13 @@ function isAllowedBootstrapPrelude(statement: string): boolean {
     return true;
   }
 
+  // Connection-scoped SHOW (DATABASES, VARIABLES, PROCESSLIST, …) does not need a
+  // selected schema. SHOW TABLES / SHOW COLUMNS still fail at the server when no
+  // database is selected — matching Navicat-style query windows.
+  if (normalized === "SHOW") {
+    return true;
+  }
+
   if (normalized !== "CREATE" && normalized !== "DROP") {
     return false;
   }
@@ -175,10 +182,14 @@ function isAllowedBootstrapPrelude(statement: string): boolean {
   return !!next && isDatabaseKeyword(next[0]);
 }
 
-export function supportsConnectionLevelDatabaseBootstrap(connection: BootstrapConnection | undefined): boolean {
+export function supportsConnectionLevelSqlExecution(connection: BootstrapConnection | undefined): boolean {
   if (!connection) return false;
   if (supportsCreateDatabaseCharset(connection.db_type, connection.driver_profile)) return true;
   return !!connection.driver_profile && MYSQL_BOOTSTRAP_EXTRA_PROFILES.has(connection.driver_profile.toLowerCase());
+}
+
+export function supportsConnectionLevelDatabaseBootstrap(connection: BootstrapConnection | undefined): boolean {
+  return supportsConnectionLevelSqlExecution(connection);
 }
 
 export function canExecuteWithoutSelectedDatabase(connection: BootstrapConnection | undefined, sql: string): boolean {

@@ -15,7 +15,7 @@ function applyCompletion(text: string, cursor: number, label: string): string {
 test("suggests Elasticsearch HTTP methods for empty and prefix input", () => {
   assert.deepEqual(
     buildElasticsearchCompletionItems("", 0).map((item) => item.label),
-    ["GET", "POST", "PUT", "DELETE"],
+    ["GET", "POST", "PUT", "DELETE", "HEAD"],
   );
 
   const items = buildElasticsearchCompletionItems("po", 2);
@@ -27,6 +27,16 @@ test("suggests Elasticsearch root endpoints", () => {
 
   assert.ok(items.find((item) => item.label === "/_search"));
   assert.ok(items.find((item) => item.label === "/_cat/indices"));
+  assert.ok(items.find((item) => item.label === "/_nodes/stats"));
+  assert.ok(items.find((item) => item.label === "/_msearch"));
+});
+
+test("suggests methods and endpoints after comments and in later REST requests", () => {
+  const commentedMethod = "# inspect node\nHE";
+  assert.ok(buildElasticsearchCompletionItems(commentedMethod, commentedMethod.length).some((item) => item.label === "HEAD"));
+
+  const secondRequest = "GET /_cluster/health\n\nGET /_no";
+  assert.ok(buildElasticsearchCompletionItems(secondRequest, secondRequest.length).some((item) => item.label === "/_nodes/stats"));
 });
 
 test("suggests Elasticsearch index endpoints", () => {

@@ -7,6 +7,16 @@ export interface QueryResultSourceLabelOptions {
   databaseType?: DatabaseType;
 }
 
+export function queryResultNameFromPreamble(preamble: string): string | undefined {
+  let name: string | undefined;
+  const withoutBlockComments = preamble.replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const line of withoutBlockComments.split(/\r?\n/)) {
+    const candidate = line.match(/^\s*--\s*name\s*:\s*(.*)$/i)?.[1]?.trim();
+    if (candidate) name = candidate;
+  }
+  return name;
+}
+
 function firstSourceOfKind(sources: SqlSemanticRowSource[], kind: SqlSemanticRowSource["kind"]): SqlSemanticRowSource | undefined {
   return sources.filter((source) => source.kind === kind).sort((left, right) => left.sourceSpan.start - right.sourceSpan.start)[0];
 }

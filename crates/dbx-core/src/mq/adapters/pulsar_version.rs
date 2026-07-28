@@ -140,6 +140,14 @@ impl PulsarApiProfile {
                 supports_token_management: false,
                 supports_raw_admin_api: true,
                 supports_send_message: false,
+                supports_message_query: false,
+                supports_dlq: false,
+                supports_message_trace: false,
+                supports_exchanges: false,
+                supports_client_connections: false,
+                supports_user_permissions: false,
+                supports_policies: false,
+                supports_cluster_monitoring: false,
             },
         }
     }
@@ -416,6 +424,7 @@ fn subscription_from_stats(name: &str, body: &serde_json::Value) -> Subscription
         msg_rate_out: body.get("msgRateOut").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
         msg_throughput_out: body.get("msgThroughputOut").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
         consumers,
+        ..Default::default()
     }
 }
 

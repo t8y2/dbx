@@ -10,9 +10,47 @@ dayjs.extend(timezone);
 
 export type DateTimeFormatterUnit = "seconds" | "milliseconds" | "auto";
 const DEFAULT_DATETIME_PATTERN = "YYYY-MM-DD HH:mm:ss";
-export const DateTimePatterns = ["HH:mm:ss", "HH:mm:ss.SSS", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss.SSS", "YYYY/MM/DD HH:mm:ss", "YYYY/MM/DD HH:mm:ss.SSS", "YYYY-MM-DDTHH:mm:ssZ", "YYYY-MM-DDTHH:mm:ss.SSSZ", "YYYY/MM/DDTHH:mm:ssZ", "YYYY/MM/DDTHH:mm:ss.SSSZ"];
-const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = ["YYYY-MM-DD", "YYYY/MM/DD", "YYYY-MM-DD HH:mm:ss", "YYYY-MM-DD HH:mm:ss.SSS", "YYYY/MM/DD HH:mm:ss", "YYYY/MM/DD HH:mm:ss.SSS", "YYYY-MM-DDTHH:mm:ss", "YYYY-MM-DDTHH:mm:ss.SSS", "YYYY/MM/DDTHH:mm:ss", "YYYY/MM/DDTHH:mm:ss.SSS"];
-const ISO_OFFSET_DATETIME_PATTERN = /^(\d{4})([-/])(\d{2})\2(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
+export const DateTimePatterns = [
+  "YYYY-MM-DD",
+  "YYYY/MM/DD",
+  "YYYY/M/D",
+  "HH:mm:ss",
+  "HH:mm:ss.SSS",
+  "YYYY-MM-DD HH:mm:ss",
+  "YYYY-MM-DD HH:mm:ss.SSS",
+  "YYYY/MM/DD HH:mm:ss",
+  "YYYY/MM/DD HH:mm:ss.SSS",
+  "YYYY/M/D HH:mm:ss",
+  "YYYY-MM-DDTHH:mm:ssZ",
+  "YYYY-MM-DDTHH:mm:ss.SSSZ",
+  "YYYY/MM/DDTHH:mm:ssZ",
+  "YYYY/MM/DDTHH:mm:ss.SSSZ",
+];
+const SUPPORTED_DATE_TIME_PATTERN_TOKENS = ["YYYY", "SSS", "ZZ", "MM", "DD", "HH", "mm", "ss", "M", "D", "H", "m", "s", "Z"];
+const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = [
+  "YYYY-MM-DD",
+  "YYYY-M-D",
+  "YYYY/MM/DD",
+  "YYYY/M/D",
+  "YYYY-MM-DD HH:mm:ss",
+  "YYYY-M-D H:m:s",
+  "YYYY-MM-DD HH:mm:ss.SSS",
+  "YYYY-M-D H:m:s.SSS",
+  "YYYY/MM/DD HH:mm:ss",
+  "YYYY/M/D H:m:s",
+  "YYYY/MM/DD HH:mm:ss.SSS",
+  "YYYY/M/D H:m:s.SSS",
+  "YYYY-MM-DDTHH:mm:ss",
+  "YYYY-M-DTH:m:s",
+  "YYYY-MM-DDTHH:mm:ss.SSS",
+  "YYYY-M-DTH:m:s.SSS",
+  "YYYY/MM/DDTHH:mm:ss",
+  "YYYY/M/DTH:m:s",
+  "YYYY/MM/DDTHH:mm:ss.SSS",
+  "YYYY/M/DTH:m:s.SSS",
+];
+const ISO_OFFSET_DATETIME_PATTERN = /^(\d{4})([-/])(\d{2})\2(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+const FRACTIONAL_LOCAL_DATETIME_PATTERN = /^(\d{4})([-/])(\d{1,2})\2(\d{1,2})([ T])(\d{1,2}):(\d{1,2}):(\d{1,2})\.(\d{1,9})$/;
 
 export interface CustomColumnFormatterConfig {
   id: string;
@@ -20,7 +58,52 @@ export interface CustomColumnFormatterConfig {
   template: string;
 }
 
-export type ColumnFormatterConfig = { kind: "datetime"; unit: DateTimeFormatterUnit; pattern: string } | { kind: "json-path"; path: string } | { kind: "mask"; prefix: number; suffix: number } | { kind: "custom-template"; template: string } | { kind: "custom-ref"; formatterId: string };
+interface IntlTimeZoneSupport {
+  supportedValuesOf?: (key: "timeZone") => string[];
+}
+
+export function getSupportedTimeZoneOptions(intl: IntlTimeZoneSupport, fallbackTimeZone = "UTC"): string[] {
+  try {
+    const timeZones = intl.supportedValuesOf?.("timeZone");
+    if (timeZones?.length) return timeZones;
+  } catch {}
+  // Older WebViews may omit or throw from this API, so keep the detected timezone selectable.
+  return [fallbackTimeZone || "UTC"];
+}
+
+export function normalizeSupportedDateTimePattern(value: string): string {
+  const pattern = value.trim();
+  if (!pattern || pattern.length > 100 || pattern.includes("%")) return "";
+
+  let index = 0;
+  while (index < pattern.length) {
+    const remaining = pattern.slice(index);
+    if (remaining.startsWith("[")) {
+      const closeIndex = remaining.indexOf("]");
+      if (closeIndex < 0) return "";
+      index += closeIndex + 1;
+      continue;
+    }
+
+    const token = SUPPORTED_DATE_TIME_PATTERN_TOKENS.find((candidate) => remaining.startsWith(candidate));
+    if (token) {
+      index += token.length;
+      continue;
+    }
+
+    if (/[A-Za-z]/.test(pattern[index])) return "";
+    index += 1;
+  }
+
+  return pattern;
+}
+
+export type ColumnFormatterConfig =
+  | { kind: "datetime"; unit: DateTimeFormatterUnit; pattern: string; timezone: string | undefined }
+  | { kind: "json-path"; path: string }
+  | { kind: "mask"; prefix: number; suffix: number }
+  | { kind: "custom-template"; template: string }
+  | { kind: "custom-ref"; formatterId: string };
 
 export interface ColumnFormatterKeyParts {
   connectionId: string;
@@ -36,7 +119,7 @@ export function buildColumnFormatterKey(parts: ColumnFormatterKeyParts): string 
 
 export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const config = value as Record<string, unknown>;
+  const config = value as Record<string, any>;
 
   if (config.kind === "datetime") {
     return config.unit === "seconds" || config.unit === "milliseconds" || config.unit === "auto"
@@ -44,6 +127,7 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
           kind: "datetime",
           unit: config.unit,
           pattern: normalizeDateTimePattern(config.pattern),
+          timezone: config.timezone,
         }
       : undefined;
   }
@@ -82,18 +166,74 @@ export function normalizeCustomColumnFormatter(value: unknown): CustomColumnForm
   };
 }
 
-export function resolveColumnFormatter(formatter: ColumnFormatterConfig | undefined, customFormatters: Record<string, CustomColumnFormatterConfig>): ColumnFormatterConfig | undefined {
-  if (!formatter) return undefined;
+export function normalizeGlobalDateTimePattern(value: unknown): string {
+  return typeof value === "string" ? value.trim().slice(0, 100) : "";
+}
+
+export function isTemporalColumnType(dataType: string | null | undefined): boolean {
+  const normalized = String(dataType || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  if (!normalized) return false;
+  const base = normalized.split(/[(:]/)[0]?.trim() ?? "";
+  return (
+    ["date", "date32", "daten", "time", "time64", "timen", "timetz", "datetime", "datetime2", "datetime4", "datetime64", "datetimen", "datetimeoffset", "datetimeoffsetn", "smalldatetime", "timestamp", "timestampdty", "timestamptz"].includes(base) ||
+    base.startsWith("timestamp_") ||
+    normalized.startsWith("timestamp with ") ||
+    normalized.startsWith("timestamp without ") ||
+    normalized.startsWith("time with ") ||
+    normalized.startsWith("time without ")
+  );
+}
+
+export function resolveColumnFormatter(formatter: ColumnFormatterConfig | undefined, customFormatters: Record<string, CustomColumnFormatterConfig>, globalDateTime?: { pattern?: string; columnType?: string | null }): ColumnFormatterConfig | undefined {
+  if (!formatter) {
+    const pattern = normalizeGlobalDateTimePattern(globalDateTime?.pattern);
+    return pattern && isTemporalColumnType(globalDateTime?.columnType) ? { kind: "datetime", unit: "auto", pattern, timezone: undefined } : undefined;
+  }
   if (formatter.kind !== "custom-ref") return formatter;
   const customFormatter = customFormatters[formatter.formatterId];
   return customFormatter ? { kind: "custom-template", template: customFormatter.template } : undefined;
+}
+
+export function formatTemporalRowsForExport<T extends CellValue>(rows: readonly (readonly T[])[], columnTypes: readonly (string | null | undefined)[], pattern: string): T[][] {
+  const normalizedPattern = normalizeGlobalDateTimePattern(pattern);
+  if (!normalizedPattern) return rows.map((row) => [...row]);
+  return rows.map((row) =>
+    row.map((value, index) => {
+      if (!isTemporalColumnType(columnTypes[index])) return value;
+      return formatTemporalValueForExport(value, normalizedPattern) as T;
+    }),
+  );
+}
+
+function formatTemporalValueForExport(value: CellValue, pattern: string): string {
+  if (typeof value === "string") {
+    const match = value.match(ISO_OFFSET_DATETIME_PATTERN);
+    if (match) {
+      const [, year, separator, month, day, hour, minute, second, fraction = "", zone] = match;
+      if (!isValidDateTimeParts(year, month, day, hour, minute, second) || !isValidOffset(zone)) {
+        return displayCellValue(value);
+      }
+      const normalizedFraction = fraction ? `.${fraction.slice(1, 4).padEnd(3, "0")}` : "";
+      const localValue = `${year}${separator}${month}${separator}${day}T${hour}:${minute}:${second}${normalizedFraction}`;
+      const inputPattern = `${separator === "-" ? "YYYY-MM-DD" : "YYYY/MM/DD"}THH:mm:ss${fraction ? ".SSS" : ""}`;
+      const parsed = dayjs(localValue, inputPattern, true);
+      if (parsed.isValid()) {
+        const offsetMinutes = zone === "Z" ? 0 : (zone.startsWith("-") ? -1 : 1) * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6)));
+        return parsed.utcOffset(offsetMinutes, true).format(pattern);
+      }
+    }
+  }
+  return applyColumnFormatter(value, { kind: "datetime", unit: "auto", pattern, timezone: undefined });
 }
 
 export function applyColumnFormatter(value: CellValue, formatter: ColumnFormatterConfig | undefined): string {
   if (!formatter) return displayCellValue(value);
 
   try {
-    if (formatter.kind === "datetime") return formatDateTime(value, formatter.unit, formatter.pattern);
+    if (formatter.kind === "datetime") return formatDateTime(value, formatter.unit, formatter.pattern, formatter.timezone);
     if (formatter.kind === "json-path") return formatJsonPath(value, formatter.path);
     if (formatter.kind === "mask") return formatMask(value, formatter);
     if (formatter.kind === "custom-template") return formatCustomTemplate(value, formatter.template);
@@ -103,12 +243,17 @@ export function applyColumnFormatter(value: CellValue, formatter: ColumnFormatte
   }
 }
 
-function formatDateTime(value: CellValue, unit: DateTimeFormatterUnit, pattern: string): string {
+function formatDateTime(value: CellValue, unit: DateTimeFormatterUnit, pattern: string, timezone: string | undefined): string {
   if (value === null) return displayCellValue(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "object") return JSON.stringify(value);
   const parsed: Dayjs | undefined = resolveDateTimeValue(value, unit);
-  return parsed ? parsed.format(pattern || DEFAULT_DATETIME_PATTERN) : displayCellValue(value);
+  if (parsed) {
+    const template = pattern || DEFAULT_DATETIME_PATTERN;
+    return timezone ? parsed.tz(timezone).format(template) : parsed.format(template);
+  } else {
+    return displayCellValue(value);
+  }
 }
 
 function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUnit) {
@@ -142,6 +287,16 @@ function parseStrictDateTimeString(value: string): Dayjs | undefined {
   const parsedIsoOffset = parseIsoOffsetDateTimeString(value);
   if (parsedIsoOffset) return parsedIsoOffset;
 
+  const fractionalLocalMatch = value.match(FRACTIONAL_LOCAL_DATETIME_PATTERN);
+  if (fractionalLocalMatch) {
+    const [, yearText, , monthText, dayText, , hourText, minuteText, secondText, fractionText] = fractionalLocalMatch;
+    if (isValidDateTimeParts(yearText, monthText, dayText, hourText, minuteText, secondText)) {
+      const normalized = `${yearText}-${monthText.padStart(2, "0")}-${dayText.padStart(2, "0")}T${hourText.padStart(2, "0")}:${minuteText.padStart(2, "0")}:${secondText.padStart(2, "0")}.${fractionText.slice(0, 3).padEnd(3, "0")}`;
+      const parsed = dayjs(normalized, "YYYY-MM-DDTHH:mm:ss.SSS", true);
+      if (parsed.isValid()) return parsed;
+    }
+  }
+
   for (const pattern of STRICT_LOCAL_DATETIME_INPUT_PATTERNS) {
     // Day.js non-strict parsing normalizes overflow dates such as 2022-01-33.
     // Keep cell text strict so invalid values fall back unchanged.
@@ -159,7 +314,8 @@ function parseIsoOffsetDateTimeString(value: string): Dayjs | undefined {
   if (!isValidDateTimeParts(yearText, monthText, dayText, hourText, minuteText, secondText)) return undefined;
   if (!isValidOffset(zoneText)) return undefined;
 
-  const normalized = `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}${fractionText}${zoneText}`;
+  const normalizedFraction = fractionText ? `.${fractionText.slice(1, 4).padEnd(3, "0")}` : "";
+  const normalized = `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}${normalizedFraction}${zoneText}`;
   const parsed = dayjs(normalized);
   return parsed.isValid() ? parsed : undefined;
 }

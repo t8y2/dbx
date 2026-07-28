@@ -63,9 +63,12 @@ impl MqAdminConfig {
         let mut parsed: MqAdminConfig = serde_json::from_value(raw.clone())
             .map_err(|e| format!("Failed to parse message queue admin config: {e}"))?;
         parsed.admin_url = parsed.admin_url.trim().to_string();
-        // Kafka uses bootstrap servers from `extra` instead of an admin URL,
-        // so allow an empty admin_url for Kafka connections.
-        if parsed.admin_url.is_empty() && parsed.system_kind != MqSystemKind::Kafka {
+        // Kafka, RocketMQ and RabbitMQ use namesrv/bootstrap/addresses from `extra` instead of an admin URL.
+        if parsed.admin_url.is_empty()
+            && parsed.system_kind != MqSystemKind::Kafka
+            && parsed.system_kind != MqSystemKind::RocketMq
+            && parsed.system_kind != MqSystemKind::RabbitMq
+        {
             return Err("Message queue admin URL is empty".to_string());
         }
         Ok(parsed)
@@ -101,6 +104,7 @@ mod tests {
         let mut cfg = ConnectionConfig {
             id: "c1".to_string(),
             name: "mq".to_string(),
+            note: String::new(),
             db_type: crate::models::connection::DatabaseType::MessageQueue,
             driver_profile: None,
             driver_label: None,
@@ -113,6 +117,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -147,6 +152,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         };
         cfg.redis_key_separator = ":".to_string();
         cfg
@@ -195,6 +201,61 @@ mod tests {
         assert_eq!(mqc.system_kind, MqSystemKind::Kafka);
         assert_eq!(mqc.admin_url, "");
         assert_eq!(mqc.extra.get("bootstrapServers").and_then(|v| v.as_str()), Some("broker1:9092,broker2:9092"));
+    }
+
+    #[test]
+    fn parses_rocketmq_config_with_empty_admin_url() {
+        let cfg = connection_with_external(serde_json::json!({
+            "systemKind": "rocketmq",
+            "adminUrl": "",
+            "auth": { "kind": "none" },
+            "extra": {
+                "namesrvAddr": "127.0.0.1:9876"
+            }
+        }));
+        let mqc = MqAdminConfig::from_connection(&cfg).expect("should parse valid RocketMQ config");
+        assert_eq!(mqc.system_kind, MqSystemKind::RocketMq);
+        assert_eq!(mqc.admin_url, "");
+        assert_eq!(mqc.extra.get("namesrvAddr").and_then(|v| v.as_str()), Some("127.0.0.1:9876"));
+    }
+
+    #[test]
+    fn parses_rabbitmq_config_with_empty_admin_url() {
+        let cfg = connection_with_external(serde_json::json!({
+            "systemKind": "rabbitmq",
+            "adminUrl": "",
+            "auth": { "kind": "basic", "username": "guest", "password": "guest" },
+            "extra": {
+                "addresses": "127.0.0.1",
+                "port": 5672,
+                "virtualHost": "/"
+            }
+        }));
+        let mqc = MqAdminConfig::from_connection(&cfg).expect("should parse valid RabbitMQ config");
+        assert_eq!(mqc.system_kind, MqSystemKind::RabbitMq);
+        assert_eq!(mqc.admin_url, "");
+        assert_eq!(mqc.extra.get("addresses").and_then(|v| v.as_str()), Some("127.0.0.1"));
+        assert_eq!(mqc.extra.get("virtualHost").and_then(|v| v.as_str()), Some("/"));
+    }
+
+    #[test]
+    fn parses_rabbitmq_config_with_management_admin_url() {
+        // An explicit management URL stays untouched: it may carry a reverse
+        // proxy path prefix, and no http(s)-only scheme restriction applies.
+        let cfg = connection_with_external(serde_json::json!({
+            "systemKind": "rabbitmq",
+            "adminUrl": "http://rabbit.internal:15672/proxy",
+            "auth": { "kind": "basic", "username": "guest", "password": "guest" },
+            "extra": {
+                "addresses": "127.0.0.1",
+                "port": 5672,
+                "virtualHost": "/"
+            }
+        }));
+        let mqc = MqAdminConfig::from_connection(&cfg).expect("should parse RabbitMQ config with a management URL");
+        assert_eq!(mqc.system_kind, MqSystemKind::RabbitMq);
+        assert_eq!(mqc.admin_url, "http://rabbit.internal:15672/proxy");
+        assert_eq!(mqc.extra.get("addresses").and_then(|v| v.as_str()), Some("127.0.0.1"));
     }
 
     #[test]

@@ -3,7 +3,9 @@ import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib
 export const MAX_MONGO_FORMAT_CHARS = 1_000_000;
 
 interface FormatState {
-  out: string;
+  out: string[];
+  lastChar: string;
+  lastNonWhitespace: string;
   indentLevel: number;
   atLineStart: boolean;
   pendingSpace: boolean;
@@ -21,7 +23,7 @@ export function formatMongoShellText(text: string, settings: Partial<SqlFormatte
   }
 
   const indentUnit = settings.useTabs ? "\t" : " ".repeat(settings.tabWidth ?? DEFAULT_SQL_FORMATTER_SETTINGS.tabWidth);
-  const state: FormatState = { out: "", indentLevel: 0, atLineStart: true, pendingSpace: false, chainIndent: false, pendingChainCall: false, stack: [] };
+  const state: FormatState = { out: [], lastChar: "", lastNonWhitespace: "", indentLevel: 0, atLineStart: true, pendingSpace: false, chainIndent: false, pendingChainCall: false, stack: [] };
 
   for (let index = 0; index < text.length; index++) {
     const char = text[index] ?? "";
@@ -111,34 +113,34 @@ export function formatMongoShellText(text: string, settings: Partial<SqlFormatte
     appendToken(state, char, indentUnit);
   }
 
-  return cleanupFormattedMongoText(state.out);
+  return cleanupFormattedMongoText(state.out.join(""));
 }
 
 function appendToken(state: FormatState, token: string, indentUnit: string) {
   if (state.atLineStart) {
-    state.out += indentUnit.repeat(Math.max(0, state.indentLevel + (state.chainIndent ? 1 : 0)));
+    appendOutput(state, indentUnit.repeat(Math.max(0, state.indentLevel + (state.chainIndent ? 1 : 0))));
     state.atLineStart = false;
-  } else if (state.pendingSpace && shouldInsertPendingSpace(state.out, token)) {
-    state.out += " ";
+  } else if (state.pendingSpace && shouldInsertPendingSpace(state.lastNonWhitespace, token)) {
+    appendOutput(state, " ");
   }
-  state.out += token;
+  appendOutput(state, token);
   state.pendingSpace = false;
   state.chainIndent = false;
 }
 
 function appendRaw(state: FormatState, token: string, indentUnit: string) {
   if (state.atLineStart) {
-    state.out += indentUnit.repeat(Math.max(0, state.indentLevel + (state.chainIndent ? 1 : 0)));
+    appendOutput(state, indentUnit.repeat(Math.max(0, state.indentLevel + (state.chainIndent ? 1 : 0))));
     state.atLineStart = false;
   }
-  state.out += token;
+  appendOutput(state, token);
   state.pendingSpace = false;
   state.chainIndent = false;
 }
 
 function newline(state: FormatState, indentUnit: string, indentDelta = 0) {
   trimTrailingSpaces(state);
-  if (!state.out.endsWith("\n")) state.out += "\n";
+  if (state.lastChar !== "\n") appendOutput(state, "\n");
   state.indentLevel = Math.max(0, state.indentLevel + indentDelta);
   state.atLineStart = true;
   state.pendingSpace = false;
@@ -146,8 +148,7 @@ function newline(state: FormatState, indentUnit: string, indentDelta = 0) {
   void indentUnit;
 }
 
-function shouldInsertPendingSpace(output: string, token: string): boolean {
-  const previous = lastNonWhitespace(output);
+function shouldInsertPendingSpace(previous: string, token: string): boolean {
   if (!previous) return false;
   if ([".", "(", "[", "{"].includes(previous)) return false;
   if ([".", ")", "]", "}", ",", ":"].includes(token)) return false;
@@ -258,13 +259,28 @@ function findPreviousNonWhitespace(text: string, start: number): number | null {
   return null;
 }
 
-function lastNonWhitespace(text: string): string | null {
-  const index = findPreviousNonWhitespace(text, text.length - 1);
-  return index == null ? null : (text[index] ?? null);
+function appendOutput(state: FormatState, text: string) {
+  if (!text) return;
+  state.out.push(text);
+  state.lastChar = text[text.length - 1] ?? state.lastChar;
+  const lastNonWhitespaceIndex = findPreviousNonWhitespace(text, text.length - 1);
+  if (lastNonWhitespaceIndex !== null) state.lastNonWhitespace = text[lastNonWhitespaceIndex] ?? state.lastNonWhitespace;
 }
 
 function trimTrailingSpaces(state: FormatState) {
-  state.out = state.out.replace(/[ \t]+$/g, "");
+  while (state.out.length > 0) {
+    const lastIndex = state.out.length - 1;
+    const chunk = state.out[lastIndex] ?? "";
+    const trimmed = chunk.replace(/[ \t]+$/g, "");
+    if (trimmed) {
+      state.out[lastIndex] = trimmed;
+      state.lastChar = trimmed[trimmed.length - 1] ?? "";
+      return;
+    }
+    state.out.pop();
+  }
+  state.lastChar = "";
+  state.lastNonWhitespace = "";
 }
 
 function cleanupFormattedMongoText(text: string): string {

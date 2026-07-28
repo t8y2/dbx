@@ -20,6 +20,15 @@ pub async fn list_databases(
 }
 
 #[tauri::command]
+pub async fn list_database_storage(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    databases: Vec<String>,
+) -> Result<Vec<db::DatabaseStorageInfo>, String> {
+    dbx_core::schema::list_database_storage_core(&state, &connection_id, &databases).await
+}
+
+#[tauri::command]
 pub async fn list_doris_catalogs(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -132,6 +141,7 @@ pub async fn list_tables(
     offset: Option<usize>,
     object_types: Option<Vec<String>>,
     catalog: Option<String>,
+    table_name_filter: Option<dbx_core::schema::TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::list_doris_catalog_tables_core(
@@ -143,6 +153,7 @@ pub async fn list_tables(
             limit,
             offset,
             object_types.as_deref(),
+            table_name_filter.as_ref(),
         )
         .await;
     }
@@ -155,6 +166,7 @@ pub async fn list_tables(
         limit,
         offset,
         object_types.as_deref(),
+        table_name_filter.as_ref(),
     )
     .await
 }
@@ -203,6 +215,7 @@ pub async fn list_objects(
             limit,
             offset,
             object_types.as_deref(),
+            None,
         )
         .await?;
         return Ok(tables
@@ -211,6 +224,7 @@ pub async fn list_objects(
                 name: table.name,
                 object_type: table.table_type,
                 schema: Some(database.clone()),
+                valid: None,
                 signature: None,
                 comment: table.comment,
                 created_at: None,
@@ -270,6 +284,7 @@ pub async fn get_object_source(
     name: String,
     object_type: db::ObjectSourceKind,
     signature: Option<String>,
+    relation_name: Option<String>,
 ) -> Result<db::ObjectSource, String> {
     dbx_core::schema::get_object_source_core(
         &state,
@@ -279,6 +294,7 @@ pub async fn get_object_source(
         &name,
         object_type,
         signature.as_deref(),
+        relation_name.as_deref(),
     )
     .await
 }
@@ -291,12 +307,32 @@ pub async fn get_columns(
     schema: String,
     table: String,
     catalog: Option<String>,
+    client_session_id: Option<String>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::get_doris_catalog_columns_core(&state, &connection_id, &catalog, &database, &table)
             .await;
     }
-    dbx_core::schema::get_columns_core(&state, &connection_id, &database, &schema, &table).await
+    dbx_core::schema::get_columns_core_for_session(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        &table,
+        client_session_id.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_sqlserver_column_metadata(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<db::sqlserver::SqlServerColumnMetadata>, String> {
+    dbx_core::schema::get_sqlserver_column_metadata_core(&state, &connection_id, &database, &schema, &table).await
 }
 
 #[tauri::command]
@@ -354,6 +390,39 @@ pub async fn list_triggers(
 }
 
 #[tauri::command]
+pub async fn list_constraints(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<dbx_core::db::ConstraintInfo>, String> {
+    dbx_core::schema::list_constraints_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_partitions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<dbx_core::db::PartitionInfo>, String> {
+    dbx_core::schema::list_partitions_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_subpartitions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<dbx_core::db::SubpartitionInfo>, String> {
+    dbx_core::schema::list_subpartitions_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
 pub async fn get_table_ddl(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -362,12 +431,18 @@ pub async fn get_table_ddl(
     table: String,
     object_type: Option<db::ObjectSourceKind>,
     catalog: Option<String>,
+    include_postgres_access: Option<bool>,
 ) -> Result<String, String> {
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::get_doris_catalog_table_ddl_core(&state, &connection_id, &catalog, &database, &table)
             .await;
     }
-    dbx_core::schema::get_table_ddl_core(&state, &connection_id, &database, &schema, &table, object_type).await
+    if include_postgres_access.unwrap_or(false) {
+        dbx_core::schema::get_table_display_ddl_core(&state, &connection_id, &database, &schema, &table, object_type)
+            .await
+    } else {
+        dbx_core::schema::get_table_ddl_core(&state, &connection_id, &database, &schema, &table, object_type).await
+    }
 }
 
 #[tauri::command]
@@ -416,9 +491,9 @@ pub async fn list_extensions(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
-    schema: String,
+    schema: Option<String>,
 ) -> Result<Vec<db::ExtensionInfo>, String> {
-    dbx_core::schema::list_extensions_core(&state, &connection_id, &database, &schema).await
+    dbx_core::schema::list_extensions_core(&state, &connection_id, &database, schema.as_deref()).await
 }
 
 #[tauri::command]

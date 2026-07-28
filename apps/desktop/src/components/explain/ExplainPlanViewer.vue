@@ -22,9 +22,15 @@ const { t } = useI18n();
 const activeView = ref<"tree" | "summary" | "raw" | "table">("tree");
 const hasTableView = computed(() => !!props.tableResult || !!props.tableError);
 
-watch(hasTableView, (available) => {
-  if (!available && activeView.value === "table") activeView.value = "tree";
-});
+watch(
+  [hasTableView, () => !!props.tableResult, () => !!props.plan, () => props.loading],
+  ([available, hasTableResult, hasPlan, loading]) => {
+    if (!available && activeView.value === "table") activeView.value = "tree";
+    // Wait for JSON EXPLAIN to finish so regular MySQL still defaults to its visual tree.
+    if (!loading && hasTableResult && !hasPlan) activeView.value = "table";
+  },
+  { immediate: true },
+);
 
 const flatRows = computed(() => {
   const rows: Array<{ node: ExplainPlanNode; depth: number }> = [];
@@ -45,6 +51,7 @@ const rawContent = computed(() => {
 });
 
 const isRawString = computed(() => typeof props.plan?.raw === "string");
+const rawFormatLabel = computed(() => (props.plan?.databaseType === "sqlserver" ? "XML" : isRawString.value ? "TEXT" : "JSON"));
 const nodeCount = computed(() => (props.plan ? flattenExplainPlanNodes(props.plan.nodes).length : 0));
 
 function tableCellText(value: unknown): string {
@@ -77,7 +84,7 @@ function tableCellText(value: unknown): string {
         <Button v-if="plan" size="sm" :variant="activeView === 'raw' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'raw'">
           <FileText v-if="isRawString" class="h-3.5 w-3.5" />
           <Braces v-else class="h-3.5 w-3.5" />
-          {{ isRawString ? "TEXT" : "JSON" }}
+          {{ rawFormatLabel }}
         </Button>
         <Button v-if="hasTableView" size="sm" :variant="activeView === 'table' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'table'">
           <Table2 class="h-3.5 w-3.5" />

@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import type { TableImportJsonShape, TableImportParseOptions, TableImportSourceFormat, TableImportTextEncoding } from "@/lib/backend/api";
 
 export const IMPORT_SKIP_TARGET = "";
 
@@ -22,9 +23,85 @@ export interface ImportTargetColumnLike {
   is_primary_key?: boolean;
 }
 
+export interface TableImportProgressLike {
+  status: "running" | "done" | "error" | "cancelled";
+  phase?: "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
+  rowsImported: number;
+  totalRows: number;
+  totalRowsExact?: boolean;
+  bytesRead?: number;
+  totalBytes?: number;
+}
+
 export type TableImportWizardStep = "source" | "options" | "mapping" | "review" | "execution";
 
 export const TABLE_IMPORT_WIZARD_STEPS: TableImportWizardStep[] = ["source", "options", "mapping", "review", "execution"];
+
+export function formatTableImportElapsed(ms: number): string {
+  const elapsedMs = Math.max(0, Number.isFinite(ms) ? Math.round(ms) : 0);
+  if (elapsedMs < 1000) return `${elapsedMs} ms`;
+  const seconds = elapsedMs / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${Math.round(seconds % 60)}s`;
+}
+
+export function resolveTableImportElapsed(liveElapsedMs: number, backendElapsedMs: number | undefined, terminal: boolean): number {
+  const live = Math.max(0, Number.isFinite(liveElapsedMs) ? liveElapsedMs : 0);
+  const backend = backendElapsedMs === undefined || !Number.isFinite(backendElapsedMs) ? undefined : Math.max(0, backendElapsedMs);
+  if (terminal && backend !== undefined) return backend;
+  return Math.max(live, backend ?? 0);
+}
+
+export function tableImportProgressPercent(progress: TableImportProgressLike | null | undefined): number {
+  if (!progress) return 0;
+  if (progress.status === "done") return 100;
+  let percent = 0;
+  const totalRows = progress.totalRows ?? 0;
+  const totalBytes = progress.totalBytes ?? 0;
+  if (progress.phase === "detectingEncoding") {
+    percent = totalBytes > 0 ? ((progress.bytesRead ?? 0) / totalBytes) * 10 : 0;
+  } else if (progress.phase === "writing" || progress.phase === "finalizing") {
+    if (progress.totalRowsExact !== false && totalRows > 0) {
+      percent = 10 + (progress.rowsImported / totalRows) * 89;
+    } else if (totalBytes > 0) {
+      percent = 10 + ((progress.bytesRead ?? 0) / totalBytes) * 89;
+    }
+  } else if (progress.totalRowsExact !== false && totalRows > 0) {
+    percent = (progress.rowsImported / totalRows) * 100;
+  } else if (totalBytes > 0) {
+    percent = ((progress.bytesRead ?? 0) / totalBytes) * 100;
+  }
+  return Math.min(99, Math.max(0, Math.round(percent)));
+}
+
+export interface TableImportParseSettings {
+  format: TableImportSourceFormat;
+  delimiter: string;
+  textEncoding: TableImportTextEncoding;
+  titleRow: number;
+  dataStartRow: number;
+  lastDataRow: number;
+  trimValues: boolean;
+  emptyStringAsNull: boolean;
+  sheetName?: string;
+  jsonShape: TableImportJsonShape;
+}
+
+export function buildTableImportParseOptions(settings: TableImportParseSettings): TableImportParseOptions {
+  const isDelimited = settings.format === "csv" || settings.format === "tsv" || settings.format === "delimited";
+  return {
+    delimiter: settings.format === "tsv" ? "\\t" : settings.format === "csv" ? "," : settings.delimiter,
+    encoding: isDelimited ? settings.textEncoding : null,
+    titleRow: settings.titleRow,
+    dataStartRow: settings.dataStartRow,
+    lastDataRow: settings.lastDataRow,
+    trimValues: settings.trimValues,
+    emptyStringAsNull: settings.emptyStringAsNull,
+    sheetName: settings.format === "excel" ? settings.sheetName || null : null,
+    jsonShape: settings.format === "json" ? settings.jsonShape : null,
+  };
+}
 
 export function normalizeImportColumnName(name: string): string {
   return name.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
@@ -161,7 +238,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       if (databaseType === "clickhouse") return "Int64";
       return "BIGINT";
     case "decimal":
-      if (["postgres", "gaussdb", "opengauss", "redshift", "kingbase", "highgo", "kwdb", "vastbase"].includes(databaseType || "")) return "DOUBLE PRECISION";
+      if (["postgres", "gaussdb", "opengauss", "redshift", "kingbase", "highgo", "uxdb", "kwdb", "vastbase"].includes(databaseType || "")) return "DOUBLE PRECISION";
       if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "REAL";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "BINARY_DOUBLE";
       if (databaseType === "clickhouse") return "Float64";
@@ -177,7 +254,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       if (databaseType === "clickhouse") return "DateTime64";
       return "TIMESTAMP";
     case "json":
-      if (["postgres", "gaussdb", "opengauss", "kingbase", "highgo", "kwdb", "vastbase"].includes(databaseType || "")) return "JSONB";
+      if (["postgres", "gaussdb", "opengauss", "kingbase", "highgo", "uxdb", "kwdb", "vastbase"].includes(databaseType || "")) return "JSONB";
       if (databaseType === "mysql" || databaseType === "databend") return "JSON";
       return importDataTypeForDatabase("text", databaseType);
     case "text":

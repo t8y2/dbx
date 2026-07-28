@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref, watch, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { use } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 import { LineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import VChart from "vue-echarts";
 import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, RefreshCw, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
-import type { TopicRef, TopicInfo, TopicStats, BacklogStats, PeekedMessage } from "@/types/mq";
+import type { MqSystemKind, TopicRef, TopicInfo, TopicStats, BacklogStats, PeekedMessage } from "@/types/mq";
 import { mqGetTopicStats, mqGetBacklog, mqPeekMessages } from "@/lib/backend/api";
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent]);
@@ -17,6 +18,7 @@ interface Props {
   topic?: TopicInfo;
   tenant?: string;
   namespace?: string;
+  mqSystemKind?: MqSystemKind;
 }
 
 interface MetricPoint {
@@ -43,6 +45,14 @@ interface PartitionStatsRow {
   raw: Record<string, unknown>;
 }
 
+interface RocketMqPartitionStatsRow {
+  partition: number;
+  brokerName: string;
+  beginOffset: number;
+  endOffset: number;
+  messageCount: number;
+}
+
 interface KafkaPartitionStatsRow {
   partition: number;
   beginOffset: number;
@@ -54,6 +64,7 @@ interface KafkaPartitionStatsRow {
 }
 
 const props = defineProps<Props>();
+const { t } = useI18n();
 
 const stats = ref<TopicStats>();
 const backlog = ref<BacklogStats>();
@@ -73,7 +84,19 @@ const MAX_HISTORY_POINTS = 60;
 
 const partitionRows = computed(() => extractPartitionRows(stats.value?.raw));
 const kafkaPartitionRows = computed(() => extractKafkaPartitionRows(stats.value?.raw));
-const isKafkaStats = computed(() => isKafkaStatsPayload(stats.value?.raw));
+const rocketMqPartitionRows = computed(() => extractRocketMqPartitionRows(stats.value?.raw));
+const isRocketMqStats = computed(() => props.mqSystemKind === "rocketmq" && rocketMqPartitionRows.value.length > 0);
+const isKafkaStats = computed(() => props.mqSystemKind === "kafka" && kafkaPartitionRows.value.length > 0);
+const rocketMqOverview = computed(() => {
+  const raw = objectRecord(stats.value?.raw);
+  const rows = rocketMqPartitionRows.value;
+  const totalMessages = numberField(raw.totalMessages) ?? rows.reduce((sum, row) => sum + row.messageCount, 0);
+  return {
+    queueCount: numberField(raw.partitions) ?? rows.length,
+    totalMessages,
+    brokerCount: new Set(rows.map((row) => row.brokerName).filter(Boolean)).size,
+  };
+});
 const kafkaOverview = computed(() => {
   const raw = objectRecord(stats.value?.raw);
   const rows = kafkaPartitionRows.value;
@@ -113,45 +136,45 @@ const selectedPartitionSubscriptions = computed(() => {
 
 const rateChartOption = computed(() => ({
   tooltip: { trigger: "axis" },
-  legend: { top: 0, data: ["In", "Out"] },
+  legend: { top: 0, data: [t("mqMonitoring.chartLegendIn"), t("mqMonitoring.chartLegendOut")] },
   grid: { left: 48, right: 18, top: 36, bottom: 32 },
   xAxis: { type: "category", boundaryGap: false, data: history.value.map((point) => point.time) },
-  yAxis: { type: "value", name: "msg/s" },
+  yAxis: { type: "value", name: t("mqMonitoring.chartAxisMsgPerSec") },
   series: [
-    { name: "In", type: "line", smooth: true, showSymbol: false, data: history.value.map((point) => point.msgRateIn) },
-    { name: "Out", type: "line", smooth: true, showSymbol: false, data: history.value.map((point) => point.msgRateOut) },
+    { name: t("mqMonitoring.chartLegendIn"), type: "line", smooth: true, showSymbol: false, data: history.value.map((point) => point.msgRateIn) },
+    { name: t("mqMonitoring.chartLegendOut"), type: "line", smooth: true, showSymbol: false, data: history.value.map((point) => point.msgRateOut) },
   ],
 }));
 
 const backlogChartOption = computed(() => ({
   tooltip: { trigger: "axis" },
-  legend: { top: 0, data: ["Messages", "Bytes"] },
+  legend: { top: 0, data: [t("mqMonitoring.chartLegendMessages"), t("mqMonitoring.chartLegendBytes")] },
   grid: { left: 56, right: 54, top: 36, bottom: 32 },
   xAxis: { type: "category", boundaryGap: false, data: history.value.map((point) => point.time) },
   yAxis: [
-    { type: "value", name: "msg" },
-    { type: "value", name: "bytes" },
+    { type: "value", name: t("mqMonitoring.chartAxisMsg") },
+    { type: "value", name: t("mqMonitoring.chartAxisBytes") },
   ],
   series: [
-    { name: "Messages", type: "line", smooth: true, showSymbol: false, data: history.value.map((point) => point.msgBacklog) },
-    { name: "Bytes", type: "line", smooth: true, showSymbol: false, yAxisIndex: 1, data: history.value.map((point) => point.backlogSize) },
+    { name: t("mqMonitoring.chartLegendMessages"), type: "line", smooth: true, showSymbol: false, data: history.value.map((point) => point.msgBacklog) },
+    { name: t("mqMonitoring.chartLegendBytes"), type: "line", smooth: true, showSymbol: false, yAxisIndex: 1, data: history.value.map((point) => point.backlogSize) },
   ],
 }));
 
 const latencyChartOption = computed(() => ({
   tooltip: { trigger: "axis" },
-  legend: { top: 0, data: ["Consumer lag"] },
+  legend: { top: 0, data: [t("mqMonitoring.chartLegendConsumerLag")] },
   grid: { left: 56, right: 18, top: 36, bottom: 32 },
   xAxis: { type: "category", boundaryGap: false, data: history.value.map((point) => point.time) },
-  yAxis: { type: "value", name: "ms" },
-  series: [{ name: "Consumer lag", type: "line", smooth: true, showSymbol: false, data: history.value.map((point) => point.consumerLagMs) }],
+  yAxis: { type: "value", name: t("mqMonitoring.chartAxisMs") },
+  series: [{ name: t("mqMonitoring.chartLegendConsumerLag"), type: "line", smooth: true, showSymbol: false, data: history.value.map((point) => point.consumerLagMs) }],
 }));
 
 function getTopicRef(): TopicRef | null {
   if (!props.topic || !props.tenant || !props.namespace) return null;
   return {
     tenant: props.tenant,
-    namespace: props.namespace,
+    namespace: props.topic.namespace || props.namespace,
     topic: props.topic.shortName,
     persistent: props.topic.persistent,
     partitioned: props.topic.partitioned,
@@ -176,7 +199,7 @@ async function loadStats(options: { skipWhenHidden?: boolean } = {}) {
   try {
     const statsData = await mqGetTopicStats(props.connectionId, topicRef);
 
-    if (isKafkaStatsPayload(statsData.raw)) {
+    if (props.mqSystemKind === "rocketmq" || (props.mqSystemKind === "kafka" && isKafkaStatsPayload(statsData.raw))) {
       stats.value = statsData;
       backlog.value = undefined;
       appendHistoryPoint(statsData);
@@ -200,19 +223,24 @@ function refreshNow() {
 
 function defaultKafkaMessageSql(): string {
   const topic = props.topic?.shortName;
-  return topic ? `SELECT * FROM "${topic}" PARTITION 0 OFFSET 0 LIMIT 20` : "";
+  return topic ? `SELECT * FROM "${topic}" LIMIT 20` : "";
 }
 
-function parseKafkaMessageSql(sql: string): { topic: string; partition: number; offset: number; limit: number } {
+function parseKafkaMessageSql(sql: string): { topic: string; partition?: number; offset?: number; limit: number } {
   const match = sql.trim().match(/^\s*select\s+\*\s+from\s+(?:"([^"]+)"|`([^`]+)`|'([^']+)'|([^\s;]+))(?:\s+partition\s+(\d+))?(?:\s+offset\s+(\d+))?(?:\s+limit\s+(\d+))?\s*;?\s*$/i);
   if (!match) {
-    throw new Error('仅支持 SELECT * FROM "topic" [PARTITION n] [OFFSET n] [LIMIT n]');
+    throw new Error(t("mqMonitoring.sqlSyntaxError"));
   }
   const topic = match[1] || match[2] || match[3] || match[4] || "";
-  const partition = Math.max(0, Number(match[5] ?? 0));
-  const offset = Math.max(0, Number(match[6] ?? 0));
+  const partition = match[5] != null ? Math.max(0, Number(match[5])) : undefined;
+  const offset = match[6] != null ? Math.max(0, Number(match[6])) : undefined;
   const limit = Math.max(1, Math.min(100, Number(match[7] ?? 20)));
   return { topic, partition, offset, limit };
+}
+
+function flatMqMonitorGroupName(): string {
+  if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_monitor__";
+  return "__dbx_kafka_monitor__";
 }
 
 async function runKafkaMessageSql() {
@@ -222,6 +250,9 @@ async function runKafkaMessageSql() {
   try {
     const parsed = parseKafkaMessageSql(kafkaMessageSql.value);
     const selected = props.topic && parsed.topic === props.topic.shortName ? props.topic : undefined;
+    const options: { partition?: number; offset?: number } = {};
+    if (parsed.partition != null) options.partition = parsed.partition;
+    if (parsed.offset != null) options.offset = parsed.offset;
     kafkaMessages.value = await mqPeekMessages(
       props.connectionId,
       {
@@ -231,9 +262,9 @@ async function runKafkaMessageSql() {
         persistent: selected?.persistent ?? true,
         partitioned: selected?.partitioned,
       },
-      "__dbx_kafka_monitor__",
+      flatMqMonitorGroupName(),
       parsed.limit,
-      { partition: parsed.partition, offset: parsed.offset },
+      options,
     );
   } catch (e: unknown) {
     kafkaMessageError.value = formatError(e);
@@ -304,6 +335,18 @@ function extractPartitionRows(raw: unknown): PartitionStatsRow[] {
   });
 }
 
+function extractRocketMqPartitionRows(raw: unknown): RocketMqPartitionStatsRow[] {
+  return arrayObjects(objectRecord(raw).partitionStats)
+    .map((body) => ({
+      partition: numberField(body.partition) ?? 0,
+      brokerName: stringField(body.brokerName),
+      beginOffset: numberField(body.beginOffset) ?? 0,
+      endOffset: numberField(body.endOffset) ?? 0,
+      messageCount: numberField(body.messageCount) ?? 0,
+    }))
+    .sort((a, b) => a.partition - b.partition || a.brokerName.localeCompare(b.brokerName));
+}
+
 function extractKafkaPartitionRows(raw: unknown): KafkaPartitionStatsRow[] {
   return arrayObjects(objectRecord(raw).partitionStats)
     .map((body) => ({
@@ -319,6 +362,7 @@ function extractKafkaPartitionRows(raw: unknown): KafkaPartitionStatsRow[] {
 }
 
 function isKafkaStatsPayload(raw: unknown): boolean {
+  if (props.mqSystemKind === "rocketmq") return false;
   const root = objectRecord(raw);
   return Array.isArray(root.partitionStats) || (numberField(root.partitions) !== undefined && numberField(root.replicationFactor) !== undefined && numberField(root.totalMessages) !== undefined);
 }
@@ -328,9 +372,9 @@ function isKafkaPartitionHealthy(row: KafkaPartitionStatsRow): boolean {
 }
 
 function kafkaPartitionStatusLabel(row: KafkaPartitionStatsRow): string {
-  if (row.leader < 0) return "无 leader";
-  if (row.replicas.length > 0 && row.isr.length < row.replicas.length) return "ISR 不完整";
-  return "正常";
+  if (row.leader < 0) return t("mqMonitoring.statusNoLeader");
+  if (row.replicas.length > 0 && row.isr.length < row.replicas.length) return t("mqMonitoring.statusIsrIncomplete");
+  return t("mqMonitoring.statusHealthy");
 }
 
 function partitionBacklogMessages(body: Record<string, unknown>): number {
@@ -451,29 +495,29 @@ onUnmounted(() => {
 <template>
   <div class="monitoring-panel">
     <div class="panel-toolbar">
-      <h3>监控统计</h3>
+      <h3>{{ t("mqMonitoring.title") }}</h3>
       <div class="toolbar-actions">
         <label class="checkbox-label">
           <input type="checkbox" v-model="autoRefresh" />
-          <span>自动刷新</span>
+          <span>{{ t("mqMonitoring.autoRefresh") }}</span>
         </label>
         <select v-model.number="refreshInterval" :disabled="!autoRefresh" class="refresh-interval">
-          <option :value="5">5秒</option>
-          <option :value="10">10秒</option>
-          <option :value="30">30秒</option>
-          <option :value="60">60秒</option>
+          <option :value="5">{{ t("mqMonitoring.refreshInterval5s") }}</option>
+          <option :value="10">{{ t("mqMonitoring.refreshInterval10s") }}</option>
+          <option :value="30">{{ t("mqMonitoring.refreshInterval30s") }}</option>
+          <option :value="60">{{ t("mqMonitoring.refreshInterval60s") }}</option>
         </select>
         <button @click="refreshNow" :disabled="loading" class="btn-sm">
           <Loader2 v-if="loading" class="btn-icon spinning" :size="14" />
           <RefreshCw v-else class="btn-icon" :size="14" />
-          <span>{{ loading ? "刷新中..." : "立即刷新" }}</span>
+          <span>{{ loading ? t("mqMonitoring.refreshing") : t("mqMonitoring.refreshNow") }}</span>
         </button>
       </div>
     </div>
 
     <div v-if="!topic" class="panel-placeholder">
       <Table2 :size="24" />
-      <span>请先选择一个主题</span>
+      <span>{{ t("mqMonitoring.selectTopicFirst") }}</span>
     </div>
 
     <div v-else-if="error" class="panel-error">
@@ -483,41 +527,97 @@ onUnmounted(() => {
 
     <div v-else-if="loading && !stats" class="panel-loading">
       <Loader2 class="loading-icon spinning" :size="22" />
-      <span>加载监控数据...</span>
+      <span>{{ t("mqMonitoring.loadingStats") }}</span>
       <div class="loading-skeleton-grid" aria-hidden="true">
         <div v-for="item in 4" :key="item" class="loading-skeleton-card"></div>
       </div>
     </div>
 
-    <div v-else-if="stats && isKafkaStats" class="stats-container">
+    <div v-else-if="stats && isRocketMqStats" class="stats-container">
       <div class="stats-section">
-        <h4>Kafka Topic 概览</h4>
+        <h4>{{ t("mqMonitoring.rocketmqTopicOverview") }}</h4>
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-icon"><Layers3 :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">分区数</div>
+              <div class="stat-label">{{ t("mqMonitoring.queueCount") }}</div>
+              <div class="stat-value">{{ rocketMqOverview.queueCount }}</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon"><Hash :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">{{ t("mqMonitoring.messageCount") }}</div>
+              <div class="stat-value">{{ formatNumber(rocketMqOverview.totalMessages) }}</div>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon"><HardDrive :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">{{ t("mqMonitoring.brokerCount") }}</div>
+              <div class="stat-value">{{ rocketMqOverview.brokerCount }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stats-section">
+        <h4>{{ t("mqMonitoring.rocketmqQueueDetails") }}</h4>
+        <div v-if="rocketMqPartitionRows.length" class="partition-table-wrap">
+          <table class="partition-table">
+            <thead>
+              <tr>
+                <th>{{ t("mqMonitoring.tableQueue") }}</th>
+                <th>{{ t("mqMonitoring.tableBroker") }}</th>
+                <th>{{ t("mqMonitoring.tableBeginOffset") }}</th>
+                <th>{{ t("mqMonitoring.tableLogEndOffset") }}</th>
+                <th>{{ t("mqMonitoring.tableMessageCount") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in rocketMqPartitionRows" :key="`${row.brokerName}-${row.partition}`">
+                <td>{{ row.partition }}</td>
+                <td>{{ row.brokerName || "-" }}</td>
+                <td>{{ formatNumber(row.beginOffset) }}</td>
+                <td>{{ formatNumber(row.endOffset) }}</td>
+                <td>{{ formatNumber(row.messageCount) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="empty-state compact">{{ t("mqMonitoring.noRocketMqQueueMetrics") }}</div>
+      </div>
+    </div>
+
+    <div v-else-if="stats && isKafkaStats" class="stats-container">
+      <div class="stats-section">
+        <h4>{{ t("mqMonitoring.kafkaTopicOverview") }}</h4>
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon"><Layers3 :size="21" /></div>
+            <div class="stat-content">
+              <div class="stat-label">{{ t("mqMonitoring.partitionCount") }}</div>
               <div class="stat-value">{{ kafkaOverview.partitionCount }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><Boxes :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">副本因子</div>
+              <div class="stat-label">{{ t("mqMonitoring.replicationFactor") }}</div>
               <div class="stat-value">{{ kafkaOverview.replicationFactor }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><Hash :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">消息数</div>
+              <div class="stat-label">{{ t("mqMonitoring.messageCount") }}</div>
               <div class="stat-value">{{ formatNumber(kafkaOverview.totalMessages) }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><BarChart3 :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">Log end offset</div>
+              <div class="stat-label">{{ t("mqMonitoring.logEndOffset") }}</div>
               <div class="stat-value">{{ formatNumber(kafkaOverview.totalEndOffset) }}</div>
             </div>
           </div>
@@ -525,33 +625,33 @@ onUnmounted(() => {
       </div>
 
       <div class="stats-section">
-        <h4>Offset 与副本状态</h4>
+        <h4>{{ t("mqMonitoring.offsetAndReplicaStatus") }}</h4>
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-icon"><Gauge :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">起始 offset</div>
+              <div class="stat-label">{{ t("mqMonitoring.beginOffset") }}</div>
               <div class="stat-value">{{ formatNumber(kafkaOverview.totalBeginOffset) }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><RadioTower :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">Leader 数</div>
+              <div class="stat-label">{{ t("mqMonitoring.leaderCount") }}</div>
               <div class="stat-value">{{ kafkaOverview.leaderCount }}</div>
             </div>
           </div>
           <div class="stat-card" :class="{ warning: kafkaOverview.underReplicatedPartitions > 0 }">
             <div class="stat-icon"><ShieldCheck :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">ISR 健康分区</div>
+              <div class="stat-label">{{ t("mqMonitoring.isrHealthyPartitions") }}</div>
               <div class="stat-value">{{ kafkaOverview.healthyPartitions }} / {{ kafkaOverview.partitionCount }}</div>
             </div>
           </div>
           <div class="stat-card" :class="{ warning: kafkaOverview.offlinePartitions > 0 }">
             <div class="stat-icon"><AlertTriangle :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">无 leader 分区</div>
+              <div class="stat-label">{{ t("mqMonitoring.noLeaderPartitions") }}</div>
               <div class="stat-value">{{ kafkaOverview.offlinePartitions }}</div>
             </div>
           </div>
@@ -559,20 +659,20 @@ onUnmounted(() => {
       </div>
 
       <div class="stats-section">
-        <h4>Kafka 分区明细</h4>
+        <h4>{{ t("mqMonitoring.kafkaPartitionDetails") }}</h4>
         <div v-if="kafkaPartitionRows.length" class="partition-layout">
           <div class="partition-table-wrap">
             <table class="partition-table">
               <thead>
                 <tr>
-                  <th>分区</th>
-                  <th>起始 offset</th>
-                  <th>Log end offset</th>
-                  <th>消息数</th>
-                  <th>Leader</th>
-                  <th>Replicas</th>
-                  <th>ISR</th>
-                  <th>状态</th>
+                  <th>{{ t("mqMonitoring.tablePartition") }}</th>
+                  <th>{{ t("mqMonitoring.tableBeginOffset") }}</th>
+                  <th>{{ t("mqMonitoring.tableLogEndOffset") }}</th>
+                  <th>{{ t("mqMonitoring.tableMessageCount") }}</th>
+                  <th>{{ t("mqMonitoring.tableLeader") }}</th>
+                  <th>{{ t("mqMonitoring.tableReplicas") }}</th>
+                  <th>{{ t("mqMonitoring.tableIsr") }}</th>
+                  <th>{{ t("mqMonitoring.tableStatus") }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -594,31 +694,32 @@ onUnmounted(() => {
             </table>
           </div>
         </div>
-        <div v-else class="empty-state compact">当前 Kafka 响应未返回分区指标</div>
+        <div v-else class="empty-state compact">{{ t("mqMonitoring.noKafkaPartitionMetrics") }}</div>
       </div>
 
       <div class="stats-section">
         <div class="section-title-row">
-          <h4>Kafka 消息查询</h4>
+          <h4>{{ t("mqMonitoring.kafkaMessageQuery") }}</h4>
           <button type="button" class="btn-sm" :disabled="kafkaMessageLoading || !kafkaMessageSql.trim()" @click="runKafkaMessageSql">
             <Loader2 v-if="kafkaMessageLoading" class="btn-icon spinning" :size="14" />
-            <span>{{ kafkaMessageLoading ? "查询中..." : "查询消息" }}</span>
+            <span>{{ kafkaMessageLoading ? t("mqMonitoring.querying") : t("mqMonitoring.queryMessages") }}</span>
           </button>
         </div>
         <textarea v-model="kafkaMessageSql" class="kafka-sql-input" rows="2" spellcheck="false" />
-        <div class="query-hint">支持：SELECT * FROM "topic" PARTITION 0 OFFSET 0 LIMIT 20，单次最多返回 100 条。</div>
+        <div class="query-hint">{{ t("mqMonitoring.queryHint") }}</div>
         <div v-if="kafkaMessageError" class="panel-error inline-error">
           <AlertTriangle :size="16" />
           <span>{{ kafkaMessageError }}</span>
         </div>
-        <div v-else-if="kafkaMessageLoading" class="empty-state compact">消息加载中...</div>
-        <div v-else-if="!kafkaMessages.length" class="empty-state compact">暂无消息</div>
+        <div v-else-if="kafkaMessageLoading" class="empty-state compact">{{ t("mqMonitoring.messagesLoading") }}</div>
+        <div v-else-if="!kafkaMessages.length" class="empty-state compact">{{ t("mqMonitoring.noMessages") }}</div>
         <div v-else class="kafka-message-list">
-          <article v-for="message in kafkaMessages" :key="message.messageId || message.position" class="kafka-message-row">
+          <article v-for="message in kafkaMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="kafka-message-row">
             <div class="kafka-message-meta">
               <span>#{{ message.position }}</span>
-              <span>offset {{ message.messageId || "-" }}</span>
-              <span v-if="message.key">key {{ message.key }}</span>
+              <span v-if="message.properties?.partition != null">{{ t("mqMonitoring.metaPartition", { partition: message.properties.partition }) }}</span>
+              <span>{{ t("mqMonitoring.metaOffset", { offset: message.messageId || "-" }) }}</span>
+              <span v-if="message.key">{{ t("mqMonitoring.metaKey", { key: message.key }) }}</span>
               <span>{{ formatKafkaMessageTimestamp(message.publishTime) }}</span>
             </div>
             <pre class="kafka-message-payload">{{ kafkaMessagePayload(message) }}</pre>
@@ -633,33 +734,33 @@ onUnmounted(() => {
     <div v-else-if="stats" class="stats-container">
       <!-- Overview Section -->
       <div class="stats-section">
-        <h4>消息速率</h4>
+        <h4>{{ t("mqMonitoring.messageRate") }}</h4>
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-icon"><Download :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">入站速率</div>
+              <div class="stat-label">{{ t("mqMonitoring.inboundRate") }}</div>
               <div class="stat-value">{{ stats.msgRateIn.toFixed(2) }} msg/s</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><Upload :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">出站速率</div>
+              <div class="stat-label">{{ t("mqMonitoring.outboundRate") }}</div>
               <div class="stat-value">{{ stats.msgRateOut.toFixed(2) }} msg/s</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><Activity :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">入站吞吐量</div>
+              <div class="stat-label">{{ t("mqMonitoring.inboundThroughput") }}</div>
               <div class="stat-value">{{ formatBytes(stats.msgThroughputIn) }}/s</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><BarChart3 :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">出站吞吐量</div>
+              <div class="stat-label">{{ t("mqMonitoring.outboundThroughput") }}</div>
               <div class="stat-value">{{ formatBytes(stats.msgThroughputOut) }}/s</div>
             </div>
           </div>
@@ -668,41 +769,41 @@ onUnmounted(() => {
 
       <div class="charts-grid">
         <div class="chart-panel">
-          <h4>速率趋势</h4>
+          <h4>{{ t("mqMonitoring.rateTrend") }}</h4>
           <VChart :option="rateChartOption" autoresize class="trend-chart" />
         </div>
         <div class="chart-panel">
-          <h4>积压趋势</h4>
+          <h4>{{ t("mqMonitoring.backlogTrend") }}</h4>
           <VChart :option="backlogChartOption" autoresize class="trend-chart" />
         </div>
         <div class="chart-panel">
-          <h4>消费延迟</h4>
+          <h4>{{ t("mqMonitoring.consumerLag") }}</h4>
           <VChart :option="latencyChartOption" autoresize class="trend-chart" />
         </div>
       </div>
 
       <!-- Storage Section -->
       <div class="stats-section">
-        <h4>存储与积压</h4>
+        <h4>{{ t("mqMonitoring.storageAndBacklog") }}</h4>
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-icon"><Database :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">存储大小</div>
+              <div class="stat-label">{{ t("mqMonitoring.storageSize") }}</div>
               <div class="stat-value">{{ formatBytes(stats.storageSize) }}</div>
             </div>
           </div>
           <div class="stat-card" :class="{ warning: stats.backlogSize > 10 * 1024 * 1024 }">
             <div class="stat-icon"><Package :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">积压大小</div>
+              <div class="stat-label">{{ t("mqMonitoring.backlogSize") }}</div>
               <div class="stat-value">{{ formatBytes(stats.backlogSize) }}</div>
             </div>
           </div>
           <div class="stat-card" v-if="backlog">
             <div class="stat-icon"><HardDrive :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">积压消息数</div>
+              <div class="stat-label">{{ t("mqMonitoring.backlogMessageCount") }}</div>
               <div class="stat-value">{{ formatNumber(backlog.msgBacklog) }}</div>
             </div>
           </div>
@@ -711,19 +812,19 @@ onUnmounted(() => {
 
       <!-- Counters Section -->
       <div class="stats-section">
-        <h4>消息计数器</h4>
+        <h4>{{ t("mqMonitoring.messageCounters") }}</h4>
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-icon"><Send :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">已发布消息</div>
+              <div class="stat-label">{{ t("mqMonitoring.publishedMessages") }}</div>
               <div class="stat-value">{{ formatNumber(stats.msgInCounter) }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><CheckCircle2 :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">已消费消息</div>
+              <div class="stat-label">{{ t("mqMonitoring.consumedMessages") }}</div>
               <div class="stat-value">{{ formatNumber(stats.msgOutCounter) }}</div>
             </div>
           </div>
@@ -732,19 +833,19 @@ onUnmounted(() => {
 
       <!-- Connections Section -->
       <div class="stats-section">
-        <h4>连接统计</h4>
+        <h4>{{ t("mqMonitoring.connectionStats") }}</h4>
         <div class="stats-grid">
           <div class="stat-card">
             <div class="stat-icon"><Users :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">订阅数量</div>
+              <div class="stat-label">{{ t("mqMonitoring.subscriptionCount") }}</div>
               <div class="stat-value">{{ stats.subscriptionCount }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><RadioTower :size="21" /></div>
             <div class="stat-content">
-              <div class="stat-label">生产者数量</div>
+              <div class="stat-label">{{ t("mqMonitoring.producerCount") }}</div>
               <div class="stat-value">{{ stats.producerCount }}</div>
             </div>
           </div>
@@ -752,21 +853,21 @@ onUnmounted(() => {
       </div>
 
       <div class="stats-section">
-        <h4>分区明细</h4>
+        <h4>{{ t("mqMonitoring.partitionDetails") }}</h4>
         <div v-if="partitionRows.length" class="partition-layout">
           <div class="partition-table-wrap">
             <table class="partition-table interactive-table">
               <thead>
                 <tr>
-                  <th>分区</th>
-                  <th>入站</th>
-                  <th>出站</th>
-                  <th>入站吞吐</th>
-                  <th>出站吞吐</th>
-                  <th>积压消息</th>
-                  <th>积压大小</th>
-                  <th>生产者</th>
-                  <th>订阅</th>
+                  <th>{{ t("mqMonitoring.tablePartition") }}</th>
+                  <th>{{ t("mqMonitoring.tableInbound") }}</th>
+                  <th>{{ t("mqMonitoring.tableOutbound") }}</th>
+                  <th>{{ t("mqMonitoring.tableInboundThroughput") }}</th>
+                  <th>{{ t("mqMonitoring.tableOutboundThroughput") }}</th>
+                  <th>{{ t("mqMonitoring.tableBacklogMessages") }}</th>
+                  <th>{{ t("mqMonitoring.tableBacklogSize") }}</th>
+                  <th>{{ t("mqMonitoring.tableProducers") }}</th>
+                  <th>{{ t("mqMonitoring.tableSubscriptions") }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -789,13 +890,13 @@ onUnmounted(() => {
             <h5>{{ selectedPartition.shortName }}</h5>
             <div class="detail-grid">
               <div>
-                <div class="detail-title">生产者</div>
+                <div class="detail-title">{{ t("mqMonitoring.producers") }}</div>
                 <table v-if="selectedPartitionPublishers.length" class="detail-table">
                   <thead>
                     <tr>
-                      <th>名称</th>
-                      <th>速率</th>
-                      <th>地址</th>
+                      <th>{{ t("mqMonitoring.tableName") }}</th>
+                      <th>{{ t("mqMonitoring.tableRate") }}</th>
+                      <th>{{ t("mqMonitoring.tableAddress") }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -806,17 +907,17 @@ onUnmounted(() => {
                     </tr>
                   </tbody>
                 </table>
-                <div v-else class="empty-state compact">暂无生产者</div>
+                <div v-else class="empty-state compact">{{ t("mqMonitoring.noProducers") }}</div>
               </div>
               <div>
-                <div class="detail-title">订阅</div>
+                <div class="detail-title">{{ t("mqMonitoring.subscriptions") }}</div>
                 <table v-if="selectedPartitionSubscriptions.length" class="detail-table">
                   <thead>
                     <tr>
-                      <th>名称</th>
-                      <th>类型</th>
-                      <th>积压</th>
-                      <th>消费者</th>
+                      <th>{{ t("mqMonitoring.tableName") }}</th>
+                      <th>{{ t("mqMonitoring.tableType") }}</th>
+                      <th>{{ t("mqMonitoring.tableBacklog") }}</th>
+                      <th>{{ t("mqMonitoring.tableConsumers") }}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -828,42 +929,42 @@ onUnmounted(() => {
                     </tr>
                   </tbody>
                 </table>
-                <div v-else class="empty-state compact">暂无订阅</div>
+                <div v-else class="empty-state compact">{{ t("mqMonitoring.noSubscriptions") }}</div>
               </div>
             </div>
           </div>
         </div>
         <div v-else class="empty-state compact">
-          {{ topic.partitioned ? "当前 Broker 响应未返回分区指标" : "非分区主题没有分区明细" }}
+          {{ topic.partitioned ? t("mqMonitoring.noPartitionMetricsFromBroker") : t("mqMonitoring.nonPartitionedTopicNoDetails") }}
         </div>
       </div>
 
       <!-- Health Indicators -->
       <div class="stats-section">
-        <h4>健康指标</h4>
+        <h4>{{ t("mqMonitoring.healthIndicators") }}</h4>
         <div class="health-indicators">
           <div class="health-item">
-            <span class="health-label">消息流动:</span>
+            <span class="health-label">{{ t("mqMonitoring.messageFlow") }}:</span>
             <span :class="['health-badge', stats.msgRateIn > 0 || stats.msgRateOut > 0 ? 'healthy' : 'idle']">
-              {{ stats.msgRateIn > 0 || stats.msgRateOut > 0 ? "活跃" : "空闲" }}
+              {{ stats.msgRateIn > 0 || stats.msgRateOut > 0 ? t("mqMonitoring.flowActive") : t("mqMonitoring.flowIdle") }}
             </span>
           </div>
           <div class="health-item">
-            <span class="health-label">积压状态:</span>
+            <span class="health-label">{{ t("mqMonitoring.backlogStatus") }}:</span>
             <span :class="['health-badge', stats.backlogSize < 10 * 1024 * 1024 ? 'healthy' : 'warning']">
-              {{ stats.backlogSize < 10 * 1024 * 1024 ? "正常" : "偏高" }}
+              {{ stats.backlogSize < 10 * 1024 * 1024 ? t("mqMonitoring.backlogNormal") : t("mqMonitoring.backlogHigh") }}
             </span>
           </div>
           <div class="health-item">
-            <span class="health-label">生产者:</span>
+            <span class="health-label">{{ t("mqMonitoring.producersLabel") }}:</span>
             <span :class="['health-badge', stats.producerCount > 0 ? 'healthy' : 'idle']">
-              {{ stats.producerCount > 0 ? "已连接" : "无连接" }}
+              {{ stats.producerCount > 0 ? t("mqMonitoring.producerConnected") : t("mqMonitoring.producerDisconnected") }}
             </span>
           </div>
           <div class="health-item">
-            <span class="health-label">订阅:</span>
+            <span class="health-label">{{ t("mqMonitoring.subscriptionsLabel") }}:</span>
             <span :class="['health-badge', stats.subscriptionCount > 0 ? 'healthy' : 'idle']">
-              {{ stats.subscriptionCount > 0 ? "活跃" : "无订阅" }}
+              {{ stats.subscriptionCount > 0 ? t("mqMonitoring.subscriptionActive") : t("mqMonitoring.subscriptionNone") }}
             </span>
           </div>
         </div>
@@ -883,15 +984,15 @@ onUnmounted(() => {
   --monitor-muted: var(--color-text-secondary, var(--color-muted-foreground, #64748b));
   --monitor-faint: var(--color-text-tertiary, color-mix(in srgb, var(--monitor-muted) 72%, transparent));
   --monitor-hover: color-mix(in srgb, var(--color-hover, var(--color-muted, #f4f4f5)) 72%, var(--monitor-accent) 7%);
-  --monitor-accent: #0f766e;
-  --monitor-accent-soft: rgb(15 118 110 / 0.1);
-  --monitor-accent-border: rgb(15 118 110 / 0.22);
-  --monitor-success: #15803d;
-  --monitor-success-soft: rgb(21 128 61 / 0.1);
-  --monitor-warning: #b45309;
-  --monitor-warning-soft: rgb(180 83 9 / 0.12);
-  --monitor-danger: #b91c1c;
-  --monitor-danger-soft: rgb(185 28 28 / 0.1);
+  --monitor-accent: var(--info);
+  --monitor-accent-soft: var(--info-bg);
+  --monitor-accent-border: color-mix(in srgb, var(--info) 22%, transparent);
+  --monitor-success: var(--success);
+  --monitor-success-soft: var(--success-bg);
+  --monitor-warning: var(--warning);
+  --monitor-warning-soft: var(--warning-bg);
+  --monitor-danger: var(--destructive);
+  --monitor-danger-soft: color-mix(in srgb, var(--destructive) 10%, transparent);
   --monitor-shadow: 0 18px 38px -28px rgb(15 23 42 / 0.42);
   height: 100%;
   display: flex;
@@ -902,20 +1003,20 @@ onUnmounted(() => {
 }
 
 :global(.dark) .monitoring-panel {
-  --monitor-panel-bg: color-mix(in srgb, var(--color-background, #131416) 90%, #0f766e 4%);
+  --monitor-panel-bg: color-mix(in srgb, var(--color-background, #131416) 90%, var(--info) 4%);
   --monitor-surface: color-mix(in srgb, var(--color-card, #1b1b1e) 94%, #ffffff 2%);
-  --monitor-surface-raised: color-mix(in srgb, var(--monitor-surface) 92%, #0f766e 8%);
+  --monitor-surface-raised: color-mix(in srgb, var(--monitor-surface) 92%, var(--info) 8%);
   --monitor-border: color-mix(in srgb, var(--color-border, rgb(110 110 114 / 0.28)) 82%, transparent);
-  --monitor-border-strong: color-mix(in srgb, var(--monitor-border) 76%, #2dd4bf 24%);
-  --monitor-accent: #2dd4bf;
-  --monitor-accent-soft: rgb(45 212 191 / 0.12);
-  --monitor-accent-border: rgb(45 212 191 / 0.24);
-  --monitor-success: #4ade80;
-  --monitor-success-soft: rgb(74 222 128 / 0.12);
-  --monitor-warning: #f59e0b;
-  --monitor-warning-soft: rgb(245 158 11 / 0.14);
-  --monitor-danger: #f87171;
-  --monitor-danger-soft: rgb(248 113 113 / 0.12);
+  --monitor-border-strong: color-mix(in srgb, var(--monitor-border) 76%, var(--info) 24%);
+  --monitor-accent: var(--info);
+  --monitor-accent-soft: var(--info-bg);
+  --monitor-accent-border: color-mix(in srgb, var(--info) 24%, transparent);
+  --monitor-success: var(--success);
+  --monitor-success-soft: var(--success-bg);
+  --monitor-warning: var(--warning);
+  --monitor-warning-soft: var(--warning-bg);
+  --monitor-danger: var(--destructive);
+  --monitor-danger-soft: color-mix(in srgb, var(--destructive) 12%, transparent);
   --monitor-shadow: 0 18px 42px -28px rgb(0 0 0 / 0.72);
 }
 
@@ -958,7 +1059,7 @@ onUnmounted(() => {
   min-height: 32px;
   padding: 5px 9px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-4);
   font-size: 13px;
   font-weight: 500;
   color: var(--monitor-muted);
@@ -986,7 +1087,7 @@ onUnmounted(() => {
   min-height: 34px;
   padding: 5px 30px 5px 10px;
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-4);
   font-size: 13px;
   font-weight: 500;
   background: var(--monitor-surface);
@@ -1021,7 +1122,7 @@ onUnmounted(() => {
   min-height: 34px;
   padding: 7px 12px;
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-4);
   background: var(--monitor-surface);
   color: var(--monitor-text);
   cursor: pointer;
@@ -1109,7 +1210,7 @@ onUnmounted(() => {
 
 .loading-skeleton-card {
   height: 96px;
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.45), transparent), var(--monitor-surface);
   background-size: 220% 100%;
   border: 1px solid var(--monitor-border);
@@ -1170,7 +1271,7 @@ onUnmounted(() => {
   min-height: 54px;
   padding: 10px 12px;
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--monitor-surface);
   color: var(--monitor-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -1196,7 +1297,7 @@ onUnmounted(() => {
   justify-content: flex-start;
   margin-top: 10px;
   border: 1px solid color-mix(in srgb, var(--monitor-danger) 22%, transparent);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   padding: 10px 12px;
 }
 
@@ -1208,7 +1309,7 @@ onUnmounted(() => {
 
 .kafka-message-row {
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--monitor-surface);
   overflow: hidden;
 }
@@ -1257,7 +1358,7 @@ onUnmounted(() => {
   min-height: 260px;
   padding: 14px;
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--monitor-surface);
   box-shadow: var(--monitor-shadow);
 }
@@ -1292,7 +1393,7 @@ onUnmounted(() => {
   padding: 17px 18px;
   background: var(--monitor-surface);
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   box-shadow: 0 1px 0 rgb(255 255 255 / 0.52) inset;
   transition:
     transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
@@ -1352,7 +1453,7 @@ onUnmounted(() => {
   height: 42px;
   flex: 0 0 42px;
   border: 1px solid var(--monitor-accent-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--monitor-accent-soft);
   color: var(--monitor-accent);
 }
@@ -1397,7 +1498,7 @@ onUnmounted(() => {
 .partition-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--monitor-surface);
   box-shadow: var(--monitor-shadow);
 }
@@ -1494,7 +1595,7 @@ onUnmounted(() => {
 .partition-detail {
   padding: 14px;
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: var(--monitor-surface);
   box-shadow: var(--monitor-shadow);
 }
@@ -1523,7 +1624,7 @@ onUnmounted(() => {
 .empty-state.compact {
   padding: 16px;
   border: 1px dashed var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   background: color-mix(in srgb, var(--monitor-surface) 74%, transparent);
 }
 
@@ -1535,7 +1636,7 @@ onUnmounted(() => {
   padding: 13px 15px;
   background: var(--monitor-surface);
   border: 1px solid var(--monitor-border);
-  border-radius: 8px;
+  border-radius: var(--dbx-radius-fixed-6);
   box-shadow: 0 1px 0 rgb(255 255 255 / 0.48) inset;
 }
 

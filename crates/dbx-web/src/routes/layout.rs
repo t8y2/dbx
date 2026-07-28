@@ -17,11 +17,11 @@ pub async fn save_sidebar_layout(
     State(state): State<Arc<WebState>>,
     Json(body): Json<SaveLayoutRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_sidebar_layout(&body.layout).await.map_err(AppError)?;
+    state.app.storage.save_sidebar_layout(&body.layout).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 
 pub async fn load_sidebar_layout(State(state): State<Arc<WebState>>) -> Result<Json<serde_json::Value>, AppError> {
-    let layout = state.app.storage.load_sidebar_layout().await.map_err(AppError)?;
+    let layout = state.app.storage.load_sidebar_layout().await.map_err(AppError::from)?;
     Ok(Json(layout.unwrap_or(serde_json::json!(null))))
 }

@@ -1,0 +1,65 @@
+name: Update Nix pnpm hash
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Keep this list aligned with the pnpm fixed-output inputs in ci.yml.
+      - 'package.json'
+      - 'packages/**/package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'flake.nix'
+      - 'flake.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-nix-pnpm-hash-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Update hash when needed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_log=$(mktemp)
+          if nix build .#dbx-pnpm-deps --no-link --print-build-logs >"$build_log" 2>&1; then
+            echo "Nix pnpm dependencies already have the correct hash."
+            exit 0
+          fi
+
+          cat "$build_log"
+          expected_hash=$(sed -n 's/.*got: \(sha256-[A-Za-z0-9+/=]*\).*/\1/p' "$build_log" | tail -1)
+          if [ -z "$expected_hash" ]; then
+            echo "Nix build failed without reporting a replacement fixed-output hash."
+            exit 1
+          fi
+
+          EXPECTED_HASH="$expected_hash" perl -0pi -e \
+            's/(hash = ")sha256-[^"]+(")/$1 . $ENV{EXPECTED_HASH} . $2/e' flake.nix
+
+          nix build .#dbx-pnpm-deps --no-link --print-build-logs
+
+          if git diff --quiet -- flake.nix; then
+            echo "The Nix build passed without changing flake.nix."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add flake.nix
+          git commit -m "fix(nix): update pnpm dependency hash"
+          # Push only the checked commit to the triggering branch; a concurrent update must fail safely.
+          git push origin "HEAD:${GITHUB_REF_NAME}"

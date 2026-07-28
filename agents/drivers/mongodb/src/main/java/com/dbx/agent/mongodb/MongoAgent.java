@@ -3,6 +3,7 @@ package com.dbx.agent.mongodb;
 import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.IndexInfo;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
@@ -13,7 +14,9 @@ import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.result.UpdateResult;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -385,7 +388,7 @@ public final class MongoAgent {
         if (filterDoc == null) {
             filterDoc = new Document();
         }
-        long total = col.countDocuments(filterDoc);
+        CollectionTotal total = collectionTotal(col, filterDoc);
 
         var iterable = col.find(filterDoc).skip((int) skip).limit(limit);
         if (projectionDoc != null) {
@@ -399,10 +402,7 @@ public final class MongoAgent {
         for (Document document : iterable) {
             documents.add(bsonToJson(document));
         }
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("documents", documents);
-        result.put("total", total);
-        return result;
+        return documentQueryResult(documents, total);
     }
 
     /**
@@ -423,7 +423,7 @@ public final class MongoAgent {
         if (filterDoc == null) {
             filterDoc = new Document();
         }
-        long total = col.countDocuments(filterDoc);
+        CollectionTotal total = collectionTotal(col, filterDoc);
 
         var iterable = col.find(filterDoc).skip((int) skip).limit(limit);
         if (projectionDoc != null) {
@@ -437,11 +437,27 @@ public final class MongoAgent {
         for (Document document : iterable) {
             documents.add(bsonToExtendedJson(document));
         }
+        return documentQueryResult(documents, total);
+    }
+
+    static CollectionTotal collectionTotal(MongoCollection<Document> collection, Document filter) {
+        if (filter.isEmpty()) {
+            return new CollectionTotal(collection.estimatedDocumentCount(), false);
+        }
+        return new CollectionTotal(collection.countDocuments(filter), true);
+    }
+
+    static Map<String, Object> documentQueryResult(List<?> documents, CollectionTotal total) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("documents", documents);
-        result.put("total", total);
+        result.put("total", total.value());
+        if (!total.exact()) {
+            result.put("total_is_exact", false);
+        }
         return result;
     }
+
+    record CollectionTotal(long value, boolean exact) {}
 
     private static Object countDocuments(JsonObject params) {
         MongoClient c = requireClient();
@@ -638,12 +654,9 @@ public final class MongoAgent {
             return stringId;
         }
         String trimmed = id.trim();
-        if (isNumberLongIdWrapper(trimmed)) {
-            try {
-                return Document.parse("{\"_id\":" + trimmed + "}").get("_id");
-            } catch (Exception e) {
-                // Fall through to the legacy ObjectId/string handling below.
-            }
+        Object extendedJsonId = parseExtendedJsonId(trimmed);
+        if (extendedJsonId != null) {
+            return extendedJsonId;
         }
         try {
             return new ObjectId(id);
@@ -665,20 +678,21 @@ public final class MongoAgent {
         }
     }
 
-    private static boolean isNumberLongIdWrapper(String value) {
+    private static Object parseExtendedJsonId(String value) {
         try {
             JsonElement parsed = JsonParser.parseString(value);
             if (!parsed.isJsonObject()) {
-                return false;
+                return null;
             }
             JsonObject wrapper = parsed.getAsJsonObject();
-            JsonElement numberLong = wrapper.get("$numberLong");
-            return wrapper.size() == 1
-                && numberLong != null
-                && numberLong.isJsonPrimitive()
-                && numberLong.getAsJsonPrimitive().isString();
+            if (wrapper.size() != 1 || (!wrapper.has("$oid") && !wrapper.has("$numberLong"))) {
+                return null;
+            }
+            // The document browser preserves BSON _id types as Extended JSON;
+            // decode only known wrappers so JSON-looking string IDs stay strings.
+            return Document.parse("{\"_id\":" + value + "}").get("_id");
         } catch (Exception e) {
-            return false;
+            return null;
         }
     }
 
@@ -695,7 +709,20 @@ public final class MongoAgent {
         var result = isUpdateOperatorDocument(newDoc)
             ? col.updateOne(filter, newDoc)
             : col.replaceOne(filter, replacementDocument(newDoc));
+        requireMatchedDocument(id, result);
         return Collections.singletonMap("modified_count", result.getModifiedCount());
+    }
+
+    static void requireMatchedDocument(String id, UpdateResult result) {
+        if (result.getMatchedCount() == 0) {
+            throw new IllegalStateException(noMatchingDocumentError(id));
+        }
+    }
+
+    private static String noMatchingDocumentError(String id) {
+        String display = decodeStringDocumentId(id);
+        return "No document matched _id " + (display == null ? id : display)
+            + ". It may have been deleted or its _id changed since the query ran.";
     }
 
     private static Object updateDocuments(JsonObject params) {
@@ -711,11 +738,24 @@ public final class MongoAgent {
 
         var col = c.getDatabase(database).getCollection(collection);
         Document filter = documentForWrite(filterJson);
-        Document update = documentForWrite(updateJson);
-        requireBulkUpdateOperatorDocument(update);
         UpdateOptions options = updateOptionsForWrite(optionsJson);
-        var result = many ? col.updateMany(filter, update, options) : col.updateOne(filter, update, options);
+        var result = isUpdatePipelineJson(updateJson)
+            ? updateDocumentsWithPipeline(col, filter, updatePipelineForWrite(updateJson), options, many)
+            : updateDocumentsWithDocument(col, filter, documentForWrite(updateJson), options, many);
         return Collections.singletonMap("modified_count", result.getModifiedCount());
+    }
+
+    private static UpdateResult updateDocumentsWithDocument(
+        MongoCollection<Document> col, Document filter, Document update,
+        UpdateOptions options, boolean many) {
+        requireBulkUpdateOperatorDocument(update);
+        return many ? col.updateMany(filter, update, options) : col.updateOne(filter, update, options);
+    }
+
+    private static UpdateResult updateDocumentsWithPipeline(
+        MongoCollection<Document> col, Document filter, List<Document> pipeline,
+        UpdateOptions options, boolean many) {
+        return many ? col.updateMany(filter, pipeline, options) : col.updateOne(filter, pipeline, options);
     }
 
     static UpdateOptions updateOptionsForWrite(String optionsJson) {
@@ -750,6 +790,27 @@ public final class MongoAgent {
         Document doc = Document.parse(docJson);
         convertMongoShellDates(doc);
         return doc;
+    }
+
+    private static boolean isUpdatePipelineJson(String updateJson) {
+        return updateJson.trim().startsWith("[");
+    }
+
+    static List<Document> updatePipelineForWrite(String updateJson) {
+        JsonElement parsed = JsonParser.parseString(updateJson);
+        if (!parsed.isJsonArray()) {
+            throw new IllegalArgumentException("Update pipeline must be an array");
+        }
+        JsonArray stages = parsed.getAsJsonArray();
+        List<Document> pipeline = new ArrayList<>(stages.size());
+        for (JsonElement stage : stages) {
+            if (!stage.isJsonObject()) {
+                // The Java driver pipeline overload accepts BSON stages, not scalar array entries.
+                throw new IllegalArgumentException("Each update pipeline stage must be an object");
+            }
+            pipeline.add(documentForWrite(stage.toString()));
+        }
+        return pipeline;
     }
 
     private static Document replacementDocument(Document doc) {
@@ -820,7 +881,36 @@ public final class MongoAgent {
     }
 
     static JsonObject bsonToExtendedJson(Document doc) {
-        return JsonParser.parseString(doc.toJson(EXTENDED_JSON_SETTINGS)).getAsJsonObject();
+        JsonObject relaxed = JsonParser.parseString(doc.toJson(EXTENDED_JSON_SETTINGS)).getAsJsonObject();
+        return preserveUnsafeLongsForJsonClients(doc, relaxed).getAsJsonObject();
+    }
+
+    private static JsonElement preserveUnsafeLongsForJsonClients(Object bsonValue, JsonElement relaxedValue) {
+        if (
+            bsonValue instanceof Long longValue &&
+            (longValue < -JS_MAX_SAFE_INTEGER || longValue > JS_MAX_SAFE_INTEGER)
+        ) {
+            JsonObject wrapper = new JsonObject();
+            wrapper.addProperty("$numberLong", longValue.toString());
+            return wrapper;
+        }
+        if (bsonValue instanceof Document document && relaxedValue.isJsonObject()) {
+            JsonObject object = relaxedValue.getAsJsonObject();
+            for (Map.Entry<String, Object> entry : document.entrySet()) {
+                if (object.has(entry.getKey())) {
+                    object.add(
+                        entry.getKey(),
+                        preserveUnsafeLongsForJsonClients(entry.getValue(), object.get(entry.getKey()))
+                    );
+                }
+            }
+        } else if (bsonValue instanceof List<?> values && relaxedValue.isJsonArray()) {
+            JsonArray array = relaxedValue.getAsJsonArray();
+            for (int index = 0; index < Math.min(values.size(), array.size()); index++) {
+                array.set(index, preserveUnsafeLongsForJsonClients(values.get(index), array.get(index)));
+            }
+        }
+        return relaxedValue;
     }
 
     static Object convertValue(Object value) {
@@ -869,10 +959,9 @@ public final class MongoAgent {
             return converted;
         }
         if (value instanceof String text) {
+            // Plain JSON strings must retain their BSON type; only explicit shell date syntax
+            // is converted here. Extended JSON $date values are decoded by Document.parse.
             Date date = parseMongoShellDate(text);
-            if (date == null) {
-                date = parseLegacyDateDisplay(text);
-            }
             return date == null ? value : date;
         }
         return value;
@@ -896,28 +985,6 @@ public final class MongoAgent {
         try {
             Instant instant = Instant.parse(inner.substring(1, inner.length() - 1));
             return Date.from(instant);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    static Date parseLegacyDateDisplay(String value) {
-        String trimmed = value.trim();
-        if (!trimmed.matches("\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?")) {
-            return null;
-        }
-        String normalized = trimmed.replace(' ', 'T');
-        int dot = normalized.indexOf('.');
-        if (dot < 0) {
-            normalized = normalized + ".000";
-        } else {
-            int millisStart = dot + 1;
-            int millisEnd = normalized.length();
-            normalized = normalized.substring(0, millisStart)
-                + String.format("%-3s", normalized.substring(millisStart, millisEnd)).replace(' ', '0');
-        }
-        try {
-            return Date.from(Instant.parse(normalized + "Z"));
         } catch (Exception e) {
             return null;
         }
@@ -980,28 +1047,41 @@ public final class MongoAgent {
     }
 
     static String handleRequest(String line) {
-        JsonObject req = JsonParser.parseString(line).getAsJsonObject();
-        JsonElement id = req.get("id");
-        String method = req.get("method").getAsString();
-        JsonObject params = req.has("params") && req.get("params").isJsonObject()
-            ? req.getAsJsonObject("params")
-            : new JsonObject();
+        return handleRequest(line, null);
+    }
 
-        JsonObject response = new JsonObject();
-        response.addProperty("jsonrpc", "2.0");
-        response.add("id", id);
-
-        try {
-            Object result = dispatch(method, params);
-            response.add("result", GSON.toJsonTree(result));
-        } catch (Exception e) {
-            JsonObject error = new JsonObject();
-            error.addProperty("code", -1);
-            error.addProperty("message", e.getMessage() == null ? "Unknown error" : e.getMessage());
-            response.add("error", error);
+    static String handleRequest(String line, MongoClient client) {
+        if (client != null) {
+            CURRENT_CLIENT.set(client);
         }
+        try {
+            JsonObject req = JsonParser.parseString(line).getAsJsonObject();
+            JsonElement id = req.get("id");
+            String method = req.get("method").getAsString();
+            JsonObject params = req.has("params") && req.get("params").isJsonObject()
+                ? req.getAsJsonObject("params")
+                : new JsonObject();
 
-        return GSON.toJson(response);
+            JsonObject response = new JsonObject();
+            response.addProperty("jsonrpc", "2.0");
+            response.add("id", id);
+
+            try {
+                Object result = dispatch(method, params);
+                response.add("result", GSON.toJsonTree(result));
+            } catch (Exception e) {
+                JsonObject error = new JsonObject();
+                error.addProperty("code", -1);
+                error.addProperty("message", e.getMessage() == null ? "Unknown error" : e.getMessage());
+                response.add("error", error);
+            }
+
+            return GSON.toJson(response);
+        } finally {
+            if (client != null) {
+                CURRENT_CLIENT.remove();
+            }
+        }
     }
 
     public static void main(String[] args) throws Exception {

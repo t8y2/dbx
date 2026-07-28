@@ -17,7 +17,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -81,6 +83,49 @@ class CommonJavaCompatibilityTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "connect"));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "query"));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), "metadata"));
+    }
+
+    @Test
+    void jsonRpcConnectionTestAddsOptionalDatabaseInfoWithoutChangingLegacySuccess() {
+        JsonRpcServer legacyServer = new JsonRpcServer(new MinimalAgent());
+        JsonObject legacyResult = JsonParser.parseString(legacyServer.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"test_connection\",\"params\":{}}"
+        )).getAsJsonObject().getAsJsonObject("result");
+        assertTrue(legacyResult.get("ok").getAsBoolean());
+        assertFalse(legacyResult.has("databaseInfo"));
+
+        JsonRpcServer detailedServer = new JsonRpcServer(new MinimalAgent() {
+            @Override
+            public Map<String, Object> testConnectionWithInfo(ConnectParams params) {
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("ok", true);
+                result.put("databaseInfo", Collections.singletonMap("productName", "ExampleDB"));
+                return result;
+            }
+        });
+        JsonObject detailedResult = JsonParser.parseString(detailedServer.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"test_connection\",\"params\":{}}"
+        )).getAsJsonObject().getAsJsonObject("result");
+        assertEquals("ExampleDB", detailedResult.getAsJsonObject("databaseInfo").get("productName").getAsString());
+    }
+
+    @Test
+    void multiSessionConnectionTestDelegatesOptionalDatabaseInfo() {
+        MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(() -> new MinimalAgent() {
+            @Override
+            public Map<String, Object> testConnectionWithInfo(ConnectParams params) {
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("ok", true);
+                result.put("databaseInfo", Collections.singletonMap("driverName", "Example JDBC"));
+                return result;
+            }
+        });
+
+        JsonObject result = JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"test_connection\",\"params\":{}}"
+        )).getAsJsonObject().getAsJsonObject("result");
+
+        assertEquals("Example JDBC", result.getAsJsonObject("databaseInfo").get("driverName").getAsString());
     }
 
     @Test

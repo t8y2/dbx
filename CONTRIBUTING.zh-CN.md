@@ -5,8 +5,9 @@
 ## 从哪里开始
 
 1. 浏览 [Issues](https://github.com/t8y2/dbx/issues)，选择尚未分配、评论中也没有人正在处理的问题。不要只依赖标签，先阅读完整正文、评论和截图。
-2. 在 Issue 下留言说明你想做什么，避免重复劳动；可以评论 `/claim` 来认领。
+2. 在 Issue 下留言说明你想做什么，避免重复劳动；使用 `/claim` 认领，后续无法继续时使用 `/unclaim` 取消认领，也兼容 `/unclaimed`。
 3. Fork 仓库，新建分支开发，然后向 `main` 提 PR。
+4. 关联 PR 合并后，如果 Issue 仍然处于打开状态，可以评论 `/close`。该命令只允许当前 assignee、且必须由关联 PR 作者本人使用。
 
 如果暂时不确定做什么，优先选择复现清晰、改动范围小，或者你能使用真实数据库验证的问题。完整流程见[官网贡献教程](https://dbxio.com/cn/docs/contributing)。
 
@@ -16,7 +17,7 @@
 
 - Node.js >= 22.13.0
 - pnpm 10.27.0
-- Rust >= 1.77
+- Rust >= 1.88
 - Make
 
 Linux 桌面端还需要 WebKit/GTK 相关依赖，具体命令见 [README.zh-CN.md](README.zh-CN.md#快速开始)。
@@ -64,7 +65,7 @@ cd agents
 | `crates/dbx-web/` | Docker / Web HTTP 后端 |
 | `packages/cli/` | `@dbx-app/cli` |
 | `packages/mcp-server/` | `@dbx-app/mcp-server` |
-| `packages/node-core/` | Node.js bridge 与直连查询逻辑 |
+| `packages/mongo-shell/` | 桌面端内部 MongoDB 编辑器解析工具 |
 | `docs/` | 官方文档站 |
 | `examples/` | 配置与自动化示例 |
 | `agents/` | JDBC Agent 驱动工程 |

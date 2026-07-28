@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -10,8 +11,9 @@ use sqlparser::ast::{
 use sqlparser::dialect::{
     ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
 };
-use sqlparser::parser::Parser;
-use sqlparser::tokenizer::Span;
+use sqlparser::keywords::Keyword;
+use sqlparser::parser::{Parser, ParserError};
+use sqlparser::tokenizer::{Span, Token, TokenWithSpan, Tokenizer};
 
 use crate::sql::{starts_with_duckdb_result_sql_keyword, starts_with_executable_sql_keyword};
 
@@ -78,7 +80,9 @@ struct Analyzer {
     columns: Vec<SqlColumnReference>,
     scopes: Vec<SqlReferenceScope>,
     scope_stack: Vec<usize>,
+    cte_scope_stack: Vec<HashSet<String>>,
     next_scope_id: usize,
+    is_sqlserver: bool,
 }
 
 pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlReferenceAnalysis, String> {
@@ -99,19 +103,70 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
         "mysql" => Parser::parse_sql(&MySqlDialect {}, &parser_sql),
         "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
-        "sqlserver" => Parser::parse_sql(&MsSqlDialect {}, &parser_sql),
+        "sqlserver" => parse_sqlserver(&parser_sql),
         "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, &parser_sql),
         "duckdb" => Parser::parse_sql(&DuckDbDialect {}, &parser_sql),
         _ => Parser::parse_sql(&GenericDialect {}, &parser_sql),
     }
     .map_err(|err| err.to_string())?;
 
-    let mut analyzer = Analyzer::default();
+    let mut analyzer = Analyzer { is_sqlserver: normalized_dialect == "sqlserver", ..Analyzer::default() };
     for statement in statements {
         analyzer.visit_statement(&statement);
     }
 
     Ok(SqlReferenceAnalysis { tables: analyzer.tables, columns: analyzer.columns, scopes: analyzer.scopes })
+}
+
+fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
+    let dialect = MsSqlDialect {};
+    let mut tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+    normalize_sqlserver_create_proc_tokens(&mut tokens);
+    Parser::new(&dialect).with_tokens_with_locations(tokens).parse_statements()
+}
+
+fn normalize_sqlserver_create_proc_tokens(tokens: &mut [TokenWithSpan]) {
+    let significant_indexes: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect();
+
+    for (position, index) in significant_indexes.iter().copied().enumerate() {
+        if token_keyword(&tokens[index]) != Some(Keyword::CREATE) {
+            continue;
+        }
+
+        let mut proc_position = position + 1;
+        if significant_indexes.get(proc_position).and_then(|index| token_keyword(&tokens[*index])) == Some(Keyword::OR)
+        {
+            proc_position += 1;
+            if significant_indexes.get(proc_position).and_then(|index| token_keyword(&tokens[*index]))
+                != Some(Keyword::ALTER)
+            {
+                continue;
+            }
+            proc_position += 1;
+        }
+
+        let Some(proc_index) = significant_indexes.get(proc_position).copied() else {
+            continue;
+        };
+        let Token::Word(word) = &mut tokens[proc_index].token else {
+            continue;
+        };
+        // SQL Server documents PROC as a contextual synonym for PROCEDURE after CREATE.
+        if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("proc") {
+            word.keyword = Keyword::PROCEDURE;
+        }
+    }
+}
+
+fn token_keyword(token: &TokenWithSpan) -> Option<Keyword> {
+    match &token.token {
+        Token::Word(word) => Some(word.keyword),
+        _ => None,
+    }
 }
 
 fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {
@@ -144,7 +199,7 @@ fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {
 
 fn normalize_dialect(dialect: Option<&str>) -> String {
     match dialect.unwrap_or("generic").to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "questdb" => {
+        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "uxdb" | "questdb" => {
             "postgres".to_string()
         }
         "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql".to_string(),
@@ -168,7 +223,9 @@ impl Analyzer {
         self.next_scope_id += 1;
         self.scopes.push(SqlReferenceScope { id: scope_id, parent_id });
         self.scope_stack.push(scope_id);
+        self.cte_scope_stack.push(HashSet::new());
         self.visit_query(query);
+        self.cte_scope_stack.pop();
         self.scope_stack.pop();
     }
 
@@ -180,9 +237,37 @@ impl Analyzer {
         self.scope_stack.last().copied()
     }
 
+    fn add_visible_cte(&mut self, ident: &Ident) {
+        let key = self.cte_name_key(ident);
+        if let Some(visible_ctes) = self.cte_scope_stack.last_mut() {
+            visible_ctes.insert(key);
+        }
+    }
+
+    fn is_visible_cte(&self, name: &ObjectName) -> bool {
+        if name.0.len() != 1 {
+            return false;
+        }
+        let Some(ident) = name.0.first().and_then(ObjectNamePart::as_ident) else {
+            return false;
+        };
+        let key = self.cte_name_key(ident);
+        self.cte_scope_stack.iter().rev().any(|visible_ctes| visible_ctes.contains(&key))
+    }
+
+    fn cte_name_key(&self, ident: &Ident) -> String {
+        if self.is_sqlserver || ident.quote_style.is_none() {
+            ident.value.to_ascii_lowercase()
+        } else {
+            ident.value.clone()
+        }
+    }
+
     fn visit_query(&mut self, query: &Query) {
         if let Some(with) = &query.with {
             for cte in &with.cte_tables {
+                // Add each name before its body: recursive/self and earlier CTEs are visible, later CTEs are not.
+                self.add_visible_cte(&cte.alias.name);
                 self.visit_child_query(&cte.query);
             }
         }
@@ -309,7 +394,8 @@ impl Analyzer {
     fn visit_table_factor(&mut self, factor: &TableFactor) {
         match factor {
             TableFactor::Table { name, alias, args, .. } => {
-                if args.is_none() {
+                // Qualified names remain physical objects even when their final component matches a visible CTE.
+                if args.is_none() && !self.is_visible_cte(name) {
                     if let Some(table) = table_reference_from_name(
                         name,
                         alias.as_ref().map(|a| a.name.value.clone()),
@@ -373,7 +459,7 @@ impl Analyzer {
             }
             Expr::InSubquery { expr, subquery, .. } => {
                 self.visit_expr(expr);
-                self.visit_query(subquery);
+                self.visit_child_query(subquery);
             }
             Expr::InUnnest { expr, array_expr, .. } => {
                 self.visit_expr(expr);
@@ -405,7 +491,7 @@ impl Analyzer {
             }
             Expr::Function(function) => {
                 self.visit_function_args(&function.parameters);
-                self.visit_function_args(&function.args);
+                self.visit_function_call_args(&function.name, &function.args);
                 if let Some(filter) = &function.filter {
                     self.visit_expr(filter);
                 }
@@ -431,11 +517,30 @@ impl Analyzer {
     }
 
     fn visit_function_args(&mut self, args: &FunctionArguments) {
+        self.visit_function_args_skipping(args, |_, _| false);
+    }
+
+    fn visit_function_call_args(&mut self, name: &ObjectName, args: &FunctionArguments) {
+        let sqlserver_datepart_function = self.is_sqlserver.then(|| sqlserver_datepart_function_name(name)).flatten();
+        self.visit_function_args_skipping(args, |index, arg| {
+            index == 0
+                && sqlserver_datepart_function
+                    .is_some_and(|function_name| is_sqlserver_datepart_argument(function_name, arg))
+        });
+    }
+
+    fn visit_function_args_skipping(
+        &mut self,
+        args: &FunctionArguments,
+        mut should_skip: impl FnMut(usize, &FunctionArg) -> bool,
+    ) {
         match args {
             FunctionArguments::Subquery(query) => self.visit_child_query(query),
             FunctionArguments::List(list) => {
-                for arg in &list.args {
-                    self.visit_function_arg(arg);
+                for (index, arg) in list.args.iter().enumerate() {
+                    if !should_skip(index, arg) {
+                        self.visit_function_arg(arg);
+                    }
                 }
                 for clause in &list.clauses {
                     if let sqlparser::ast::FunctionArgumentClause::OrderBy(items) = clause {
@@ -485,4 +590,78 @@ fn table_reference_from_name(
 
 fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {
     name.0.iter().rev().find_map(ObjectNamePart::as_ident)
+}
+
+fn sqlserver_datepart_function_name(name: &ObjectName) -> Option<&str> {
+    if name.0.len() != 1 {
+        return None;
+    }
+
+    let ident = name.0.first()?.as_ident()?;
+    ["DATEADD", "DATEDIFF", "DATEDIFF_BIG", "DATEPART", "DATENAME"]
+        .iter()
+        .copied()
+        .find(|function_name| ident.value.eq_ignore_ascii_case(function_name))
+}
+
+fn is_sqlserver_datepart_argument(function_name: &str, arg: &FunctionArg) -> bool {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) = arg else {
+        return false;
+    };
+    if ident.quote_style.is_some() {
+        return false;
+    }
+
+    // SQL Server parses datepart tokens as identifiers, but these built-ins treat the first token as grammar, not a column.
+    let datepart = ident.value.as_str();
+    let common_datepart = is_datepart(
+        datepart,
+        &[
+            "year",
+            "yy",
+            "yyyy",
+            "quarter",
+            "qq",
+            "q",
+            "month",
+            "mm",
+            "m",
+            "dayofyear",
+            "dy",
+            "y",
+            "day",
+            "dd",
+            "d",
+            "week",
+            "wk",
+            "ww",
+            "hour",
+            "hh",
+            "minute",
+            "mi",
+            "n",
+            "second",
+            "ss",
+            "s",
+            "millisecond",
+            "ms",
+            "microsecond",
+            "mcs",
+            "nanosecond",
+            "ns",
+        ],
+    );
+    let weekday_datepart = is_datepart(datepart, &["weekday", "dw", "w"]);
+    let extended_datepart = is_datepart(datepart, &["tzoffset", "tz", "iso_week", "isowk", "isoww"]);
+
+    match function_name {
+        "DATEADD" | "DATEDIFF" | "DATEDIFF_BIG" => common_datepart || weekday_datepart,
+        "DATEPART" => common_datepart || weekday_datepart || extended_datepart,
+        "DATENAME" => common_datepart || weekday_datepart || extended_datepart,
+        _ => false,
+    }
+}
+
+fn is_datepart(value: &str, valid_dateparts: &[&str]) -> bool {
+    valid_dateparts.iter().any(|datepart| value.eq_ignore_ascii_case(datepart))
 }

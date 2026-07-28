@@ -42,6 +42,7 @@ const SCHEMA_FIRST_QUALIFIER_TYPES = new Set<DatabaseType>([
   "opengauss",
   "kingbase",
   "highgo",
+  "uxdb",
   "vastbase",
   "yashandb",
   "oracle",

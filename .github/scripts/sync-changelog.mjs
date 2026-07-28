@@ -11,7 +11,9 @@ const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
 const OUT_CN = "releases-cn.json";
 const OUT_EN = "releases-en.json";
 const LATEST_EN_OUT = "latest-en.json";
+const LATEST_NOTES_OUT = "latest-notes.json";
 const EN_CACHE_URL = process.env.CHANGELOG_EN_CACHE_URL || "https://dl.dbxio.com/changelog/releases-en.json";
+const APP_RELEASE_TAG_PATTERN = /^v[0-9]+[.][0-9]+[.][0-9]+(?:[.-][0-9A-Za-z.-]+)?$/;
 
 const SECTION_MAP = {
   新功能: "added",
@@ -120,11 +122,16 @@ export function buildReleaseSourceHash(release) {
     .digest("hex");
 }
 
+export function isAppRelease(release) {
+  return !release.draft && !release.prerelease && APP_RELEASE_TAG_PATTERN.test(release.tag_name || "");
+}
+
 export function buildReleasesJson(releases, now = new Date()) {
   return {
     updatedAt: now.toISOString(),
     releases: releases
-      .filter((r) => !r.draft && !r.prerelease && !r.tag_name.startsWith("agents-"))
+      // This repository has independent app, agent, and package release streams.
+      .filter(isAppRelease)
       .sort((a, b) => new Date(b.published_at) - new Date(a.published_at))
       .map((r) => ({
         tag: r.tag_name,
@@ -154,6 +161,14 @@ function buildLatestEnNotes(enReleasesJson) {
     version: latest.tag,
     notes: releaseToMarkdown(latest),
   };
+}
+
+export function buildLatestReleaseNotes(releases) {
+  const latest = releases
+    .filter(isAppRelease)
+    .sort((a, b) => new Date(b.published_at) - new Date(a.published_at))[0];
+  if (!latest) return null;
+  return { version: latest.tag_name, notes: latest.body || "" };
 }
 
 export async function fetchCachedEnglish({ cacheUrl = EN_CACHE_URL, fetchImpl = fetch } = {}) {
@@ -261,6 +276,12 @@ async function main() {
 
   writeFileSync(OUT_CN, JSON.stringify(cnJson, null, 2));
   console.log(`Wrote ${OUT_CN}`);
+
+  const latestNotes = buildLatestReleaseNotes(releases);
+  if (latestNotes) {
+    writeFileSync(LATEST_NOTES_OUT, JSON.stringify(latestNotes, null, 2));
+    console.log(`Wrote ${LATEST_NOTES_OUT}`);
+  }
 
   console.log("Fetching cached English changelog...");
   const cachedEnJson = await fetchCachedEnglish();

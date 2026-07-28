@@ -8,5 +8,5 @@ use crate::error::AppError;
 use crate::state::WebState;
 
 pub async fn list_plugins(State(state): State<Arc<WebState>>) -> Result<Json<Vec<InstalledPlugin>>, AppError> {
-    state.app.plugins.list_installed().map(Json).map_err(AppError)
+    state.app.plugins.list_installed().map(Json).map_err(AppError::from)
 }

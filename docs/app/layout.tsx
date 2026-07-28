@@ -61,7 +61,7 @@ const SOFTWARE_APP_SCHEMA = {
   releaseNotes: `${SITE_URL}/en/changelog`,
   screenshot: `${SITE_URL}/screenshot-dark.png`,
   featureList: [
-    "60+ database engines (MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, and many more)",
+    "70+ database engines (MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, and many more)",
     "AI-powered SQL generation and explanation",
     "MCP Server integration for AI coding agents",
     "Schema browser and diff tools",
@@ -87,6 +87,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html suppressHydrationWarning>
       <head>
+        <script
+          defer
+          src="https://analytics.unihub.top/script.js"
+          data-website-id="69afbe68-e06e-4fa8-84cd-e47d6d44baf0"
+          data-domains="dbxio.com,www.dbxio.com"
+        />
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(WEBSITE_SCHEMA) }}

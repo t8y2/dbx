@@ -7,7 +7,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
+import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError } from "@/lib/table/objectSourceEditor";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
@@ -22,6 +22,7 @@ const props = withDefaults(
     database: string;
     schema?: string;
     name: string;
+    relationName?: string;
     signature?: string;
     objectType: ObjectSourceKind;
     databaseType?: DatabaseType;
@@ -59,7 +60,7 @@ const canEdit = computed(() => sourceEditable.value && props.objectType !== "SEQ
 const title = computed(() => `${editing.value ? t("contextMenu.editView") : t("contextMenu.viewSource")} - ${props.name}`);
 
 watch(
-  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.signature, props.objectType, props.initialEditing] as const,
+  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.relationName, props.signature, props.objectType, props.initialEditing] as const,
   () => {
     if (props.open) void loadSource();
   },
@@ -79,7 +80,7 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   try {
     if (!props.databaseType) throw new Error("Connection type is unavailable.");
     const schema = props.schema || props.database;
-    const result = await api.getObjectSource(props.connectionId, props.database, schema, props.name, props.objectType, props.signature);
+    const result = await api.getObjectSource(props.connectionId, props.database, schema, props.name, props.objectType, props.signature, props.relationName);
     const editableAllowed = result.editable !== false;
     const editable = await buildEditableObjectSource({
       databaseType: props.databaseType,
@@ -168,8 +169,8 @@ async function saveSource() {
     toast(t("objects.sourceSaved"));
     emit("saved");
     await loadSource(false);
-  } catch (e: any) {
-    saveError.value = e?.message || String(e);
+  } catch (e: unknown) {
+    saveError.value = formatObjectSourceSaveError(e, databaseType, props.objectType, t("objects.postgresViewColumnChangeHint"));
   } finally {
     saving.value = false;
   }
@@ -182,7 +183,7 @@ function closeDialog() {
 
 <template>
   <Dialog :open="props.open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent class="h-[min(760px,calc(100dvh-2rem))] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-[900px]">
+    <DialogContent class="h-[min(760px,calc(var(--dbx-viewport-height)-2rem))] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-[900px]">
       <DialogHeader>
         <DialogTitle>{{ title }}</DialogTitle>
       </DialogHeader>
@@ -212,7 +213,7 @@ function closeDialog() {
           hide-execution-controls
           @save="saveSource"
         />
-        <div v-if="saveError" class="shrink-0 border-t px-3 py-2 text-xs text-destructive">
+        <div v-if="saveError" class="shrink-0 whitespace-pre-wrap break-words border-t px-3 py-2 text-xs text-destructive">
           {{ saveError }}
         </div>
       </div>

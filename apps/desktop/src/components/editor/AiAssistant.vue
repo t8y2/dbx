@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   Bot,
   Check,
+  ChevronLeft,
   ChevronRight,
   CircleSlash,
   Copy,
@@ -39,33 +40,39 @@ import {
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import LightDropdown from "@/components/ui/LightDropdown.vue";
-import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/composables/useTheme";
-import { useSettingsStore, AI_PROVIDER_PRESETS, type AiProvider } from "@/stores/settingsStore";
+import { useSettingsStore, AI_PROVIDER_PRESETS, normalizeAiConfig } from "@/stores/settingsStore";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
-import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext } from "@/lib/ai/ai";
-import { formatAiModelOption } from "@/lib/ai/aiModelPresentation";
+import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
+import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
+import { effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
+import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
+import { ACTIVE_TEMPLATES_TOTAL_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
+
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
-import { extractFirstSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiCancelStream, aiListModels, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation, type AiModelInfo } from "@/lib/backend/api";
+import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
+import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
@@ -75,13 +82,15 @@ import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } fr
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
-import { looksLikeActionProposal, containsChinese } from "@/lib/ai/aiProposalDetect";
+import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
+import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
 const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
+const promptTemplateStore = usePromptTemplateStore();
 const queryStore = useQueryStore();
 const { openTableTarget } = useNavigationTargets({
   showFieldLineageDialog: ref(false),
@@ -129,6 +138,8 @@ const emit = defineEmits<{
   executeSql: [sql: string];
   tempRunSql: [sql: string];
   requestAutoExecuteSql: [sql: string];
+  insertRedisCommand: [command: string];
+  executeRedisCommand: [command: string];
   openExplainPlan: [sql: string];
   close: [];
 }>();
@@ -138,11 +149,79 @@ const messages = ref<ChatMessage[]>([]);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
 const activeAction = ref<AiAction>("general");
-const assistantMode = ref<"ask" | "agent">("ask");
+const assistantMode = ref<AiAssistantMode>("ask");
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
 const showConversationList = ref(false);
+const showTemplateSelector = ref(false);
+const modeActionOpen = ref(false);
+
+// Prompt template selection (panel-session scope)
+const activeTemplateIds = ref<string[]>([]);
+const activeTemplates = computed(() => promptTemplateStore.templates.filter((t) => activeTemplateIds.value.includes(t.id)));
+
+watch(
+  () => promptTemplateStore.templates,
+  (templates) => {
+    const availableIds = new Set(templates.map((template) => template.id));
+    activeTemplateIds.value = activeTemplateIds.value.filter((id) => availableIds.has(id));
+  },
+);
+
+// Retry store load on selector open if prior init failed (e.g. backend not yet ready at mount)
+watch(showTemplateSelector, (open) => {
+  if (open) void promptTemplateStore.ensureLoaded();
+});
+
+// Reset template selection when the user switches to a different connection or database —
+// a new database context warrants a fresh selection of scenario templates.
+watch(
+  // Return a stable primitive key: a fresh array literal is never Object.is-equal to the
+  // previous one, so a getter returning `[id, database]` fires on every dependency
+  // invalidation (e.g. the 30s backup scheduler replacing connection objects) even when the
+  // id/database values are unchanged — spuriously clearing the selection mid agent-run.
+  () => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}`,
+  () => {
+    activeTemplateIds.value = [];
+  },
+);
+
+function toggleTemplateId(id: string) {
+  if (activeTemplateIds.value.includes(id)) {
+    activeTemplateIds.value = activeTemplateIds.value.filter((tid) => tid !== id);
+  } else {
+    // Check total content limit
+    const tpl = promptTemplateStore.templates.find((t) => t.id === id);
+    if (tpl) {
+      const currentTotal = activeTemplates.value.reduce((sum, template) => sum + promptTemplateCharacterCount(template.content), 0);
+      if (currentTotal + promptTemplateCharacterCount(tpl.content) > ACTIVE_TEMPLATES_TOTAL_MAX) {
+        toast(t("ai.templateSelectorTooLong", { max: ACTIVE_TEMPLATES_TOTAL_MAX }), 4000);
+        return;
+      }
+    }
+    activeTemplateIds.value = [...activeTemplateIds.value, id];
+  }
+}
+
+function deselectAllTemplates() {
+  activeTemplateIds.value = [];
+}
+
+const templateSelectorLabel = computed(() => {
+  if (!promptTemplateStore.isLoaded) return t("ai.templateSelectorLoading");
+  const count = activeTemplates.value.length;
+  if (count === 0) return t("ai.templateSelectorNone");
+  const name = activeTemplates.value[0].name;
+  if (count === 1) return name;
+  return `${name} +${count - 1}`;
+});
+const templateSelectorTriggerLabel = computed(() => {
+  if (activeTemplates.value.length === 0) {
+    return t("ai.templateSelectorLabel", { label: templateSelectorLabel.value });
+  }
+  return templateSelectorLabel.value;
+});
 const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const shouldAutoScroll = ref(true);
 const userPausedAutoScroll = ref(false);
@@ -164,7 +243,9 @@ const MESSAGE_SCROLL_BUTTON_HIDE_THRESHOLD_PX = 48;
 let messageScrollViewport: HTMLElement | null = null;
 let messageTouchStartY: number | null = null;
 let lastMessageScrollTop = 0;
+const STREAM_RENDER_INTERVAL_MS = 33;
 let assistantDeltaFrame: number | null = null;
+let lastAssistantFlushAt = 0;
 let pendingAssistantDelta = "";
 let pendingAssistantReasoning = "";
 let pendingAssistantIndex = -1;
@@ -196,7 +277,7 @@ function submitEdit(visibleIndex: number) {
   const actualIndex = visibleToActualIndex(messages.value, visibleIndex);
   if (actualIndex < 0) return;
   if (!props.connection || !props.tab) return;
-  if (!settings.isConfigured()) {
+  if (!settings.isConfigured) {
     toast(t("ai.noConfig"));
     return;
   }
@@ -223,72 +304,209 @@ function onEditKeydown(event: KeyboardEvent, visibleIndex: number) {
 }
 
 // Inline model selector
-const modelOptions = ref<AiModelInfo[]>([]);
-const modelLoading = ref(false);
-let modelRequestToken = 0;
 const providerSelectorOpen = ref(false);
+const modelSearchQuery = ref("");
+const collapsedModelConfigIds = ref<Set<string>>(new Set());
+const effortMenuOpen = ref(false);
+const manualModelConfigId = ref("");
+const manualModelId = ref("");
+const effortTextValue = ref("");
+const effortIntegerValue = ref(0);
+let effortMenuCloseTimer: ReturnType<typeof setTimeout> | null = null;
+const { catalogs: modelCatalogs, effortCatalogs, loadModels, resolveEffort, effortKey } = useAiModelCatalog();
 
-// Configured providers for quick switching
-const configuredProviders = computed(() => (Object.keys(AI_PROVIDER_PRESETS) as AiProvider[]).filter((p) => p !== settings.aiConfig.provider && settings.isAiProviderConfigured(p)));
-
-function handleProviderSwitch(provider: AiProvider) {
-  settings.updateAiConfig({ provider });
-  modelOptions.value = [];
-  providerSelectorOpen.value = false;
-}
-
-function normalizeModelOptions(models: AiModelInfo[]): AiModelInfo[] {
-  const seen = new Set<string>();
-  const normalized: AiModelInfo[] = [];
-  for (const model of models) {
-    const id = model.id?.trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    normalized.push({ id, displayName: model.displayName?.trim() || undefined });
+// Configured providers for quick switching - get from aiConfigs
+const configuredProviders = computed(() => {
+  const providers = orderAiConfigsForDisplay(settings.aiConfigs.filter((config) => isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey)));
+  if (modelSearchQuery.value.trim()) {
+    const query = modelSearchQuery.value.trim().toLowerCase();
+    return providers.filter((c) => {
+      if (configMatchesModelQuery(c, query)) return true;
+      const models = getModelsForConfig(c.id);
+      return models.some((model) => model.id.toLowerCase().includes(query) || model.displayName?.toLowerCase().includes(query));
+    });
   }
-  return normalized;
-}
-
-async function fetchModelOptions() {
-  if (modelLoading.value) return;
-  if (!settings.isConfigured()) return;
-  const token = ++modelRequestToken;
-  modelLoading.value = true;
-  try {
-    const models = normalizeModelOptions(await aiListModels(settings.aiConfig));
-    if (token !== modelRequestToken) return;
-    modelOptions.value = models;
-  } catch {
-    if (token !== modelRequestToken) return;
-    modelOptions.value = [];
-  } finally {
-    if (token === modelRequestToken) modelLoading.value = false;
-  }
-}
-
-function handleModelSelect(modelId: string) {
-  settings.updateAiConfig({ model: modelId });
-}
-
-const modelOptionIds = computed(() => {
-  const currentModel = settings.aiConfig.model;
-  const ids = modelOptions.value.map((model) => model.id);
-  if (currentModel && !ids.includes(currentModel)) {
-    return [currentModel, ...ids];
-  }
-  return ids;
+  return providers;
 });
 
-function displayModelName(modelId: string) {
-  return modelOptions.value.find((model) => model.id === modelId)?.displayName || modelId;
+const activeFullConfig = computed(() => {
+  if (!settings.activeModel) return null;
+  const item = settings.aiConfigs.find((c) => c.id === settings.activeModel!.configId);
+  if (!item) return null;
+  const modelId = settings.activeModel.modelId;
+  return normalizeAiConfig({ ...item, model: modelId, runtimeEffort: runtimeEffortFromPreference(settings.activeEffort) });
+});
+
+function getModelsForConfig(configId: string) {
+  return modelCatalogs.get(configId)?.models ?? [];
 }
 
-function modelOptionPresentation(modelId: string, label = displayModelName(modelId)) {
-  return formatAiModelOption(label, modelId);
+function configMatchesModelQuery(config: AiConfigItem, query: string): boolean {
+  return config.name.toLowerCase().includes(query) || config.provider.toLowerCase().includes(query) || AI_PROVIDER_PRESETS[config.provider].label.toLowerCase().includes(query);
 }
 
-function modelOptionSecondary(modelId: string, label = displayModelName(modelId)) {
-  return modelOptionPresentation(modelId, label).secondary;
+function getConfigModelOptions(config: AiConfigItem) {
+  const models = getModelsForConfig(config.id);
+  const query = modelSearchQuery.value.trim().toLowerCase();
+  if (!query || configMatchesModelQuery(config, query)) return models;
+  return models.filter((model) => model.id.toLowerCase().includes(query) || model.displayName?.toLowerCase().includes(query));
+}
+
+function getModelCatalog(configId: string) {
+  return modelCatalogs.get(configId) ?? { status: "idle" as const, models: [] };
+}
+
+function isModelConfigCollapsed(configId: string): boolean {
+  return collapsedModelConfigIds.value.has(configId);
+}
+
+function toggleModelConfig(configId: string) {
+  const next = new Set(collapsedModelConfigIds.value);
+  if (next.has(configId)) next.delete(configId);
+  else next.add(configId);
+  collapsedModelConfigIds.value = next;
+}
+
+async function loadConfiguredModelCatalogs(force = false) {
+  const configs = settings.aiConfigs.filter((config) => isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey));
+  const queue = [...configs];
+  const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+    while (queue.length) {
+      const config = queue.shift();
+      if (!config) return;
+      await loadModels(config, force).catch(() => {});
+    }
+  });
+  await Promise.all(workers);
+}
+
+watch(providerSelectorOpen, (open) => {
+  if (open) {
+    void loadConfiguredModelCatalogs();
+  } else {
+    modelSearchQuery.value = "";
+    closeEffortMenu();
+    manualModelConfigId.value = "";
+    manualModelId.value = "";
+  }
+});
+
+async function ensureModelEffort(config: AiConfigItem, modelId: string, force = false) {
+  try {
+    const capability = await resolveEffort(config, modelId, force);
+    syncEffortInputs(capability);
+  } catch {
+    // The effort section exposes the scoped retry state.
+  }
+}
+
+function handleModelSelect(configId: string, modelId: string) {
+  const config = settings.aiConfigs.find((c) => c.id === configId);
+  if (!config) return;
+  settings.updateActiveModel({ configId, modelId });
+  closeEffortMenu();
+}
+
+function startManualModel(configId: string) {
+  manualModelConfigId.value = configId;
+  manualModelId.value = settings.activeModel?.configId === configId ? settings.activeModel.modelId : "";
+  nextTick(() => document.querySelector<HTMLInputElement>("[data-manual-model-input]")?.focus());
+}
+
+function applyManualModel(configId: string) {
+  const modelId = manualModelId.value.trim();
+  if (!modelId) return;
+  handleModelSelect(configId, modelId);
+  manualModelConfigId.value = "";
+  manualModelId.value = "";
+}
+
+const activeEffortEntry = computed(() => {
+  const active = settings.activeModel;
+  if (!active) return undefined;
+  return effortCatalogs.get(effortKey(active.configId, active.modelId));
+});
+
+const activeEffortCapability = computed(() => activeEffortEntry.value?.capability);
+
+function syncEffortInputs(capability = activeEffortCapability.value) {
+  const selection = settings.activeEffort;
+  effortTextValue.value = selection?.kind === "text" ? selection.value : "";
+  if (capability?.kind === "integer") {
+    const selectedValue = selection?.kind === "integer" ? selection.value : undefined;
+    const defaultValue = capability.default.kind === "integer" ? capability.default.value : undefined;
+    effortIntegerValue.value = selectedValue !== undefined && selectedValue >= capability.min && selectedValue <= capability.max ? selectedValue : defaultValue !== undefined && defaultValue >= capability.min && defaultValue <= capability.max ? defaultValue : capability.min;
+  }
+}
+
+function clearEffortMenuCloseTimer() {
+  if (!effortMenuCloseTimer) return;
+  clearTimeout(effortMenuCloseTimer);
+  effortMenuCloseTimer = null;
+}
+
+function openEffortMenu() {
+  clearEffortMenuCloseTimer();
+  if (settings.activeModel) effortMenuOpen.value = true;
+}
+
+function closeEffortMenu() {
+  clearEffortMenuCloseTimer();
+  effortMenuOpen.value = false;
+}
+
+function scheduleEffortMenuClose() {
+  clearEffortMenuCloseTimer();
+  effortMenuCloseTimer = setTimeout(() => {
+    effortMenuOpen.value = false;
+    effortMenuCloseTimer = null;
+  }, 120);
+}
+
+watch(effortMenuOpen, (open) => {
+  const active = settings.activeModel;
+  if (!open || !active) return;
+  const config = settings.aiConfigs.find((item) => item.id === active.configId);
+  if (config) void ensureModelEffort(config, active.modelId);
+});
+
+function selectEffort(selection: AiEffortSelection) {
+  settings.updateActiveEffort(selection);
+  syncEffortInputs();
+}
+
+function selectEffortOption(option: AiEffortOption) {
+  selectEffort(option.selection);
+}
+
+function commitIntegerEffort(capability: Extract<AiEffortCapability, { kind: "integer" }>) {
+  const steppedValue = capability.min + Math.round((effortIntegerValue.value - capability.min) / capability.step) * capability.step;
+  const value = Math.min(capability.max, Math.max(capability.min, steppedValue));
+  effortIntegerValue.value = value;
+  selectEffort({ kind: "integer", value });
+}
+
+function commitTextEffort() {
+  const value = effortTextValue.value.trim();
+  settings.updateActiveEffort(value ? { kind: "text", value } : { kind: "providerDefault" });
+}
+
+function effortSelectionLabel(selection: AiEffortSelection | null): string {
+  if (!selection || selection.kind === "providerDefault") return t("ai.providerDefault");
+  const capability = activeEffortCapability.value;
+  const options = capability?.kind === "enum" ? capability.options : capability?.kind === "integer" ? capability.specialValues : undefined;
+  const matchingOption = options?.find((option) => effortSelectionEquals(selection, option.selection));
+  if (matchingOption) return matchingOption.label;
+  if (selection.kind === "disabled") return t("ai.effortDisabled");
+  if (selection.kind === "boolean") return selection.value ? t("ai.effortEnabled") : t("ai.effortDisabled");
+  return String(selection.value);
+}
+
+function retryActiveEffort() {
+  const active = settings.activeModel;
+  if (!active) return;
+  const config = settings.aiConfigs.find((item) => item.id === active.configId);
+  if (config) void ensureModelEffort(config, active.modelId, true);
 }
 
 /** Deferred context compaction info; applied after stream ends to avoid shifting assistantIdx. */
@@ -386,6 +604,7 @@ const agentActionButtons: AiActionButton[] = [
 ];
 
 const actionButtons = computed<AiActionButton[]>(() => (assistantMode.value === "agent" ? agentActionButtons : askActionButtons));
+const isRedisConnection = computed(() => props.connection?.db_type === "redis");
 
 // Vector DBs hide the action menu and only expose collection tools.
 // Keep their action at `generate` so the task contract doesn't tell the LLM to call execute_query.
@@ -498,19 +717,30 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
 });
 
 let allowWriteSqlForNextRun = false;
+/** The specific write SQL embedded in the confirmed proposal, for binding to the agent run. */
+let confirmedWriteSqlText: string | undefined = undefined;
+/** Connection/database snapshot captured at confirmation time, verified at send time
+ *  to prevent a database change between confirmation and execution. */
+let confirmedConnectionId: string | undefined = undefined;
+let confirmedDatabase: string | undefined = undefined;
+
+/** Clear all pending write-confirmation state. Call on every early-return
+ *  and failure path so a stale grant cannot leak into a subsequent send(). */
+function clearPendingWriteGrant() {
+  allowWriteSqlForNextRun = false;
+  confirmedWriteSqlText = undefined;
+  confirmedConnectionId = undefined;
+  confirmedDatabase = undefined;
+}
 
 const productionContext = computed(() => productionContextForDatabase(props.connection, props.tab?.database));
-
-function proposalContainsWriteSql(content: string) {
-  return /\b(insert|update|delete|replace|merge|create|alter|drop|truncate|rename|grant|revoke)\b/i.test(content);
-}
 
 function sendProposalReply(positive: boolean) {
   // Disable while a stream is in flight or no proposal is currently active.
   if (isGenerating.value) return;
   const target = proposalConfirmMessage.value;
   if (!target) return;
-  if (positive && productionContext.value.active && proposalContainsWriteSql(target.content)) {
+  if (positive && productionContext.value.active && looksLikeWriteSqlProposal(target.content)) {
     const sql = extractFirstSqlCodeBlock(target.content);
     if (sql) emit("replaceSql", sql);
     toast(t("production.aiReviewRequired"), 5000);
@@ -520,40 +750,52 @@ function sendProposalReply(positive: boolean) {
   const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
   const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
   prompt.value = isZh ? replyZh : replyEn;
-  allowWriteSqlForNextRun = positive && assistantMode.value === "agent" && proposalContainsWriteSql(target.content);
+  if (positive && assistantMode.value === "agent" && looksLikeWriteSqlProposal(target.content)) {
+    confirmedWriteSqlText = extractSingleSqlCodeBlock(target.content);
+    if (confirmedWriteSqlText) {
+      allowWriteSqlForNextRun = true;
+      confirmedConnectionId = props.connection?.id;
+      confirmedDatabase = props.tab?.database || "";
+    }
+    // When no SQL code block is found in the proposal, treat the
+    // confirmation as rejected — we cannot bind the agent to a
+    // specific SQL statement, so we must not grant blanket write access.
+  }
   // Use the existing send pipeline so the message is added to history, persisted, etc.
   send();
 }
 
 const activePlaceholder = computed(() => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
-const activeModeHint = computed(() => t(`ai.modeHints.${assistantMode.value}`));
-const assistantModeItems = computed(() => [
-  {
-    value: "ask",
-    label: t("ai.modes.ask"),
-    title: t("ai.modeHints.ask"),
-    icon: MessageSquarePlus,
-  },
-  {
-    value: "agent",
-    label: t("ai.modes.agent"),
-    title: t("ai.modeHints.agent"),
-    icon: Bot,
-  },
-]);
-const actionMenuItems = computed(() =>
-  actionButtons.value.map((button) => ({
-    value: button.action,
-    label: t(button.key),
-    icon: button.icon,
-  })),
-);
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
 
 const showActionButtons = computed(() => {
   if (!props.connection) return true;
   return !isVectorDbType(props.connection.db_type);
 });
+
+const modeIcon = computed<Component>(() => (assistantMode.value === "agent" ? Bot : MessageSquarePlus));
+const modeLabel = computed(() => t(`ai.modes.${assistantMode.value}`));
+const selectedActionButton = computed<AiActionButton | undefined>(() => actionButtons.value.find((b) => b.action === activeAction.value));
+const modeActionTriggerLabel = computed(() => {
+  const modePart = `${modeLabel.value}`;
+  if (!showActionButtons.value || !selectedActionButton.value) return modePart;
+  return `${modePart} · ${t(selectedActionButton.value.key)}`;
+});
+
+function switchModeActionTab(mode: "ask" | "agent") {
+  activeAction.value = resolveDefaultAction(mode);
+  if (assistantMode.value !== mode) {
+    // Set the mode after the action so the tab label and picker stay aligned.
+    assistantMode.value = mode;
+  }
+}
+
+function selectModeActionItem(action: AiAction) {
+  // Vector databases only support generation; keep this constraint at the selection boundary.
+  if (!showActionButtons.value) return;
+  selectAction(action);
+  modeActionOpen.value = false;
+}
 
 const { databaseOptions: allDbOptions, loadDatabaseOptions } = useDatabaseOptions();
 
@@ -622,6 +864,7 @@ function changeDatabase(value: string) {
 
 function flushAssistantDeltas() {
   assistantDeltaFrame = null;
+  lastAssistantFlushAt = performance.now();
   const msg = messages.value[pendingAssistantIndex];
   if (!msg) return;
   if (pendingAssistantReasoning) {
@@ -637,12 +880,22 @@ function flushAssistantDeltas() {
   scrollToBottom();
 }
 
+function runAssistantDeltaFrame() {
+  // Markdown is rendered live, so keep the refresh rate under the frame rate:
+  // a repaint every STREAM_RENDER_INTERVAL_MS still reads as continuous typing.
+  if (performance.now() - lastAssistantFlushAt < STREAM_RENDER_INTERVAL_MS) {
+    assistantDeltaFrame = requestAnimationFrame(runAssistantDeltaFrame);
+    return;
+  }
+  flushAssistantDeltas();
+}
+
 function scheduleAssistantDeltaFlush(assistantIdx: number) {
   pendingAssistantIndex = assistantIdx;
   if (assistantDeltaFrame !== null) return;
-  // Providers can emit many tiny chunks. Render once per animation frame so
+  // Providers can emit many tiny chunks. Batch them on an animation frame so
   // Markdown parsing, highlighting, and layout do not run for every token.
-  assistantDeltaFrame = requestAnimationFrame(flushAssistantDeltas);
+  assistantDeltaFrame = requestAnimationFrame(runAssistantDeltaFrame);
 }
 
 function appendAssistantDelta(assistantIdx: number, delta: string) {
@@ -1381,11 +1634,35 @@ async function send() {
   const text = prompt.value.trim();
   if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length) || isGenerating.value) return;
 
-  if (!props.connection || !props.tab) return;
-  if (!settings.isConfigured()) {
+  // Snapshot the target connection/database before any async work so that
+  // suspension points during context loading cannot cause a TOCTOU target switch.
+  const connection = props.connection;
+  const tab = props.tab;
+  if (!connection || !tab) {
+    clearPendingWriteGrant();
+    return;
+  }
+  if (!settings.isConfigured) {
+    clearPendingWriteGrant();
     toast(t("ai.noConfig"));
     return;
   }
+  // Acquire the send guard before the first async operation so two rapid
+  // submissions cannot both pass the initial isGenerating check and then
+  // resume into concurrent agent runs.
+  isGenerating.value = true;
+  if (!(await promptTemplateStore.ensureLoaded())) {
+    clearPendingWriteGrant();
+    isGenerating.value = false;
+    toast(t("ai.customInstructionsLoadFailed"), 5000);
+    return;
+  }
+  // Snapshot the selected custom prompts at send time so later async context loading
+  // cannot change the instructions for an already-submitted request.
+  const customPromptContext: CustomPromptContext = {
+    globalInstructions: promptTemplateStore.globalInstructions,
+    activeTemplates: [...activeTemplates.value],
+  };
 
   const selectedTableMentions = [...selectedMentions.value];
   const selectedSqlFiles = [...selectedSqlFileMentions.value];
@@ -1407,10 +1684,58 @@ async function send() {
 
   const requestedAction = activeAction.value;
   const requestedMode = assistantMode.value;
+  // Detect user-typed short confirmation (e.g. "可以"/"go ahead") as an alternative
+  // path to the proposal ✅ button. Delegates to the shared pure function so the
+  // component and its unit tests share the same gating logic.
+  if (!allowWriteSqlForNextRun) {
+    allowWriteSqlForNextRun = shouldGrantWriteSqlOnShortAffirmative({
+      mode: requestedMode,
+      alreadyGranted: false,
+      isProduction: productionContext.value.active,
+      userText: text,
+      // Pass the history BEFORE the just-pushed user message so the function skips it.
+      messages: messages.value.slice(0, -1),
+    });
+    if (allowWriteSqlForNextRun) {
+      // Extract the confirmed SQL from the assistant's proposal message.
+      // If no SQL code block is found, treat the confirmation as rejected —
+      // we cannot bind the agent to a specific SQL statement.
+      for (let i = messages.value.length - 2; i >= 0; i--) {
+        const msg = messages.value[i];
+        if (msg.kind === "contextSummary") continue;
+        if (msg.role === "assistant" && msg.content) {
+          confirmedWriteSqlText = extractSingleSqlCodeBlock(msg.content);
+          confirmedConnectionId = connection.id;
+          confirmedDatabase = tab.database || "";
+          break;
+        }
+        if (msg.role === "user") break;
+      }
+      if (!confirmedWriteSqlText) {
+        allowWriteSqlForNextRun = false;
+      }
+    }
+  }
+  // Verify the connection/database haven't changed since the user confirmed
+  // the write operation. If the user switched connections or databases between
+  // confirmation and execution, the grant is void.
+  if (allowWriteSqlForNextRun && confirmedWriteSqlText) {
+    if (confirmedConnectionId !== connection.id || confirmedDatabase !== (tab.database || "")) {
+      allowWriteSqlForNextRun = false;
+      confirmedWriteSqlText = undefined;
+    }
+  }
   // Agent confirmation cannot grant autonomous writes while the active database is production.
   const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
+  const confirmedWriteSql = allowWriteSql ? confirmedWriteSqlText : undefined;
+  // Capture the confirmed target snapshot before clearing the one-shot grant
+  // state, so the values survive to be passed through to the backend.
+  const confirmedTargetConnId = allowWriteSql ? confirmedConnectionId : undefined;
+  const confirmedTargetDb = allowWriteSql ? confirmedDatabase : undefined;
   allowWriteSqlForNextRun = false;
-  isGenerating.value = true;
+  confirmedWriteSqlText = undefined;
+  confirmedConnectionId = undefined;
+  confirmedDatabase = undefined;
   messages.value.push({ role: "assistant", content: "" });
   const assistantIdx = messages.value.length - 1;
   const sessionId = uuid();
@@ -1419,19 +1744,22 @@ async function send() {
   agentTokens.value = null;
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
-    const context = await buildAiContext(props.tab, props.connection, {
+    const context = await buildAiContext(tab, connection, {
       mentionedTables,
       sqlFiles,
     });
     const history: AiMessage[] = messagesForAgentHistory(messages.value.slice(0, -2));
     await runAgentStream(
       {
-        config: settings.aiConfig,
+        config: activeFullConfig.value!,
         action: requestedAction,
         mode: requestedMode,
         instruction: modelInstruction,
         context,
         allowWriteSql,
+        confirmedWriteSql,
+        confirmedConnectionId: confirmedTargetConnId,
+        confirmedDatabase: confirmedTargetDb,
       },
       history,
       (event: AgentEvent) => {
@@ -1468,10 +1796,11 @@ async function send() {
         scrollToBottom();
       },
       sessionId,
+      customPromptContext,
     );
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    messages.value[assistantIdx].content = `Error: ${message}`;
+    messages.value[assistantIdx].content = `${t("ai.requestFailed")}\n\n${translateBackendError(t, message)}`;
   } finally {
     if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
     flushAssistantDeltas();
@@ -1494,8 +1823,8 @@ async function send() {
         action: requestedAction,
         instruction: modelInstruction,
         assistantContent: msg?.content || "",
-        connection: props.connection,
-        database: props.tab?.database,
+        connection: connection,
+        database: tab.database,
       });
       if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
       if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
@@ -1527,14 +1856,26 @@ async function cancelStream() {
 }
 
 function applySql(code: string) {
+  if (isRedisConnection.value) {
+    emit("insertRedisCommand", code);
+    return;
+  }
   emit("replaceSql", code);
 }
 
 function executeSql(code: string) {
+  if (isRedisConnection.value) {
+    emit("executeRedisCommand", code);
+    return;
+  }
   emit("executeSql", code);
 }
 
 function tempRunSql(code: string) {
+  if (isRedisConnection.value) {
+    emit("executeRedisCommand", code);
+    return;
+  }
   emit("tempRunSql", code);
 }
 
@@ -1558,6 +1899,7 @@ function clearMessages() {
   conversationId.value = "";
   historyIndex.value = -1;
   draftBeforeHistory.value = "";
+  messageRenderer.value.clear();
 }
 
 async function persistConversation() {
@@ -1588,6 +1930,8 @@ async function setConversationListOpen(open: boolean) {
 
 function selectConversation(conv: AiConversation) {
   conversationId.value = conv.id;
+  // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
+  messageRenderer.value.clear();
   messages.value = conv.messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
@@ -1610,6 +1954,9 @@ async function deleteConversation(id: string) {
 function startNewChat() {
   clearMessages();
   showConversationList.value = false;
+  // A fresh conversation always starts from the safe, non-executing default.
+  assistantMode.value = "ask";
+  activeAction.value = resolveDefaultAction("ask");
 }
 
 onMounted(async () => {
@@ -1625,9 +1972,6 @@ onMounted(async () => {
   shikiCodeHighlighter.value = await createAiShikiCodeHighlighter({
     appearance: () => aiCodeAppearance.value,
   }).catch(() => undefined);
-
-  // Load available AI models for inline selector
-  fetchModelOptions();
 
   window.addEventListener("resize", handlePanelResize);
   if (typeof ResizeObserver !== "undefined" && assistantRootRef.value) {
@@ -1689,6 +2033,7 @@ function stopResize() {
 onUnmounted(() => {
   if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
   clearTimeout(mentionTimer);
+  clearEffortMenuCloseTimer();
   cancelStream();
   detachMessageScrollListener();
   // 清理拖拽事件监听，防止内存泄漏
@@ -1731,6 +2076,15 @@ const messageRenderer = computed(() => {
     highlightCode: highlightCode ? (content, lang) => highlightCode(content, lang, appearance) : undefined,
   });
 });
+
+/**
+ * Renders Markdown live while the answer streams in. The renderer reuses the
+ * already-finished segments, so a frame only re-parses the growing tail.
+ */
+function renderMessageSegments(msg: ChatMessage) {
+  const streaming = isGenerating.value && msg === messages.value[messages.value.length - 1];
+  return messageRenderer.value.render(msg.content, { streaming });
+}
 
 function onMarkdownClick(event: MouseEvent) {
   handleAiMarkdownLinkClick(event, openExternalUrl);
@@ -1799,7 +2153,7 @@ async function openExternalUrl(url: string) {
         <div class="flex flex-col gap-3 p-3">
           <template v-for="(msg, i) in visibleMessages" :key="i">
             <div v-if="msg.role === 'user'" class="group flex justify-end">
-              <div class="min-w-0 max-w-[85%]" :class="{ 'w-[85%]': editingMessageIndex === i }">
+              <div class="relative min-w-0 max-w-[85%]" :class="{ 'w-[85%]': editingMessageIndex === i }">
                 <template v-if="editingMessageIndex === i">
                   <div v-if="editingMentions.length" class="mb-1.5 flex flex-wrap justify-end gap-1">
                     <button
@@ -1831,8 +2185,14 @@ async function openExternalUrl(url: string) {
                   </div>
                 </template>
                 <template v-else>
-                  <div class="flex items-start gap-1">
-                    <button v-if="!isGenerating" class="mt-1 hidden h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground group-hover:flex" :title="t('ai.editMessage')" @click="startEditMessage(i)">
+                  <div class="min-w-0">
+                    <!-- Keep the hover action out of normal flow so message wrapping stays stable. -->
+                    <button
+                      v-if="!isGenerating"
+                      class="pointer-events-none absolute right-full top-1 mr-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus:pointer-events-auto focus:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+                      :title="t('ai.editMessage')"
+                      @click="startEditMessage(i)"
+                    >
                       <Pencil class="h-3 w-3" />
                     </button>
                     <div class="min-w-0 rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground">
@@ -1858,12 +2218,13 @@ async function openExternalUrl(url: string) {
             </div>
 
             <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex">
-              <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed">
+              <div class="max-w-[95%] min-w-0 rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
                 <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
                   <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
                     <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': reasoningExpanded }" />
                     <Loader2 v-if="msg.isThinking" class="h-3 w-3 animate-spin" />
                     <span>{{ t("ai.reasoningProcess") }}</span>
+                    <span v-if="shouldShowReasoningCharCount(msg.reasoning, reasoningExpanded)" :class="reasoningCharCountClass(!!msg.isThinking)">{{ msg.reasoning?.length ?? 0 }} {{ t("ai.chars") }}</span>
                   </button>
                   <div
                     class="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"
@@ -1899,8 +2260,7 @@ async function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </div>
-                <div v-if="isGenerating && msg === messages[messages.length - 1]" class="whitespace-pre-wrap break-words text-sm leading-relaxed">{{ msg.content }}</div>
-                <template v-else v-for="(seg, j) in messageRenderer.render(msg.content)" :key="j">
+                <template v-for="(seg, j) in renderMessageSegments(msg)" :key="j">
                   <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal" @click.capture="onMarkdownClick">
                     <div v-html="seg.html" />
                   </div>
@@ -1909,14 +2269,16 @@ async function openExternalUrl(url: string) {
                       <component :is="seg.isSql ? Database : Terminal" class="h-3 w-3 mr-1.5" />
                       <span>{{ seg.lang }}</span>
                       <span class="flex-1" />
+                      <!-- `pending` means the closing fence is still missing, so the code is truncated: never offer to run or apply it. -->
+                      <Loader2 v-if="seg.pending && isGenerating" class="h-3 w-3 animate-spin text-zinc-400" />
                       <div class="flex items-center gap-1.5">
-                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
+                        <button v-if="!seg.pending && seg.isSql && !isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
                           <FlaskConical class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
+                        <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
                           <Play class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="seg.isSql" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
+                        <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
                           <Replace class="h-3.5 w-3.5" />
                         </button>
                         <button
@@ -1971,53 +2333,95 @@ async function openExternalUrl(url: string) {
       <div ref="promptPanelRef" class="relative rounded-[6px] border bg-background">
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
-          <div v-if="connectionStore.connections.length" class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
-            <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
-            <Server v-else class="h-3 w-3 shrink-0" />
-            <Select
-              :model-value="connection?.id || ''"
-              @update:model-value="
-                (v) => {
-                  if (typeof v === 'string') changeConnection(v);
-                }
-              "
-            >
-              <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
-                <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t("editor.selectConnection") }}</SelectValue>
-              </SelectTrigger>
-              <SelectContent class="min-w-48">
-                <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
-                  <div class="flex min-w-0 items-center gap-2">
-                    <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
-                    <span class="truncate">{{ conn.name }}</span>
-                  </div>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <template v-if="connection">
-              <Database class="h-3 w-3 shrink-0 text-foreground/40" />
+          <div class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
+            <template v-if="connectionStore.connections.length">
+              <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
+              <Server v-else class="h-3 w-3 shrink-0" />
               <Select
-                :model-value="selectedDatabaseSelectValue"
+                :model-value="connection?.id || ''"
                 @update:model-value="
                   (v) => {
-                    if (typeof v === 'string') changeDatabase(v);
-                  }
-                "
-                @update:open="
-                  (open: boolean) => {
-                    if (open) loadDatabases();
+                    if (typeof v === 'string') changeConnection(v);
                   }
                 "
               >
                 <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
-                  <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
+                  <SelectValue :placeholder="t('editor.selectConnection')">{{ connection?.name || t("editor.selectConnection") }}</SelectValue>
                 </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="option in dbSelectOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                  <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{ selectedDatabaseLabel }}</SelectItem>
+                <SelectContent class="min-w-48">
+                  <SelectItem v-for="conn in connectionStore.connections" :key="conn.id" :value="conn.id">
+                    <div class="flex min-w-0 items-center gap-2">
+                      <DatabaseIcon :db-type="connectionIconType(conn)" class="h-3.5 w-3.5 shrink-0" />
+                      <ConnectionGroupBadge :connection-id="conn.id" />
+                      <span class="truncate">{{ conn.name }}</span>
+                    </div>
+                  </SelectItem>
                 </SelectContent>
               </Select>
+              <template v-if="connection">
+                <Database class="h-3 w-3 shrink-0 text-foreground/40" />
+                <Select
+                  :model-value="selectedDatabaseSelectValue"
+                  @update:model-value="
+                    (v) => {
+                      if (typeof v === 'string') changeDatabase(v);
+                    }
+                  "
+                  @update:open="
+                    (open: boolean) => {
+                      if (open) loadDatabases();
+                    }
+                  "
+                >
+                  <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
+                    <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="option in dbSelectOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                    <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{ selectedDatabaseLabel }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </template>
             </template>
+            <span class="min-w-0 flex-1" />
+            <!-- Template selector -->
+            <Popover v-model:open="showTemplateSelector">
+              <PopoverTrigger as-child>
+                <button type="button" class="flex min-w-0 max-w-[40%] items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="templateSelectorTriggerLabel" :title="templateSelectorTriggerLabel">
+                  <FileCode class="h-3 w-3" />
+                  <span class="truncate">{{ templateSelectorTriggerLabel }}</span>
+                  <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="end" class="w-64 gap-0 p-1.5">
+                <div class="max-h-64 overflow-auto">
+                  <div v-if="!promptTemplateStore.isLoaded" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {{ t("ai.templateSelectorLoading") }}
+                  </div>
+                  <div v-else-if="promptTemplateStore.templates.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {{ t("ai.templateSelectorEmpty") }}
+                  </div>
+                  <template v-else>
+                    <template v-for="tpl in promptTemplateStore.templates" :key="tpl.id">
+                      <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleTemplateId(tpl.id)">
+                        <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="activeTemplateIds.includes(tpl.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                          <Check v-if="activeTemplateIds.includes(tpl.id)" class="h-3 w-3" />
+                        </div>
+                        <div class="flex-1 truncate text-left">
+                          <div class="font-medium">{{ tpl.name }}</div>
+                          <div class="text-[10px] text-muted-foreground truncate">{{ tpl.content.slice(0, 60) }}</div>
+                        </div>
+                      </button>
+                    </template>
+                  </template>
+                </div>
+                <div v-if="promptTemplateStore.isLoaded && promptTemplateStore.templates.length > 0" class="border-t mt-1 pt-1 px-1">
+                  <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" @click="deselectAllTemplates">
+                    {{ t("ai.templateSelectorDeselectAll") }}
+                  </button>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
           <div v-if="mentionOpen" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
             <div v-if="mentionLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
@@ -2096,74 +2500,248 @@ async function openExternalUrl(url: string) {
             @keydown="onPromptKeydown"
           />
           <div class="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden">
-            <LightDropdown
-              v-model="assistantMode"
-              :items="assistantModeItems"
-              :aria-label="activeModeHint"
-              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-              item-class="text-xs px-2"
-            />
-            <LightDropdown
-              v-if="showActionButtons"
-              :model-value="activeAction"
-              :items="actionMenuItems"
-              content-class="w-max min-w-0"
-              trigger-class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-              item-class="text-xs px-2"
-              @update:model-value="(value) => selectAction(value as AiAction)"
-            />
+            <!-- Combined mode + action selector -->
+            <Popover v-model:open="modeActionOpen">
+              <PopoverTrigger as-child>
+                <button type="button" class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="modeActionTriggerLabel">
+                  <component :is="modeIcon" class="h-3 w-3" />
+                  <span>{{ modeActionTriggerLabel }}</span>
+                  <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" class="w-56 gap-0 p-1.5" @click.stop>
+                <!-- Mode tabs -->
+                <div class="flex items-center gap-1 mb-1.5 px-0.5">
+                  <button
+                    type="button"
+                    class="flex-1 flex items-center justify-center gap-1.5 rounded-sm px-2 py-1 text-xs"
+                    :class="assistantMode === 'ask' ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted'"
+                    @click="switchModeActionTab('ask')"
+                  >
+                    <MessageSquarePlus class="h-3 w-3" />
+                    {{ t("ai.modes.ask") }}
+                  </button>
+                  <button
+                    type="button"
+                    class="flex-1 flex items-center justify-center gap-1.5 rounded-sm px-2 py-1 text-xs"
+                    :class="assistantMode === 'agent' ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted'"
+                    @click="switchModeActionTab('agent')"
+                  >
+                    <Bot class="h-3 w-3" />
+                    {{ t("ai.modes.agent") }}
+                  </button>
+                </div>
+                <template v-if="showActionButtons">
+                  <div class="border-t my-1" />
+                  <!-- Action list -->
+                  <div class="max-h-56 overflow-auto">
+                    <button v-for="button in actionButtons" :key="button.action" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs" :class="activeAction === button.action ? 'bg-accent' : 'hover:bg-muted'" @click="selectModeActionItem(button.action)">
+                      <component :is="button.icon" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span class="flex-1 text-left">{{ t(button.key) }}</span>
+                      <Check v-if="activeAction === button.action" class="h-3.5 w-3.5 shrink-0" />
+                    </button>
+                  </div>
+                </template>
+              </PopoverContent>
+            </Popover>
             <span class="min-w-0 flex-1" />
-            <template v-if="settings.isConfigured()">
+            <template v-if="settings.aiConfigs.length > 0">
               <!-- Combined provider + model selector -->
               <Popover v-model:open="providerSelectorOpen">
                 <PopoverTrigger as-child>
                   <button type="button" class="min-w-0 flex shrink items-center gap-1.5 max-w-[220px] rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground">
-                    <AiProviderLogo :provider="settings.aiConfig.provider" :label="AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.label ?? settings.aiConfig.provider" :icon-slug="AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.iconSlug" class="h-3 w-3 shrink-0" />
-                    <span class="min-w-0 truncate">{{ modelLoading ? t("ai.loadingModels") : settings.aiConfig.model }}</span>
+                    <AiProviderLogo
+                      :provider="activeFullConfig?.provider ?? 'claude'"
+                      :label="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.label ?? activeFullConfig?.provider ?? 'claude'"
+                      :icon-slug="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.iconSlug"
+                      class="h-3 w-3 shrink-0"
+                    />
+                    <span class="min-w-0 truncate">{{ activeFullConfig?.model || t("ai.selectModel") }}</span>
                     <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                   </button>
                 </PopoverTrigger>
-                <PopoverContent align="end" class="w-72 gap-0 p-1.5" @open-auto-focus.prevent>
-                  <!-- Configured providers section -->
-                  <template v-if="configuredProviders.length">
-                    <p class="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{{ t("ai.switchProvider") }}</p>
-                    <button v-for="p in configuredProviders" :key="p" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground" @click="handleProviderSwitch(p)">
-                      <AiProviderLogo :provider="p" :label="AI_PROVIDER_PRESETS[p]?.label ?? p" :icon-slug="AI_PROVIDER_PRESETS[p]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
-                      <span class="font-medium">{{ AI_PROVIDER_PRESETS[p]?.label ?? p }}</span>
-                      <span class="ml-auto min-w-0 truncate text-[11px] text-muted-foreground">{{ settings.aiProviderConfigs[p]?.model }}</span>
-                    </button>
-                    <div class="my-1 border-t" />
-                  </template>
-                  <!-- Model list for current provider -->
-                  <p class="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                    {{ AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.label ?? settings.aiConfig.provider }}
-                  </p>
-                  <SearchableSelect
-                    :model-value="settings.aiConfig.model"
-                    :options="modelOptionIds"
-                    :placeholder="t('ai.browseModels')"
-                    :search-placeholder="t('ai.searchModels')"
-                    :empty-text="t('ai.modelListHint')"
-                    :loading-text="t('ai.loadingModels')"
-                    :loading="modelLoading"
-                    :display-name="displayModelName"
-                    trigger-class="w-full max-w-full justify-start rounded-sm px-2 py-1.5 text-xs text-foreground hover:bg-accent"
-                    content-class="w-72"
-                    item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
-                    @update:model-value="handleModelSelect"
-                    @update:open="(open: boolean) => open && fetchModelOptions()"
-                  >
-                    <template #trigger-label="{ label, loading }">
-                      <AiProviderLogo :provider="settings.aiConfig.provider" :label="AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.label ?? settings.aiConfig.provider" :icon-slug="AI_PROVIDER_PRESETS[settings.aiConfig.provider]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
-                      <span class="min-w-0 truncate">{{ loading ? t("ai.loadingModels") : label }}</span>
+                <PopoverContent align="end" class="max-h-(--reka-popover-content-available-height) w-80 gap-0 overflow-y-auto p-1.5" @open-auto-focus.prevent>
+                  <div class="relative px-1 pb-1">
+                    <Search class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <input v-model="modelSearchQuery" type="text" :placeholder="t('ai.searchModels')" class="w-full rounded-sm border bg-background py-1.5 pl-7 pr-2 text-xs outline-none focus:ring-1 focus:ring-primary" @click.stop />
+                  </div>
+                  <div class="max-h-80 overflow-auto">
+                    <template v-for="config in configuredProviders" :key="config.id">
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted"
+                        :class="config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : 'text-foreground'"
+                        :aria-expanded="!isModelConfigCollapsed(config.id)"
+                        @click="toggleModelConfig(config.id)"
+                      >
+                        <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': !isModelConfigCollapsed(config.id) }" />
+                        <AiProviderLogo :provider="config.provider" :label="AI_PROVIDER_PRESETS[config.provider]?.label ?? config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
+                        <span class="min-w-0 flex-1 truncate font-medium">{{ config.name }}</span>
+                        <Loader2 v-if="getModelCatalog(config.id).status === 'loading'" class="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+                        <span v-if="config.isDefault" class="ml-auto text-[10px] text-muted-foreground">{{ t("ai.default") }}</span>
+                      </button>
+                      <div v-if="!isModelConfigCollapsed(config.id)">
+                        <div v-if="getModelCatalog(config.id).status === 'loading' && !getModelsForConfig(config.id).length" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                          <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                          {{ t("ai.loadingModels") }}
+                        </div>
+                        <div v-else-if="getModelCatalog(config.id).status === 'error' && !getModelsForConfig(config.id).length" class="space-y-1 px-2 py-2 text-xs text-muted-foreground">
+                          <div class="truncate" :title="getModelCatalog(config.id).error">{{ t("ai.modelLoadFailed") }}</div>
+                          <button type="button" class="text-primary hover:underline" @click="loadModels(config, true)">{{ t("ai.retry") }}</button>
+                        </div>
+                        <div v-else-if="getModelCatalog(config.id).status === 'ready' && !getConfigModelOptions(config).length" class="px-2 py-2 text-xs text-muted-foreground">
+                          {{ modelSearchQuery.trim() ? t("ai.noModelMatch") : t("ai.noModels") }}
+                        </div>
+                        <template v-if="getConfigModelOptions(config).length">
+                          <button
+                            v-for="model in getConfigModelOptions(config)"
+                            :key="model.id"
+                            type="button"
+                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                            :class="model.id === settings.activeModel?.modelId && config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : ''"
+                            @click="handleModelSelect(config.id, model.id)"
+                          >
+                            <span class="min-w-0 flex-1 truncate">
+                              {{ model.displayName || model.id }}
+                              <span v-if="model.displayName && model.displayName !== model.id" class="ml-1 text-[10px] text-muted-foreground">{{ model.id }}</span>
+                            </span>
+                            <Check v-if="model.id === settings.activeModel?.modelId && config.id === settings.activeModel?.configId" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                          </button>
+                        </template>
+                        <div v-if="getModelCatalog(config.id).status === 'error' && getModelsForConfig(config.id).length" class="flex items-center justify-between gap-2 px-2 py-1 text-[10px] text-muted-foreground">
+                          <span class="truncate" :title="getModelCatalog(config.id).error">{{ t("ai.modelLoadFailed") }}</span>
+                          <button type="button" class="shrink-0 text-primary hover:underline" @click="loadModels(config, true)">{{ t("ai.retry") }}</button>
+                        </div>
+                        <form v-if="manualModelConfigId === config.id" class="flex items-center gap-1 px-2 py-1" @submit.prevent="applyManualModel(config.id)">
+                          <input v-model="manualModelId" data-manual-model-input type="text" :placeholder="t('ai.manualModelPlaceholder')" class="min-w-0 flex-1 rounded-sm border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary" @click.stop />
+                          <Button type="submit" size="sm" class="h-6 px-2 text-[10px]" :disabled="!manualModelId.trim()">{{ t("common.confirm") }}</Button>
+                        </form>
+                        <button v-else type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" @click="startManualModel(config.id)">
+                          <Pencil class="h-3 w-3" />
+                          {{ t("ai.manualModel") }}
+                        </button>
+                      </div>
+                      <div class="my-1 border-t" />
                     </template>
-                    <template #option-label="{ option, label }">
-                      <span class="flex min-w-0 flex-col leading-tight">
-                        <span class="truncate">{{ modelOptionPresentation(option, label).primary }}</span>
-                        <span v-if="modelOptionSecondary(option, label)" class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ modelOptionSecondary(option, label) }}</span>
-                      </span>
-                    </template>
-                  </SearchableSelect>
+                  </div>
+                  <div v-if="settings.activeModel" class="border-t pt-1">
+                    <Popover v-model:open="effortMenuOpen">
+                      <PopoverAnchor as-child>
+                        <button
+                          type="button"
+                          class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
+                          :aria-expanded="effortMenuOpen"
+                          aria-haspopup="menu"
+                          @mouseenter="openEffortMenu"
+                          @mouseleave="scheduleEffortMenuClose"
+                          @focus="openEffortMenu"
+                          @click.stop="openEffortMenu"
+                        >
+                          <ChevronLeft class="h-3.5 w-3.5 shrink-0" />
+                          <span>{{ t("ai.effort") }}</span>
+                          <span class="ml-auto max-w-[160px] truncate text-muted-foreground">{{ effortSelectionLabel(settings.activeEffort) }}</span>
+                        </button>
+                      </PopoverAnchor>
+                      <PopoverContent
+                        side="left"
+                        align="end"
+                        :side-offset="6"
+                        :collision-padding="8"
+                        class="max-h-(--reka-popover-content-available-height) w-72 gap-1 overflow-y-auto p-2"
+                        @mouseenter="openEffortMenu"
+                        @mouseleave="scheduleEffortMenuClose"
+                        @open-auto-focus.prevent
+                        @close-auto-focus.prevent
+                        @pointerdown.stop
+                        @click.stop
+                        @keydown.stop
+                      >
+                        <button
+                          type="button"
+                          class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                          :class="!settings.activeEffort || settings.activeEffort.kind === 'providerDefault' ? 'bg-accent text-accent-foreground' : ''"
+                          @click="selectEffort({ kind: 'providerDefault' })"
+                        >
+                          <span class="flex-1">{{ t("ai.providerDefault") }}</span>
+                          <Check v-if="!settings.activeEffort || settings.activeEffort.kind === 'providerDefault'" class="h-3.5 w-3.5 text-primary" />
+                        </button>
+                        <div v-if="activeEffortEntry?.status === 'loading'" class="flex items-center gap-2 py-2 text-xs text-muted-foreground">
+                          <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                          {{ t("ai.loadingEffort") }}
+                        </div>
+                        <div v-else-if="activeEffortEntry?.status === 'error'" class="flex items-center justify-between gap-2 py-2 text-xs text-muted-foreground">
+                          <span class="truncate" :title="activeEffortEntry.error">{{ t("ai.effortLoadFailed") }}</span>
+                          <button type="button" class="shrink-0 text-primary hover:underline" @click="retryActiveEffort">
+                            {{ t("ai.retry") }}
+                          </button>
+                        </div>
+                        <template v-else-if="activeEffortCapability?.kind === 'enum'">
+                          <button
+                            v-for="option in activeEffortCapability.options"
+                            :key="option.id"
+                            type="button"
+                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                            :class="effortSelectionEquals(settings.activeEffort, option.selection) ? 'bg-accent text-accent-foreground' : ''"
+                            @click="selectEffortOption(option)"
+                          >
+                            <span class="flex-1">{{ option.label }}</span>
+                            <Check v-if="effortSelectionEquals(settings.activeEffort, option.selection)" class="h-3.5 w-3.5 text-primary" />
+                          </button>
+                        </template>
+                        <template v-else-if="activeEffortCapability?.kind === 'integer'">
+                          <button
+                            v-for="option in activeEffortCapability.specialValues"
+                            :key="option.id"
+                            type="button"
+                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                            :class="effortSelectionEquals(settings.activeEffort, option.selection) ? 'bg-accent text-accent-foreground' : ''"
+                            @click="selectEffortOption(option)"
+                          >
+                            <span class="flex-1">{{ option.label }}</span>
+                            <Check v-if="effortSelectionEquals(settings.activeEffort, option.selection)" class="h-3.5 w-3.5 text-primary" />
+                          </button>
+                          <div class="flex items-center gap-2 py-1">
+                            <input v-model.number="effortIntegerValue" type="range" class="min-w-0 flex-1" :min="activeEffortCapability.min" :max="activeEffortCapability.max" :step="activeEffortCapability.step" @change="commitIntegerEffort(activeEffortCapability)" />
+                            <input
+                              v-model.number="effortIntegerValue"
+                              type="number"
+                              class="w-20 rounded-sm border bg-background px-2 py-1 text-xs"
+                              :min="activeEffortCapability.min"
+                              :max="activeEffortCapability.max"
+                              :step="activeEffortCapability.step"
+                              @change="commitIntegerEffort(activeEffortCapability)"
+                              @click.stop
+                            />
+                          </div>
+                        </template>
+                        <template v-else-if="activeEffortCapability?.kind === 'boolean'">
+                          <button type="button" class="flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent" @click="selectEffort({ kind: 'boolean', value: true })">
+                            <span class="flex-1 text-left">{{ t("ai.effortEnabled") }}</span>
+                            <Check v-if="settings.activeEffort?.kind === 'boolean' && settings.activeEffort.value" class="h-3.5 w-3.5 text-primary" />
+                          </button>
+                          <button type="button" class="flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent" @click="selectEffort({ kind: 'boolean', value: false })">
+                            <span class="flex-1 text-left">{{ t("ai.effortDisabled") }}</span>
+                            <Check v-if="settings.activeEffort?.kind === 'boolean' && !settings.activeEffort.value" class="h-3.5 w-3.5 text-primary" />
+                          </button>
+                        </template>
+                        <form v-else-if="activeEffortCapability?.kind === 'freeText'" class="flex items-center gap-1 py-1" @submit.prevent="commitTextEffort">
+                          <input
+                            v-model="effortTextValue"
+                            type="text"
+                            maxlength="64"
+                            :placeholder="activeEffortCapability.placeholder || t('ai.customEffortPlaceholder')"
+                            class="min-w-0 flex-1 rounded-sm border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
+                            @click.stop
+                            @blur="commitTextEffort"
+                          />
+                          <Button type="submit" size="sm" class="h-6 px-2 text-[10px]">{{ t("common.confirm") }}</Button>
+                        </form>
+                        <div v-else-if="activeEffortCapability?.kind === 'unsupported'" class="px-2 py-2 text-xs text-muted-foreground">
+                          {{ t("ai.effortUnsupported") }}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
                 </PopoverContent>
               </Popover>
             </template>
@@ -2217,24 +2795,24 @@ async function openExternalUrl(url: string) {
   font-weight: 600;
 }
 .ai-markdown :deep(a) {
-  color: hsl(var(--primary));
+  color: var(--primary);
   text-decoration: underline;
 }
 .ai-markdown :deep(blockquote) {
-  border-left: 2px solid hsl(var(--muted-foreground) / 0.3);
+  border-left: 2px solid color-mix(in srgb, var(--muted-foreground) 30%, transparent);
   padding-left: 0.75em;
   margin: 0.3em 0;
-  color: hsl(var(--muted-foreground));
+  color: var(--muted-foreground);
 }
 .ai-markdown :deep(code) {
   border-radius: 0.25rem;
-  background: hsl(var(--muted));
+  background: var(--muted);
   padding: 0.125rem 0.375rem;
   font-size: 11px;
   font-family: ui-monospace, monospace;
 }
 .ai-markdown :deep(pre) {
-  background: hsl(var(--muted));
+  background: var(--muted);
   border-radius: 0.375rem;
   padding: 0.5em 0.75em;
   margin: 0.3em 0;
@@ -2257,7 +2835,7 @@ async function openExternalUrl(url: string) {
   max-width: 100%;
   margin: 0.3em 0;
   border-radius: 0.375rem;
-  border: 1px solid hsl(var(--border));
+  border: 1px solid var(--border);
 }
 .ai-markdown :deep(.ai-markdown-table-wrap table) {
   border: none;
@@ -2265,14 +2843,14 @@ async function openExternalUrl(url: string) {
 }
 .ai-markdown :deep(th),
 .ai-markdown :deep(td) {
-  border: 1px solid hsl(var(--border));
+  border: 1px solid var(--border);
   padding: 0.25em 0.5em;
   text-align: left;
   white-space: nowrap;
 }
 .ai-markdown :deep(th) {
   font-weight: 600;
-  background: hsl(var(--muted));
+  background: var(--muted);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -2289,11 +2867,11 @@ async function openExternalUrl(url: string) {
   height: 4px;
   width: 100%;
   cursor: ns-resize;
-  background-color: hsl(var(--border));
+  background-color: var(--border);
   transition: background-color 0.15s ease;
 }
 
 .resize-handle:hover {
-  background-color: hsl(var(--foreground) / 0.2);
+  background-color: color-mix(in srgb, var(--foreground) 20%, transparent);
 }
 </style>

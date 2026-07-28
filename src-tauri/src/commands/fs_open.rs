@@ -63,7 +63,7 @@ fn validate_path(raw: &str) -> Result<PathBuf, String> {
         return Err(format!("path is not absolute: {expanded}"));
     }
     if !path.exists() {
-        return Err(format!("文件不存在: {expanded}"));
+        return Err(format!("file does not exist: {expanded}"));
     }
     Ok(path)
 }
@@ -80,6 +80,43 @@ pub async fn reveal_path_in_file_manager(path: String) -> Result<(), String> {
 pub async fn is_sqlite_database_file(path: String) -> Result<bool, String> {
     let resolved = validate_path(&path)?;
     path_has_sqlite_header(&resolved)
+}
+
+fn validate_database_backup_file(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("backup file path is empty".to_string());
+    }
+
+    let expanded = expand_tilde(trimmed);
+    let path = PathBuf::from(&expanded);
+    if !path.is_absolute() {
+        return Err(format!("backup file path is not absolute: {expanded}"));
+    }
+    if path.extension().and_then(|extension| extension.to_str()).map(|extension| extension.eq_ignore_ascii_case("sql"))
+        != Some(true)
+    {
+        return Err(format!("backup file must use the .sql extension: {expanded}"));
+    }
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    if !file_name.starts_with("dbx-backup__") {
+        return Err(format!("backup file name is not managed by DBX: {expanded}"));
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn delete_database_backup_files(paths: Vec<String>) -> Result<usize, String> {
+    let resolved = paths.iter().map(|path| validate_database_backup_file(path)).collect::<Result<Vec<_>, _>>()?;
+    let mut deleted = 0;
+    for path in resolved {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => deleted += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to delete backup file {}: {error}", path.display())),
+        }
+    }
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -114,7 +151,7 @@ mod tests {
             "/__dbx_definitely_missing__/foo.sqlite".to_string()
         };
         let err = validate_path(&probe).unwrap_err();
-        assert!(err.contains("文件不存在"));
+        assert!(err.contains("file does not exist"));
     }
 
     #[test]
@@ -125,6 +162,17 @@ mod tests {
         let dir_str = dir.to_string_lossy().to_string();
         let resolved = validate_path(&dir_str).expect("temp dir should validate");
         assert_eq!(resolved, dir);
+    }
+
+    #[test]
+    fn database_backup_file_requires_absolute_sql_path() {
+        assert!(validate_database_backup_file("relative/backup.sql").is_err());
+        let invalid_extension = if cfg!(windows) { "C:/tmp/backup.txt" } else { "/tmp/backup.txt" };
+        assert!(validate_database_backup_file(invalid_extension).is_err());
+        let unmanaged = if cfg!(windows) { "C:/tmp/backup.sql" } else { "/tmp/backup.sql" };
+        assert!(validate_database_backup_file(unmanaged).is_err());
+        let valid = if cfg!(windows) { "C:/tmp/dbx-backup__nightly.SQL" } else { "/tmp/dbx-backup__nightly.SQL" };
+        assert!(validate_database_backup_file(valid).is_ok());
     }
 
     #[test]

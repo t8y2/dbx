@@ -2,10 +2,12 @@ import type { Theme } from "@tauri-apps/api/window";
 
 export const APP_THEME_STORAGE_KEY = "dbx-theme";
 export const APP_THEME_PALETTE_STORAGE_KEY = "dbx-theme-palette";
+export const APP_CORNER_STYLE_STORAGE_KEY = "dbx-corner-style";
 
 export type AppThemeMode = "light" | "dark" | "system";
 export type AppThemeAppearance = "light" | "dark";
 export type AppThemePalette = "pearl" | "mist" | "graphite" | "cobalt" | "sage" | "amber" | "blush" | "vscode" | "idea" | "xcode" | "jetbrains" | "cursor" | "claude";
+export type AppCornerStyle = "none" | "small" | "large";
 
 export type AppThemePaletteOption = {
   value: AppThemePalette;
@@ -43,6 +45,11 @@ export function normalizeAppThemeMode(value: string | null): AppThemeMode {
 export function normalizeAppThemePalette(value: string | null): AppThemePalette {
   if (value === "mist" || value === "graphite" || value === "cobalt" || value === "sage" || value === "amber" || value === "blush" || value === "vscode" || value === "idea" || value === "xcode" || value === "jetbrains" || value === "cursor" || value === "claude" || value === "pearl") return value;
   return "pearl";
+}
+
+export function normalizeAppCornerStyle(value: string | null): AppCornerStyle {
+  if (value === "none" || value === "small") return value;
+  return "large";
 }
 
 export function getAppThemePaletteClass(palette: AppThemePalette): string | null {

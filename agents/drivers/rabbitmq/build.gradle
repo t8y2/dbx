@@ -1,0 +1,12 @@
+dependencies {
+    implementation 'com.google.code.gson:gson:2.12.1'
+    implementation 'com.rabbitmq:amqp-client:5.21.0'
+    runtimeOnly 'org.slf4j:slf4j-simple:1.7.36'
+}
+
+tasks.named('shadowJar') {
+    mergeServiceFiles()
+    manifest {
+        attributes('Agent-Label': 'RabbitMQ', 'Main-Class': 'com.dbx.agent.rabbitmq.RabbitMqAgent')
+    }
+}

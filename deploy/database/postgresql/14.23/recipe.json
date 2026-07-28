@@ -1,0 +1,13 @@
+{
+  "database": "postgresql",
+  "name": "PostgreSQL",
+  "version": "14.23",
+  "displayVersion": "14.23",
+  "image": "docker.cnb.cool/znb/images/postgres:14.23",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "service": "database",
+  "defaultPort": 5432,
+  "connection": { "host": "127.0.0.1", "port": 5433, "username": "postgres", "password": "123456", "database": "dbx" },
+  "shell": ["env", "PGPASSWORD=${DB_PASSWORD}", "psql", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres", "-d", "dbx"],
+  "smoke": { "steps": [{ "name": "query initialized row over TCP", "command": ["env", "PGPASSWORD=${DB_PASSWORD}", "psql", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres", "-d", "dbx", "-Atc", "SELECT note FROM dbx_smoke WHERE id=1"], "expect": "DBX smoke" }] }
+}

@@ -14,8 +14,16 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 final class ZooKeeperAgentTest {
     @AfterEach
@@ -134,6 +142,75 @@ final class ZooKeeperAgentTest {
                 "{\"connection\":{\"connect_string\":\"" + server.getConnectString() + "\"}}"
             ));
             Assertions.assertTrue(test.get("ok").getAsBoolean());
+        }
+    }
+
+    @Test
+    void defaultTimeoutAllowsSessionEstablishmentAfterFiveSeconds() throws Exception {
+        try (TestingServer server = new TestingServer();
+             DelayedTcpProxy proxy = new DelayedTcpProxy(server.getConnectString(), 5500)) {
+            long startedAt = System.nanoTime();
+            JsonObject connect = result(request(
+                1,
+                "connect",
+                "{\"connection\":{\"connect_string\":\"" + proxy.getConnectString() + "\"}}"
+            ));
+            long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+
+            Assertions.assertTrue(connect.get("ok").getAsBoolean());
+            Assertions.assertTrue(elapsedMs >= 5000, "expected delayed handshake, took " + elapsedMs + "ms");
+        }
+    }
+
+    @Test
+    void connectFailsFastWhenAllServersAreUnreachable() {
+        long startedAt = System.nanoTime();
+        JsonObject error = error(request(
+            1,
+            "connect",
+            "{\"connection\":{\"connect_string\":\"127.0.0.1:1\",\"connection_timeout_ms\":15000}}"
+        ));
+        long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;
+
+        Assertions.assertTrue(
+            error.get("message").getAsString().contains("No reachable ZooKeeper server"),
+            "expected fast unreachable error, got: " + error.get("message").getAsString()
+        );
+        Assertions.assertTrue(elapsedMs < 4000, "expected fast failure, took " + elapsedMs + "ms");
+    }
+
+    @Test
+    void connectUsesReachableServerWithoutDroppingEnsembleMembers() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            JsonObject connect = result(request(
+                1,
+                "connect",
+                "{\"connection\":{\"connect_string\":\"127.0.0.1:1," + server.getConnectString() + "\"}}"
+            ));
+            Assertions.assertTrue(connect.get("ok").getAsBoolean());
+
+            JsonObject get = result(request(2, "kv_get", "{\"key\":\"/\"}"));
+            Assertions.assertTrue(get.get("found").getAsBoolean());
+        }
+    }
+
+    @Test
+    void reachableConnectStringPreservesFullEnsembleAndChroot() throws Exception {
+        try (TestingServer server = new TestingServer()) {
+            String alive = server.getConnectString();
+            String ensemble = "127.0.0.1:1," + alive + "/app";
+
+            Assertions.assertEquals(
+                ensemble,
+                ZooKeeperAgent.reachableConnectString(ensemble, 1000)
+            );
+            Assertions.assertEquals(alive, ZooKeeperAgent.reachableConnectString(alive, 1000));
+
+            IllegalStateException error = Assertions.assertThrows(
+                IllegalStateException.class,
+                () -> ZooKeeperAgent.reachableConnectString("127.0.0.1:1/app", 1000)
+            );
+            Assertions.assertTrue(error.getMessage().contains("No reachable ZooKeeper server"));
         }
     }
 
@@ -622,5 +699,88 @@ final class ZooKeeperAgentTest {
         }
         Assertions.fail("expected listed row for " + key);
         return new JsonObject();
+    }
+
+    private static final class DelayedTcpProxy implements AutoCloseable {
+        private final ServerSocket listener;
+        private final InetSocketAddress target;
+        private final long delayMs;
+        private final ExecutorService executor;
+        private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
+
+        private DelayedTcpProxy(String targetConnectString, long delayMs) throws IOException {
+            this.listener = new ServerSocket(0);
+            this.target = ZooKeeperAgent.parseEndpoint(targetConnectString);
+            this.delayMs = delayMs;
+            this.executor = Executors.newCachedThreadPool(task -> {
+                Thread thread = new Thread(task, "dbx-zookeeper-delayed-proxy");
+                thread.setDaemon(true);
+                return thread;
+            });
+            executor.submit(this::acceptConnections);
+        }
+
+        private String getConnectString() {
+            return "127.0.0.1:" + listener.getLocalPort();
+        }
+
+        private void acceptConnections() {
+            while (!listener.isClosed()) {
+                try {
+                    Socket client = listener.accept();
+                    sockets.add(client);
+                    executor.submit(() -> forwardAfterDelay(client));
+                } catch (IOException error) {
+                    if (!listener.isClosed()) {
+                        throw new IllegalStateException("Delayed proxy failed to accept a connection", error);
+                    }
+                }
+            }
+        }
+
+        private void forwardAfterDelay(Socket client) {
+            try {
+                Thread.sleep(delayMs);
+                Socket server = new Socket();
+                sockets.add(server);
+                server.connect(target);
+                executor.submit(() -> copyUntilClosed(client, server));
+                copyUntilClosed(server, client);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                closeSocket(client);
+            } catch (IOException error) {
+                closeSocket(client);
+            }
+        }
+
+        private void copyUntilClosed(Socket source, Socket destination) {
+            try {
+                source.getInputStream().transferTo(destination.getOutputStream());
+            } catch (IOException ignored) {
+                // Closing either side is expected when a probe or client disconnects.
+            } finally {
+                closeSocket(source);
+                closeSocket(destination);
+            }
+        }
+
+        private void closeSocket(Socket socket) {
+            sockets.remove(socket);
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+                // Best effort cleanup for test sockets.
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            listener.close();
+            for (Socket socket : sockets) {
+                closeSocket(socket);
+            }
+            executor.shutdownNow();
+        }
     }
 }

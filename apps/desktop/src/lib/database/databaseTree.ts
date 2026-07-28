@@ -7,8 +7,12 @@ export function shouldIncludeDefaultDatabaseNode(connection: Pick<ConnectionConf
   return connection?.db_type === "mysql" && databases.some((database) => !database.name.trim());
 }
 
+export function compareSidebarNames(left: string, right: string): number {
+  return sidebarNameCollator.compare(left, right);
+}
+
 export function sortSidebarNames(names: readonly string[]): string[] {
-  return [...names].sort((left, right) => sidebarNameCollator.compare(left, right));
+  return [...names].sort(compareSidebarNames);
 }
 
 export function sortSidebarDatabases(databases: readonly DatabaseInfo[]): DatabaseInfo[] {
@@ -17,8 +21,8 @@ export function sortSidebarDatabases(databases: readonly DatabaseInfo[]): Databa
 
 export function buildDatabaseTreeNodes(connectionId: string, databases: DatabaseInfo[], options: { includeDefaultWhenEmpty?: boolean } = {}): TreeNode[] {
   const nodes = sortSidebarDatabases(databases).flatMap((db) => {
-    const name = db.name.trim();
-    if (!name) return [];
+    const name = db.name;
+    if (!name.trim()) return [];
     return [
       {
         id: `${connectionId}:${name}`,
@@ -66,8 +70,8 @@ export function buildDuckDbConnectionTreeNodes(connectionId: string, databases: 
   });
 
   const attachedCatalogNodes = sortSidebarDatabases(databases).flatMap((db) => {
-    const name = db.name.trim();
-    if (!name || name === "main") return [];
+    const name = db.name;
+    if (!name.trim() || name === "main") return [];
     return [
       {
         id: `${connectionId}:${name}`,

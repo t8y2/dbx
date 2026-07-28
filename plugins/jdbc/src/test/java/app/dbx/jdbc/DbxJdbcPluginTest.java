@@ -19,6 +19,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
@@ -28,6 +29,7 @@ import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 final class DbxJdbcPluginTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -79,6 +81,87 @@ final class DbxJdbcPluginTest {
             """);
 
         assertEquals("linkage boom", response.path("error").path("message").asText());
+    }
+
+    @Test
+    void reportsInformativeOuterMessageWhenRootCauseHasNoMessage() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("throwableMessage", Throwable.class);
+        method.setAccessible(true);
+        RuntimeException root = new RuntimeException();
+        SQLException outer = new SQLException("MCP initialization failed: Cannot run program npx", root);
+
+        assertEquals("MCP initialization failed: Cannot run program npx", method.invoke(null, outer));
+    }
+
+    @Test
+    void reportsActionableMessageForMissingJdbcxMcpRuntime() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("throwableMessage", Throwable.class);
+        method.setAccessible(true);
+        SQLException outer = new SQLException(new ClassNotFoundException("io.modelcontextprotocol.spec.McpError"));
+
+        assertEquals(
+            "Missing JDBCX MCP runtime class io.modelcontextprotocol.spec.McpError. "
+                + "Install io.github.jdbcx:io.modelcontextprotocol with the version required by the selected JDBCX runtime.",
+            method.invoke(null, outer)
+        );
+    }
+
+    @Test
+    void testConnectionAndConnectionInfoExposeH2Metadata() throws Exception {
+        JsonNode tested = request("testConnection", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        assertDatabaseInfo(tested.path("result").path("databaseInfo"));
+
+        request("connect", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        JsonNode connected = request("connectionInfo", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        assertDatabaseInfo(connected.path("result").path("databaseInfo"));
+    }
+
+    @Test
+    void databaseInfoKeepsSupportedFieldsWhenOneMetadataGetterFails() throws Exception {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DatabaseMetaData.class.getClassLoader(),
+            new Class<?>[]{DatabaseMetaData.class},
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getDatabaseProductName" -> "ExampleDB";
+                case "getDatabaseProductVersion" -> throw new SQLFeatureNotSupportedException("version unavailable");
+                case "storesLowerCaseIdentifiers" -> throw new UnsupportedOperationException("case unavailable");
+                case "storesUpperCaseIdentifiers" -> true;
+                case "storesMixedCaseQuotedIdentifiers" -> true;
+                case "getDriverName" -> "Example JDBC";
+                case "getDriverVersion" -> "1.2.3";
+                case "getJDBCMajorVersion" -> 4;
+                case "getJDBCMinorVersion" -> 2;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("databaseInfo", DatabaseMetaData.class);
+        method.setAccessible(true);
+
+        JsonNode info = MAPPER.valueToTree(method.invoke(null, metadata));
+
+        assertEquals("ExampleDB", info.path("productName").asText());
+        assertFalse(info.has("productVersion"));
+        assertEquals("upper", info.path("unquotedIdentifierCase").asText());
+        assertEquals("mixed", info.path("quotedIdentifierCase").asText());
+        assertEquals("Example JDBC", info.path("driverName").asText());
+        assertEquals("1.2.3", info.path("driverVersion").asText());
+        assertEquals("4.2", info.path("jdbcVersion").asText());
+    }
+
+    private static void assertDatabaseInfo(JsonNode info) {
+        assertEquals("H2", info.path("productName").asText());
+        assertFalse(info.path("productVersion").asText().isEmpty());
+        assertEquals("upper", info.path("unquotedIdentifierCase").asText());
+        assertFalse(info.has("quotedIdentifierCase"));
+        assertFalse(info.path("driverName").asText().isEmpty());
+        assertFalse(info.path("driverVersion").asText().isEmpty());
+        assertFalse(info.path("jdbcVersion").asText().isEmpty());
     }
 
     @Test
@@ -400,6 +483,215 @@ final class DbxJdbcPluginTest {
 
         assertEquals("45", properties.getProperty("loginTimeout"));
         assertEquals("45", properties.getProperty("connectTimeout"));
+    }
+
+    @Test
+    void mysqlConnectTimeoutSecondsAreMappedToMilliseconds() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyConnectTimeout", JsonNode.class, Properties.class);
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:mysql://ddb.example.test:6000/app",
+              "jdbc_driver_class": "com.mysql.cj.jdbc.Driver",
+              "connect_timeout_secs": 45
+            }
+            """);
+
+        method.invoke(null, connection, properties);
+
+        assertEquals("45", properties.getProperty("loginTimeout"));
+        assertEquals("45000", properties.getProperty("connectTimeout"));
+    }
+
+    @Test
+    void explicitJdbcUrlConnectTimeoutIsNotOverridden() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyConnectTimeout", JsonNode.class, Properties.class);
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:mysql://ddb.example.test:6000/app?connectTimeout=5000",
+              "connect_timeout_secs": 45
+            }
+            """);
+
+        method.invoke(null, connection, properties);
+
+        assertEquals("45", properties.getProperty("loginTimeout"));
+        assertFalse(properties.containsKey("connectTimeout"));
+    }
+
+    @Test
+    void mysqlPagedQueriesEnableConnectorCursorFetchingByDefault() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyPagedFetchProperties",
+            JsonNode.class,
+            String.class,
+            Properties.class
+        );
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:mysql://127.0.0.1:3306/app",
+              "jdbc_driver_class": "com.mysql.cj.jdbc.Driver"
+            }
+            """);
+
+        method.invoke(null, connection, "jdbc:mysql://127.0.0.1:3306/app", properties);
+
+        assertEquals("true", properties.getProperty("useCursorFetch"));
+    }
+
+    @Test
+    void mysqlPagedQueriesPreserveExplicitCursorFetchSetting() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyPagedFetchProperties",
+            JsonNode.class,
+            String.class,
+            Properties.class
+        );
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false"
+            }
+            """);
+
+        method.invoke(
+            null,
+            connection,
+            "jdbc:mysql://127.0.0.1:3306/app?useCursorFetch=false",
+            properties
+        );
+
+        assertFalse(properties.containsKey("useCursorFetch"));
+    }
+
+    @Test
+    void postgresPagedQueryUsesCursorTransactionAndRestoresAutoCommit() throws Exception {
+        Method begin = DbxJdbcPlugin.class.getDeclaredMethod(
+            "beginPagedQueryTransaction",
+            JsonNode.class,
+            Connection.class
+        );
+        Method create = DbxJdbcPlugin.class.getDeclaredMethod("createPagedQueryStatement", Connection.class);
+        Method restore = DbxJdbcPlugin.class.getDeclaredMethod(
+            "restorePagedQueryTransaction",
+            Connection.class,
+            boolean.class
+        );
+        begin.setAccessible(true);
+        create.setAccessible(true);
+        restore.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        Connection connection = pagedQueryConnection(calls, true);
+        JsonNode config = MAPPER.readTree("""
+            { "connection_string": "jdbc:postgresql://127.0.0.1:5432/app" }
+            """);
+
+        boolean restoreAutoCommit = (boolean) begin.invoke(null, config, connection);
+        create.invoke(null, connection);
+        restore.invoke(null, connection, restoreAutoCommit);
+
+        assertEquals(true, restoreAutoCommit);
+        assertEquals(
+            List.of(
+                "getAutoCommit",
+                "setAutoCommit:false",
+                "createStatement:" + ResultSet.TYPE_FORWARD_ONLY + ":" + ResultSet.CONCUR_READ_ONLY,
+                "rollback",
+                "setAutoCommit:true"
+            ),
+            calls
+        );
+    }
+
+    @Test
+    void postgresPagedQueryPreservesExistingManualTransaction() throws Exception {
+        Method begin = DbxJdbcPlugin.class.getDeclaredMethod(
+            "beginPagedQueryTransaction",
+            JsonNode.class,
+            Connection.class
+        );
+        Method restore = DbxJdbcPlugin.class.getDeclaredMethod(
+            "restorePagedQueryTransaction",
+            Connection.class,
+            boolean.class
+        );
+        begin.setAccessible(true);
+        restore.setAccessible(true);
+        List<String> calls = new ArrayList<>();
+        Connection connection = pagedQueryConnection(calls, false);
+        JsonNode config = MAPPER.readTree("""
+            { "jdbc_driver_class": "org.postgresql.Driver" }
+            """);
+
+        boolean restoreAutoCommit = (boolean) begin.invoke(null, config, connection);
+        restore.invoke(null, connection, restoreAutoCommit);
+
+        assertFalse(restoreAutoCommit);
+        assertEquals(List.of("getAutoCommit"), calls);
+    }
+
+    @Test
+    void jdbcxHighPrivilegeExtensionsAreDisabledByDefault() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyJdbcxExtensionSecurity",
+            JsonNode.class,
+            String.class,
+            Properties.class
+        );
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        method.invoke(null, MAPPER.createObjectNode(), "jdbcx:shell:mysql://127.0.0.1:3306/test", properties);
+
+        String whitelist = properties.getProperty("jdbcx.extension.whitelist");
+        assertEquals("help,var,version", whitelist);
+        assertFalse(whitelist.contains("shell"));
+        assertFalse(whitelist.contains("script"));
+        assertFalse(whitelist.contains("web"));
+        assertFalse(whitelist.contains("mcp"));
+    }
+
+    @Test
+    void jdbcxHighPrivilegeExtensionsRequireExplicitConnectionOptIn() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "applyJdbcxExtensionSecurity",
+            JsonNode.class,
+            String.class,
+            Properties.class
+        );
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        ObjectNode connection = MAPPER.createObjectNode();
+        connection.putArray("agent_java_options").add("-Ddbx.jdbcx.allowHighPrivilegeExtensions=true");
+
+        method.invoke(null, connection, "jdbcx:script:mysql://127.0.0.1:3306/test", properties);
+
+        assertFalse(properties.containsKey("jdbcx.extension.whitelist"));
+    }
+
+    @Test
+    void jdbcxHighPrivilegeExtensionChangeInvalidatesOnlyJdbcxConnections() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("connectionKey", JsonNode.class);
+        method.setAccessible(true);
+        ObjectNode jdbcxConnection = MAPPER.createObjectNode();
+        jdbcxConnection.put("connection_string", "jdbcx:mysql://127.0.0.1:3306/test");
+        String jdbcxDisabledKey = (String) method.invoke(null, jdbcxConnection);
+        jdbcxConnection.putArray("agent_java_options").add("-Ddbx.jdbcx.allowHighPrivilegeExtensions=true");
+        String jdbcxEnabledKey = (String) method.invoke(null, jdbcxConnection);
+
+        ObjectNode regularConnection = MAPPER.createObjectNode();
+        regularConnection.put("connection_string", "jdbc:mysql://127.0.0.1:3306/test");
+        String regularDefaultKey = (String) method.invoke(null, regularConnection);
+        regularConnection.putArray("agent_java_options").add("-Ddbx.jdbcx.allowHighPrivilegeExtensions=true");
+        String regularWithOptionKey = (String) method.invoke(null, regularConnection);
+
+        assertNotEquals(jdbcxDisabledKey, jdbcxEnabledKey);
+        assertEquals(regularDefaultKey, regularWithOptionKey);
     }
 
     @Test
@@ -921,6 +1213,115 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void kingbaseListTablesReusesCastSafeAgentDiscovery() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("kingbaseListTables", Connection.class, String.class, boolean.class);
+        method.setAccessible(true);
+        List<String> sql = new ArrayList<>();
+        ResultSet tables = rowsResultSet(
+            new String[] { "table_name", "table_type", "remarks" },
+            new Object[][] {
+                { "orders", "TABLE", "Order records" },
+                { "order_summary", "VIEW", null }
+            }
+        );
+
+        JsonNode result = (JsonNode) method.invoke(null, kingbaseTableConnection(sql, tables, false), "APP", false);
+
+        assertEquals("orders", result.path(0).path("name").asText());
+        assertEquals("TABLE", result.path(0).path("table_type").asText());
+        assertEquals("Order records", result.path(0).path("comment").asText());
+        assertEquals("VIEW", result.path(1).path("table_type").asText());
+        String discoverySql = sql.get(2);
+        assertEquals(true, discoverySql.contains("FROM sys_catalog.sys_class c"));
+        assertEquals(true, discoverySql.contains("FROM sys_catalog.sys_tables t"));
+        assertEquals(true, discoverySql.contains("FROM sys_catalog.sys_foreign_table ft"));
+        assertEquals(true, discoverySql.contains("FROM sys_catalog.sys_views"));
+        assertEquals(true, discoverySql.contains("FROM sys_catalog.sys_matviews"));
+        assertEquals(true, discoverySql.contains("CAST(c.relname AS varchar(256))"));
+        assertEquals(false, discoverySql.contains("relkind"));
+        assertEquals(false, discoverySql.contains("sys_freespace"));
+        assertEquals(false, discoverySql.contains("pg_relation_size_ex"));
+    }
+
+    @Test
+    void kingbaseCompatibilityListTablesAvoidsRelkind() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("kingbaseListTables", Connection.class, String.class, boolean.class);
+        method.setAccessible(true);
+        List<String> sql = new ArrayList<>();
+        ResultSet tables = rowsResultSet(
+            new String[] { "table_name", "table_type", "remarks" },
+            new Object[][] { { "orders", "BASE TABLE", null }, { "order_summary", "VIEW", null } }
+        );
+
+        JsonNode result = (JsonNode) method.invoke(null, kingbaseTableConnection(sql, tables, true), "APP", false);
+
+        assertEquals("TABLE", result.path(0).path("table_type").asText());
+        assertEquals("VIEW", result.path(1).path("table_type").asText());
+        assertEquals(true, sql.get(1).contains("LOWER(name) = 'database_mode'"));
+        String discoverySql = sql.get(2);
+        assertEquals(true, discoverySql.contains("FROM information_schema.tables"));
+        assertEquals(false, discoverySql.contains("relkind"));
+        assertEquals(false, discoverySql.contains("sys_freespace"));
+    }
+
+    @Test
+    void kingbasePostgresCatalogModePreservesMaterializedViews() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("kingbaseListTables", Connection.class, String.class, boolean.class);
+        method.setAccessible(true);
+        List<String> sql = new ArrayList<>();
+        ResultSet tables = rowsResultSet(
+            new String[] { "table_name", "table_type", "remarks" },
+            new Object[][] { { "orders", "TABLE", null }, { "order_summary", "MATERIALIZED_VIEW", "Cached orders" } }
+        );
+
+        JsonNode result = (JsonNode) method.invoke(null, kingbasePostgresTableConnection(sql, tables), "APP", false);
+
+        assertEquals("TABLE", result.path(0).path("table_type").asText());
+        assertEquals("MATERIALIZED_VIEW", result.path(1).path("table_type").asText());
+        assertEquals("SELECT 1 FROM sys_catalog.sys_namespace WHERE 1 = 0", sql.get(0));
+        assertEquals("SELECT 1 FROM pg_catalog.pg_namespace WHERE 1 = 0", sql.get(1));
+        String discoverySql = sql.get(2);
+        assertEquals(true, discoverySql.contains("FROM pg_catalog.pg_class c"));
+        assertEquals(true, discoverySql.contains("JOIN pg_catalog.pg_namespace n"));
+        assertEquals(true, discoverySql.contains("c.relkind IN ('r', 'p', 'v', 'm', 'f')"));
+    }
+
+    @Test
+    void kingbaseRegularTableDiscoveryExcludesCompositeTypesWithPositiveTableCatalog() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("kingbaseListTables", Connection.class, String.class, boolean.class);
+        method.setAccessible(true);
+        List<String> sql = new ArrayList<>();
+
+        JsonNode result = (JsonNode) method.invoke(null, kingbaseCompositeCatalogConnection(sql), "APP", false);
+
+        assertEquals(1, result.size());
+        assertEquals("orders", result.path(0).path("name").asText());
+        String discoverySql = sql.get(2);
+        assertEquals(true, discoverySql.contains("FROM sys_catalog.sys_tables t"));
+        assertEquals(true, discoverySql.contains("FROM sys_catalog.sys_foreign_table ft"));
+        assertEquals(false, discoverySql.contains("information_schema.tables"));
+        assertEquals(false, discoverySql.contains("sys_rewrite"));
+        assertEquals(false, discoverySql.contains("sys_index"));
+    }
+
+    @Test
+    void kingbaseEffectiveSchemaPreservesConnectionSchemaCase() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("kingbaseEffectiveSchema", Connection.class, String.class);
+        method.setAccessible(true);
+        Connection connection = (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getSchema" -> "CaseSensitiveSchema";
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals("CaseSensitiveSchema", method.invoke(null, connection, null));
+        assertEquals("ExplicitSchema", method.invoke(null, connection, "ExplicitSchema"));
+    }
+
+    @Test
     void columnIsNullablePrefersIsNullableStringWhenNullableCodeIsWrong() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("columnIsNullable", ResultSet.class);
         method.setAccessible(true);
@@ -1198,6 +1599,36 @@ final class DbxJdbcPluginTest {
         );
     }
 
+    private static Connection pagedQueryConnection(List<String> calls, boolean autoCommit) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getAutoCommit" -> {
+                    calls.add("getAutoCommit");
+                    yield autoCommit;
+                }
+                case "setAutoCommit" -> {
+                    calls.add("setAutoCommit:" + args[0]);
+                    yield null;
+                }
+                case "rollback" -> {
+                    calls.add("rollback");
+                    yield null;
+                }
+                case "createStatement" -> {
+                    if (args == null || args.length == 0) {
+                        calls.add("createStatement");
+                    } else {
+                        calls.add("createStatement:" + args[0] + ":" + args[1]);
+                    }
+                    yield recordingStatement(new ArrayList<>());
+                }
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
     private static ResultSet temporalResultSet(Object objectValue, Date dateValue) {
         return (ResultSet) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
@@ -1301,6 +1732,113 @@ final class DbxJdbcPluginTest {
                     yield statement(sql, index[0]++ == 0 ? primaryKeys : columns);
                 }
                 case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Connection kingbaseTableConnection(List<String> sql, ResultSet rs, boolean compatibilityMode) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "createStatement" -> kingbaseCatalogProbeStatement(sql, compatibilityMode);
+                case "prepareStatement" -> {
+                    sql.add(String.valueOf(args[0]));
+                    yield preparedStatement(rs);
+                }
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Connection kingbaseCompositeCatalogConnection(List<String> sql) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "createStatement" -> kingbaseCatalogProbeStatement(sql, false);
+                case "prepareStatement" -> {
+                    String preparedSql = String.valueOf(args[0]);
+                    sql.add(preparedSql);
+                    boolean positivelySelectsTables = preparedSql.contains("FROM sys_catalog.sys_tables t")
+                        && preparedSql.contains("FROM sys_catalog.sys_foreign_table ft");
+                    Object[][] rows = positivelySelectsTables
+                        ? new Object[][] { { "orders", "TABLE", null } }
+                        : new Object[][] { { "orders", "TABLE", null }, { "address_type", "TABLE", null } };
+                    yield preparedStatement(rowsResultSet(new String[] { "table_name", "table_type", "remarks" }, rows));
+                }
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Connection kingbasePostgresTableConnection(List<String> sql, ResultSet rs) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "createStatement" -> kingbasePostgresCatalogProbeStatement(sql);
+                case "prepareStatement" -> {
+                    sql.add(String.valueOf(args[0]));
+                    yield preparedStatement(rs);
+                }
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement kingbaseCatalogProbeStatement(List<String> sql, boolean compatibilityMode) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "executeQuery" -> {
+                    String query = String.valueOf(args[0]);
+                    sql.add(query);
+                    if (query.contains("sys_catalog.sys_namespace")) {
+                        yield rowsResultSet(new String[] { "exists" }, new Object[0][]);
+                    }
+                    if (query.contains("LOWER(name) = 'database_mode'")) {
+                        yield rowsResultSet(
+                            new String[] { "setting" },
+                            new Object[][] { { compatibilityMode ? "mysql" : "oracle" } }
+                        );
+                    }
+                    if (query.contains("LOWER(name) = 'sql_mode'")) {
+                        yield rowsResultSet(new String[] { "exists" }, new Object[0][]);
+                    }
+                    throw new SQLException("Unexpected Kingbase catalog probe: " + query);
+                }
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement kingbasePostgresCatalogProbeStatement(List<String> sql) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "executeQuery" -> {
+                    String query = String.valueOf(args[0]);
+                    sql.add(query);
+                    if (query.contains("sys_catalog.sys_namespace")) {
+                        throw new SQLException("relation does not exist: sys_catalog.sys_namespace");
+                    }
+                    if (query.contains("pg_catalog.pg_namespace")) {
+                        yield rowsResultSet(new String[] { "exists" }, new Object[0][]);
+                    }
+                    throw new SQLException("Unexpected Kingbase catalog probe: " + query);
+                }
                 case "close" -> null;
                 default -> defaultValue(method.getReturnType());
             }

@@ -219,6 +219,101 @@ class StandardJdbcMetadataTest {
     }
 
     @Test
+    void listTablesEscapesUnderscoreInHanaSysSchema() {
+        // HANA 的 _SYS_RT 等 schema 名含下划线，JDBC schemaPattern 把 _ 当作通配符，
+        // 若不转义会误匹配 _xSYSxRT 等其他 schema。HANA 驱动 getSearchStringEscape() 返回 "\\"。
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "RT_OBJECTS", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, profile, "", "_SYS_RT");
+
+        assertEquals(1, tables.size());
+        assertEquals("RT_OBJECTS", tables.get(0).getName());
+        // schema 第二个参数应转义为 _\_S\_Y\_S\_R\_T（HANA 转义符为反斜杠）
+        assertEquals("\\_SYS\\_RT", capturedArgs.get()[1]);
+    }
+
+    @Test
+    void listTablesEscapesPercentInQuotedSchema() {
+        // 被引号引用、含 % 的 schema（如 "SALES%2024"），% 是通配符，必须转义。
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "ORDERS_2024", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, profile, "", "SALES%2024");
+
+        assertEquals(1, tables.size());
+        assertEquals("ORDERS_2024", tables.get(0).getName());
+        assertEquals("SALES\\%2024", capturedArgs.get()[1]);
+    }
+
+    @Test
+    void listTablesLeavesPlainSchemaUntouched() {
+        // 普通 schema（无 _ 和 %）不应被转义，且仍作为 schemaPattern 传入。
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "ORDERS", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, profile, "", "SALES");
+
+        assertEquals(1, tables.size());
+        assertEquals("ORDERS", tables.get(0).getName());
+        assertEquals("SALES", capturedArgs.get()[1]);
+    }
+
+    @Test
+    void listTablesFallsBackWhenSearchEscapeUnavailable() {
+        // 驱动不支持 getSearchStringEscape() 时，schema 原样返回（不做转义），不抛异常。
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection(null, rows(
+            row("TABLE_NAME", "ORDERS", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, profile, "", "SALES");
+
+        assertEquals(1, tables.size());
+        assertEquals("SALES", capturedArgs.get()[1]);
+    }
+
+    private static Connection schemaEscapeConnection(String searchEscape, ResultSet tables, AtomicReference<Object[]> capturedArgs) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("getTables".equals(name)) {
+                    if (capturedArgs != null) {
+                        capturedArgs.set(args);
+                    }
+                    return tables;
+                }
+                if ("getTableTypes".equals(name)) {
+                    return rows(row("TABLE_TYPE", "TABLE"));
+                }
+                if ("getSearchStringEscape".equals(name)) {
+                    if (searchEscape == null) {
+                        throw new UnsupportedOperationException("escape unavailable");
+                    }
+                    return searchEscape;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
+    @Test
     void mapsColumnsWithPrimaryKeysAndLengths() {
         Connection conn = connection(
             rows(),

@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { formatShortcutDisplay, shortcutDisplayKeys } from "@/lib/editor/shortcutDisplay";
 
 describe("shortcut display", () => {
+  it("shows the default mouse modifier as Option on macOS and Alt elsewhere", () => {
+    expect(formatShortcutDisplay("Alt", "MacIntel")).toBe("⌥");
+    expect(formatShortcutDisplay("Alt", "Win32")).toBe("Alt");
+  });
+
   it("uses readable modifier labels on Windows", () => {
     expect(shortcutDisplayKeys("Shift+Alt+U", "Win32")).toEqual(["Shift", "Alt", "U"]);
   });
@@ -12,6 +17,16 @@ describe("shortcut display", () => {
 
   it("uses Apple platform glyphs on macOS", () => {
     expect(shortcutDisplayKeys("Mod+Alt+Enter", "MacIntel")).toEqual(["⌘", "⌥", "↵"]);
+  });
+
+  it("formats the close other tabs shortcut by platform", () => {
+    expect(formatShortcutDisplay("Alt+Mod+W", "MacIntel")).toBe("⌥ ⌘ W");
+    expect(formatShortcutDisplay("Shift+Alt+W", "Win32")).toBe("Shift + Alt + W");
+  });
+
+  it("formats the close tab shortcut by platform", () => {
+    expect(formatShortcutDisplay("Mod+W", "MacIntel")).toBe("⌘ W");
+    expect(formatShortcutDisplay("Mod+W", "Win32")).toBe("Ctrl + W");
   });
 
   it("formats shortcut pills with platform separators", () => {

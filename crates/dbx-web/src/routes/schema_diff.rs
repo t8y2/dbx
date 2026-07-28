@@ -12,6 +12,8 @@ pub struct GenerateSchemaSyncSqlRequest {
     pub database_type: dbx_core::models::connection::DatabaseType,
     pub target_schema: Option<String>,
     pub cascade_delete: Option<bool>,
+    pub source_dialect: Option<String>,
+    pub field_mappings: Option<Vec<dbx_core::schema_diff::FieldMapping>>,
 }
 
 pub async fn prepare_schema_diff(
@@ -30,5 +32,7 @@ pub async fn generate_schema_sync_sql(Json(req): Json<GenerateSchemaSyncSqlReque
         req.database_type,
         req.target_schema.as_deref(),
         req.cascade_delete.unwrap_or(false),
+        req.source_dialect.as_deref().and_then(dbx_core::sql_dialect::descriptor::DialectKind::from_label),
+        req.field_mappings.as_deref().unwrap_or(&[]),
     ))
 }

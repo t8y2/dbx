@@ -16,12 +16,75 @@ import {
   isMysqlEnumDataType,
   isSqlServerIdentityCompatibleDataType,
   mysqlEnumDataType,
+  parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
+  resolveInsertColumnIndex,
   restoreDamengLengthUnitsAfterSave,
   splitDataType,
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  it("hydrates Kingbase type parameters returned separately from the data type", () => {
+    const columns = createColumnDrafts(
+      [
+        {
+          name: "display_name",
+          data_type: "varchar",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          character_maximum_length: 255,
+        },
+        {
+          name: "amount",
+          data_type: "numeric",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          numeric_precision: 12,
+          numeric_scale: 2,
+        },
+        {
+          name: "attempts",
+          data_type: "integer",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          numeric_precision: 32,
+          numeric_scale: 0,
+        },
+        {
+          name: "code",
+          data_type: "character varying(64)",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+          character_maximum_length: 64,
+        },
+      ],
+      "kingbase",
+    );
+
+    expect(columns.map((column) => column.dataType)).toEqual(["varchar(255)", "numeric(12,2)", "integer", "character varying(64)"]);
+    expect(columns.map((column) => column.original?.data_type)).toEqual(["varchar(255)", "numeric(12,2)", "integer", "character varying(64)"]);
+    expect(dataTypeLengthInputValue("kingbase", columns[0]?.dataType ?? "")).toBe("255");
+  });
+
+  it("parses Kingbase SQLServer compatibility identity metadata", () => {
+    expect(parseExtraToColumnExtra("identity(10, 2)", "kingbase")).toEqual({
+      autoIncrement: true,
+      identity: { seed: 10, increment: 2 },
+    });
+    expect(parseExtraToColumnExtra("generated always as identity", "kingbase")).toEqual({
+      identity: { generation: "ALWAYS" },
+    });
+    expect(parseExtraToColumnExtra("identity(1,1)", "postgres")).toEqual({});
+  });
+
   it("keeps mysql unsigned attributes in the editable base type", () => {
     expect(splitDataType("int(11) unsigned")).toEqual({ baseType: "int unsigned", params: "11" });
     expect(splitDataType("bigint(20) unsigned zerofill")).toEqual({
@@ -236,6 +299,19 @@ describe("tableStructureEditorState", () => {
     expect(hasExistingColumnTypeChange([column])).toBe(false);
   });
 
+  it("inserts new columns after the selected row or appends when none is selected", () => {
+    const columns = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+    expect(resolveInsertColumnIndex(columns, null)).toBe(3);
+    expect(resolveInsertColumnIndex(columns, undefined)).toBe(3);
+    expect(resolveInsertColumnIndex(columns, "a")).toBe(1);
+    expect(resolveInsertColumnIndex(columns, "b")).toBe(2);
+    expect(resolveInsertColumnIndex(columns, "c")).toBe(3);
+    expect(resolveInsertColumnIndex(columns, "missing")).toBe(3);
+    expect(resolveInsertColumnIndex([], "a")).toBe(0);
+    expect(resolveInsertColumnIndex([{ id: "a", markedForDrop: true }, { id: "b" }], "a")).toBe(2);
+  });
+
   it("strips SQL Server metadata parentheses from editable defaults", () => {
     const drafts = createColumnDrafts(
       [
@@ -277,6 +353,115 @@ describe("tableStructureEditorState", () => {
 
     expect(drafts.map((draft) => draft.defaultValue)).toEqual(["''", "1", "sysdatetime()", "'prefix (internal)'"]);
     expect(drafts.map((draft) => draft.original?.column_default)).toEqual(["''", "1", "sysdatetime()", "'prefix (internal)'"]);
+  });
+
+  it("distinguishes MySQL empty string defaults from no default", () => {
+    const drafts = createColumnDrafts(
+      [
+        {
+          name: "empty_label",
+          data_type: "varchar(100)",
+          is_nullable: false,
+          column_default: "",
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "optional_label",
+          data_type: "varchar(100)",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "mysql",
+    );
+
+    expect(drafts.map((draft) => draft.defaultValue)).toEqual(["''", ""]);
+    expect(drafts.map((draft) => draft.original?.column_default)).toEqual(["''", null]);
+  });
+
+  it("preserves MySQL ordinary string and expression defaults", () => {
+    const drafts = createColumnDrafts(
+      [
+        {
+          name: "status",
+          data_type: "varchar(20)",
+          is_nullable: false,
+          column_default: "active",
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "created_at",
+          data_type: "timestamp",
+          is_nullable: false,
+          column_default: "CURRENT_TIMESTAMP",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "mysql",
+    );
+
+    expect(drafts.map((draft) => draft.defaultValue)).toEqual(["active", "CURRENT_TIMESTAMP"]);
+    expect(drafts.map((draft) => draft.original?.column_default)).toEqual(["active", "CURRENT_TIMESTAMP"]);
+  });
+
+  it("keeps a MySQL empty string default when renaming a column", () => {
+    const [column] = createColumnDrafts(
+      [
+        {
+          name: "old_name",
+          data_type: "varchar(100)",
+          is_nullable: false,
+          column_default: "",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "mysql",
+    );
+
+    column!.name = "new_name";
+
+    expect(column!.defaultValue).toBe("''");
+    expect(column!.original?.column_default).toBe("''");
+  });
+
+  it("retains Postgres and SQL Server default normalization", () => {
+    const [postgres] = createColumnDrafts(
+      [
+        {
+          name: "label",
+          data_type: "character varying(100)",
+          is_nullable: false,
+          column_default: "''::character varying",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "postgres",
+    );
+    const [sqlserver] = createColumnDrafts(
+      [
+        {
+          name: "label",
+          data_type: "nvarchar(100)",
+          is_nullable: false,
+          column_default: "('')",
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "sqlserver",
+    );
+
+    expect(postgres!.defaultValue).toBe("''");
+    expect(postgres!.original?.column_default).toBe("''");
+    expect(sqlserver!.defaultValue).toBe("''");
+    expect(sqlserver!.original?.column_default).toBe("''");
   });
 
   it("limits SQL Server identity columns to supported data types", () => {

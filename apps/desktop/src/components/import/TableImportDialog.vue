@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -8,11 +8,23 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import { autoMapImportColumns, nextTableImportWizardStep, previousTableImportWizardStep, requiredImportTargetColumns, suggestImportTargetDataTypes, validateImportMappings, type TableImportWizardStep } from "@/lib/table/tableImport";
+import {
+  autoMapImportColumns,
+  buildTableImportParseOptions,
+  formatTableImportElapsed,
+  nextTableImportWizardStep,
+  previousTableImportWizardStep,
+  requiredImportTargetColumns,
+  resolveTableImportElapsed,
+  suggestImportTargetDataTypes,
+  tableImportProgressPercent,
+  validateImportMappings,
+  type TableImportWizardStep,
+} from "@/lib/table/tableImport";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { ColumnInfo } from "@/types/database";
@@ -20,6 +32,7 @@ import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
 const store = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
 
@@ -55,7 +68,7 @@ const selectedSource = ref<string | File | null>(null);
 const batchTasks = ref<BatchImportTask[]>([]);
 const activeTaskIndex = ref(0);
 const sourceFormat = ref<api.TableImportSourceFormat>("csv");
-const preview = ref<api.TableImportPreview | null>(null);
+const preview = shallowRef<api.TableImportPreview | null>(null);
 const columnMapping = ref<Record<string, string>>({});
 const columnDataTypes = ref<Record<string, string>>({});
 const dynamicDataTypeOptions = ref<string[]>([]);
@@ -81,7 +94,10 @@ const emptyStringAsNull = ref(true);
 const selectedSheet = ref("");
 const jsonShape = ref<api.TableImportJsonShape>("auto");
 const previewLimit = ref(50);
+const liveElapsedMs = ref(0);
 let previewReloadTimer: ReturnType<typeof setTimeout> | null = null;
+let importElapsedTimer: ReturnType<typeof setInterval> | null = null;
+let importStartedAt = 0;
 let dataTypeOptionsRequestId = 0;
 let previewRequestId = 0;
 let batchEncodingRequestId = 0;
@@ -156,11 +172,9 @@ const canGoNext = computed(() => {
   if (wizardStep.value === "mapping") return mappingValidation.value.valid;
   return false;
 });
-const progressPercent = computed(() => {
-  const p = progress.value;
-  if (!p || p.totalRows <= 0) return 0;
-  return Math.min(100, Math.round((p.rowsImported / p.totalRows) * 100));
-});
+const rawProgressPercent = computed(() => tableImportProgressPercent(progress.value));
+const progressPercentFloor = ref(0);
+const progressPercent = computed(() => Math.max(rawProgressPercent.value, progressPercentFloor.value));
 const currentStepIndex = computed(() => wizardSteps.findIndex((step) => step.value === wizardStep.value));
 const targetLabel = computed(() => {
   const pieces = [selectedConnection.value?.name, props.prefillDatabase, props.prefillSchema, targetTableName.value].filter(Boolean);
@@ -178,20 +192,45 @@ const createColumnSummaries = computed(() =>
     targetDataType: mapping.targetDataType || "",
   })),
 );
-const parseOptions = computed<api.TableImportParseOptions>(() => ({
-  delimiter: sourceFormat.value === "tsv" ? "\\t" : sourceFormat.value === "csv" ? "," : delimiter.value,
-  encoding: isDelimitedFormat(sourceFormat.value) ? textEncoding.value : null,
-  titleRow: titleRow.value,
-  dataStartRow: dataStartRow.value,
-  lastDataRow: lastDataRow.value,
-  trimValues: trimValues.value,
-  emptyStringAsNull: emptyStringAsNull.value,
-  sheetName: sourceFormat.value === "excel" ? selectedSheet.value || null : null,
-  jsonShape: sourceFormat.value === "json" ? jsonShape.value : null,
-}));
-const terminalStatus = computed(() => progress.value?.status && ["done", "error", "cancelled"].includes(progress.value.status));
+const parseOptions = computed<api.TableImportParseOptions>(() => taskParseOptions(sourceFormat.value, selectedSheet.value));
+const terminalStatus = computed(() => !!progress.value?.status && ["done", "error", "cancelled"].includes(progress.value.status));
+const displayedElapsedMs = computed(() => resolveTableImportElapsed(liveElapsedMs.value, progress.value?.elapsedMs, terminalStatus.value));
+const progressLabelKey = computed(() => {
+  if (terminalStatus.value) return `tableImport.status_${progress.value?.status || "idle"}`;
+  return `tableImport.phase_${progress.value?.phase || "writing"}`;
+});
+
+function previewRowsLabel(currentPreview: api.TableImportPreview | null | undefined): string {
+  if (!currentPreview) return "-";
+  if (currentPreview.totalRowsExact !== false) return currentPreview.totalRows.toLocaleString();
+  return t("tableImport.previewPartial", { rows: currentPreview.rows.length });
+}
+
+function stopImportElapsedClock() {
+  if (importElapsedTimer) {
+    clearInterval(importElapsedTimer);
+    importElapsedTimer = null;
+  }
+}
+
+function refreshImportElapsedClock() {
+  if (importStartedAt > 0) {
+    liveElapsedMs.value = Math.max(0, Math.round(performance.now() - importStartedAt));
+  }
+}
+
+function startImportElapsedClock() {
+  stopImportElapsedClock();
+  importStartedAt = performance.now();
+  liveElapsedMs.value = 0;
+  importElapsedTimer = setInterval(refreshImportElapsedClock, 100);
+}
 
 function resetState() {
+  stopImportElapsedClock();
+  closeDataTypePicker();
+  importStartedAt = 0;
+  liveElapsedMs.value = 0;
   previewRequestId++;
   batchEncodingRequestId++;
   if (previewReloadTimer) {
@@ -266,25 +305,37 @@ function uniqueTableName(baseName: string, usedNames: Set<string>): string {
 }
 
 function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): api.TableImportParseOptions {
-  return {
-    delimiter: format === "tsv" ? "\\t" : format === "csv" ? "," : delimiter.value,
-    encoding: isDelimitedFormat(format) ? textEncoding.value : null,
+  return buildTableImportParseOptions({
+    format,
+    delimiter: delimiter.value,
+    textEncoding: textEncoding.value,
     titleRow: titleRow.value,
     dataStartRow: dataStartRow.value,
     lastDataRow: lastDataRow.value,
     trimValues: trimValues.value,
     emptyStringAsNull: emptyStringAsNull.value,
-    sheetName: format === "excel" ? sheetName || null : null,
-    jsonShape: format === "json" ? jsonShape.value : null,
-  };
+    sheetName,
+    jsonShape: jsonShape.value,
+  });
 }
 
 function importParseOptions(format: api.TableImportSourceFormat, currentPreview: api.TableImportPreview, sheetName = ""): api.TableImportParseOptions {
   const options = taskParseOptions(format, sheetName);
-  if (isDelimitedFormat(format) && options.encoding === "auto" && currentPreview.effectiveEncoding) {
+  if (isDelimitedFormat(format) && currentPreview.totalRowsExact !== false && options.encoding === "auto" && currentPreview.effectiveEncoding) {
     options.encoding = currentPreview.effectiveEncoding;
   }
   return options;
+}
+
+function preparedImportSource(currentPreview: api.TableImportPreview): api.TableImportPreparedSource {
+  return {
+    fingerprint: currentPreview.sourceFingerprint,
+    columns: currentPreview.columns,
+    rows: currentPreview.rows,
+    totalRows: currentPreview.totalRows,
+    totalRowsExact: currentPreview.totalRowsExact !== false,
+    effectiveEncoding: currentPreview.effectiveEncoding ?? null,
+  };
 }
 
 function mergeDataTypeOptions(...groups: readonly string[][]): string[] {
@@ -321,6 +372,65 @@ function applySuggestedColumnDataTypes(currentPreview = preview.value) {
   const suggested = suggestImportTargetDataTypes(currentPreview.columns, currentPreview.rows, structureDatabaseType.value);
   const previous = columnDataTypes.value;
   columnDataTypes.value = Object.fromEntries(currentPreview.columns.map((sourceColumn) => [sourceColumn, previous[sourceColumn]?.trim() ? previous[sourceColumn] : suggested[sourceColumn] || "TEXT"]));
+}
+
+// 200+ 列时 SearchableSelect 太重，换成一个全局 popover，
+// 只有点击输入框时才挂载，避免创建上百分组件实例。
+const activeDataTypeColumn = ref<string | null>(null);
+const dataTypePickerOpen = ref(false);
+const dataTypePickerStyle = ref<Record<string, string>>({});
+const activeDataTypeOptionIndex = ref(-1);
+const dataTypePickerOptions = computed(() => {
+  const options = dataTypeOptions.value;
+  const sourceColumn = activeDataTypeColumn.value;
+  const currentValue = sourceColumn ? columnDataTypes.value[sourceColumn] : "";
+  return currentValue && !options.includes(currentValue) ? [...options, currentValue] : options;
+});
+
+function closeDataTypePicker() {
+  dataTypePickerOpen.value = false;
+  activeDataTypeColumn.value = null;
+  activeDataTypeOptionIndex.value = -1;
+}
+
+function openDataTypePicker(sourceColumn: string, input: HTMLInputElement) {
+  const rect = input.getBoundingClientRect();
+  dataTypePickerStyle.value = {
+    position: "fixed",
+    top: `${rect.bottom + 2}px`,
+    left: `${rect.left}px`,
+    width: `${Math.max(rect.width, 200)}px`,
+  };
+  activeDataTypeColumn.value = sourceColumn;
+  activeDataTypeOptionIndex.value = -1;
+  dataTypePickerOpen.value = true;
+}
+
+function selectDataTypeOption(value: string) {
+  const sourceColumn = activeDataTypeColumn.value;
+  if (sourceColumn) updateColumnDataType(sourceColumn, value);
+  closeDataTypePicker();
+}
+
+function handleDataTypePickerKeydown(event: KeyboardEvent, sourceColumn: string, input: HTMLInputElement) {
+  if (!dataTypePickerOpen.value && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+    openDataTypePicker(sourceColumn, input);
+  }
+  if (!dataTypePickerOpen.value || !activeDataTypeColumn.value) return;
+  const options = dataTypePickerOptions.value;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeDataTypePicker();
+  } else if (event.key === "ArrowDown" && options.length) {
+    event.preventDefault();
+    activeDataTypeOptionIndex.value = (activeDataTypeOptionIndex.value + 1) % options.length;
+  } else if (event.key === "ArrowUp" && options.length) {
+    event.preventDefault();
+    activeDataTypeOptionIndex.value = activeDataTypeOptionIndex.value <= 0 ? options.length - 1 : activeDataTypeOptionIndex.value - 1;
+  } else if (event.key === "Enter" && activeDataTypeOptionIndex.value >= 0) {
+    event.preventDefault();
+    selectDataTypeOption(options[activeDataTypeOptionIndex.value]);
+  }
 }
 
 async function loadDataTypeOptions() {
@@ -365,7 +475,9 @@ async function loadTargetColumns() {
 }
 
 async function previewSelectedImportFile(fileOrPath: string | File) {
-  return api.previewTableImportFile(fileOrPath, {
+  const reusablePreview = preview.value?.sourceRef ? preview.value : null;
+  return api.previewTableImportFile(reusablePreview?.filePath || fileOrPath, {
+    sourceRef: reusablePreview?.sourceRef || null,
     sourceFormat: sourceFormat.value,
     parseOptions: parseOptions.value,
     previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -452,20 +564,22 @@ async function prepareBatchSources(sources: ImportSource[]) {
       });
       const sheets = format === "excel" && initialPreview.sheets?.length ? initialPreview.sheets : [""];
       for (const sheetName of sheets) {
-        const taskPreview =
-          sheetName && sheetName !== initialPreview.sheets?.[0]
-            ? await api.previewTableImportFile(source, {
-                sourceFormat: format,
-                parseOptions: taskParseOptions(format, sheetName),
-                previewLimit: Math.max(1, Number(previewLimit.value) || 50),
-              })
-            : initialPreview;
+        const reusableSource = initialPreview.sourceRef ? initialPreview.filePath : source;
+        const effectiveSheetName = sheetName && sheetName === initialPreview.sheets?.[0] ? "" : sheetName;
+        const taskPreview = effectiveSheetName
+          ? await api.previewTableImportFile(reusableSource, {
+              sourceRef: initialPreview.sourceRef || null,
+              sourceFormat: format,
+              parseOptions: taskParseOptions(format, effectiveSheetName),
+              previewLimit: Math.max(1, Number(previewLimit.value) || 50),
+            })
+          : initialPreview;
         const tableBase = sheetName ? `${suggestedTableName(sourceName(source))}_${sheetName}` : sourceName(source);
         tasks.push({
           id: uuid(),
           source,
           format,
-          sheetName,
+          sheetName: effectiveSheetName,
           tableName: uniqueTableName(tableBase, usedNames),
           preview: taskPreview,
           columnMapping: Object.fromEntries(taskPreview.columns.map((column) => [column, column])),
@@ -598,15 +712,22 @@ async function startImport() {
   const tableName = targetTableName.value;
   if (!canImport.value || !currentPreview || !props.prefillConnectionId || !tableName) return;
   running.value = true;
+  progressPercentFloor.value = 0;
   cancelling.value = false;
   errorMessage.value = "";
   wizardStep.value = "execution";
   importId.value = uuid();
+  startImportElapsedClock();
   progress.value = {
     importId: importId.value,
     status: "running",
+    phase: "preparing",
     rowsImported: 0,
     totalRows: currentPreview.totalRows,
+    totalRowsExact: currentPreview.totalRowsExact !== false,
+    bytesRead: 0,
+    totalBytes: currentPreview.sizeBytes,
+    elapsedMs: 0,
   };
 
   try {
@@ -620,17 +741,20 @@ async function startImport() {
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
         sourceFormat: sourceFormat.value,
-        parseOptions: importParseOptions(sourceFormat.value, currentPreview),
+        // Execution must parse the same worksheet that produced the preview and mappings.
+        parseOptions: importParseOptions(sourceFormat.value, currentPreview, selectedSheet.value),
         mappings: mappedColumns.value,
         mode: targetMode.value === "create" ? "append" : importMode.value,
         createTable: targetMode.value === "create",
         batchSize: Math.max(1, Number(batchSize.value) || 500),
+        dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
+        preparedSource: preparedImportSource(currentPreview),
       },
       (nextProgress) => {
-        progress.value = nextProgress;
+        progress.value = { ...nextProgress, elapsedMs: nextProgress.elapsedMs ?? liveElapsedMs.value };
       },
     );
-    progress.value = { importId: summary.importId, status: "done", rowsImported: summary.rowsImported, totalRows: summary.totalRows };
+    progress.value = { importId: summary.importId, status: "done", rowsImported: summary.rowsImported, totalRows: summary.totalRows, elapsedMs: summary.elapsedMs };
     toast(t("tableImport.success", { count: summary.rowsImported }), 2500);
     store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, tableName);
     if (targetMode.value === "create") {
@@ -646,9 +770,12 @@ async function startImport() {
       status: progress.value?.status === "cancelled" ? "cancelled" : "error",
       rowsImported: progress.value?.rowsImported ?? 0,
       totalRows: progress.value?.totalRows ?? currentPreview.totalRows,
+      elapsedMs: progress.value?.elapsedMs ?? liveElapsedMs.value,
       error: message,
     };
   } finally {
+    refreshImportElapsedClock();
+    stopImportElapsedClock();
     running.value = false;
     cancelling.value = false;
   }
@@ -657,13 +784,18 @@ async function startImport() {
 async function startBatchImport() {
   if (!props.prefillConnectionId || !batchTasks.value.length || running.value) return;
   running.value = true;
+  progressPercentFloor.value = 0;
   cancelling.value = false;
   errorMessage.value = "";
   wizardStep.value = "execution";
-  const totalRows = batchTasks.value.reduce((sum, task) => sum + task.preview.totalRows, 0);
+  const totalRowsExact = batchTasks.value.every((task) => task.preview.totalRowsExact !== false);
+  const totalRows = totalRowsExact ? batchTasks.value.reduce((sum, task) => sum + task.preview.totalRows, 0) : 0;
+  const totalBytes = batchTasks.value.reduce((sum, task) => sum + task.preview.sizeBytes, 0);
   let completedRows = 0;
+  let completedBytes = 0;
   importId.value = uuid();
-  progress.value = { importId: importId.value, status: "running", rowsImported: 0, totalRows };
+  startImportElapsedClock();
+  progress.value = { importId: importId.value, status: "running", phase: "preparing", rowsImported: 0, totalRows, totalRowsExact, bytesRead: 0, totalBytes, elapsedMs: 0 };
 
   try {
     const tableNames = batchTasks.value.map((task) => task.tableName.trim().toLowerCase());
@@ -700,18 +832,36 @@ async function startBatchImport() {
           mode: "append",
           createTable: true,
           batchSize: Math.max(1, Number(batchSize.value) || 500),
+          dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
+          preparedSource: preparedImportSource(task.preview),
+          retainSource: true,
         },
         (nextProgress) => {
           task.rowsImported = nextProgress.rowsImported;
-          progress.value = { ...nextProgress, rowsImported: completedRows + nextProgress.rowsImported, totalRows };
+          const hasRemainingTasks = index < batchTasks.value.length - 1;
+          const aggregateStatus = nextProgress.status === "done" && hasRemainingTasks ? "running" : nextProgress.status;
+          const aggregatePhase = nextProgress.status === "done" && hasRemainingTasks ? "preparing" : nextProgress.phase;
+          progress.value = {
+            ...nextProgress,
+            status: aggregateStatus,
+            phase: aggregatePhase,
+            rowsImported: completedRows + nextProgress.rowsImported,
+            totalRows,
+            totalRowsExact,
+            bytesRead: completedBytes + (nextProgress.bytesRead ?? 0),
+            totalBytes,
+            elapsedMs: liveElapsedMs.value,
+          };
         },
       );
       task.status = "done";
       task.rowsImported = summary.rowsImported;
       completedRows += summary.rowsImported;
+      completedBytes += task.preview.sizeBytes;
       store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, task.tableName);
     }
-    progress.value = { importId: importId.value, status: "done", rowsImported: completedRows, totalRows };
+    refreshImportElapsedClock();
+    progress.value = { importId: importId.value, status: "done", phase: "done", rowsImported: completedRows, totalRows: completedRows, totalRowsExact: true, bytesRead: totalBytes, totalBytes, elapsedMs: liveElapsedMs.value };
     toast(t("tableImport.success", { count: completedRows }), 2500);
     store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined).catch((error) => {
       console.warn("[DBX][table-import:refresh-created-table-failed]", error);
@@ -729,12 +879,25 @@ async function startBatchImport() {
       status: progress.value?.status === "cancelled" ? "cancelled" : "error",
       rowsImported: progress.value?.rowsImported ?? completedRows,
       totalRows,
+      elapsedMs: progress.value?.elapsedMs ?? liveElapsedMs.value,
       error: message,
     };
   } finally {
+    refreshImportElapsedClock();
+    stopImportElapsedClock();
+    await releaseTableImportSources();
     running.value = false;
     cancelling.value = false;
   }
+}
+
+async function releaseTableImportSources() {
+  const sourceRefs = new Set<string>();
+  if (preview.value?.sourceRef) sourceRefs.add(preview.value.sourceRef);
+  for (const task of batchTasks.value) {
+    if (task.preview.sourceRef) sourceRefs.add(task.preview.sourceRef);
+  }
+  await Promise.allSettled([...sourceRefs].map((sourceRef) => api.releaseTableImportSource(sourceRef)));
 }
 
 async function cancelImport() {
@@ -773,7 +936,9 @@ async function reloadBatchPreviewsForEncoding() {
   try {
     for (const task of batchTasks.value) {
       if (!isDelimitedFormat(task.format)) continue;
-      const nextPreview = await api.previewTableImportFile(task.source, {
+      const reusableSource = task.preview.sourceRef ? task.preview.filePath : task.source;
+      const nextPreview = await api.previewTableImportFile(reusableSource, {
+        sourceRef: task.preview.sourceRef || null,
         sourceFormat: task.format,
         parseOptions: taskParseOptions(task.format, task.sheetName),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -801,6 +966,8 @@ watch(
       resetState();
       void loadTargetColumns();
       void loadDataTypeOptions();
+    } else if (!running.value) {
+      void releaseTableImportSources();
     }
   },
   { immediate: true },
@@ -809,6 +976,9 @@ watch(
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
 watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
+watch(wizardStep, (step) => {
+  if (step !== "mapping") closeDataTypePicker();
+});
 watch(targetMode, (mode) => {
   if (mode === "existing") {
     columnDataTypes.value = {};
@@ -822,11 +992,19 @@ watch(targetMode, (mode) => {
     void loadDataTypeOptions();
   }
 });
+
+watch(rawProgressPercent, (percent) => {
+  if (progress.value?.status === "running") {
+    progressPercentFloor.value = Math.max(progressPercentFloor.value, percent);
+  } else if (progress.value?.status === "done") {
+    progressPercentFloor.value = 100;
+  }
+});
 </script>
 
 <template>
   <Dialog v-model:open="open">
-    <DialogScrollContent class="flex max-h-[calc(100dvh-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
+    <DialogScrollContent class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
       <DialogHeader class="shrink-0 pr-8">
         <DialogTitle class="flex items-center gap-2 text-base">
           <FileUp class="h-4 w-4" />
@@ -1060,7 +1238,9 @@ watch(targetMode, (mode) => {
               <RefreshCw v-else class="mr-1.5 h-3.5 w-3.5" />
               {{ preview ? t("tableImport.reloadPreview") : t("tableImport.loadPreview") }}
             </Button>
-            <span v-if="preview" class="text-xs text-muted-foreground">{{ t("tableImport.previewReady", { rows: preview.totalRows, columns: preview.columns.length }) }}</span>
+            <span v-if="preview" class="text-xs text-muted-foreground">
+              {{ preview.totalRowsExact !== false ? t("tableImport.previewReady", { rows: preview.totalRows, columns: preview.columns.length }) : t("tableImport.previewReadyPartial", { rows: preview.rows.length, columns: preview.columns.length }) }}
+            </span>
           </div>
         </div>
 
@@ -1072,7 +1252,7 @@ watch(targetMode, (mode) => {
             </div>
             <div class="rounded-md border px-3 py-2">
               <div class="text-muted-foreground">{{ t("tableImport.rows") }}</div>
-              <div class="font-medium">{{ preview.totalRows.toLocaleString() }}</div>
+              <div class="font-medium">{{ previewRowsLabel(preview) }}</div>
             </div>
             <div class="rounded-md border px-3 py-2">
               <div class="text-muted-foreground">{{ t("tableImport.mapped") }}</div>
@@ -1093,34 +1273,42 @@ watch(targetMode, (mode) => {
                   <div class="truncate font-mono text-xs" :title="sourceColumn">
                     {{ sourceColumn }}
                   </div>
-                  <Input v-if="targetMode === 'create'" :model-value="columnMapping[sourceColumn] ?? sourceColumn" class="h-7 text-xs font-mono" @update:model-value="(value: any) => updateMapping(sourceColumn, value)" />
-                  <Select v-else :model-value="columnMapping[sourceColumn] || SKIP_VALUE" @update:model-value="(value: any) => updateMapping(sourceColumn, value)">
-                    <SelectTrigger class="h-7 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem :value="SKIP_VALUE">{{ t("tableImport.skipColumn") }}</SelectItem>
-                      <SelectItem v-for="column in targetColumns" :key="column.name" :value="column.name">
-                        {{ column.name }}
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <SearchableSelect
+                  <!-- 原生 input/select: 200+ 列时 Vue Input/Select 组件是渲染瓶颈 -->
+                  <input
                     v-if="targetMode === 'create'"
-                    :model-value="columnDataTypes[sourceColumn] || ''"
-                    :placeholder="t('tableImport.targetDataType')"
-                    :search-placeholder="t('tableImport.targetDataType')"
-                    :empty-text="t('structureEditor.noMatchingType')"
-                    :loading-text="t('common.loading')"
-                    :loading="loadingDataTypeOptions"
-                    :options="dataTypeOptions"
-                    :allow-custom="true"
-                    :trigger-class="'h-7 w-full max-w-none rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25'"
-                    :content-class="'w-56'"
-                    :item-class="'font-mono text-xs'"
-                    :trigger-icon-class="'h-3 w-3'"
-                    @update:model-value="(value: any) => updateColumnDataType(sourceColumn, value)"
+                    :value="columnMapping[sourceColumn] ?? sourceColumn"
+                    class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                    @input="(e) => updateMapping(sourceColumn, (e.target as HTMLInputElement).value)"
                   />
+                  <select
+                    v-else
+                    :value="columnMapping[sourceColumn] || SKIP_VALUE"
+                    class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                    @change="(e) => updateMapping(sourceColumn, (e.target as HTMLSelectElement).value)"
+                  >
+                    <option :value="SKIP_VALUE">{{ t("tableImport.skipColumn") }}</option>
+                    <option v-for="column in targetColumns" :key="column.name" :value="column.name">
+                      {{ column.name }}
+                    </option>
+                  </select>
+                  <!-- 数据类型：plain input + 全局 popover，点击才弹出 -->
+                  <div v-if="targetMode === 'create'" class="relative">
+                    <input
+                      data-dt-input
+                      :value="columnDataTypes[sourceColumn] || ''"
+                      :placeholder="t('tableImport.targetDataType')"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      :aria-expanded="activeDataTypeColumn === sourceColumn && dataTypePickerOpen"
+                      aria-controls="table-import-data-type-options"
+                      :aria-activedescendant="activeDataTypeColumn === sourceColumn && activeDataTypeOptionIndex >= 0 ? `table-import-data-type-option-${activeDataTypeOptionIndex}` : undefined"
+                      class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                      @focus="(event) => openDataTypePicker(sourceColumn, event.currentTarget as HTMLInputElement)"
+                      @blur="closeDataTypePicker"
+                      @keydown="(event) => handleDataTypePickerKeydown(event, sourceColumn, event.currentTarget as HTMLInputElement)"
+                      @input="(e) => updateColumnDataType(sourceColumn, (e.target as HTMLInputElement).value)"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -1169,7 +1357,7 @@ watch(targetMode, (mode) => {
             </div>
             <div class="rounded-md border px-3 py-2">
               <div class="text-muted-foreground">{{ t("tableImport.rows") }}</div>
-              <div class="font-medium">{{ preview?.totalRows.toLocaleString() }}</div>
+              <div class="font-medium">{{ previewRowsLabel(preview) }}</div>
             </div>
             <div class="rounded-md border px-3 py-2">
               <div class="text-muted-foreground">{{ t("tableImport.mapped") }}</div>
@@ -1230,14 +1418,19 @@ watch(targetMode, (mode) => {
         <div v-else class="space-y-4">
           <div class="rounded-md border px-4 py-5">
             <div class="flex items-center gap-3">
-              <Loader2 v-if="running && !cancelling" class="h-5 w-5 animate-spin text-primary" />
-              <Square v-else-if="cancelling || progress?.status === 'cancelled'" class="h-5 w-5 fill-current text-destructive" />
+              <Square v-if="cancelling || progress?.status === 'cancelled'" class="h-5 w-5 fill-current text-destructive" />
               <CheckCircle2 v-else-if="progress?.status === 'done'" class="h-5 w-5 text-emerald-600" />
               <AlertTriangle v-else-if="progress?.status === 'error'" class="h-5 w-5 text-destructive" />
+              <Loader2 v-else-if="running" class="h-5 w-5 animate-spin text-primary" />
               <FileUp v-else class="h-5 w-5 text-muted-foreground" />
               <div class="min-w-0 flex-1">
-                <div class="text-sm font-medium">{{ t(`tableImport.status_${progress?.status || "idle"}`) }}</div>
-                <div class="mt-1 text-xs text-muted-foreground">{{ progress?.rowsImported ?? 0 }} / {{ progress?.totalRows ?? preview?.totalRows ?? 0 }} · {{ progressPercent }}%</div>
+                <div class="text-sm font-medium">{{ t(progressLabelKey) }}</div>
+                <div class="mt-1 text-xs text-muted-foreground">
+                  <template v-if="progress?.totalRowsExact !== false && (progress?.totalRows ?? 0) > 0">{{ progress?.rowsImported ?? 0 }} / {{ progress?.totalRows ?? 0 }}</template>
+                  <template v-else>{{ progress?.rowsImported ?? 0 }} {{ t("tableImport.rowsImported") }}</template>
+                  · {{ progressPercent }}% ·
+                  {{ t("tableImport.elapsed", { duration: formatTableImportElapsed(displayedElapsedMs) }) }}
+                </div>
               </div>
             </div>
             <div class="mt-4 h-2 overflow-hidden rounded bg-muted">
@@ -1257,6 +1450,26 @@ watch(targetMode, (mode) => {
           {{ errorMessage }}
         </div>
       </div>
+
+      <!-- 全局数据类型 popover：仅一个实例，替代每列的 SearchableSelect -->
+      <Teleport to="body">
+        <div v-if="activeDataTypeColumn && dataTypePickerOpen" id="table-import-data-type-options" role="listbox" :style="dataTypePickerStyle" class="pointer-events-auto z-[9999] max-h-48 overflow-auto rounded-md border bg-popover p-0.5 shadow-md">
+          <button
+            v-for="(opt, index) in dataTypePickerOptions"
+            :key="opt"
+            :id="`table-import-data-type-option-${index}`"
+            type="button"
+            role="option"
+            :aria-selected="opt === (activeDataTypeColumn ? columnDataTypes[activeDataTypeColumn] : '')"
+            class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground"
+            :class="{ 'bg-accent/50': index === activeDataTypeOptionIndex || opt === (activeDataTypeColumn ? columnDataTypes[activeDataTypeColumn] : '') }"
+            @pointerenter="activeDataTypeOptionIndex = index"
+            @pointerdown.prevent="selectDataTypeOption(opt)"
+          >
+            {{ opt }}
+          </button>
+        </div>
+      </Teleport>
 
       <DialogFooter class="shrink-0">
         <Button variant="outline" :disabled="running" @click="open = false">

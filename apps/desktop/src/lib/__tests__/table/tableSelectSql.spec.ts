@@ -28,9 +28,20 @@ describe("qualifiedTableName — Doris/StarRocks multi-catalog", () => {
   });
 });
 
+describe("qualifiedTableName — SQLite attached databases", () => {
+  it("qualifies tables with the attached database alias", () => {
+    expect(qualifiedTableName({ databaseType: "sqlite", schema: "analytics", tableName: "events" })).toBe('"analytics"."events"');
+  });
+});
+
 describe("quoteTableIdentifier", () => {
   it("backtick-quotes mysql identifiers", () => {
     expect(quoteTableIdentifier("mysql", "orders")).toBe("`orders`");
+  });
+
+  it("uses BigQuery quoted identifiers and escape sequences", () => {
+    expect(quoteTableIdentifier("bigquery", "order")).toBe("`order`");
+    expect(quoteTableIdentifier("bigquery", "a`b")).toBe("`a\\`b`");
   });
 
   it("bracket-quotes sqlserver identifiers", () => {

@@ -1,7 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
-    self, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyInfo, RedisScanResult,
-    RedisValue,
+    self, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisScanResult,
+    RedisStreamConsumer, RedisStreamGroup, RedisStreamPendingPage, RedisValue,
 };
 
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -65,40 +65,8 @@ pub async fn redis_scan_keys_batch_core(
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_db(db)?;
-                // Cluster scan already iterates across nodes; for batch mode we
-                // loop the cluster-level scan to accumulate keys server-side.
-                if max_iterations <= 1 {
-                    return redis_driver::scan_cluster_keys_page_with_options(
-                        cluster,
-                        cursor,
-                        pattern,
-                        count,
-                        include_types,
-                    )
-                    .await;
-                }
-                let mut all_keys: Vec<RedisKeyInfo> = Vec::new();
-                let mut current_cursor = cursor;
-                let mut total_keys: u64 = 0;
-                for i in 0..max_iterations {
-                    let page = redis_driver::scan_cluster_keys_page_with_options(
-                        cluster,
-                        current_cursor,
-                        pattern,
-                        count,
-                        include_types,
-                    )
-                    .await?;
-                    if i == 0 {
-                        total_keys = page.total_keys;
-                    }
-                    all_keys.extend(page.keys);
-                    if page.cursor == 0 {
-                        return Ok(RedisScanResult { cursor: 0, keys: all_keys, total_keys });
-                    }
-                    current_cursor = page.cursor;
-                }
-                Ok(RedisScanResult { cursor: current_cursor, keys: all_keys, total_keys })
+                redis_driver::scan_cluster_keys_batch(cluster, cursor, pattern, count, max_iterations, include_types)
+                    .await
             }
         },
         _ => Err("Not a Redis connection".to_string()),
@@ -162,6 +130,100 @@ pub async fn redis_get_value_in_db_core(
                     redis_driver::ensure_cluster_db(db)?;
                     let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
                     redis_driver::get_value(&mut con, &key).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_stream_groups_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+) -> Result<Vec<RedisStreamGroup>, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(connection_id).ok_or("Connection not found")?;
+    match pool {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::get_stream_groups(&mut *con, &key).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::get_stream_groups(&mut con, &key).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_stream_consumers_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    group_raw: &str,
+) -> Result<Vec<RedisStreamConsumer>, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(connection_id).ok_or("Connection not found")?;
+    match pool {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            let group = redis_driver::redis_key_raw_to_bytes(group_raw)?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::get_stream_consumers(&mut *con, &key, &group).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::get_stream_consumers(&mut con, &key, &group).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_stream_pending_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    group_raw: &str,
+    cursor: Option<&str>,
+    consumer_raw: Option<&str>,
+) -> Result<RedisStreamPendingPage, String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(connection_id).ok_or("Connection not found")?;
+    match pool {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            let group = redis_driver::redis_key_raw_to_bytes(group_raw)?;
+            let consumer = consumer_raw.map(redis_driver::redis_key_raw_to_bytes).transpose()?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::get_stream_pending_page(&mut *con, &key, &group, cursor, consumer.as_deref()).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::get_stream_pending_page(&mut con, &key, &group, cursor, consumer.as_deref()).await
                 }
             }
         }
@@ -678,6 +740,35 @@ pub async fn redis_set_ttl_in_db_core(
     }
 }
 
+pub async fn redis_set_expire_at_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    expire_at: i64,
+) -> Result<(), String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::set_expire_at(&mut *con, &key, expire_at).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::set_expire_at(&mut con, &key, expire_at).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
 pub async fn redis_delete_keys_in_db_core(
     state: &AppState,
     connection_id: &str,
@@ -774,12 +865,10 @@ fn command_may_target_first_key(argv: &[String]) -> bool {
     if argv.len() < 2 {
         return false;
     }
-    match argv[0].to_ascii_uppercase().as_str() {
-        "PING" | "INFO" | "DBSIZE" | "TIME" | "ROLE" | "CLUSTER" | "CLIENT" | "COMMAND" | "HELLO" | "AUTH" | "QUIT" => {
-            false
-        }
-        _ => true,
-    }
+    !matches!(
+        argv[0].to_ascii_uppercase().as_str(),
+        "PING" | "INFO" | "DBSIZE" | "TIME" | "ROLE" | "CLUSTER" | "CLIENT" | "COMMAND" | "HELLO" | "AUTH" | "QUIT"
+    )
 }
 
 pub async fn redis_load_more_in_db_core(

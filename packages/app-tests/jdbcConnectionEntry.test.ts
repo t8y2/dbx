@@ -28,7 +28,7 @@ test("opens driver management on the JDBC tab from JDBC connection settings", ()
   const app = source("apps/desktop/src/App.vue");
   const driverStore = source("apps/desktop/src/components/config/DriverStoreDialog.vue");
 
-  assert.equal(connectionDialog.match(/emit\('openDriverStore', 'jdbc'\)/g)?.length, 2);
+  assert.equal(connectionDialog.match(/emit\('openDriverStore', \{ target: 'tab', tab: 'jdbc' \}\)/g)?.length, 2);
   assert.match(appDialogs, /@open-driver-store="emit\('openDriverStore', \$event\)"/);
   assert.match(app, /openDriverStorePage\(\$event\)/);
   assert.match(app, /v-model:active-tab="driverStoreActiveTab"/);

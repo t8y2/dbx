@@ -48,6 +48,22 @@ const searchQuery = ref("");
 const collapsedSections = ref<Set<string>>(new Set());
 const autoRefreshInterval = ref<number>(0); // 0 = off, 5, 10, 30, 60 (seconds)
 
+const infoSectionI18nKeys: Record<string, string> = {
+  Server: "redis.dashboard.sections.server",
+  Clients: "redis.dashboard.sections.clients",
+  Memory: "redis.dashboard.sections.memory",
+  Persistence: "redis.dashboard.sections.persistence",
+  Stats: "redis.dashboard.sections.stats",
+  Replication: "redis.dashboard.sections.replication",
+  CPU: "redis.dashboard.sections.cpu",
+  Modules: "redis.dashboard.sections.modules",
+  Commandstats: "redis.dashboard.sections.commandstats",
+  Errorstats: "redis.dashboard.sections.errorstats",
+  Latencystats: "redis.dashboard.sections.latencystats",
+  Cluster: "redis.dashboard.sections.cluster",
+  Keyspace: "redis.dashboard.sections.keyspace",
+};
+
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 // ---------------------------------------------------------------------------
@@ -228,6 +244,11 @@ function isCollapsed(name: string): boolean {
   return collapsedSections.value.has(name);
 }
 
+function infoSectionTitle(name: string): string {
+  const key = infoSectionI18nKeys[name];
+  return key ? t(key) : name;
+}
+
 // ---------------------------------------------------------------------------
 // Auto-refresh
 // ---------------------------------------------------------------------------
@@ -286,7 +307,7 @@ function copyToClipboard(text: string) {
   navigator.clipboard
     .writeText(text)
     .then(() => {
-      toast("Copied", 1500);
+      toast(t("redis.copied"), 1500);
     })
     .catch(() => {
       // Fallback for environments without clipboard API
@@ -318,7 +339,7 @@ function copyEntryValue(entry: InfoEntry) {
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-2 min-w-0">
           <div v-if="showNodeSelector && nodeOptions.length > 0" class="flex items-center gap-2">
-            <span class="text-xs text-muted-foreground whitespace-nowrap">Node:</span>
+            <span class="text-xs text-muted-foreground whitespace-nowrap">{{ t("redis.dashboard.node") }}:</span>
             <Select v-model="selectedNodeIndex" @update:model-value="fetchInfo">
               <SelectTrigger class="h-7 w-auto min-w-[140px] text-xs">
                 <SelectValue />
@@ -339,7 +360,7 @@ function copyEntryValue(entry: InfoEntry) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem :value="0" class="text-xs">Off</SelectItem>
+              <SelectItem :value="0" class="text-xs">{{ t("redis.dashboard.off") }}</SelectItem>
               <SelectItem :value="1" class="text-xs">1s</SelectItem>
               <SelectItem :value="5" class="text-xs">5s</SelectItem>
               <SelectItem :value="15" class="text-xs">15s</SelectItem>
@@ -354,7 +375,7 @@ function copyEntryValue(entry: InfoEntry) {
                 <RefreshCw v-else class="h-3.5 w-3.5" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Refresh</TooltipContent>
+            <TooltipContent>{{ t("redis.dashboard.refresh") }}</TooltipContent>
           </Tooltip>
         </div>
       </div>
@@ -374,7 +395,7 @@ function copyEntryValue(entry: InfoEntry) {
         <div class="rounded-lg border bg-card text-card-foreground p-3">
           <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
             <HardDrive class="h-3.5 w-3.5" />
-            <span>Total Memory</span>
+            <span>{{ t("redis.dashboard.totalMemory") }}</span>
           </div>
           <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="totalMemory">
             {{ totalMemory }}
@@ -384,7 +405,7 @@ function copyEntryValue(entry: InfoEntry) {
         <div class="rounded-lg border bg-card text-card-foreground p-3">
           <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
             <Activity class="h-3.5 w-3.5" />
-            <span>Used Memory</span>
+            <span>{{ t("redis.dashboard.usedMemory") }}</span>
           </div>
           <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="usedMemory">
             {{ usedMemory }}
@@ -394,7 +415,7 @@ function copyEntryValue(entry: InfoEntry) {
         <div class="rounded-lg border bg-card text-card-foreground p-3">
           <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
             <Terminal class="h-3.5 w-3.5" />
-            <span>Operations</span>
+            <span>{{ t("redis.dashboard.operations") }}</span>
           </div>
           <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="operation">
             {{ operation }}
@@ -404,7 +425,7 @@ function copyEntryValue(entry: InfoEntry) {
         <div class="rounded-lg border bg-card text-card-foreground p-3">
           <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
             <Target class="h-3.5 w-3.5" />
-            <span>Hit Ratio</span>
+            <span>{{ t("redis.dashboard.hitRatio") }}</span>
           </div>
           <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="hitRatio">
             {{ hitRatio }}
@@ -414,7 +435,7 @@ function copyEntryValue(entry: InfoEntry) {
         <div class="rounded-lg border bg-card text-card-foreground p-3">
           <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
             <Database class="h-3.5 w-3.5" />
-            <span>Key Count</span>
+            <span>{{ t("redis.dashboard.keyCount") }}</span>
           </div>
           <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="keyCount">
             {{ keyCount }}
@@ -424,7 +445,7 @@ function copyEntryValue(entry: InfoEntry) {
         <div class="rounded-lg border bg-card text-card-foreground p-3">
           <div class="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
             <Users class="h-3.5 w-3.5" />
-            <span>Clients</span>
+            <span>{{ t("redis.dashboard.clients") }}</span>
           </div>
           <div class="text-xl font-semibold tabular-nums dbx-editor-font-family truncate" :title="connectedClients">
             {{ connectedClients }}
@@ -436,7 +457,7 @@ function copyEntryValue(entry: InfoEntry) {
       <div class="px-4 pb-2">
         <div class="relative">
           <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-          <Input v-model="searchQuery" class="h-8 pl-7 text-xs" placeholder="Search indicators..." />
+          <Input v-model="searchQuery" class="h-8 pl-7 text-xs" :placeholder="t('redis.dashboard.searchIndicators')" />
         </div>
       </div>
 
@@ -452,7 +473,7 @@ function copyEntryValue(entry: InfoEntry) {
           <!-- Section header (clickable) -->
           <button class="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-foreground hover:bg-muted/50 transition-colors text-left" @click="toggleSection(section.name)">
             <component :is="isCollapsed(section.name) ? ChevronRight : ChevronDown" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <span>{{ section.name }}</span>
+            <span>{{ infoSectionTitle(section.name) }}</span>
             <span class="ml-auto text-muted-foreground font-normal">{{ section.entries.length }}</span>
           </button>
           <!-- Section body -->
@@ -472,8 +493,8 @@ function copyEntryValue(entry: InfoEntry) {
       <!-- Empty / no data -->
       <div v-else-if="!loading" class="flex flex-col items-center justify-center py-12 text-xs text-muted-foreground">
         <Info class="mb-2 h-5 w-5" />
-        <span v-if="searchQuery">No matching indicators</span>
-        <span v-else>No data available</span>
+        <span v-if="searchQuery">{{ t("redis.dashboard.noMatchingIndicators") }}</span>
+        <span v-else>{{ t("redis.dashboard.noDataAvailable") }}</span>
       </div>
     </div>
   </div>

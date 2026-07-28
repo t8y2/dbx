@@ -8,6 +8,7 @@ on:
         required: true
 
 permissions:
+  attestations: write
   contents: write
   id-token: write
 
@@ -51,7 +52,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsecret-1-dev
+          sudo apt-get install -y libfontconfig1-dev libsecret-1-dev
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -73,14 +74,62 @@ jobs:
           const writeJson = (path, data) => fs.writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
 
           for (const path of [
-            "packages/node-core/package.json",
             "packages/cli/package.json",
+            "packages/cli-darwin-arm64/package.json",
+            "packages/cli-darwin-x64/package.json",
+            "packages/cli-linux-arm64-gnu/package.json",
+            "packages/cli-linux-x64-gnu/package.json",
+            "packages/cli-win32-arm64/package.json",
+            "packages/cli-win32-x64/package.json",
             "packages/mcp-server/package.json",
+            "packages/mcp-darwin-arm64/package.json",
+            "packages/mcp-darwin-x64/package.json",
+            "packages/mcp-linux-arm64-gnu/package.json",
+            "packages/mcp-linux-x64-gnu/package.json",
+            "packages/mcp-win32-arm64/package.json",
+            "packages/mcp-win32-x64/package.json",
           ]) {
             const pkg = readJson(path);
             pkg.version = version;
             writeJson(path, pkg);
           }
+
+          const mcpPackagePath = "packages/mcp-server/package.json";
+          const mcpPackage = readJson(mcpPackagePath);
+          for (const dependency of Object.keys(mcpPackage.optionalDependencies ?? {})) {
+            if (dependency.startsWith("@dbx-app/mcp-")) {
+              mcpPackage.optionalDependencies[dependency] = version;
+            }
+          }
+          writeJson(mcpPackagePath, mcpPackage);
+
+          const cliPackagePath = "packages/cli/package.json";
+          const cliPackage = readJson(cliPackagePath);
+          for (const dependency of Object.keys(cliPackage.optionalDependencies ?? {})) {
+            if (dependency.startsWith("@dbx-app/cli-")) {
+              cliPackage.optionalDependencies[dependency] = version;
+            }
+          }
+          writeJson(cliPackagePath, cliPackage);
+
+          const lockPath = "pnpm-lock.yaml";
+          let lockfile = fs.readFileSync(lockPath, "utf8");
+          const updateLockDependency = (dependency, packageDirectory) => {
+            const escapedDependency = dependency.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const dependencyPattern = new RegExp(`('${escapedDependency}':\\n\\s+specifier: )[^\\n]+(\\n\\s+version: )([^\\n]+)`);
+            const updated = lockfile.replace(dependencyPattern, `$1${version}$2link:../${packageDirectory}`);
+            if (updated === lockfile) {
+              throw new Error(`Unable to update ${dependency} in pnpm-lock.yaml.`);
+            }
+            lockfile = updated;
+          };
+          for (const dependency of Object.keys(mcpPackage.optionalDependencies ?? {})) {
+            updateLockDependency(dependency, dependency.replace("@dbx-app/", ""));
+          }
+          for (const dependency of Object.keys(cliPackage.optionalDependencies ?? {})) {
+            updateLockDependency(dependency, dependency.replace("@dbx-app/", ""));
+          }
+          fs.writeFileSync(lockPath, lockfile);
 
           const serverPath = "packages/mcp-server/server.json";
           const server = readJson(serverPath);
@@ -92,9 +141,23 @@ jobs:
           }
           writeJson(serverPath, server);
 
+          const cargoPath = "crates/dbx-mcp/Cargo.toml";
+          const cargo = fs.readFileSync(cargoPath, "utf8").replace(/^version = "[^"]+"/m, `version = "${version}"`);
+          fs.writeFileSync(cargoPath, cargo);
+
+          const cliCargoPath = "crates/dbx-cli/Cargo.toml";
+          const cliCargo = fs.readFileSync(cliCargoPath, "utf8").replace(/^version = "[^"]+"/m, `version = "${version}"`);
+          fs.writeFileSync(cliCargoPath, cliCargo);
+
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=packages-v${version}\n`);
           NODE
+
+      - name: Update Rust lockfile
+        run: cargo check -p dbx-mcp -p dbx-cli --no-default-features
+
+      - name: Verify workspace lockfile
+        run: pnpm install --frozen-lockfile --lockfile-only --ignore-scripts
 
       - name: Run package tests
         run: pnpm test:packages
@@ -110,7 +173,7 @@ jobs:
       - name: Commit package release version
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          git add packages/node-core/package.json packages/cli/package.json packages/mcp-server/package.json packages/mcp-server/server.json
+          git add Cargo.lock pnpm-lock.yaml crates/dbx-mcp/Cargo.toml crates/dbx-cli/Cargo.toml packages/cli/package.json packages/cli-*/package.json packages/mcp-server/package.json packages/mcp-server/server.json packages/mcp-*/package.json
           if git diff --cached --quiet; then
             echo "Package versions already committed for ${VERSION}."
           else
@@ -143,63 +206,129 @@ jobs:
             git push origin "refs/tags/${TAG}:refs/tags/${TAG}"
           fi
 
-  publish-node-core:
-    name: Publish node-core
-    runs-on: ubuntu-latest
-    needs: prepare
-    outputs:
-      published-or-existing: ${{ steps.publish.outputs.published_or_existing }}
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22.13.0
-          registry-url: https://registry.npmjs.org
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsecret-1-dev
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Publish Node core
-        id: publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          if npm view "@dbx-app/node-core@${VERSION}" version >/dev/null 2>&1; then
-            echo "@dbx-app/node-core@${VERSION} already exists on npm; skipping."
-            echo "published_or_existing=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          pnpm --filter @dbx-app/node-core publish --access public --provenance --no-git-checks
-          echo "published_or_existing=true" >> "$GITHUB_OUTPUT"
-
-  publish-leaf-packages:
+  publish-cli-platforms:
     name: Publish ${{ matrix.package-name }}
-    runs-on: ubuntu-latest
-    needs: [prepare, publish-node-core]
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - package-name: "@dbx-app/cli"
-            filter: "@dbx-app/cli"
-          - package-name: "@dbx-app/mcp-server"
-            filter: "@dbx-app/mcp-server"
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            package-dir: cli-darwin-arm64
+            package-name: "@dbx-app/cli-darwin-arm64"
+            binary: dbx
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            package-dir: cli-darwin-x64
+            package-name: "@dbx-app/cli-darwin-x64"
+            binary: dbx
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            package-dir: cli-linux-arm64-gnu
+            package-name: "@dbx-app/cli-linux-arm64-gnu"
+            binary: dbx
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            package-dir: cli-linux-x64-gnu
+            package-name: "@dbx-app/cli-linux-x64-gnu"
+            binary: dbx
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            package-dir: cli-win32-arm64
+            package-name: "@dbx-app/cli-win32-arm64"
+            binary: dbx.exe
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            package-dir: cli-win32-x64
+            package-name: "@dbx-app/cli-win32-x64"
+            binary: dbx.exe
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dbx-cli-${{ matrix.target }}
+          cache-targets: false
+          cache-on-failure: true
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev
+
+      - name: Build Rust CLI binary
+        shell: bash
+        run: cargo build --release -p dbx-cli --no-default-features --target "${{ matrix.target }}"
+
+      - name: Stage platform package
+        shell: bash
+        run: |
+          mkdir -p "packages/${{ matrix.package-dir }}/bin"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"; fi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish platform package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
+            exit 0
+          fi
+          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+
+  publish-cli:
+    name: Publish @dbx-app/cli
+    runs-on: ubuntu-latest
+    needs: [prepare, publish-cli-platforms]
 
     steps:
       - uses: actions/checkout@v5
@@ -217,34 +346,396 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsecret-1-dev
-
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build workspace dependencies
-        run: pnpm --filter @dbx-app/node-core build
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Publish package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
-          PACKAGE_NAME: ${{ matrix.package-name }}
-          PACKAGE_FILTER: ${{ matrix.filter }}
         run: |
-          if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
-            echo "${PACKAGE_NAME}@${VERSION} already exists on npm; skipping."
+          wait_for_package() {
+            package="$1"
+            for attempt in $(seq 1 18); do
+              if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then return 0; fi
+              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/18)."
+              sleep 10
+            done
+            return 1
+          }
+          for package in \
+            @dbx-app/cli-darwin-arm64 \
+            @dbx-app/cli-darwin-x64 \
+            @dbx-app/cli-linux-arm64-gnu \
+            @dbx-app/cli-linux-x64-gnu \
+            @dbx-app/cli-win32-arm64 \
+            @dbx-app/cli-win32-x64; do
+            wait_for_package "${package}" || {
+              echo "${package}@${VERSION} is not available on npm; refusing to publish @dbx-app/cli."
+              exit 1
+            }
+          done
+          if npm view "@dbx-app/cli@${VERSION}" version >/dev/null 2>&1; then
+            echo "@dbx-app/cli@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          pnpm --filter "${PACKAGE_FILTER}" publish --access public --provenance --no-git-checks
+          pnpm --filter "@dbx-app/cli" publish --access public --provenance --no-git-checks
+
+  publish-mcp-platforms:
+    name: Publish ${{ matrix.package-name }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            package-dir: mcp-darwin-arm64
+            package-name: "@dbx-app/mcp-darwin-arm64"
+            binary: dbx-mcp
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            package-dir: mcp-darwin-x64
+            package-name: "@dbx-app/mcp-darwin-x64"
+            binary: dbx-mcp
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            package-dir: mcp-linux-arm64-gnu
+            package-name: "@dbx-app/mcp-linux-arm64-gnu"
+            binary: dbx-mcp
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            package-dir: mcp-linux-x64-gnu
+            package-name: "@dbx-app/mcp-linux-x64-gnu"
+            binary: dbx-mcp
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            package-dir: mcp-win32-arm64
+            package-name: "@dbx-app/mcp-win32-arm64"
+            binary: dbx-mcp.exe
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            package-dir: mcp-win32-x64
+            package-name: "@dbx-app/mcp-win32-x64"
+            binary: dbx-mcp.exe
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dbx-mcp-${{ matrix.target }}
+          cache-targets: false
+          cache-on-failure: true
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev
+
+      - name: Build Rust MCP binary
+        shell: bash
+        run: cargo build --release -p dbx-mcp --target "${{ matrix.target }}"
+
+      - name: Stage platform package
+        shell: bash
+        run: |
+          mkdir -p "packages/${{ matrix.package-dir }}/bin"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          fi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish platform package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
+            exit 0
+          fi
+          npm publish "./packages/${{ matrix.package-dir }}" --access public --provenance
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+
+  publish-mcp-server:
+    name: Publish @dbx-app/mcp-server
+    runs-on: ubuntu-latest
+    needs: [prepare, publish-mcp-platforms]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Publish MCP launcher
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          wait_for_package() {
+            package="$1"
+            for attempt in $(seq 1 18); do
+              if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then
+                return 0
+              fi
+              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/18)."
+              sleep 10
+            done
+            return 1
+          }
+
+          for package in \
+            @dbx-app/mcp-darwin-arm64 \
+            @dbx-app/mcp-darwin-x64 \
+            @dbx-app/mcp-linux-arm64-gnu \
+            @dbx-app/mcp-linux-x64-gnu \
+            @dbx-app/mcp-win32-arm64 \
+            @dbx-app/mcp-win32-x64; do
+            wait_for_package "${package}" || {
+              echo "${package}@${VERSION} is not available on npm; refusing to publish @dbx-app/mcp-server."
+              exit 1
+            }
+          done
+          if npm view "@dbx-app/mcp-server@${VERSION}" version >/dev/null 2>&1; then
+            echo "@dbx-app/mcp-server@${VERSION} already exists on npm; skipping."
+            exit 0
+          fi
+          pnpm --filter "@dbx-app/mcp-server" publish --access public --provenance --no-git-checks
+
+  publish-mcp-github-release:
+    name: Publish MCP GitHub Release assets
+    runs-on: ubuntu-latest
+    needs: [prepare, publish-mcp-server]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Build native release archives from npm packages
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          pack_unix() {
+            package_name="$1"
+            asset_name="$2"
+            work_dir="$(mktemp -d)"
+            npm pack "${package_name}@${VERSION}" --pack-destination "${work_dir}" --json > "${work_dir}/pack.json"
+            tarball="${work_dir}/$(jq -r '.[0].filename' "${work_dir}/pack.json")"
+            tar -xzf "${tarball}" -C "${work_dir}"
+            mkdir -p "${work_dir}/archive"
+            cp "${work_dir}/package/bin/dbx-mcp" "${work_dir}/archive/dbx-mcp"
+            chmod +x "${work_dir}/archive/dbx-mcp"
+            tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx-mcp
+          }
+
+          pack_windows() {
+            package_name="$1"
+            asset_name="$2"
+            work_dir="$(mktemp -d)"
+            npm pack "${package_name}@${VERSION}" --pack-destination "${work_dir}" --json > "${work_dir}/pack.json"
+            tarball="${work_dir}/$(jq -r '.[0].filename' "${work_dir}/pack.json")"
+            tar -xzf "${tarball}" -C "${work_dir}"
+            zip -j "release-assets/${asset_name}.zip" "${work_dir}/package/bin/dbx-mcp.exe"
+          }
+
+          pack_unix "@dbx-app/mcp-darwin-arm64" "dbx-mcp-darwin-arm64"
+          pack_unix "@dbx-app/mcp-darwin-x64" "dbx-mcp-darwin-x64"
+          pack_unix "@dbx-app/mcp-linux-arm64-gnu" "dbx-mcp-linux-arm64-gnu"
+          pack_unix "@dbx-app/mcp-linux-x64-gnu" "dbx-mcp-linux-x64-gnu"
+          pack_windows "@dbx-app/mcp-win32-arm64" "dbx-mcp-win32-arm64"
+          pack_windows "@dbx-app/mcp-win32-x64" "dbx-mcp-win32-x64"
+
+          (
+            cd release-assets
+            sha256sum *.tar.gz *.zip > SHA256SUMS
+          )
+
+      - name: Attest native release archives
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: release-assets/*
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          cat > release-notes.md <<EOF
+          DBX MCP and CLI ${VERSION} provide precompiled native binaries for macOS, Linux, and Windows.
+
+          Recommended npm installation:
+
+          \`\`\`bash
+          npm install -g @dbx-app/mcp-server@${VERSION}
+          \`\`\`
+
+          Native archives run without Node.js. Download the archive matching your operating system and CPU, verify it with \`SHA256SUMS\`, extract \`dbx-mcp\` (or \`dbx-mcp.exe\`), and configure your MCP client to run it directly.
+
+          The CLI archives use the \`dbx-cli-*\` prefix. Verify them with \`CLI-SHA256SUMS\`, extract \`dbx\` (or \`dbx.exe\`), and run it directly without Node.js.
+
+          This package release is separate from the DBX desktop application release and is intentionally not marked as the repository's latest release.
+          EOF
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-assets/* --clobber
+            gh release edit "${TAG}" --title "DBX Packages ${VERSION}" --notes-file release-notes.md --latest=false
+          else
+            gh release create "${TAG}" release-assets/* \
+              --verify-tag \
+              --title "DBX Packages ${VERSION}" \
+              --notes-file release-notes.md \
+              --latest=false
+          fi
+
+  publish-cli-github-release:
+    name: Publish CLI GitHub Release assets
+    runs-on: ubuntu-latest
+    needs: [prepare, publish-cli, publish-mcp-github-release]
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Build native CLI release archives from npm packages
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          pack_unix() {
+            package_name="$1"
+            asset_name="$2"
+            work_dir="$(mktemp -d)"
+            npm pack "${package_name}@${VERSION}" --pack-destination "${work_dir}" --json > "${work_dir}/pack.json"
+            tarball="${work_dir}/$(jq -r '.[0].filename' "${work_dir}/pack.json")"
+            tar -xzf "${tarball}" -C "${work_dir}"
+            mkdir -p "${work_dir}/archive"
+            cp "${work_dir}/package/bin/dbx" "${work_dir}/archive/dbx"
+            chmod +x "${work_dir}/archive/dbx"
+            tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx
+          }
+
+          pack_windows() {
+            package_name="$1"
+            asset_name="$2"
+            work_dir="$(mktemp -d)"
+            npm pack "${package_name}@${VERSION}" --pack-destination "${work_dir}" --json > "${work_dir}/pack.json"
+            tarball="${work_dir}/$(jq -r '.[0].filename' "${work_dir}/pack.json")"
+            tar -xzf "${tarball}" -C "${work_dir}"
+            zip -j "release-assets/${asset_name}.zip" "${work_dir}/package/bin/dbx.exe"
+          }
+
+          pack_unix "@dbx-app/cli-darwin-arm64" "dbx-cli-darwin-arm64"
+          pack_unix "@dbx-app/cli-darwin-x64" "dbx-cli-darwin-x64"
+          pack_unix "@dbx-app/cli-linux-arm64-gnu" "dbx-cli-linux-arm64-gnu"
+          pack_unix "@dbx-app/cli-linux-x64-gnu" "dbx-cli-linux-x64-gnu"
+          pack_windows "@dbx-app/cli-win32-arm64" "dbx-cli-win32-arm64"
+          pack_windows "@dbx-app/cli-win32-x64" "dbx-cli-win32-x64"
+
+          (
+            cd release-assets
+            sha256sum *.tar.gz *.zip > CLI-SHA256SUMS
+          )
+
+      - name: Attest native CLI release archives
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: release-assets/*
+
+      - name: Upload CLI assets to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "${TAG}" release-assets/* --clobber
 
   publish-homebrew-formula:
     name: Publish Homebrew formula
     runs-on: ubuntu-latest
-    needs: [prepare, publish-leaf-packages]
+    needs: [prepare, publish-cli, publish-mcp-server]
     steps:
       - name: Download CLI npm tarball and compute SHA256
         id: cli-hash
@@ -292,30 +783,12 @@ jobs:
             sha256 "__CLI_SHA256__"
             license "Apache-2.0"
 
-            depends_on "node"
-
-            on_linux do
-              depends_on "pkgconf" => :build
-              depends_on "libsecret"
-            end
+              depends_on "node"
 
             def install
               system "npm", "install", *std_npm_args
               bin.install_symlink libexec.glob("bin/*")
 
-              # Rebuild better-sqlite3 and keytar native bindings for the current platform.
-              # prebuild-install is blocked by the Homebrew sandbox during npm install,
-              # so we must rebuild them explicitly via node-gyp.
-              node_modules = libexec/"lib/node_modules/@dbx-app/cli/node_modules"
-
-              cd node_modules/"better-sqlite3" do
-                system "npm", "run", "build-release"
-              end
-
-              cd node_modules/"keytar" do
-                rm_r "prebuilds" if File.directory?("prebuilds")
-                system "npm", "run", "build"
-              end
             end
 
             test do

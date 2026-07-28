@@ -71,6 +71,13 @@ pub struct DuckDbAttachDatabaseSqlOptions {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SqliteAttachDatabaseSqlOptions {
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DropObjectSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
@@ -155,6 +162,15 @@ pub struct DuplicateTableStructureSqlOptions {
     pub schema: Option<String>,
     pub source_name: String,
     pub target_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_comments: Vec<DuplicateTableColumnComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateTableColumnComment {
+    pub name: String,
+    pub comment: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,6 +267,7 @@ pub fn supports_create_schema_target(database_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Kwdb
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
+                | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
                 | DatabaseType::Yashandb
                 | DatabaseType::Dameng
@@ -287,6 +304,7 @@ pub fn supports_database_property_comment(database_type: Option<DatabaseType>) -
                 | DatabaseType::Kwdb
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
+                | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
                 | DatabaseType::OpenGauss
                 | DatabaseType::Yashandb
@@ -300,6 +318,14 @@ pub fn build_duckdb_attach_database_sql(options: DuckDbAttachDatabaseSqlOptions)
         "ATTACH {} AS {};",
         quote_sql_string(&options.path),
         quote_table_identifier(Some(DatabaseType::DuckDb), &options.name)
+    )
+}
+
+pub fn build_sqlite_attach_database_sql(options: SqliteAttachDatabaseSqlOptions) -> String {
+    format!(
+        "ATTACH DATABASE {} AS {};",
+        quote_sql_string(&options.path),
+        quote_table_identifier(Some(DatabaseType::Sqlite), &options.name)
     )
 }
 
@@ -354,6 +380,7 @@ fn supports_drop_table_cascade(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Kwdb
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
+                | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
                 | DatabaseType::OpenGauss
         )
@@ -382,12 +409,14 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
                         | DatabaseType::OpenGauss
                         | DatabaseType::Questdb
                         | DatabaseType::Highgo
+                        | DatabaseType::Uxdb
                         | DatabaseType::Vastbase
                         | DatabaseType::Kingbase
                         | DatabaseType::Oracle
                         | DatabaseType::Dameng
                         | DatabaseType::OceanbaseOracle
                         | DatabaseType::Iris
+                        | DatabaseType::Sqlite
                 )
             ) && options.schema.as_deref().is_some_and(|schema| !schema.is_empty())
             {
@@ -413,6 +442,7 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
                         | DatabaseType::OpenGauss
                         | DatabaseType::Questdb
                         | DatabaseType::Highgo
+                        | DatabaseType::Uxdb
                         | DatabaseType::Vastbase
                         | DatabaseType::Kingbase
                 )
@@ -472,6 +502,7 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
                 | DatabaseType::Kwdb
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
+                | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
                 | DatabaseType::OpenGauss
         )
@@ -560,22 +591,38 @@ pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
 pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOptions) -> String {
     let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
     let target = qualified_name(options.database_type, options.schema.as_deref(), &options.target_name);
-    if options.database_type == Some(DatabaseType::Mysql) {
-        return format!("CREATE TABLE {target} LIKE {source};");
+    let structure_sql = if options.database_type == Some(DatabaseType::Mysql) {
+        format!("CREATE TABLE {target} LIKE {source};")
+    } else if options.database_type == Some(DatabaseType::Questdb) {
+        format!("CREATE TABLE {target} (LIKE {source});")
+    } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
+        format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
+    } else if options.database_type == Some(DatabaseType::SqlServer) {
+        format!("SELECT TOP 0 * INTO {target} FROM {source};")
+    } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
+        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
+    } else {
+        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+    };
+
+    if options.database_type != Some(DatabaseType::Dameng) {
+        return structure_sql;
     }
-    if options.database_type == Some(DatabaseType::Questdb) {
-        return format!("CREATE TABLE {target} (LIKE {source});");
+    let comment_sql = options
+        .column_comments
+        .iter()
+        .filter_map(|column| {
+            if column.comment.trim().is_empty() {
+                return None;
+            }
+            let column_name = quote_table_identifier(options.database_type, &column.name);
+            Some(format!("COMMENT ON COLUMN {target}.{column_name} IS {}", quote_sql_string(&column.comment)))
+        })
+        .collect::<Vec<_>>();
+    if comment_sql.is_empty() {
+        return structure_sql;
     }
-    if options.database_type.is_some_and(is_postgres_like_structure_copy) {
-        return format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);");
-    }
-    if options.database_type == Some(DatabaseType::SqlServer) {
-        return format!("SELECT TOP 0 * INTO {target} FROM {source};");
-    }
-    if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
-        return format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0");
-    }
-    format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+    format!("{};\n{};", structure_sql.trim_end_matches(';'), comment_sql.join(";\n"))
 }
 
 pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
@@ -690,6 +737,7 @@ fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
             | DatabaseType::Kwdb
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
     )
 }
@@ -1061,6 +1109,17 @@ mod tests {
     }
 
     #[test]
+    fn builds_sqlite_attach_sql() {
+        assert_eq!(
+            build_sqlite_attach_database_sql(SqliteAttachDatabaseSqlOptions {
+                path: "/Users/me/O'Reilly data.sqlite".to_string(),
+                name: "report db".to_string(),
+            }),
+            "ATTACH DATABASE '/Users/me/O''Reilly data.sqlite' AS \"report db\";"
+        );
+    }
+
+    #[test]
     fn builds_dameng_create_user_sql_with_escaped_values() {
         assert_eq!(
             build_create_user_sql("app\"user", "pa'ss", "main\"space"),
@@ -1321,6 +1380,17 @@ mod tests {
         );
         assert_eq!(
             build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
+                database_type: Some(DatabaseType::Sqlite),
+                object_type: TableChildObjectType::Index,
+                schema: Some("analytics".to_string()),
+                table_name: "orders".to_string(),
+                name: "idx_orders_status".to_string(),
+            })
+            .unwrap(),
+            "DROP INDEX \"analytics\".\"idx_orders_status\";"
+        );
+        assert_eq!(
+            build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
                 object_type: TableChildObjectType::ForeignKey,
                 schema: None,
@@ -1374,6 +1444,7 @@ mod tests {
                 schema: None,
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                column_comments: vec![],
             }),
             "CREATE TABLE `users_copy` LIKE `users`;"
         );
@@ -1383,6 +1454,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                column_comments: vec![],
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
         );
@@ -1392,6 +1464,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                column_comments: vec![],
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
         );
@@ -1401,6 +1474,7 @@ mod tests {
                 schema: Some("dbo".to_string()),
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                column_comments: vec![],
             }),
             "SELECT TOP 0 * INTO [dbo].[users_copy] FROM [dbo].[users];"
         );
@@ -1410,8 +1484,36 @@ mod tests {
                 schema: Some("HR".to_string()),
                 source_name: "USERS".to_string(),
                 target_name: "USERS_COPY".to_string(),
+                column_comments: vec![],
             }),
             "CREATE TABLE \"HR\".\"USERS_COPY\" AS SELECT * FROM \"HR\".\"USERS\" WHERE 1=0"
+        );
+        let dameng_sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Dameng),
+            schema: Some("APP".to_string()),
+            source_name: "USERS".to_string(),
+            target_name: "USERS_COPY".to_string(),
+            column_comments: vec![
+                DuplicateTableColumnComment {
+                    name: "DISPLAY\"NAME".to_string(),
+                    comment: "  Owner's; display name".to_string(),
+                },
+                DuplicateTableColumnComment { name: "STATUS".to_string(), comment: "active  ".to_string() },
+                DuplicateTableColumnComment { name: "EMPTY".to_string(), comment: " \t\n".to_string() },
+            ],
+        });
+        assert_eq!(
+            dameng_sql,
+            "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  ';"
+        );
+        assert_eq!(
+            crate::sql::split_sql_statements_for_database(&dameng_sql, DatabaseType::Dameng),
+            vec![
+                "CREATE TABLE \"APP\".\"USERS_COPY\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'"
+                    .to_string(),
+                "COMMENT ON COLUMN \"APP\".\"USERS_COPY\".\"STATUS\" IS 'active  '".to_string(),
+            ]
         );
         assert_eq!(
             build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
@@ -1419,6 +1521,7 @@ mod tests {
                 schema: Some("SQLUSER".to_string()),
                 source_name: "tb_a".to_string(),
                 target_name: "tb_a_copy".to_string(),
+                column_comments: vec![],
             }),
             "CREATE TABLE \"SQLUSER\".\"tb_a_copy\" AS SELECT * FROM \"SQLUSER\".\"tb_a\" WHERE 1=0"
         );
@@ -1428,6 +1531,7 @@ mod tests {
                 schema: None,
                 source_name: "users".to_string(),
                 target_name: "users_copy".to_string(),
+                column_comments: vec![],
             }),
             "CREATE TABLE `users_copy` (LIKE `users`);"
         );

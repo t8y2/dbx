@@ -172,6 +172,23 @@ pub async fn list_system_fonts() -> Result<Json<Vec<String>>, AppError> {
     Ok(Json(jdbc::list_system_fonts()))
 }
 
+async fn progress_sender(state: &WebState, operation_id: &str) -> broadcast::Sender<String> {
+    let mut channels = state.sse_channels.write().await;
+    channels
+        .entry(format!("agent-install-progress:{operation_id}"))
+        .or_insert_with(|| {
+            let (tx, _) = broadcast::channel::<String>(256);
+            tx
+        })
+        .clone()
+}
+
+fn send_progress_event(tx: &broadcast::Sender<String>, event: AgentProgressEvent) {
+    if let Ok(payload) = serde_json::to_string(&event) {
+        let _ = tx.send(payload);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::safe_upload_file_name;
@@ -189,22 +206,5 @@ mod tests {
             panic!("plain JAR filename should be accepted");
         };
         assert_eq!(file_name, "postgresql-42.7.jar");
-    }
-}
-
-async fn progress_sender(state: &WebState, operation_id: &str) -> broadcast::Sender<String> {
-    let mut channels = state.sse_channels.write().await;
-    channels
-        .entry(format!("agent-install-progress:{operation_id}"))
-        .or_insert_with(|| {
-            let (tx, _) = broadcast::channel::<String>(256);
-            tx
-        })
-        .clone()
-}
-
-fn send_progress_event(tx: &broadcast::Sender<String>, event: AgentProgressEvent) {
-    if let Ok(payload) = serde_json::to_string(&event) {
-        let _ = tx.send(payload);
     }
 }

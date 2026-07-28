@@ -5,6 +5,7 @@ type CellValue = string | number | boolean | null;
 export const DATA_GRID_COL_MIN_WIDTH = 60;
 export const DATA_GRID_COL_MAX_WIDTH = 400;
 export const DATA_GRID_COL_AUTO_FIT_MAX_WIDTH = 1200;
+export const DATA_GRID_HEADER_MAX_WIDTH = 500;
 export const DATA_GRID_CHAR_WIDTH = 8;
 export const DATA_GRID_HEADER_CONTROL_WIDTH = 80;
 export const DATA_GRID_CELL_PADDING = 28;
@@ -91,17 +92,19 @@ export function percentileValue(values: number[], percentile: number): number {
   return sorted[idx];
 }
 
-export function calculateDataGridColumnWidth(options: { columnName: string; sampleValues: readonly CellValue[]; maxWidth?: number; valueTextLimit?: number; density?: ColumnWidthDensity; compactColumnHeaderActions?: boolean; includeValues?: boolean }): number {
+export function calculateDataGridColumnWidth(options: { columnName: string; sampleValues: readonly CellValue[]; maxWidth?: number; valueTextLimit?: number; density?: ColumnWidthDensity; compactColumnHeaderActions?: boolean; includeValues?: boolean; headerTextWidth?: number }): number {
   const density = options.density ?? "standard";
   const preset = COLUMN_WIDTH_DENSITY_PRESETS[density];
   const maxAllowedWidth = options.maxWidth ?? preset.maxWidth;
   const valueTextLimit = options.valueTextLimit ?? preset.valueTextLimit;
   const headerControl = options.compactColumnHeaderActions ? preset.headerControlWidthCompact : preset.headerControlWidth;
-  const headerWidth = estimateTextWidth(options.columnName, headerControl, preset.charWidth);
+  const headerTextWidth = options.headerTextWidth ?? estimateTextWidth(options.columnName, 0, preset.charWidth);
+  // Protect the grid from pathological identifiers while keeping normal names density-independent.
+  const headerWidth = Math.min(DATA_GRID_HEADER_MAX_WIDTH, headerTextWidth + headerControl);
 
-  // Compact defaults to header-only sizing, while explicit auto-fit still measures values.
+  // Density limits cell content, never the column name and its header controls.
   if (density === "compact" && !options.includeValues) {
-    return Math.max(DATA_GRID_COL_MIN_WIDTH, Math.min(maxAllowedWidth, Math.round(headerWidth)));
+    return Math.max(DATA_GRID_COL_MIN_WIDTH, Math.round(headerWidth));
   }
 
   const valueWidths: number[] = [];
@@ -113,7 +116,7 @@ export function calculateDataGridColumnWidth(options: { columnName: string; samp
   }
 
   const valueWidth = percentileValue(valueWidths, preset.valueWidthPercentile);
-  const maxContentWidth = Math.max(headerWidth, valueWidth);
+  const maxContentWidth = Math.max(headerWidth, Math.min(maxAllowedWidth, valueWidth));
 
-  return Math.max(DATA_GRID_COL_MIN_WIDTH, Math.min(maxAllowedWidth, Math.round(maxContentWidth)));
+  return Math.max(DATA_GRID_COL_MIN_WIDTH, Math.round(maxContentWidth));
 }

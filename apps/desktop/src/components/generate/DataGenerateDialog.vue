@@ -71,6 +71,14 @@ function colKey(schema: string, table: string, column: string) {
   return `${schema}.${table}.${column}`;
 }
 
+function tableInfo(schema: string, table: string): TableInfo | undefined {
+  return schemaTables[schema]?.find((item) => item.name === table);
+}
+
+function isTdengineTagColumn(column: ColumnInfo): boolean {
+  return (column.extra ?? "").toUpperCase().includes("TAG") || (column.comment ?? "").toUpperCase() === "TAG";
+}
+
 // Derived state for template
 const activeCfg = computed(() => {
   const k = panelTableKey.value;
@@ -109,11 +117,13 @@ async function loadSchemas() {
         try {
           const tables = await api.listTables(cid, db, targetSchema);
           schemaTables[targetSchema] = tables;
-          if (tables.some((t: { name: string }) => t.name === props.prefillTable)) {
+          const prefillTableInfo = tables.find((table) => table.name === props.prefillTable);
+          if (prefillTableInfo) {
             const cols = await api.getColumns(cid, db, targetSchema, props.prefillTable);
             const key = tableKey(targetSchema, props.prefillTable);
             configs[key] = {
               tableName: props.prefillTable,
+              tableType: prefillTableInfo.table_type,
               schema: targetSchema,
               database: db,
               rowCount: 1000,
@@ -138,6 +148,7 @@ async function loadSchemas() {
                     gKey,
                   ),
                   isAutoIncrement: isAI,
+                  isTag: isTdengineTagColumn(c),
                   columnDefault: c.column_default,
                 };
               }),
@@ -210,6 +221,7 @@ async function loadColumns(schema: string, table: string) {
   const cols = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, schema, table);
   const cfg: TableGenerateConfig = {
     tableName: table,
+    tableType: tableInfo(schema, table)?.table_type,
     schema,
     database: props.prefillDatabase,
     rowCount: 1000,
@@ -234,6 +246,7 @@ async function loadColumns(schema: string, table: string) {
           gKey,
         ),
         isAutoIncrement: isAI,
+        isTag: isTdengineTagColumn(c),
         columnDefault: c.column_default,
       };
     }),
@@ -912,12 +925,12 @@ async function onFileSelected(event: Event) {
           <template v-else>
             <div class="flex items-center justify-between px-3 py-2 border-b bg-muted/10">
               <div class="flex items-center gap-2">
-                <span class="text-xs text-muted-foreground">{{ t("dataGenerate.target") }}：</span>
+                <span class="text-xs text-muted-foreground">{{ t("dataGenerate.target") }}:</span>
                 <select v-if="generatedResults.length > 1" v-model="previewTableIndex" class="h-7 rounded border bg-background px-2 text-xs">
                   <option v-for="(r, i) in generatedResults" :key="i" :value="i">{{ r.tableName }}</option>
                 </select>
                 <span v-else class="text-sm font-medium">{{ generatedResults[0].tableName }}</span>
-                <span class="text-xs text-muted-foreground">{{ currentPreview.rows.length }} 行</span>
+                <span class="text-xs text-muted-foreground">{{ t("dataGenerate.previewRowCount", { count: currentPreview.rows.length }) }}</span>
               </div>
               <Button variant="outline" size="sm" class="h-7 text-xs" @click="regenerate">{{ t("dataGenerate.regenerate") }}</Button>
             </div>
@@ -1028,7 +1041,7 @@ async function onFileSelected(event: Event) {
     <Dialog v-model:open="optionsDialogOpen">
       <DialogContent class="max-w-sm">
         <DialogHeader>
-          <DialogTitle class="text-sm">生成选项</DialogTitle>
+          <DialogTitle class="text-sm">{{ t("dataGenerate.generateOptions") }}</DialogTitle>
         </DialogHeader>
         <div class="space-y-3 py-2">
           <label class="flex items-center gap-3 cursor-pointer">

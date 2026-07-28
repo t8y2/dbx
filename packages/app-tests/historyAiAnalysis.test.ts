@@ -20,7 +20,7 @@ const baseEntry: HistoryAiAnalysisEntry = {
 test("buildHistoryAiAnalysisPrompt includes operation details and rollback SQL", () => {
   const prompt = buildHistoryAiAnalysisPrompt(baseEntry);
 
-  assert.match(prompt, /分析这条 DBX 历史记录/);
+  assert.match(prompt, /Analyse this DBX history entry/);
   assert.match(prompt, /Connection: Local MySQL/);
   assert.match(prompt, /Operation: UPDATE/);
   assert.match(prompt, /Affected rows: 1/);

@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
@@ -52,6 +52,7 @@ const tabDrag = useTabDrag((draggedId, targetId, position) => {
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
+const isWrapLayout = computed(() => settingsStore.editorSettings.tabLayout === "wrap");
 const fixedTabs = computed(() => queryStore.tabs.filter((tab) => tab.pinned));
 const regularTabs = computed(() => queryStore.tabs.filter((tab) => !tab.pinned));
 const hasFixedTabs = computed(() => fixedTabs.value.length > 0);
@@ -128,8 +129,12 @@ function startRenameTab(tab: QueryTab) {
   editingTitle.value = tab.title;
   nextTick(() => {
     const input = document.querySelector<HTMLInputElement>(`[data-tab-title-input="${tab.id}"]`);
-    input?.focus();
-    input?.select();
+    if (input) {
+      input.focus();
+      const dotIndex = input.value.lastIndexOf(".");
+      const selectEnd = dotIndex > 0 ? dotIndex : input.value.length;
+      input.setSelectionRange(0, selectEnd);
+    }
   });
 }
 
@@ -184,6 +189,26 @@ function closeAllRegularSurfaces() {
   closeSpecialRegularSurfaces();
 }
 
+function closeOtherActiveTabs() {
+  if (props.settingsPageActive) {
+    queryStore.closeRegularTabs();
+    closeSpecialRegularSurfaces("settings");
+    return;
+  }
+  if (props.driverStoreActive) {
+    queryStore.closeRegularTabs();
+    closeSpecialRegularSurfaces("driverStore");
+    return;
+  }
+
+  const tab = queryStore.tabs.find((item) => item.id === queryStore.activeTabId);
+  if (!tab) return;
+  if (tab.pinned) queryStore.closeOtherFixedTabs(tab.id);
+  else closeOtherRegularTabsFromTab(tab);
+}
+
+defineExpose({ closeOtherActiveTabs });
+
 function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextMenuItem[] {
   const keep = surface;
   const closeCurrent = surface === "driverStore" ? () => emit("close-driver-store") : () => emit("close-settings-page");
@@ -207,6 +232,7 @@ function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextM
       },
       disabled: closeOtherDisabled,
       icon: X,
+      shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
     },
     {
       label: closeAllLabel,
@@ -269,6 +295,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: closeOtherAction,
       disabled: closeOtherDisabled,
       icon: X,
+      shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
     },
     {
       label: closeAllLabel,
@@ -342,12 +369,14 @@ watch(
   () => queryStore.activeTabId,
   () => {
     nextTick(() => {
-      for (const container of [tabsContainerRef.value, fixedTabsContainerRef.value]) {
-        if (!container) continue;
-        const activeEl = container.querySelector('[data-active-tab="true"]');
-        if (activeEl) {
-          activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: activeTabScrollInline(container, queryStore.activeTabId) });
-          break;
+      if (!isWrapLayout.value) {
+        for (const container of [tabsContainerRef.value, fixedTabsContainerRef.value]) {
+          if (!container) continue;
+          const activeEl = container.querySelector('[data-active-tab="true"]');
+          if (activeEl) {
+            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: activeTabScrollInline(container, queryStore.activeTabId) });
+            break;
+          }
         }
       }
       updateAllScrollButtons();
@@ -361,6 +390,7 @@ watch(
   (show) => {
     if (!show) return;
     nextTick(() => {
+      if (isWrapLayout.value) return;
       const container = tabsContainerRef.value;
       if (!container) return;
       const el = container.querySelector("[data-driver-store-tab]");
@@ -377,6 +407,7 @@ watch(
   (show) => {
     if (!show) return;
     nextTick(() => {
+      if (isWrapLayout.value) return;
       const container = tabsContainerRef.value;
       if (!container) return;
       const el = container.querySelector("[data-settings-page-tab]");
@@ -418,7 +449,7 @@ function tabColorStyle(tab: QueryTab) {
 
 function tabIconClass(tab: QueryTab) {
   if (tab.mode === "mq") return "";
-  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "objects" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
+  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "hbase" || tab.mode === "objects" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
   return "text-blue-600 dark:text-blue-400";
 }
 
@@ -429,29 +460,32 @@ function tabDatabaseIconType(tab: QueryTab) {
     const externalConfig = connection.external_config as { systemKind?: unknown } | undefined;
     const systemKind = typeof externalConfig?.systemKind === "string" ? externalConfig.systemKind : "";
     if (connection.driver_profile === "kafka" || systemKind === "kafka") return "kafka";
+    if (connection.driver_profile === "rocketmq" || systemKind === "rocketmq") return "rocketmq";
+    if (connection.driver_profile === "rabbitmq" || systemKind === "rabbitmq") return "rabbitmq";
     if (connection.driver_profile === "pulsar" || systemKind === "pulsar") return "pulsar";
   }
   return connection.driver_profile || connection.db_type;
 }
 
-const showRegularTabScrollbar = computed(() => hasTabOverflow.value);
-const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value);
-const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value);
+const showRegularTabScrollbar = computed(() => hasTabOverflow.value && !isWrapLayout.value);
+const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value && !isWrapLayout.value);
+const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value && !isWrapLayout.value);
 const regularTabOverflowOpen = ref(false);
 const fixedTabOverflowOpen = ref(false);
 const tabBarClass = computed(() => [isClassicLayout.value ? "bg-muted" : "border-b bg-background", hasFixedTabs.value ? "flex-col" : "", isClassicLayout.value && hasFixedTabs.value ? "border-b" : ""]);
 const regularTabRowClass = computed(() => [isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2", isClassicLayout.value && !hasFixedTabs.value ? "border-b" : ""]);
 
 function tabMenuIcon(tab: QueryTab) {
-  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis") return Table2;
+  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
   if (tab.mode === "vector") return TableProperties;
   if (tab.mode === "etcd" || tab.mode === "zookeeper") return KeyRound;
+  if (tab.mode === "etcd-dashboard") return Gauge;
   if (tab.mode === "nacos") return Network;
   if (tab.mode === "objects") return TableProperties;
   if (tab.mode === "structure") return PencilRuler;
   if (tab.mode === "dameng-jobs") return CalendarClock;
   if (tab.mode === "processlist") return Activity;
-  if (tab.mode === "mysql-dashboard") return Gauge;
+  if (tab.mode === "mysql-dashboard" || tab.mode === "postgres-dashboard" || tab.mode === "nacos-dashboard") return Gauge;
   return Code2;
 }
 
@@ -504,8 +538,8 @@ const fixedTabScrollbarThumbStyle = computed<CSSProperties>(() => ({
   width: `${fixedScrollThumbWidthPercent.value}%`,
 }));
 
-const tabTailDragRegionClass = computed(() => (showRegularTabOverflowControls.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
-const fixedTabTailDragRegionClass = computed(() => (showFixedTabScrollbar.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
+const tabTailDragRegionClass = computed(() => (showRegularTabOverflowControls.value || isWrapLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
+const fixedTabTailDragRegionClass = computed(() => (showFixedTabScrollbar.value || isWrapLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
 
 const tabOverflowControlClass = computed(() =>
   isClassicLayout.value
@@ -551,13 +585,20 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
         <div v-if="showRegularTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="tabScrollbarThumbStyle" />
         </div>
-        <div ref="tabsContainerRef" class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto" :class="isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1.5'" :style="tabsContainerStyle" @scroll="updateScrollButtons" @wheel="onTabsWheel">
+        <div
+          ref="tabsContainerRef"
+          class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto"
+          :class="[isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1.5', isWrapLayout ? 'wrap-mode' : '', isWrapLayout && isClassicLayout ? 'classic-wrap' : '']"
+          :style="tabsContainerStyle"
+          @scroll="updateScrollButtons"
+          @wheel="onTabsWheel"
+        >
           <CustomContextMenu v-for="tab in regularTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -578,16 +619,17 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
                     <span class="shrink-0" :class="tabIconClass(tab)">
-                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
+                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
                       <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
                       <Activity v-else-if="tab.mode === 'processlist'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'mysql-dashboard'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
                       <Code2 v-else class="h-3.5 w-3.5" />
                     </span>
                     <input
@@ -632,13 +674,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-settings-page-tab
-                class="group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
                     : ['h-7 rounded-md border font-medium', settingsPageActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
                 "
                 :style="isClassicLayout && settingsPageActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                :data-active-tab="settingsPageActive"
                 @click="emit('activate-settings-page')"
                 @mousedown.middle.prevent="emit('close-settings-page')"
               >
@@ -658,13 +701,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-driver-store-tab
-                class="group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
                     : ['h-7 rounded-md border font-medium', driverStoreActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
                 "
                 :style="isClassicLayout && driverStoreActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                :data-active-tab="driverStoreActive"
                 @click="emit('activate-driver-store')"
                 @mousedown.middle.prevent="emit('close-driver-store')"
               >
@@ -735,13 +779,20 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
         <div v-if="showFixedTabScrollbar" class="app-tab-scrollbar app-tab-scrollbar--bottom" :class="{ 'app-tab-scrollbar--dragging': isFixedScrollbarDragging }" @pointerdown="startFixedScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="fixedTabScrollbarThumbStyle" />
         </div>
-        <div ref="fixedTabsContainerRef" class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto" :class="isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1'" :style="tabsContainerStyle" @scroll="updateFixedScrollButtons" @wheel="onFixedTabsWheel">
+        <div
+          ref="fixedTabsContainerRef"
+          class="app-tab-scroll flex w-full min-w-0 flex-1 items-center overflow-x-auto"
+          :class="[isClassicLayout ? 'h-full' : 'h-full gap-1.5 py-1', isWrapLayout ? 'wrap-mode' : '', isWrapLayout && isClassicLayout ? 'classic-wrap' : '']"
+          :style="tabsContainerStyle"
+          @scroll="updateFixedScrollButtons"
+          @wheel="onFixedTabsWheel"
+        >
           <CustomContextMenu v-for="tab in fixedTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -762,16 +813,17 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
                     <span class="shrink-0" :class="tabIconClass(tab)">
-                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
+                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
                       <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
                       <Activity v-else-if="tab.mode === 'processlist'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'mysql-dashboard'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
                       <Code2 v-else class="h-3.5 w-3.5" />
                     </span>
                     <input
@@ -871,15 +923,16 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       }
     "
   >
-    <DialogContent class="sm:max-w-md">
+    <DialogContent class="min-w-0 sm:max-w-md">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <AlertTriangle class="h-5 w-5 text-amber-500" />
           {{ t("editor.unsavedChangesTitle") }}
         </DialogTitle>
       </DialogHeader>
-      <div class="space-y-2">
-        <p class="text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
+      <!-- Grid items use min-content sizing by default; shrink and wrap long file paths before they can displace the footer actions. -->
+      <div class="min-w-0 space-y-2">
+        <p class="wrap-anywhere text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
         <Popover v-if="showCloseConfirmBulkActions" :open="closeConfirmListOpen" @update:open="closeConfirmListOpen = $event">
           <PopoverTrigger as-child>
             <button
@@ -904,7 +957,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
           </PopoverContent>
         </Popover>
       </div>
-      <DialogFooter>
+      <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" variant="secondary" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>
@@ -916,6 +969,45 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </template>
 
 <style scoped>
+/* 多行平铺模式：覆盖滚动相关样式，让标签换行展示 */
+.app-tab-scroll.wrap-mode {
+  height: auto !important;
+  overflow: visible !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
+  flex-wrap: wrap;
+}
+
+/* 父级 strip 容器在包含 wrap-mode 时也需要解除高度约束和裁剪 */
+.app-tab-strip:has(.wrap-mode) {
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* 标签栏行容器（直接子 div）在包含 wrap-mode 时解除固定高度和裁剪 */
+.app-tab-bar > div:has(.wrap-mode) {
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* 标签栏本身也解除裁剪，让换行内容自然撑高 */
+.app-tab-bar:has(.wrap-mode) {
+  overflow: visible !important;
+}
+
+/* 经典布局 + 多行模式：优化多行标签显示 */
+.app-tab-scroll.classic-wrap {
+  row-gap: 0.25rem;
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  align-items: flex-start;
+}
+
+/* 经典布局下 h-full 在 height:auto 容器中失效，改为固定高度 */
+.app-tab-scroll.classic-wrap > div {
+  height: 2rem;
+}
+
 .dirty-tab-marker {
   display: inline-flex;
   width: 0.5rem;

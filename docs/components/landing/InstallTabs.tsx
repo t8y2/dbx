@@ -2,8 +2,7 @@
 
 import { ChevronDown, Download, Server } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { createInstallOptions, type InstallOption } from "@/lib/downloadLinks";
-import { fetchLatestReleaseInfo } from "@/lib/latestRelease";
+import { createInstallOptions } from "@/lib/downloadLinks";
 
 type InstallTabsProps = {
   lang: "en" | "cn";
@@ -44,29 +43,13 @@ function PlatformIcon({ id, size, variant }: { id: string; size: number; variant
 }
 
 export function InstallTabs({ lang, version }: InstallTabsProps) {
-  const [downloadVersion, setDownloadVersion] = useState(version);
-  const options = useMemo(() => createInstallOptions(lang, downloadVersion), [lang, downloadVersion]);
+  const options = useMemo(() => createInstallOptions(lang, version), [lang, version]);
   const [open, setOpen] = useState(false);
   const [platformId, setPlatformId] = useState("macos-arm");
 
   useEffect(() => {
     setPlatformId(detectPlatformId());
   }, []);
-
-  useEffect(() => {
-    let active = true;
-
-    setDownloadVersion(version);
-    fetchLatestReleaseInfo().then((release) => {
-      if (active && release?.version) {
-        setDownloadVersion(release.version);
-      }
-    });
-
-    return () => {
-      active = false;
-    };
-  }, [version]);
 
   const primary = useMemo(() => options.find((o) => o.id === platformId) ?? options[0], [options, platformId]);
   const menuOptions = useMemo(() => options.filter((o) => o.id !== platformId), [options, platformId]);

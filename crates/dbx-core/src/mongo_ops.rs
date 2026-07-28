@@ -62,6 +62,22 @@ pub async fn mongo_drop_collection_core(
     }
 }
 
+pub async fn mongo_rename_collection_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::rename_collection(client, database, collection, new_name).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support rename collection".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
 pub async fn mongo_server_version_core(
     state: &AppState,
     connection_id: &str,
@@ -119,6 +135,27 @@ pub async fn mongo_find_documents_core(
         sort,
     )
     .await
+}
+
+pub async fn mongo_find_one_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    options: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::find_one(client, database, collection, filter, projection, options).await
+        }
+        // The legacy agent only exposes paginated find, which also performs a count.
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support the bounded findOne path".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
 }
 
 pub async fn mongo_count_documents_core(
@@ -224,14 +261,33 @@ pub async fn mongo_aggregate_documents_core(
     collection: &str,
     pipeline_json: &str,
     max_rows: Option<usize>,
+    options_json: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows).await
+            mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support aggregate".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_distinct_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    field: &str,
+    filter: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => mongo_driver::distinct(client, database, collection, field, filter).await,
+        // The legacy agent protocol has no distinct method and no read that could stand in for it.
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support distinct".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -302,7 +358,7 @@ pub async fn mongo_insert_document_core(
     collection: &str,
     doc_json: &str,
 ) -> Result<String, String> {
-    crate::document_ops::insert_document_core(state, connection_id, database, collection, doc_json).await
+    crate::document_ops::insert_document_core(state, connection_id, database, collection, doc_json, None).await
 }
 
 pub async fn mongo_insert_documents_core(
@@ -423,6 +479,74 @@ pub async fn mongo_delete_documents_core(
                 .await?;
             Ok(result.get("deleted_count").and_then(|v| v.as_u64()).unwrap_or(0))
         }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_find_one_and_update_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    update_json: &str,
+    options_json: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::find_one_and_update(client, database, collection, filter_json, update_json, options_json)
+                .await
+        }
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndUpdate".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_find_one_and_replace_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::find_one_and_replace(
+                client,
+                database,
+                collection,
+                filter_json,
+                replacement_json,
+                options_json,
+            )
+            .await
+        }
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndReplace".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_find_one_and_delete_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    options_json: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::find_one_and_delete(client, database, collection, filter_json, options_json).await
+        }
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndDelete".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }

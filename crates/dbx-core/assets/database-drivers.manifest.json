@@ -187,7 +187,7 @@
         "queryExecution": true,
         "metadataBrowse": true,
         "objectBrowser": true,
-        "objectSource": false,
+        "objectSource": true,
         "schemaSearch": true,
         "diagram": false,
         "tableDataEdit": true,
@@ -261,7 +261,7 @@
         "sqlFileExecution": true,
         "databaseCreate": true,
         "fieldLineage": true,
-        "sqlExplain": false,
+        "sqlExplain": true,
         "userAdmin": false,
         "driverManagement": false
       }
@@ -344,6 +344,35 @@
         "schemaSearch": false,
         "diagram": false,
         "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "hbase",
+      "label": "Apache HBase",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8080,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": false,
+        "metadataBrowse": true,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": true,
         "tableStructureEdit": false,
         "tableImport": false,
         "dataTransfer": false,
@@ -496,7 +525,7 @@
         "databaseCreate": true,
         "fieldLineage": false,
         "sqlExplain": false,
-        "userAdmin": false,
+        "userAdmin": true,
         "driverManagement": false
       }
     },
@@ -525,7 +554,7 @@
         "databaseCreate": true,
         "fieldLineage": false,
         "sqlExplain": false,
-        "userAdmin": false,
+        "userAdmin": true,
         "driverManagement": false
       }
     },
@@ -674,6 +703,36 @@
         "fieldLineage": false,
         "sqlExplain": false,
         "userAdmin": true,
+        "driverManagement": true
+      }
+    },
+    {
+      "dbType": "uxdb",
+      "label": "优炫 UXDB",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "uxdb",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 52025,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": true,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": true,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
         "driverManagement": true
       }
     },
@@ -1716,6 +1775,16 @@
           "profile": "kafka",
           "label": "Apache Kafka",
           "agentKey": "kafka"
+        },
+        {
+          "profile": "rocketmq",
+          "label": "Apache RocketMQ",
+          "agentKey": "rocketmq"
+        },
+        {
+          "profile": "rabbitmq",
+          "label": "RabbitMQ",
+          "agentKey": "rabbitmq"
         }
       ],
       "supportLevel": "connect",

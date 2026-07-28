@@ -1,0 +1,25 @@
+{
+  "name": "@dbx-app/mongo-shell",
+  "version": "0.4.36",
+  "private": true,
+  "description": "MongoDB shell parsing helpers used by the DBX desktop editor",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

@@ -213,6 +213,7 @@ async fn resolve_transfer_target_table_name(
         Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
         None,
         None,
+        None,
     )
     .await
     .unwrap_or_else(|error| {
@@ -231,6 +232,37 @@ async fn resolve_transfer_target_table_name(
 
 fn quote_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+pub(crate) fn quote_postgres_string_literal(value: &str) -> String {
+    if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
+        return quote_string_literal(value);
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x08' => escaped.push_str("\\b"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\'' => escaped.push_str("''"),
+            character if character.is_ascii_control() => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                let byte = character as u8;
+                escaped.push_str("\\x");
+                escaped.push(HEX[(byte >> 4) as usize] as char);
+                escaped.push(HEX[(byte & 0x0F) as usize] as char);
+            }
+            character => escaped.push(character),
+        }
+    }
+
+    // Escape string constants keep control characters out of the physical
+    // script and remain correct regardless of standard_conforming_strings.
+    format!("E'{escaped}'")
 }
 
 fn postgres_schema_exists_sql(schema: &str) -> String {
@@ -262,12 +294,45 @@ fn is_postgres_transfer_dialect(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Postgres | DatabaseType::Kingbase)
 }
 
-fn is_postgres_integer_like_type(data_type: &str) -> bool {
+fn postgres_integer_bounds(data_type: &str) -> Option<(i128, i128)> {
     let normalized = data_type.trim().to_ascii_lowercase();
-    matches!(
-        normalized.split(['(', ' ']).next().unwrap_or(""),
-        "smallint" | "integer" | "bigint" | "int2" | "int4" | "int8"
-    )
+    match normalized.split(['(', ' ']).next().unwrap_or("") {
+        "smallint" | "int2" => Some((i128::from(i16::MIN), i128::from(i16::MAX))),
+        "integer" | "int4" => Some((i128::from(i32::MIN), i128::from(i32::MAX))),
+        "bigint" | "int8" => Some((i128::from(i64::MIN), i128::from(i64::MAX))),
+        _ => None,
+    }
+}
+
+fn is_postgres_integer_like_type(data_type: &str) -> bool {
+    postgres_integer_bounds(data_type).is_some()
+}
+
+pub(crate) fn normalize_postgres_integer_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    let bounds = column_type.filter(|_| is_postgres_transfer_dialect(db_type)).and_then(postgres_integer_bounds)?;
+
+    // Excel numeric cells arrive as f64; normalize only an explicit zero fraction so real decimals,
+    // scientific notation, and values outside the target integer range stay untouched.
+    if value.bytes().any(|byte| matches!(byte, b'e' | b'E')) {
+        return None;
+    }
+    let (integer, fraction) = value.split_once('.')?;
+    if fraction.is_empty() || !fraction.bytes().all(|byte| byte == b'0') {
+        return None;
+    }
+    let digits = integer.strip_prefix('-').or_else(|| integer.strip_prefix('+')).unwrap_or(integer);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let parsed = integer.parse::<i128>().ok()?;
+    if parsed < bounds.0 || parsed > bounds.1 {
+        return None;
+    }
+    Some(integer.to_string())
 }
 
 fn is_postgres_sequence_default(default_value: Option<&str>) -> bool {
@@ -344,12 +409,7 @@ pub(crate) fn wrap_dameng_identity_insert_sql(insert_sql: &str, table: &str, sch
 
 pub(crate) fn wrap_dameng_identity_insert_sql_for_table(insert_sql: &str, full_table: &str) -> String {
     let trimmed = insert_sql.trim().trim_end_matches(';').trim();
-    format!(
-        "{};\n{};\n{};",
-        format!("SET IDENTITY_INSERT {full_table} ON"),
-        trimmed,
-        format!("SET IDENTITY_INSERT {full_table} OFF")
-    )
+    format!("SET IDENTITY_INSERT {full_table} ON;\n{trimmed};\nSET IDENTITY_INSERT {full_table} OFF;")
 }
 
 async fn execute_transfer_write_statement(
@@ -506,6 +566,7 @@ fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
             | DatabaseType::Redshift
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Kwdb
             | DatabaseType::Vastbase
     )
@@ -1038,7 +1099,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                     }
                 }
             }
-            DatabaseType::SqlServer => {
+            DatabaseType::SqlServer | DatabaseType::Dameng => {
                 if *b {
                     "1".to_string()
                 } else {
@@ -1053,17 +1114,25 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 }
             }
         },
-        serde_json::Value::Number(n) => match db_type {
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
-                if column_type.is_some_and(is_mysql_bit_type) {
-                    format!("b'{}'", n)
-                } else {
-                    n.to_string()
-                }
+        serde_json::Value::Number(n) => {
+            if let Some(integer_literal) = normalize_postgres_integer_literal(&n.to_string(), db_type, column_type) {
+                return integer_literal;
             }
-            _ => n.to_string(),
-        },
+            match db_type {
+                DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
+                    if column_type.is_some_and(is_mysql_bit_type) {
+                        format!("b'{}'", n)
+                    } else {
+                        n.to_string()
+                    }
+                }
+                _ => n.to_string(),
+            }
+        }
         serde_json::Value::String(s) => {
+            if let Some(integer_literal) = normalize_postgres_integer_literal(s, db_type, column_type) {
+                return integer_literal;
+            }
             if let Some(binary_literal) = format_postgres_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
@@ -1073,12 +1142,15 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if let Some(numeric_literal) = format_mysql_numeric_string_literal(s, db_type, column_type) {
                 return numeric_literal;
             }
-            if let Some(date_literal) = format_oracle_date_sql_literal(s, db_type, column_type) {
-                return date_literal;
+            if let Some(temporal_literal) = format_oracle_temporal_sql_literal(s, db_type, column_type) {
+                return temporal_literal;
             }
 
             let literal = format_literal_string(s, db_type, column_type);
-            let escaped = if is_postgres_family_target(db_type) {
+            if *db_type == DatabaseType::Postgres {
+                return quote_postgres_string_literal(&literal);
+            }
+            let escaped = if is_postgres_family_target(db_type) || *db_type == DatabaseType::SqlServer {
                 literal.replace('\'', "''")
             } else {
                 literal.replace('\\', "\\\\").replace('\'', "''")
@@ -1178,21 +1250,46 @@ fn format_mysql_binary_sql_literal(value: &str, db_type: &DatabaseType, column_t
     }
 }
 
-fn format_oracle_date_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
+fn format_oracle_temporal_sql_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
     if !matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
         return None;
     }
-    if temporal_column_kind(column_type) != Some("date") {
-        return None;
-    }
+    let kind = temporal_column_kind(column_type)?;
+    let normalized_column_type = column_type?.trim().to_ascii_lowercase();
     let parts = oracle_export_date_parts(value)?;
-    Some(format_oracle_date_sql_literal_parts(&parts))
+    match kind {
+        "date" => Some(format_oracle_date_sql_literal_parts(&parts)),
+        "datetime"
+            if (normalized_column_type.contains("with time zone")
+                || normalized_column_type.contains("with local time zone"))
+                && parts.zone.is_some() =>
+        {
+            let fraction = parts.fraction.unwrap_or_default();
+            let mask = if fraction.is_empty() { "YYYY-MM-DD HH24:MI:SS" } else { "YYYY-MM-DD HH24:MI:SS.FF" };
+            let zone = match parts.zone.unwrap_or_default() {
+                "Z" | "z" => "+00:00",
+                zone => zone,
+            };
+            Some(format!("TO_TIMESTAMP_TZ('{} {}{fraction} {zone}', '{mask} TZH:TZM')", parts.date, parts.time))
+        }
+        "datetime" => {
+            let fraction = parts.fraction.unwrap_or_default();
+            let mask = if fraction.is_empty() { "YYYY-MM-DD HH24:MI:SS" } else { "YYYY-MM-DD HH24:MI:SS.FF" };
+            Some(format!("TO_TIMESTAMP('{} {}{fraction}', '{mask}')", parts.date, parts.time))
+        }
+        _ => None,
+    }
 }
 
 struct OracleExportDateParts<'a> {
     date: &'a str,
     time: &'a str,
     fraction: Option<&'a str>,
+    zone: Option<&'a str>,
 }
 
 fn format_oracle_date_sql_literal_parts(parts: &OracleExportDateParts<'_>) -> String {
@@ -1218,7 +1315,7 @@ fn oracle_export_date_parts(value: &str) -> Option<OracleExportDateParts<'_>> {
         return None;
     }
     if bytes.len() == 10 {
-        return Some(OracleExportDateParts { date, time: "00:00:00", fraction: None });
+        return Some(OracleExportDateParts { date, time: "00:00:00", fraction: None, zone: None });
     }
     let separator = *bytes.get(10)?;
     if separator != b'T' && separator != b' ' {
@@ -1233,7 +1330,7 @@ fn oracle_export_date_parts(value: &str) -> Option<OracleExportDateParts<'_>> {
     }
     let rest = &value[19..];
     if rest.is_empty() || is_timezone_suffix(rest) {
-        return Some(OracleExportDateParts { date, time, fraction: None });
+        return Some(OracleExportDateParts { date, time, fraction: None, zone: (!rest.is_empty()).then_some(rest) });
     }
     if let Some(after_dot) = rest.strip_prefix('.') {
         let digit_count = after_dot.bytes().take_while(|byte| byte.is_ascii_digit()).count();
@@ -1242,7 +1339,12 @@ fn oracle_export_date_parts(value: &str) -> Option<OracleExportDateParts<'_>> {
         }
         let zone = &after_dot[digit_count..];
         if zone.is_empty() || is_timezone_suffix(zone) {
-            return Some(OracleExportDateParts { date, time, fraction: Some(&value[19..19 + 1 + digit_count]) });
+            return Some(OracleExportDateParts {
+                date,
+                time,
+                fraction: Some(&value[19..19 + 1 + digit_count]),
+                zone: (!zone.is_empty()).then_some(zone),
+            });
         }
     }
     None
@@ -2058,6 +2160,63 @@ fn generate_transfer_write_sql(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_insert_typed_sql_batches(
+    columns: &[String],
+    column_types: &[Option<String>],
+    rows: &[Vec<serde_json::Value>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    requested_max_rows: usize,
+) -> Vec<(String, usize)> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    let max_rows = requested_max_rows.max(1);
+    let max_sql_bytes = match db_type {
+        DatabaseType::CloudflareD1 => crate::db::cloudflare_d1::MAX_SQL_STATEMENT_BYTES,
+        _ => MAX_TRANSFER_WRITE_SQL_BYTES,
+    };
+    let mut statements = Vec::new();
+    let mut start = 0;
+
+    // First honor the row limit, then use binary search to find the largest statement that
+    // also fits the backend byte limit. This avoids generating every intermediate size.
+    while start < rows.len() {
+        let max_end = start.saturating_add(max_rows).min(rows.len());
+        let mut end = max_end;
+        let mut accepted = generate_insert_typed(columns, column_types, &rows[start..max_end], table, schema, db_type);
+
+        if accepted.len() > max_sql_bytes && max_end > start + 1 {
+            end = start + 1;
+            accepted = generate_insert_typed(columns, column_types, &rows[start..end], table, schema, db_type);
+            let mut low = start + 2;
+            let mut high = max_end;
+            while low <= high {
+                let candidate_end = low + (high - low) / 2;
+                let candidate =
+                    generate_insert_typed(columns, column_types, &rows[start..candidate_end], table, schema, db_type);
+                if candidate.len() <= max_sql_bytes {
+                    accepted = candidate;
+                    end = candidate_end;
+                    low = candidate_end + 1;
+                } else {
+                    high = candidate_end - 1;
+                }
+            }
+        }
+
+        if !accepted.is_empty() {
+            statements.push((accepted, end - start));
+        }
+        start = end;
+    }
+
+    statements
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_transfer_write_sql_batches(
     mode: &TransferMode,
     columns: &[String],
@@ -2070,6 +2229,21 @@ fn generate_transfer_write_sql_batches(
 ) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();
+    }
+
+    if matches!(mode, TransferMode::Append | TransferMode::Overwrite) {
+        return generate_insert_typed_sql_batches(
+            columns,
+            column_types,
+            rows,
+            table,
+            schema,
+            db_type,
+            max_transfer_write_rows(db_type, mode),
+        )
+        .into_iter()
+        .map(|(sql, _)| sql)
+        .collect();
     }
 
     let max_rows = max_transfer_write_rows(db_type, mode);
@@ -2804,6 +2978,7 @@ async fn execute_on_pool_once(
                         truncated: false,
                         session_id: None,
                         has_more: false,
+                        elasticsearch_raw_body: None,
                     })
                 } else {
                     let affected = con.execute(&sql, []).map_err(|e| e.to_string())?;
@@ -2817,6 +2992,7 @@ async fn execute_on_pool_once(
                         truncated: false,
                         session_id: None,
                         has_more: false,
+                        elasticsearch_raw_body: None,
                     })
                 }
             })
@@ -4044,6 +4220,7 @@ where
         Some(1),
         None,
         None,
+        None,
     )
     .await
     .unwrap_or_default()
@@ -4109,7 +4286,7 @@ where
                 can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
             let ddl = if can_reuse_source_ddl {
                 let source_ddl = crate::schema::get_table_ddl_core(
-                    &state,
+                    state,
                     &request.source_connection_id,
                     &request.source_database,
                     &request.source_schema,
@@ -4564,6 +4741,9 @@ where
             db::ObjectSourceKind::Sequence | db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody => {
                 object.source.clone()
             }
+            db::ObjectSourceKind::Trigger | db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody => {
+                object.source.clone()
+            }
         };
         let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Postgres,
@@ -4743,6 +4923,7 @@ mod tests {
         crate::models::connection::ConnectionConfig {
             id: id.to_string(),
             name: id.to_string(),
+            note: String::new(),
             db_type: DatabaseType::DuckDb,
             driver_profile: None,
             driver_label: None,
@@ -4755,6 +4936,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -4789,6 +4971,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            database_info: None,
         }
     }
 
@@ -4830,6 +5013,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         }
     }
 
@@ -5188,19 +5372,13 @@ mod tests {
 
     #[test]
     fn transfer_create_table_result_treats_existing_table_as_preexisting() {
-        assert_eq!(
-            transfer_create_table_created(
-                Err("ERROR: relation \"items\" already exists (SQLSTATE 42P07)".to_string()),
-                "create"
-            )
-            .unwrap(),
-            false
-        );
-        assert_eq!(
-            transfer_create_table_created(Err("错误: 关系 \"items\" 已经存在".to_string()), "create").unwrap(),
-            false
-        );
-        assert_eq!(transfer_create_table_created(Ok(()), "create").unwrap(), true);
+        assert!(!transfer_create_table_created(
+            Err("ERROR: relation \"items\" already exists (SQLSTATE 42P07)".to_string()),
+            "create"
+        )
+        .unwrap());
+        assert!(!transfer_create_table_created(Err("错误: 关系 \"items\" 已经存在".to_string()), "create").unwrap());
+        assert!(transfer_create_table_created(Ok(()), "create").unwrap());
         assert_eq!(
             transfer_create_table_created(Err("permission denied for schema public".to_string()), "create")
                 .unwrap_err(),
@@ -5986,11 +6164,19 @@ mod tests {
 
         assert_eq!(
             sql,
-            "INSERT INTO \"APP\".\"events\" (\"id\", \"created_on\", \"created_at\", \"raw_text\") VALUES\n(1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z', '2022-08-25T09:58:43Z')"
+            "INSERT INTO \"APP\".\"events\" (\"id\", \"created_on\", \"created_at\", \"raw_text\") VALUES\n(1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z')"
         );
         assert_eq!(
             escape_value_typed(&json!("2022-08-25T00:00:00Z"), &DatabaseType::Oracle, Some("DATE")),
             "DATE '2022-08-25'"
+        );
+        assert_eq!(
+            escape_value_typed(
+                &json!("2022-08-25T09:58:43.123456+08:00"),
+                &DatabaseType::Oracle,
+                Some("TIMESTAMP(6) WITH TIME ZONE")
+            ),
+            "TO_TIMESTAMP_TZ('2022-08-25 09:58:43.123456 +08:00', 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')"
         );
     }
 
@@ -6065,6 +6251,27 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_insert_preserves_backslashes_control_characters_quotes_and_unicode() {
+        let sql = generate_insert_typed(
+            &[String::from("escape_sequence"), String::from("line_break"), String::from("quote_and_unicode")],
+            &[
+                Some(String::from("nvarchar(max)")),
+                Some(String::from("nvarchar(max)")),
+                Some(String::from("nvarchar(max)")),
+            ],
+            &[vec![json!(r#"\n"#), json!("line1\r\nline2"), json!("O'Brien / Tiếng Việt")]],
+            "notes",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO [dbo].[notes] ([escape_sequence], [line_break], [quote_and_unicode]) VALUES\n(N'\\n', N'line1\r\nline2', N'O''Brien / Tiếng Việt')"
+        );
+    }
+
+    #[test]
     fn sqlserver_insert_formats_datetime_literals_with_supported_precision() {
         let sql = generate_insert_typed(
             &[String::from("id"), String::from("date1"), String::from("date2"), String::from("note")],
@@ -6106,6 +6313,25 @@ mod tests {
     }
 
     #[test]
+    fn dameng_insert_formats_bit_booleans_as_numeric_literals() {
+        let sql = generate_insert_typed(
+            &[String::from("enabled"), String::from("deleted"), String::from("optional")],
+            &[Some(String::from("BIT")), Some(String::from("bit")), Some(String::from("BIT"))],
+            &[vec![json!(true), json!(false), serde_json::Value::Null]],
+            "flags",
+            "DBX_TEST",
+            &DatabaseType::Dameng,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO \"DBX_TEST\".\"flags\" (\"enabled\", \"deleted\", \"optional\") VALUES\n(1, 0, NULL)"
+        );
+        assert!(!sql.contains("TRUE"));
+        assert!(!sql.contains("FALSE"));
+    }
+
+    #[test]
     fn sqlserver_upsert_formats_bit_booleans_as_numeric_literals() {
         let sql = generate_upsert_typed(
             &[String::from("id"), String::from("enabled")],
@@ -6136,7 +6362,7 @@ mod tests {
         assert_eq!(
             sql,
             r#"INSERT INTO "public"."events" ("payload") VALUES
-('{"message":"hello\nworld"}')"#
+(E'{"message":"hello\\nworld"}')"#
         );
     }
 
@@ -6154,7 +6380,7 @@ mod tests {
         assert_eq!(
             sql,
             r#"INSERT INTO "public"."files" ("path") VALUES
-('C:\tmp\file.txt')"#
+(E'C:\\tmp\\file.txt')"#
         );
     }
 
@@ -6233,6 +6459,80 @@ mod tests {
             r#"INSERT INTO `files` (`path`) VALUES
 ('C:\\tmp\\file.txt')"#
         );
+    }
+
+    #[test]
+    fn postgres_insert_escapes_control_characters_quotes_and_backslashes() {
+        let sql = generate_insert_typed(
+            &[
+                String::from("line_break"),
+                String::from("carriage_return"),
+                String::from("quote"),
+                String::from("path"),
+                String::from("plain"),
+            ],
+            &[
+                Some(String::from("text")),
+                Some(String::from("text")),
+                Some(String::from("text")),
+                Some(String::from("text")),
+                Some(String::from("text")),
+            ],
+            &[vec![json!("line1\nline2"), json!("line1\rline2"), json!("O'Hara"), json!(r"C:\tmp"), json!("plain")]],
+            "notes",
+            "public",
+            &DatabaseType::Postgres,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "public"."notes" ("line_break", "carriage_return", "quote", "path", "plain") VALUES
+(E'line1\nline2', E'line1\rline2', 'O''Hara', E'C:\\tmp', 'plain')"#
+        );
+    }
+
+    #[test]
+    fn postgres_insert_formats_whole_number_values_as_integer_literals() {
+        let sql = generate_insert_typed(
+            &[String::from("small_value"), String::from("integer_value"), String::from("big_value")],
+            &[Some(String::from("smallint")), Some(String::from("integer")), Some(String::from("bigint"))],
+            &[vec![json!(1.0), json!(-2.0), json!(3.0)]],
+            "numbers",
+            "public",
+            &DatabaseType::Postgres,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO \"public\".\"numbers\" (\"small_value\", \"integer_value\", \"big_value\") VALUES\n(1, -2, 3)"
+        );
+    }
+
+    #[test]
+    fn postgres_integer_literal_normalization_preserves_non_whole_and_out_of_range_values() {
+        let scientific: serde_json::Value = serde_json::from_str("1e20").unwrap();
+        let out_of_range: serde_json::Value = serde_json::from_str("9223372036854775808.0").unwrap();
+
+        assert_eq!(escape_value_typed(&json!("1.0"), &DatabaseType::Postgres, Some("smallint")), "1");
+        assert_eq!(escape_value_typed(&json!("-2.0"), &DatabaseType::Postgres, Some("integer")), "-2");
+        assert_eq!(escape_value_typed(&json!("3.0"), &DatabaseType::Postgres, Some("bigint")), "3");
+        assert_eq!(escape_value_typed(&json!(1.25), &DatabaseType::Postgres, Some("smallint")), "1.25");
+        assert_eq!(escape_value_typed(&json!("1.25"), &DatabaseType::Postgres, Some("smallint")), "'1.25'");
+        assert_eq!(escape_value_typed(&scientific, &DatabaseType::Postgres, Some("bigint")), "1e+20");
+        assert_eq!(escape_value_typed(&json!("1e3"), &DatabaseType::Postgres, Some("bigint")), "'1e3'");
+        assert_eq!(escape_value_typed(&out_of_range, &DatabaseType::Postgres, Some("bigint")), "9223372036854775808.0");
+        assert_eq!(
+            escape_value_typed(&json!("9223372036854775808.0"), &DatabaseType::Postgres, Some("bigint")),
+            "'9223372036854775808.0'"
+        );
+        assert_eq!(escape_value_typed(&json!("32768.0"), &DatabaseType::Postgres, Some("smallint")), "'32768.0'");
+        assert_eq!(
+            escape_value_typed(&json!("2147483648.0"), &DatabaseType::Postgres, Some("integer")),
+            "'2147483648.0'"
+        );
+        assert_eq!(escape_value_typed(&json!("1.0"), &DatabaseType::Postgres, Some("text")), "'1.0'");
+        assert_eq!(escape_value_typed(&json!("1.0"), &DatabaseType::Postgres, Some("numeric")), "'1.0'");
+        assert_eq!(escape_value_typed(&json!("1.0"), &DatabaseType::Postgres, None), "'1.0'");
     }
 
     #[test]

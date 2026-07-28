@@ -54,6 +54,39 @@ pub fn normalize_changelog_lang(lang: &str) -> &'static str {
     }
 }
 
+fn is_app_release_tag(tag: &str) -> bool {
+    let Some(version) = tag.strip_prefix('v') else {
+        return false;
+    };
+    let mut parts = version.splitn(3, '.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
+    let Some(patch_and_suffix) = parts.next() else {
+        return false;
+    };
+    if major.is_empty()
+        || minor.is_empty()
+        || !major.bytes().all(|byte| byte.is_ascii_digit())
+        || !minor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+
+    let patch_len = patch_and_suffix.bytes().take_while(u8::is_ascii_digit).count();
+    if patch_len == 0 {
+        return false;
+    }
+    let suffix = &patch_and_suffix[patch_len..];
+    suffix.is_empty()
+        || ((suffix.starts_with('.') || suffix.starts_with('-'))
+            && suffix.len() > 1
+            && suffix[1..].bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-'))
+}
+
 pub async fn fetch_changelog(lang: &str) -> Result<ChangelogData, String> {
     let lang = normalize_changelog_lang(lang);
     let client = build_changelog_http_client()?;
@@ -68,7 +101,8 @@ pub async fn fetch_changelog(lang: &str) -> Result<ChangelogData, String> {
         .map_err(|e| format!("Failed to fetch changelog: {e}"))?;
 
     let mut data: ChangelogData = resp.json().await.map_err(|e| format!("Failed to parse changelog: {e}"))?;
-    data.releases.retain(|release| !release.tag.trim().is_empty());
+    // Treat R2 as untrusted cached data so auxiliary release streams never leak into the app UI.
+    data.releases.retain(|release| is_app_release_tag(release.tag.trim()));
     Ok(data)
 }
 
@@ -86,7 +120,7 @@ fn build_changelog_http_client() -> Result<reqwest::Client, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_changelog_lang;
+    use super::{is_app_release_tag, normalize_changelog_lang};
 
     #[test]
     fn normalizes_changelog_lang() {
@@ -95,5 +129,15 @@ mod tests {
         assert_eq!(normalize_changelog_lang("zh-TW"), "cn");
         assert_eq!(normalize_changelog_lang("en"), "en");
         assert_eq!(normalize_changelog_lang("ja"), "en");
+    }
+
+    #[test]
+    fn recognizes_only_app_release_tags() {
+        assert!(is_app_release_tag("v0.5.66"));
+        assert!(is_app_release_tag("v1.2.3-hotfix.1"));
+        assert!(!is_app_release_tag("packages-v0.4.42"));
+        assert!(!is_app_release_tag("agents-v0.2.64"));
+        assert!(!is_app_release_tag("v0.5"));
+        assert!(!is_app_release_tag("v0.5.x"));
     }
 }

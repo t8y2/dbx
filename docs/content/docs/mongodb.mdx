@@ -49,12 +49,15 @@ Edit documents directly from the table view:
 
 ## JSON Editor
 
-For complex edits that span nested fields, use the JSON editor:
+In document view, switch between field-tree editing and whole-document JSON editing:
 
-- Edit the full document as JSON
-- Syntax validation before saving
-- Useful for adding new nested fields or restructuring documents
-- **Date preservation**: Date values are preserved correctly during edits, maintaining their original type
+- Edit or create a document as a full JSON object
+- Validate the entire JSON payload before saving
+- Paste complete documents when inserting new records
+- Keep the field editor for targeted field changes
+- **Whole-document replace on update**: saving JSON replaces the document body
+- **Identity change**: editing `_id` inserts a document under the new id and deletes the previous one
+- **Date and Extended JSON preservation**: `$date`, `$oid`, and `$numberLong` values are preserved correctly during edits
 
 ## MongoDB Versions
 

@@ -6,11 +6,15 @@ import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Loader2, Plus, Trash2 } from "@lucide/vue";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Loader2, Plus, Trash2, FolderOpen } from "@lucide/vue";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { createTunnelProfile, createTunnelProfileTestGuard, tunnelProfileSummary, type TunnelProfileType } from "@/lib/connection/tunnelProfiles";
-import type { TunnelProfile } from "@/types/database";
+import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
+import * as api from "@/lib/backend/api";
+import type { SshConfigHostEntry, TunnelProfile } from "@/types/database";
 import { translateBackendError } from "@/i18n/backend-errors";
 
 const { t } = useI18n();
@@ -24,6 +28,7 @@ const hasInitializedDraft = ref(false);
 const isTesting = ref(false);
 const testResult = ref<{ ok: boolean; message: string } | null>(null);
 const testGuard = createTunnelProfileTestGuard();
+const sshConfigHosts = ref<SshConfigHostEntry[]>([]);
 
 function cloneProfiles(profiles: TunnelProfile[]): TunnelProfile[] {
   return JSON.parse(JSON.stringify(profiles)) as TunnelProfile[];
@@ -56,6 +61,23 @@ const selected = computed(() => draft.value.find((profile) => profile.id === sel
 const selectedSsh = computed(() => (selected.value?.type === "ssh" ? selected.value : null));
 const selectedProxy = computed(() => (selected.value?.type === "proxy" ? selected.value : null));
 const selectedHttp = computed(() => (selected.value?.type === "http_tunnel" ? selected.value : null));
+const sshConfigHostAliases = computed(() => sshConfigHosts.value.map((entry) => entry.alias));
+
+async function loadSshConfigHosts() {
+  try {
+    sshConfigHosts.value = await api.listSshConfigHosts();
+  } catch {
+    sshConfigHosts.value = [];
+  }
+}
+
+function updateSelectedSshHost(value: string | number) {
+  if (!selectedSsh.value) return;
+  selectedSsh.value.host = String(value);
+  prefillSshConfigHostAlias(selectedSsh.value, sshConfigHosts.value);
+}
+
+void loadSshConfigHosts();
 
 function invalidateProfileTest() {
   testGuard.invalidate();
@@ -66,7 +88,7 @@ function invalidateProfileTest() {
 // Profile tests are asynchronous, so any selection or configuration change
 // must invalidate the request before it can publish a stale result.
 watch(
-  [selectedId, selectedSsh],
+  [selectedId, selectedSsh, selectedProxy],
   () => {
     invalidateProfileTest();
   },
@@ -99,9 +121,9 @@ function removeSelected() {
 function updateSshAuthMethod(value: unknown) {
   const profile = selectedSsh.value;
   if (!profile) return;
-  profile.auth_method = value === "key" ? "key" : value === "none" ? "none" : "password";
-  if (profile.auth_method !== "password") profile.password = "";
-  if (profile.auth_method !== "key") {
+  profile.auth_method = value === "key" ? "key" : value === "key+password" ? "key+password" : value === "none" ? "none" : "password";
+  if (profile.auth_method !== "password" && profile.auth_method !== "key+password") profile.password = "";
+  if (profile.auth_method !== "key" && profile.auth_method !== "key+password") {
     profile.key_path = "";
     profile.key_passphrase = "";
   }
@@ -111,6 +133,19 @@ function updateProxyType(value: unknown) {
   const profile = selectedProxy.value;
   if (!profile) return;
   profile.proxy_type = value === "http" ? "http" : "socks5";
+}
+
+async function browseSshKeyPath(target?: { key_path?: string } | null) {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: "Select SSH Private Key",
+      multiple: false,
+    });
+    if (selected && typeof selected === "string" && target) {
+      target.key_path = selected;
+    }
+  }
 }
 
 async function save() {
@@ -128,7 +163,7 @@ async function save() {
 }
 
 async function testSelected() {
-  const profile = selectedSsh.value;
+  const profile = selectedSsh.value || selectedProxy.value;
   if (!profile || isTesting.value) return;
   const profileSnapshot = cloneProfiles([profile])[0];
   const requestId = testGuard.start(profileSnapshot);
@@ -136,13 +171,13 @@ async function testSelected() {
   testResult.value = null;
   try {
     const message = await store.testProfile(profileSnapshot);
-    if (!testGuard.isCurrent(requestId, selectedSsh.value)) return;
-    testResult.value = { ok: true, message: message || t("settings.tunnelsTestSuccess") };
+    if (!testGuard.isCurrent(requestId, profile)) return;
+    testResult.value = { ok: true, message: message ? t("settings.tunnelsTestSuccess") + ": " + message : t("settings.tunnelsTestSuccess") };
   } catch (error) {
-    if (!testGuard.isCurrent(requestId, selectedSsh.value)) return;
+    if (!testGuard.isCurrent(requestId, profile)) return;
     testResult.value = { ok: false, message: t("settings.tunnelsTestFailed", { message: translateBackendError(t, String(error)) }) };
   } finally {
-    if (testGuard.isCurrent(requestId, selectedSsh.value)) isTesting.value = false;
+    if (testGuard.isCurrent(requestId, selectedSsh.value || selectedProxy.value)) isTesting.value = false;
   }
 }
 </script>
@@ -190,7 +225,10 @@ async function testSelected() {
       <template v-if="selectedSsh">
         <div class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshHost") }}</Label>
-          <Input v-model="selectedSsh.host" class="col-span-2" :placeholder="t('connection.sshHostPlaceholder')" />
+          <Input :model-value="selectedSsh.host" class="col-span-2" list="tunnel-profile-ssh-config-host-aliases" :placeholder="t('connection.sshHostPlaceholder')" @update:model-value="updateSelectedSshHost" />
+          <datalist id="tunnel-profile-ssh-config-host-aliases">
+            <option v-for="alias in sshConfigHostAliases" :key="alias" :value="alias" />
+          </datalist>
           <Input v-model.number="selectedSsh.port" type="number" min="1" max="65535" class="col-span-1" />
         </div>
         <div class="grid grid-cols-4 items-center gap-4">
@@ -206,19 +244,30 @@ async function testSelected() {
             <SelectContent>
               <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
               <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
+              <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
               <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <div v-if="!selectedSsh.auth_method || selectedSsh.auth_method === 'password'" class="grid grid-cols-4 items-center gap-4">
+        <div v-if="!selectedSsh.auth_method || selectedSsh.auth_method === 'password' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshPassword") }}</Label>
           <PasswordInput v-model="selectedSsh.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" />
         </div>
-        <div v-if="selectedSsh.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
+        <div v-if="selectedSsh.auth_method === 'key' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshKeyPath") }}</Label>
-          <Input v-model="selectedSsh.key_path" class="col-span-3" placeholder="~/.ssh/id_rsa" />
+          <div class="col-span-3 flex items-center gap-1">
+            <Input v-model="selectedSsh.key_path" class="flex-1" placeholder="~/.ssh/id_rsa" />
+            <Tooltip v-if="isTauriRuntime()">
+              <TooltipTrigger as-child>
+                <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseSshKeyPath(selectedSsh)">
+                  <FolderOpen class="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{{ t("connection.sshKeyPathBrowse") }}</TooltipContent>
+            </Tooltip>
+          </div>
         </div>
-        <div v-if="selectedSsh.auth_method === 'key'" class="grid grid-cols-4 items-center gap-4">
+        <div v-if="selectedSsh.auth_method === 'key' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshKeyPassphrase") }}</Label>
           <PasswordInput v-model="selectedSsh.key_passphrase" class="col-span-3" :placeholder="t('connection.sshKeyPassphrasePlaceholder')" />
         </div>
@@ -265,6 +314,10 @@ async function testSelected() {
           <Label class="text-xs">{{ t("connection.proxyPassword") }}</Label>
           <PasswordInput v-model="selectedProxy.password" class="col-span-3" :placeholder="t('connection.proxyPasswordPlaceholder')" />
         </div>
+        <div class="grid grid-cols-4 items-center gap-4">
+          <Label class="text-xs">{{ t("connection.proxyTestTarget") }}</Label>
+          <Input v-model="selectedProxy.test_target" class="col-span-3" :placeholder="t('connection.proxyTestTargetPlaceholder')" />
+        </div>
       </template>
 
       <template v-else-if="selectedHttp">
@@ -291,7 +344,7 @@ async function testSelected() {
       <Button type="button" variant="outline" size="sm" :disabled="!isDirty || isSaving" @click="resetDraft">
         {{ t("settings.tunnelsReset") }}
       </Button>
-      <Button v-if="selectedSsh" type="button" variant="outline" size="sm" :disabled="isTesting || isSaving || !selectedSsh.host.trim()" @click="testSelected">
+      <Button v-if="selectedSsh || selectedProxy" type="button" variant="outline" size="sm" :disabled="isTesting || isSaving || (!selectedSsh?.host?.trim() && !selectedProxy?.host?.trim())" @click="testSelected">
         <Loader2 v-if="isTesting" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
         {{ isTesting ? t("settings.tunnelsTesting") : t("settings.tunnelsTest") }}
       </Button>

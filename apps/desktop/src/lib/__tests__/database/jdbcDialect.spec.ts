@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -46,6 +46,34 @@ describe("jdbc dialect inference", () => {
       }),
     ).toBe("sqlserver");
   });
+
+  it("detects GaussDB-compatible JDBC connections as schema-aware", () => {
+    const gaussdbConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:gaussdb://localhost:8000/testdb",
+      jdbc_driver_class: "com.huawei.gaussdb.jdbc.Driver",
+    };
+    const opengaussConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:opengauss://localhost:5432/postgres",
+      jdbc_driver_class: "org.opengauss.Driver",
+    };
+
+    expect(inferJdbcDialect(gaussdbConnection)).toBe("gaussdb");
+    expect(connectionUsesDatabaseObjectTreeMode(gaussdbConnection)).toBe(false);
+    expect(inferJdbcDialect(opengaussConnection)).toBe("opengauss");
+    expect(connectionUsesDatabaseObjectTreeMode(opengaussConnection)).toBe(false);
+  });
+
+  it("detects Dameng JDBC connections", () => {
+    const damengConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:dm://localhost:5236/DAMENG",
+      jdbc_driver_class: "dm.jdbc.driver.DmDriver",
+    };
+
+    expect(inferJdbcDialect(damengConnection)).toBe("dameng");
+  });
 });
 
 describe("query execution schema", () => {
@@ -67,5 +95,11 @@ describe("query execution schema", () => {
 
   it("keeps generic JDBC Databend schema fallback", () => {
     expect(connectionQueryExecutionSchema({ db_type: "jdbc", connection_string: "jdbc:databend://localhost:8000/default" }, "analytics", undefined, false)).toBe("analytics");
+  });
+});
+
+describe("object tree node schema", () => {
+  it("uses the SQLite database alias to qualify attached tables", () => {
+    expect(connectionObjectTreeNodeSchema({ db_type: "sqlite" }, "analytics")).toBe("analytics");
   });
 });

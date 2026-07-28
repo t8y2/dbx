@@ -17,19 +17,19 @@ pub struct SaveTunnelProfilesRequest {
 pub async fn load_tunnel_profiles(
     State(state): State<Arc<WebState>>,
 ) -> Result<Json<Vec<TransportLayerConfig>>, AppError> {
-    state.app.storage.load_tunnel_profiles().await.map(Json).map_err(AppError)
+    state.app.storage.load_tunnel_profiles().await.map(Json).map_err(AppError::from)
 }
 
 pub async fn save_tunnel_profiles(
     State(state): State<Arc<WebState>>,
     Json(body): Json<SaveTunnelProfilesRequest>,
 ) -> Result<Json<()>, AppError> {
-    state.app.storage.save_tunnel_profiles(&body.profiles).await.map(Json).map_err(AppError)
+    state.app.storage.save_tunnel_profiles(&body.profiles).await.map(Json).map_err(AppError::from)
 }
 
 pub async fn test_tunnel_profile(
     State(state): State<Arc<WebState>>,
     Json(profile): Json<TransportLayerConfig>,
 ) -> Result<Json<String>, AppError> {
-    state.app.test_tunnel_profile(&profile).await.map(Json).map_err(AppError)
+    state.app.test_tunnel_profile(&profile).await.map(Json).map_err(AppError::from)
 }

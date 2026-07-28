@@ -64,6 +64,7 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "kwdb",
   "kingbase",
   "highgo",
+  "uxdb",
   "vastbase",
   "goldendb",
   "yashandb",
@@ -122,6 +123,9 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
     syntheticKey: "neo4j-element-id",
   },
   oracle: {
+    syntheticKey: "oracle-rowid",
+  },
+  "oceanbase-oracle": {
     syntheticKey: "oracle-rowid",
   },
   trino: {

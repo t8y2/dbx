@@ -76,6 +76,81 @@ test("builds fallback metadata from a data tab when column metadata is unavailab
   });
 });
 
+test("uses result columns when persisted table metadata has no columns", () => {
+  const tableMeta = {
+    schema: "public",
+    tableName: "users",
+    columns: [],
+    primaryKeys: ["id"],
+  };
+
+  assert.deepEqual(
+    tableMetaForDataTab(
+      tab({
+        tableMeta,
+        result: {
+          columns: ["id", "name"],
+          rows: [],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      }),
+    ),
+    {
+      schema: "public",
+      tableName: "users",
+      columns: [
+        {
+          name: "id",
+          data_type: "",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+        {
+          name: "name",
+          data_type: "",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      primaryKeys: ["id"],
+    },
+  );
+});
+
+test("prefers the tableMeta table name over a schema-qualified tab title", () => {
+  // Data tabs opened from the object browser are titled "<schema>.<table>";
+  // rebuilding SQL from the title would qualify the table twice (issue #3613).
+  const tableMeta = {
+    schema: "dbo",
+    tableName: "wcs_dispatch_task",
+    columns: [],
+    primaryKeys: [],
+  };
+
+  const meta = tableMetaForDataTab(tab({ title: "dbo.wcs_dispatch_task", schema: "dbo", tableMeta }));
+
+  assert.equal(meta?.tableName, "wcs_dispatch_task");
+  assert.equal(meta?.schema, "dbo");
+});
+
+test("strips the schema prefix from the tab title when no tableMeta exists", () => {
+  const meta = tableMetaForDataTab(tab({ title: "dbo.wcs_dispatch_task", schema: "dbo" }));
+
+  assert.equal(meta?.tableName, "wcs_dispatch_task");
+  assert.equal(meta?.schema, "dbo");
+});
+
+test("keeps a dotted tab title intact when it does not start with the schema", () => {
+  const meta = tableMetaForDataTab(tab({ title: "audit.2024_log", schema: "public" }));
+
+  assert.equal(meta?.tableName, "audit.2024_log");
+});
+
 test("does not infer table metadata for query tabs", () => {
   assert.equal(tableMetaForDataTab(tab({ mode: "query" })), undefined);
 });

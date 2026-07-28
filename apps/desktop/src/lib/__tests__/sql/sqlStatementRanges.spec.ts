@@ -80,6 +80,49 @@ BEGIN
   NULL;
 END;`;
 
+const gaussDbDollarQuotedFunctionScript = `DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid;
+
+CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid (v_str IN TEXT) RETURNS varchar(36) LANGUAGE PLPGSQL IMMUTABLE AS $function$
+DECLARE
+    str1 TEXT;
+BEGIN
+    str1 := md5(v_str);
+    RETURN CAST(str1 AS varchar(36));
+END$function$;
+
+DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing;`;
+
+const gaussDbIssue4573Script = `CREATE OR REPLACE PROCEDURE createIndex (
+  dbName IN VARCHAR(32),
+  tableName IN VARCHAR(64),
+  indexInfo IN VARCHAR(64),
+  indexColumns IN VARCHAR(128)
+) AS
+DECLARE STMT TEXT;
+
+DECLARE flag int;
+
+BEGIN
+SELECT
+  count(*) INTO flag
+FROM
+  PG_CATALOG.PG_INDEXES
+WHERE
+  schemaname = dbName
+  AND TABLENAME = tableName
+  AND INDEXNAME = indexInfo;
+
+IF flag = 0 THEN STMT := 'CREATE INDEX ' || indexInfo || ' ON ' || dbName || '.' || tableName || '(' || indexColumns || ')';
+
+EXECUTE STMT;
+
+END IF;
+
+END;
+
+SELECT 1 AS after_procedure;
+SELECT 2 AS final_statement;`;
+
 const xuguProgrammableObjectFixtures = [
   `CREATE OR REPLACE PROCEDURE dbx_xugu_procedure AS
   v_value INTEGER;
@@ -290,6 +333,19 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps nested GaussDB procedure blocks together", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(gaussDbNestedProcedure, "gaussdb"))).toEqual([gaussDbNestedProcedure]);
+  });
+
+  it("separates GaussDB dollar-quoted functions from surrounding statements", () => {
+    const ranges = splitSqlStatementRanges(gaussDbDollarQuotedFunctionScript, "gaussdb");
+    expect(rangeSqlTexts(ranges)).toEqual([
+      "DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid",
+      gaussDbDollarQuotedFunctionScript.slice(gaussDbDollarQuotedFunctionScript.indexOf("CREATE"), gaussDbDollarQuotedFunctionScript.lastIndexOf(";\n\nDROP")),
+      "DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing",
+    ]);
+  });
+
+  it("separates the issue #4573 GaussDB procedure from following statements", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(gaussDbIssue4573Script, "gaussdb"))).toEqual([gaussDbIssue4573Script.slice(0, gaussDbIssue4573Script.indexOf("\n\nSELECT 1")), "SELECT 1 AS after_procedure", "SELECT 2 AS final_statement"]);
   });
 
   it("keeps Xugu programmable object DDL together and retains its terminator", () => {
@@ -853,6 +909,11 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
   it("returns the full GaussDB procedure for cursors after a nested block", () => {
     const outerNull = indexOf(gaussDbNestedProcedure, "NULL;", 2);
     expect(statementRangeAtCursor(gaussDbNestedProcedure, outerNull, "gaussdb")?.sql.trim()).toBe(gaussDbNestedProcedure);
+  });
+
+  it("returns only the issue #4573 GaussDB procedure for a gutter cursor", () => {
+    const expected = gaussDbIssue4573Script.slice(0, gaussDbIssue4573Script.indexOf("\n\nSELECT 1"));
+    expect(statementRangeAtCursor(gaussDbIssue4573Script, indexOf(gaussDbIssue4573Script, "count(*)"), "gaussdb")?.sql.trim()).toBe(expected);
   });
 
   it("returns the full SAP HANA DO block for cursors inside nested statements", () => {

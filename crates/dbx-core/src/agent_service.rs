@@ -54,23 +54,23 @@ fn remove_jre_dir_with_retry(path: &Path) -> std::io::Result<()> {
     Err(last_err.unwrap_or_else(|| std::io::Error::other("remove_dir_all failed without an error")))
 }
 
-/// Render a friendly Chinese error message when the old JRE directory cannot
-/// be replaced. On Windows, lists likely culprits (process holding java.exe,
+/// Render a friendly error message when the old JRE directory cannot be
+/// replaced. On Windows, lists likely culprits (process holding java.exe,
 /// AV scanning) and suggests restarting dbx; on POSIX returns a concise
 /// message. The original OS error is appended in parentheses for support.
 fn format_jre_dir_remove_error(path: &Path, os_err: &std::io::Error) -> String {
     if cfg!(windows) {
         format!(
-            "无法删除旧的 JRE 目录：{}\n\
-             可能的原因：\n  \
-             - 仍有 dbx Agent / java 进程占用该目录\n  \
-             - 防病毒软件正在扫描\n\
-             请关闭可能持有该目录的进程，或重启 dbx 后重试。\n\
-             （原始错误：{os_err}）",
+            "Failed to remove the old JRE directory: {}\n\
+             Possible causes:\n  \
+             - a dbx Agent / java process still holds the directory\n  \
+             - antivirus software is scanning it\n\
+             Close any process that may hold the directory, or restart dbx and try again.\n\
+             (original error: {os_err})",
             path.display()
         )
     } else {
-        format!("无法删除旧的 JRE 目录：{}（原始错误：{os_err}）", path.display())
+        format!("Failed to remove the old JRE directory: {} (original error: {os_err})", path.display())
     }
 }
 
@@ -538,7 +538,7 @@ pub async fn uninstall_agent_jre(am: &AgentManager, jre_key: &str) -> Result<(),
         .map(|(k, _)| k.as_str())
         .collect();
     if !dependents.is_empty() {
-        return Err(format!("JRE {} 正在被以下驱动使用: {}，请先卸载这些驱动", jre_key, dependents.join(", ")));
+        return Err(format!("JRE {jre_key} is in use by drivers: {}. Uninstall them first.", dependents.join(", ")));
     }
     // Stop daemons first so any java.exe holding the JRE files exits before
     // we try to remove the directory (Windows ERROR_ACCESS_DENIED otherwise).
@@ -1679,7 +1679,7 @@ fn validate_offline_identifier(value: &str, kind: &str) -> Result<(), String> {
 fn read_registry_from_zip(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<AgentRegistry, String> {
     let mut entry = archive
         .by_name("agent-registry.json")
-        .map_err(|_| "ZIP 文件中未找到 agent-registry.json，请确认这是有效的离线驱动包".to_string())?;
+        .map_err(|_| "agent-registry.json not found in the ZIP; not a valid offline driver package.".to_string())?;
     let mut buf = String::new();
     entry.read_to_string(&mut buf).map_err(|e| format!("Failed to read agent-registry.json: {e}"))?;
     serde_json::from_str(&buf).map_err(|e| format!("Invalid agent-registry.json: {e}"))
@@ -1724,15 +1724,100 @@ fn db_type_for_jar_offline_entry(registry: &AgentRegistry, name: &str) -> Option
 }
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    let status = crate::process::new_std_command("tar")
-        .args(["xzf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy(), "--strip-components=1"])
-        .status()
-        .map_err(|e| format!("Failed to extract archive: {e}"))?;
-    if !status.success() {
-        return Err("Failed to extract JRE archive".to_string());
+    let parent = dest.parent().ok_or_else(|| format!("Invalid JRE destination: {}", dest.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create JRE directory: {e}"))?;
+
+    let staging = tempfile::Builder::new()
+        .prefix(".jre-extract-")
+        .tempdir_in(parent)
+        .map_err(|e| format!("Failed to create JRE extraction directory: {e}"))?;
+    let file = std::fs::File::open(archive).map_err(|e| format!("Failed to open JRE archive: {e}"))?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    tar::Archive::new(decoder).unpack(staging.path()).map_err(|e| format!("Failed to extract JRE archive: {e}"))?;
+
+    let mut roots = std::fs::read_dir(staging.path())
+        .map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?;
+    if roots.len() != 1 {
+        return Err("Invalid JRE archive: expected a single top-level directory".to_string());
+    }
+
+    let root = roots.pop().expect("root count checked above");
+    if !root.file_type().map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?.is_dir() {
+        return Err("Invalid JRE archive: expected a top-level directory".to_string());
+    }
+
+    std::fs::create_dir_all(dest).map_err(|e| format!("Failed to create JRE directory: {e}"))?;
+    for entry in std::fs::read_dir(root.path()).map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))? {
+        let entry = entry.map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?;
+        std::fs::rename(entry.path(), dest.join(entry.file_name()))
+            .map_err(|e| format!("Failed to install extracted JRE: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod jre_archive_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn append_file(
+        builder: &mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>,
+        path: &str,
+        data: &[u8],
+        mode: u32,
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(mode);
+        header.set_cksum();
+        builder.append_data(&mut header, path, Cursor::new(data)).unwrap();
+    }
+
+    #[test]
+    fn extracts_jre_archive_without_system_tools_and_strips_top_level_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("jre.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        append_file(&mut builder, "jdk-21/bin/java", b"java", 0o755);
+        append_file(&mut builder, "jdk-21/conf/release", b"JAVA_VERSION=21", 0o644);
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let dest = temp.path().join("managed-jre");
+        extract_tar_gz(&archive_path, &dest).unwrap();
+
+        assert_eq!(std::fs::read(dest.join("bin/java")).unwrap(), b"java");
+        assert_eq!(std::fs::read(dest.join("conf/release")).unwrap(), b"JAVA_VERSION=21");
+        assert!(!dest.join("jdk-21").exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(dest.join("bin/java")).unwrap().permissions().mode() & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn rejects_jre_archive_without_a_single_top_level_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("jre.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        append_file(&mut builder, "jdk-21/bin/java", b"java", 0o755);
+        append_file(&mut builder, "unexpected/readme.txt", b"unexpected", 0o644);
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let error = extract_tar_gz(&archive_path, &temp.path().join("managed-jre")).unwrap_err();
+        assert!(error.contains("single top-level directory"), "unexpected error: {error}");
+    }
 }
 
 pub async fn import_agent_driver(am: &AgentManager, db_type: &str, source_path: &Path) -> Result<(), String> {
@@ -2143,13 +2228,10 @@ mod agent_registry_install_tests {
         let java_path = payload.join(relative_java_path);
         std::fs::create_dir_all(java_path.parent().unwrap()).unwrap();
         std::fs::write(java_path, b"java").unwrap();
-        let archive = archive_root.join("runtime.tar.gz");
-        let status = crate::process::new_std_command("tar")
-            .args(["czf", &archive.to_string_lossy(), "-C", &archive_root.to_string_lossy(), "payload"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-        std::fs::read(archive).unwrap()
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder.append_dir_all("payload", &payload).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
     }
 
     fn write_cached_jre_download(am: &AgentManager, jre_key: &str, version: &str, url: &str, archive: &[u8]) {
@@ -2545,16 +2627,16 @@ mod jre_dir_remove_tests {
         let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "拒绝访问。 (os error 5)");
         let rendered = format_jre_dir_remove_error(&path, &err);
         assert!(rendered.contains(&path.display().to_string()), "missing path: {rendered}");
-        assert!(rendered.contains("（原始错误："), "missing original error wrapper: {rendered}");
+        assert!(rendered.contains("(original error:"), "missing original error wrapper: {rendered}");
         assert!(rendered.contains("拒绝访问"), "missing original error text: {rendered}");
         if cfg!(windows) {
-            assert!(rendered.starts_with("无法删除旧的 JRE 目录："), "wrong prefix: {rendered}");
-            assert!(rendered.contains("Agent / java 进程占用"), "missing process advice: {rendered}");
-            assert!(rendered.contains("重启 dbx 后重试"), "missing restart advice: {rendered}");
+            assert!(rendered.starts_with("Failed to remove the old JRE directory:"), "wrong prefix: {rendered}");
+            assert!(rendered.contains("java process still holds the directory"), "missing process advice: {rendered}");
+            assert!(rendered.contains("restart dbx and try again"), "missing restart advice: {rendered}");
         } else {
             // POSIX path: short form, no Windows-specific advice.
-            assert!(rendered.contains("无法删除旧的 JRE 目录"));
-            assert!(!rendered.contains("防病毒"));
+            assert!(rendered.contains("Failed to remove the old JRE directory"));
+            assert!(!rendered.contains("antivirus"));
         }
     }
 

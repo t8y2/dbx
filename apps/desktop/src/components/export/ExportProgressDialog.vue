@@ -7,6 +7,7 @@ import { Loader2, CheckCircle2, XCircle, AlertCircle, FolderOpen, Minimize2, X }
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
+import { translateBackendError } from "@/i18n/backend-errors";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -32,6 +33,7 @@ const emit = defineEmits<{
   "update:open": [value: boolean];
 }>();
 
+const translatedErrorMessage = computed(() => (props.errorMessage ? translateBackendError(t, props.errorMessage) : ""));
 const isActive = computed(() => props.status === "Running" || props.status === "Writing");
 const isFinished = computed(() => props.status === "Done" || props.status === "Error" || props.status === "Cancelled");
 const canRevealFile = computed(() => props.status === "Done" && !!props.filePath && isTauriRuntime());
@@ -55,8 +57,7 @@ async function revealExportFile() {
   try {
     await api.revealPathInFileManager(props.filePath);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    toast(t("exportProgress.openFolderFailed", { message }), 5000);
+    toast(t("exportProgress.openFolderFailed", { message: translateBackendError(t, error) }), 5000);
   } finally {
     isRevealing.value = false;
   }
@@ -108,7 +109,7 @@ async function revealExportFile() {
           </template>
           <template v-else-if="status === 'Error'">
             <XCircle class="h-4 w-4 text-destructive" />
-            <span class="text-destructive">{{ errorMessage || t("exportProgress.error") }}</span>
+            <span class="text-destructive">{{ translatedErrorMessage || t("exportProgress.error") }}</span>
           </template>
           <template v-else-if="status === 'Cancelled'">
             <AlertCircle class="h-4 w-4 text-yellow-500" />

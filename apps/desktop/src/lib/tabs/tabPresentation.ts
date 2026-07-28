@@ -94,6 +94,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return tab.sql;
     return `${tab.sql}@${database}`;
   }
+  if (tab.mode === "hbase" && tab.sql) {
+    if (compact) return tab.sql;
+    return `${tab.sql}@${database}`;
+  }
   if (tab.mode === "redis") {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@${database}`;
@@ -147,6 +151,9 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   }
   if (tab.mode === "vector" && tab.sql) {
     lines.push({ label: t("tabs.tooltipCollection"), value: tab.sql });
+  }
+  if (tab.mode === "hbase" && tab.sql) {
+    lines.push({ label: t("tabs.tooltipTable"), value: tab.sql });
   }
   if (tab.mode === "objects" && tab.objectBrowser?.schema) {
     lines.push({ label: t("tabs.tooltipSchema"), value: tab.objectBrowser.schema });
@@ -333,6 +340,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "mongo") return t("tabs.mongo");
   if (tab.mode === "mongo-gridfs" || tab.mode === "mongo-bucket") return t("tabs.gridfs");
   if (tab.mode === "vector") return t("tabs.vector");
+  if (tab.mode === "hbase") return "HBase";
   if (tab.mode === "redis") return t("tabs.redis");
   if (tab.mode === "etcd") return t("tabs.etcd");
   if (tab.mode === "etcd-dashboard") return t("tabs.etcdDashboard");

@@ -14,10 +14,11 @@ describe("orderAiConfigsForDisplay", () => {
       { id: "claude", provider: "claude" },
       { id: "openai", provider: "openai" },
       { id: "codex", provider: "codex-cli" },
+      { id: "pi", provider: "pi-agent-cli" },
       { id: "custom", provider: "custom" },
     ];
 
-    expect(orderAiConfigsForDisplay(configs).map((config) => config.id)).toEqual(["claude", "openai", "claude-code-1", "codex", "custom"]);
+    expect(orderAiConfigsForDisplay(configs).map((config) => config.id)).toEqual(["claude", "openai", "claude-code-1", "codex", "pi", "custom"]);
   });
 
   it("preserves creation order for configs from the same provider", () => {

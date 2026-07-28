@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.67"
+version = "0.5.68"
 dependencies = [
  "anyhow",
  "axum",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.43"
+version = "0.4.44"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1891,6 +1891,7 @@ dependencies = [
  "deadpool-postgres",
  "duckdb",
  "encoding_rs",
+ "flate2",
  "font-kit",
  "futures",
  "iana-time-zone",
@@ -1920,6 +1921,7 @@ dependencies = [
  "sqlparser",
  "ssfmt",
  "sysinfo",
+ "tar",
  "tempfile",
  "tiberius",
  "tokio",
@@ -1938,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.43"
+version = "0.4.44"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1955,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.67"
+version = "0.5.68"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -4753,7 +4755,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.37.0"
-source = "git+https://github.com/t8y2/mysql_async.git?rev=5c1186d05e62f712e717632a5b66dd030466e9b3#5c1186d05e62f712e717632a5b66dd030466e9b3"
+source = "git+https://github.com/t8y2/mysql_async.git?rev=2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec#2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec"
 dependencies = [
  "bytes",
  "crossbeam-queue",

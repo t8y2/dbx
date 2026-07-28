@@ -4,7 +4,7 @@ use tauri::State;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
     classify_command, parse_command_argv, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
-    RedisDatabaseInfo, RedisScanResult, RedisValue,
+    RedisDatabaseInfo, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPendingPage, RedisValue,
 };
 
 #[tauri::command]
@@ -84,6 +84,49 @@ pub async fn redis_get_value(
     key_raw: String,
 ) -> Result<RedisValue, String> {
     dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_stream_groups(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+) -> Result<Vec<RedisStreamGroup>, String> {
+    dbx_core::redis_ops::redis_stream_groups_in_db_core(&state, &connection_id, db, &key_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_stream_consumers(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    group_raw: String,
+) -> Result<Vec<RedisStreamConsumer>, String> {
+    dbx_core::redis_ops::redis_stream_consumers_in_db_core(&state, &connection_id, db, &key_raw, &group_raw).await
+}
+
+#[tauri::command]
+pub async fn redis_get_stream_pending(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    group_raw: String,
+    cursor: Option<String>,
+    consumer_raw: Option<String>,
+) -> Result<RedisStreamPendingPage, String> {
+    dbx_core::redis_ops::redis_stream_pending_in_db_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        &group_raw,
+        cursor.as_deref(),
+        consumer_raw.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

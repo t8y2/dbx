@@ -168,6 +168,8 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         client_session_id: None,
         execution_id: Some(format!("live-mysql-query-export-{suffix}")),
         date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
         numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
@@ -254,6 +256,8 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         client_session_id: None,
         execution_id: Some(format!("live-mysql-query-export-timeout-{suffix}")),
         date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
         numeric_column_right_align: false,
     };
     let rows_exported = AtomicU64::new(0);

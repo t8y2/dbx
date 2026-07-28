@@ -23,12 +23,23 @@ const apiMock = vi.hoisted(() => ({
 const clipboardMock = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
 }));
+const runtimeMock = vi.hoisted(() => ({ isTauri: false }));
+const dialogMock = vi.hoisted(() => ({ save: vi.fn() }));
+const toastMock = vi.hoisted(() => vi.fn());
+const translateMock = vi.hoisted(() =>
+  vi.fn((key: string, params?: Record<string, unknown>) => {
+    if (key === "exportProgress.xlsxRowLimit") return `XLSX 最多支持 ${params?.limit} 行数据，请使用 CSV 导出完整结果。`;
+    if (key === "grid.exportFailed") return `导出失败：${params?.message}`;
+    return key;
+  }),
+);
 
 vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/lib/common/clipboard", () => clipboardMock);
-vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtimeMock.isTauri }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMock.save }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: toastMock }) }));
+vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: translateMock }) }));
 
 const { defaultDataGridExportFileName, useDataGridExport } = await import("../../apps/desktop/src/composables/useDataGridExport.ts");
 
@@ -79,6 +90,7 @@ function buildExportHarness(
     exportFileBaseName?: string;
     columns?: string[];
     columnTypes?: Array<string | undefined>;
+    allColumnTypes?: Array<string | undefined>;
     rows?: QueryResult["rows"];
     allExportResults?: Array<{ sheetName: string; result: QueryResult; sql?: string }>;
     completeLocalResult?: QueryResult;
@@ -109,7 +121,7 @@ function buildExportHarness(
   const fullExportResult = vi.fn(async () => {
     throw new Error("fullExportResult should not be called for streaming CSV/XLSX query exports");
   });
-  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt"; includeSqlSheet?: boolean }) => ({
+  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => ({
     exportId: options.exportId,
     connectionId: "conn-1",
     database: "db",
@@ -121,6 +133,8 @@ function buildExportHarness(
     filePath: options.filePath,
     format: options.format,
     includeSqlSheet: options.includeSqlSheet,
+    exportTableName: options.exportTableName,
+    exportColumnTypes: options.exportColumnTypes,
     pageSize: 1000,
     rowLimit: 100000,
     totalRows: 2,
@@ -142,6 +156,7 @@ function buildExportHarness(
     context: computed(() => options.context ?? "results"),
     sourceColumns: computed(() => options.sourceColumns),
     columnTypes: computed(() => options.columnTypes),
+    allColumnTypes: computed(() => options.allColumnTypes),
     whereInput: computed(() => undefined),
     orderBy: computed(() => undefined),
     exportBatchSize: computed(() => 1000),
@@ -236,6 +251,8 @@ function buildTableDataExportHarness() {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  runtimeMock.isTauri = false;
+  dialogMock.save.mockResolvedValue(null);
   clipboardMock.copyToClipboard.mockResolvedValue(undefined);
   apiMock.startQueryResultExport.mockImplementation(async (_request, onProgress) => {
     onProgress({ exportId: _request.exportId, tableName: "", rowsExported: 2, totalRows: 2, status: "Done" });
@@ -371,6 +388,20 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
 });
 
+test("streaming query result export translates terminal backend errors before the toast", async () => {
+  const rawMessage = "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result.";
+  apiMock.startQueryResultExport.mockImplementationOnce(async (request, onProgress) => {
+    onProgress({ exportId: request.exportId, tableName: "", rowsExported: 0, totalRows: 1_048_576, status: "Error", errorMessage: rawMessage });
+    throw new Error(rawMessage);
+  });
+  const { composable, exportProgressState } = buildExportHarness();
+
+  await composable.exportXlsx();
+
+  assert.equal(exportProgressState.value.errorMessage, rawMessage);
+  assert.deepEqual(toastMock.mock.calls.at(-1), ["导出失败：XLSX 最多支持 1,048,575 行数据，请使用 CSV 导出完整结果。", 5000]);
+});
+
 test("complete local query result XLSX export does not re-execute the query", async () => {
   const completeLocalResult: QueryResult = {
     columns: ["id", "name"],
@@ -428,6 +459,22 @@ test("MySQL joined query SQL export keeps result aliases instead of source colum
   } finally {
     download.restore();
   }
+});
+
+test("background SQL export keeps full result column types when visible columns are reordered", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
+  const { composable, queryResultExportRequest } = buildExportHarness({
+    columns: ["payload", "created_at"],
+    columnTypes: ["jsonb", "timestamp"],
+    allColumnTypes: ["bytea", "jsonb", "timestamp"],
+    tableMeta: { tableName: "events", primaryKeys: ["id"] },
+  });
+
+  await composable.exportSql();
+
+  assert.deepEqual(queryResultExportRequest.mock.calls[0][0].exportColumnTypes, ["bytea", "jsonb", "timestamp"]);
+  assert.deepEqual(apiMock.startQueryResultExport.mock.calls[0][0].exportColumnTypes, ["bytea", "jsonb", "timestamp"]);
 });
 
 test("table data SQL export keeps source column names", async () => {

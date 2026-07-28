@@ -10,6 +10,14 @@ describe("ObjectBrowser context watcher", () => {
     expect(objectBrowserSource).not.toContain("() => [props.connection.id, props.database, props.schema]");
   });
 
+  it("invalidates object requests before waiting for the new connection", () => {
+    const watcher = objectBrowserSource.match(/watch\(\s*\[\(\) => props\.connection\.id[\s\S]*?\{ immediate: true \},\s*\);/)?.[0] ?? "";
+
+    expect(watcher).toContain("const contextEpoch = objectBrowserRowsLoadGuard.invalidate();");
+    expect(watcher.indexOf("objectBrowserRowsLoadGuard.invalidate()")).toBeLessThan(watcher.indexOf("await connectionStore.ensureConnected"));
+    expect(watcher).toContain("reload({ allowCachedObjects: true, contextEpoch })");
+  });
+
   it("ignores connection object replacement when the context values stay unchanged", async () => {
     const connection = ref({ id: "connection-1" });
     const database = ref("database-1");

@@ -26,7 +26,7 @@ const previewVal = computed(() => {
   return `${year}-${month}-${day}`;
 });
 
-const weekdayLabels = ["日", "一", "二", "三", "四", "五", "六"];
+const weekdayLabels = computed(() => (["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const).map((d) => t(`dataGenerate.weekdayShort.${d}`)));
 
 function toggleWeekday(d: number) {
   if (!props.params.weekdays) props.params.weekdays = [];
@@ -77,11 +77,11 @@ function refresh() {
     </div>
 
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">星期</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.weekday") }}</div>
       <div class="flex items-center gap-2 text-xs">
-        <button type="button" class="px-2 py-1 rounded border text-xs" :class="!params.weekdayMode || params.weekdayMode === 'all' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.weekdayMode = 'all'">全部</button>
-        <button type="button" class="px-2 py-1 rounded border text-xs" :class="params.weekdayMode === 'weekday' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.weekdayMode = 'weekday'">工作日</button>
-        <button type="button" class="px-2 py-1 rounded border text-xs" :class="params.weekdayMode === 'custom' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.weekdayMode = 'custom'">自定义</button>
+        <button type="button" class="px-2 py-1 rounded border text-xs" :class="!params.weekdayMode || params.weekdayMode === 'all' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.weekdayMode = 'all'">{{ t("dataGenerate.all") }}</button>
+        <button type="button" class="px-2 py-1 rounded border text-xs" :class="params.weekdayMode === 'weekday' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.weekdayMode = 'weekday'">{{ t("dataGenerate.weekdayOnly") }}</button>
+        <button type="button" class="px-2 py-1 rounded border text-xs" :class="params.weekdayMode === 'custom' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="params.weekdayMode = 'custom'">{{ t("dataGenerate.custom") }}</button>
       </div>
       <div v-if="params.weekdayMode === 'custom'" class="flex gap-1 mt-2">
         <button v-for="(_, i) in 7" :key="i" type="button" class="w-7 h-7 rounded text-xs border" :class="(params.weekdays ?? []).includes(i) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="toggleWeekday(i)">{{ weekdayLabels[i] }}</button>

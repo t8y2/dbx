@@ -14,6 +14,31 @@ env:
   CNB_REGISTRY: "docker.cnb.cool"
 
 jobs:
+  release-ready:
+    name: Verify Agent-created draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          for attempt in $(seq 1 30); do
+            RELEASE_JSON="$(gh release view "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json tagName,isDraft,body 2>/dev/null || true)"
+            if [ -n "$RELEASE_JSON" ] \
+              && [ "$(jq -r '.tagName' <<<"$RELEASE_JSON")" = "${GITHUB_REF_NAME}" ] \
+              && [ "$(jq -r '.isDraft' <<<"$RELEASE_JSON")" = true ] \
+              && [ -n "$(jq -r '.body' <<<"$RELEASE_JSON")" ]; then
+              echo "Agent-created draft release is ready."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Agent-created draft release was not ready for ${GITHUB_REF_NAME}." >&2
+          exit 1
+
   nix-packaging:
     runs-on: ubuntu-22.04
     steps:
@@ -79,6 +104,7 @@ jobs:
           git push origin HEAD:main
 
   build:
+    needs: release-ready
     strategy:
       fail-fast: false
       matrix:
@@ -205,25 +231,6 @@ jobs:
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
           fi
 
-      - name: Generate release notes
-        id: release-notes
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BODY="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="${GITHUB_REF_NAME}" \
-            --jq '.body')"
-          if [ -z "$BODY" ]; then
-            BODY="DBX ${GITHUB_REF_NAME}"
-          fi
-          DELIM="RELEASE_NOTES_$(date +%s%N)"
-          {
-            echo "body<<$DELIM"
-            printf '%s\n' "$BODY"
-            echo "$DELIM"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -234,10 +241,7 @@ jobs:
           APPLE_TEAM_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_TEAM_ID || '' }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "DBX ${{ github.ref_name }}"
-          releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: true
-          prerelease: false
           args: --target ${{ matrix.target }}
 
       - name: Show sccache stats
@@ -336,6 +340,7 @@ jobs:
           gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
   build-windows-7-offline:
+    needs: release-ready
     runs-on: windows-2022
     env:
       CARGO_INCREMENTAL: "0"

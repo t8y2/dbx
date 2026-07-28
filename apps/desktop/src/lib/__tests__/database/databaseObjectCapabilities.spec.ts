@@ -6,6 +6,10 @@ describe("databaseObjectCapabilities", () => {
     expect(sidebarObjectKindsForDatabase("dameng")).toContain("MATERIALIZED_VIEW");
   });
 
+  it("exposes only tables for HBase namespaces", () => {
+    expect(sidebarObjectKindsForDatabase("hbase")).toEqual(["TABLE"]);
+  });
+
   it("exposes materialized views for StarRocks only", () => {
     // StarRocks has a dedicated MV listing/classification path in
     // crates/dbx-core/src/db/mysql.rs (`list_starrocks_tables` +

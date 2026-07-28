@@ -12,7 +12,6 @@ import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -33,7 +32,6 @@ import {
   type AiApiStyle,
   type AiAuthMethod,
   type AiConfiguredModel,
-  type AiEffortLevel,
   type AiReasoningLevel,
   type EditorTheme,
   type DesktopIconTheme,
@@ -49,7 +47,6 @@ import {
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
-import { normalizeAiModelEffortLevels, normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
 import DangerConfirmDialog from "./DangerConfirmDialog.vue";
@@ -81,7 +78,6 @@ import {
   webdavSyncTest,
   webdavSyncUpload,
   type AppSupportInfo,
-  type AiModelInfo,
   type McpServerStatus,
   type SnippetProvider,
   type SnippetSyncConfig,
@@ -392,10 +388,10 @@ const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
 const uiScaleOptions = [0.75, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2, 1.25, 1.5, 1.75];
 const fontSearchTriggerClass =
-  "h-8 w-full max-w-none justify-between gap-1.5 rounded-[6px] border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-transparent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
-const appearanceFontSearchTriggerClass = `${fontSearchTriggerClass} gap-0 pl-2 pr-1.5`;
+  "h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent py-2 pl-2.5 pr-2 text-sm font-normal shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-expanded:bg-transparent dark:bg-input/30 dark:hover:bg-input/50";
+const appearanceFontSearchTriggerClass = fontSearchTriggerClass;
 const fontSearchTriggerIconClass = "size-4 text-muted-foreground";
-const appearanceFontSearchTriggerIconClass = "size-2.5 text-muted-foreground";
+const appearanceFontSearchTriggerIconClass = "size-4 text-muted-foreground";
 const disconnectTabHandlingModeDescriptionKey = computed(() => {
   switch (editDisconnectTabHandlingMode.value) {
     case "close-tabs":
@@ -2199,17 +2195,7 @@ async function saveMaxAgentTurnsSetting() {
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
-// Model list management
-const aiEditModels = ref<AiConfiguredModel[]>([]);
-const aiModelListLoading = ref(false);
-let aiModelListRequestToken = 0;
-
-// AI Model Multi-Select
-const aiModelMultiSelectOpen = ref(false);
-const aiModelMultiSelectSearch = ref("");
-const aiFetchedModels = ref<AiModelInfo[]>([]);
-
-const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli"]);
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "pi-agent-cli", "codex-cli"]);
 const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
@@ -2218,6 +2204,7 @@ const aiEditApiKey = ref("");
 const aiEditAuthMethod = ref<AiAuthMethod>("api-key");
 const aiEditEndpoint = ref("");
 const aiEditModel = ref("");
+const aiEditLegacyModels = ref<AiConfiguredModel[]>([]);
 const aiEditApiStyle = ref<AiApiStyle>("completions");
 const aiEditProxyEnabled = ref(false);
 const aiEditProxyUrl = ref("");
@@ -2228,25 +2215,10 @@ const aiEditCodexCliPath = ref("");
 const aiEditCodexCliEnvRows = ref<AiEnvRow[]>([]);
 const aiEditClaudeCodeCliPath = ref("");
 const aiEditClaudeCodeCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditPiAgentCliPath = ref("");
+const aiEditPiAgentCliEnvRows = ref<AiEnvRow[]>([]);
 
-const aiModelError = ref("");
-
-const aiCompletionsMode = computed(() => aiEditApiStyle.value === "completions");
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
-const codexReasoningLevelOptions: Array<{ value: AiReasoningLevel; labelKey: string }> = [
-  { value: "default", labelKey: "ai.reasoningLevelDefault" },
-  { value: "minimal", labelKey: "ai.reasoningLevelMinimal" },
-  { value: "low", labelKey: "ai.reasoningLevelLow" },
-  { value: "medium", labelKey: "ai.reasoningLevelMedium" },
-  { value: "high", labelKey: "ai.reasoningLevelHigh" },
-];
-const effortLevelLabelKeys: Record<AiEffortLevel, string> = {
-  low: "ai.reasoningLevelLow",
-  medium: "ai.reasoningLevelMedium",
-  high: "ai.reasoningLevelHigh",
-  xhigh: "ai.reasoningLevelXhigh",
-  max: "ai.reasoningLevelMax",
-};
 
 const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
@@ -2273,21 +2245,40 @@ const aiTestErrorPresentation = computed(() => {
 const aiTestErrorDisplay = computed(() => [aiTestErrorPresentation.value.summary, aiTestErrorPresentation.value.detail].filter(Boolean).join(" "));
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
+const aiIsPiAgentCli = computed(() => aiEditProvider.value === "pi-agent-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
-const aiCliCommandName = computed(() => (aiIsClaudeCodeCli.value ? "claude" : "codex"));
-const aiCliLoginCommand = computed(() => (aiIsClaudeCodeCli.value ? "claude auth login" : "codex login"));
+const aiCliCommandName = computed(() => {
+  if (aiIsClaudeCodeCli.value) return "claude";
+  if (aiIsPiAgentCli.value) return "pi";
+  return "codex";
+});
+const aiCliLoginCommand = computed(() => {
+  if (aiIsClaudeCodeCli.value) return "claude auth login";
+  if (aiIsPiAgentCli.value) return "pi";
+  return "codex login";
+});
 const aiEditCliPath = computed({
-  get: () => (aiIsClaudeCodeCli.value ? aiEditClaudeCodeCliPath.value : aiEditCodexCliPath.value),
+  get: () => {
+    if (aiIsClaudeCodeCli.value) return aiEditClaudeCodeCliPath.value;
+    if (aiIsPiAgentCli.value) return aiEditPiAgentCliPath.value;
+    return aiEditCodexCliPath.value;
+  },
   set: (value: string) => {
     if (aiIsClaudeCodeCli.value) {
       aiEditClaudeCodeCliPath.value = value;
+    } else if (aiIsPiAgentCli.value) {
+      aiEditPiAgentCliPath.value = value;
     } else {
       aiEditCodexCliPath.value = value;
     }
   },
 });
-const aiEditCliEnvRows = computed(() => (aiIsClaudeCodeCli.value ? aiEditClaudeCodeCliEnvRows.value : aiEditCodexCliEnvRows.value));
+const aiEditCliEnvRows = computed(() => {
+  if (aiIsClaudeCodeCli.value) return aiEditClaudeCodeCliEnvRows.value;
+  if (aiIsPiAgentCli.value) return aiEditPiAgentCliEnvRows.value;
+  return aiEditCodexCliEnvRows.value;
+});
 watch(aiIsCliProvider, (isCliProvider) => {
   if (isCliProvider) void ensureCliMcpStatus();
 });
@@ -2313,7 +2304,7 @@ const aiEndpointHint = computed(() => {
     return t("ai.anthropicMessagesHint");
   }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
-    return "大多数 OpenAI 兼容 API 需要 /v1 路径前缀";
+    return t("ai.openAiCompatibleEndpointHint");
   }
   return "";
 });
@@ -2329,8 +2320,6 @@ const aiCliMcpActionLabel = computed(() => {
   if (mcpStatus.value.update_available) return t("settings.mcpUpdateButton");
   return t("settings.mcpUpToDate");
 });
-const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
-const aiCanListModels = computed(() => aiModelListSupported.value && (aiIsCliProvider.value || !!aiEditEndpoint.value.trim()) && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
 const aiCliEnvError = computed(() => cliEnvValidationError());
 const aiCliPathError = computed(() => {
   const path = aiEditCliPath.value.trim();
@@ -2357,7 +2346,10 @@ function cliEnvValidationError(): string {
   for (const row of aiEditCliEnvRows.value) {
     const key = row.key.trim();
     if (key && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return t("ai.cliEnvInvalidName", { name: key });
-    if (key.toUpperCase().startsWith("DBX_MCP_")) return t("ai.cliEnvReservedName", { name: key });
+    const upper = key.toUpperCase();
+    if (upper.startsWith("DBX_MCP_") || (aiIsPiAgentCli.value && upper.startsWith("DBX_PI_"))) {
+      return t("ai.cliEnvReservedName", { name: key });
+    }
   }
   return "";
 }
@@ -2369,29 +2361,36 @@ function addCliEnvRow() {
 function removeCliEnvRow(id: string) {
   if (aiIsClaudeCodeCli.value) {
     aiEditClaudeCodeCliEnvRows.value = aiEditClaudeCodeCliEnvRows.value.filter((row) => row.id !== id);
+  } else if (aiIsPiAgentCli.value) {
+    aiEditPiAgentCliEnvRows.value = aiEditPiAgentCliEnvRows.value.filter((row) => row.id !== id);
   } else {
     aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
   }
 }
 
 function currentAiEditConfig() {
-  const reasoningLevel = aiIsClaudeCodeCli.value ? normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value) : aiEditReasoningLevel.value;
   return {
     provider: aiEditProvider.value,
-    apiKey: aiEditApiKey.value,
+    apiKey: aiEditApiKey.value.trim(),
     authMethod: aiEditAuthMethod.value,
     endpoint: aiEditEndpoint.value,
     model: aiEditModel.value,
+    models: aiEditLegacyModels.value.map((model) => ({
+      ...model,
+      supportedEffortLevels: model.supportedEffortLevels ? [...model.supportedEffortLevels] : undefined,
+    })),
     apiStyle: aiEditApiStyle.value,
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
-    reasoningLevel,
+    reasoningLevel: aiEditReasoningLevel.value,
     contextWindow: aiEditContextWindow.value || undefined,
     codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
     codexCliEnv: aiIsCodexCli.value ? cliEnvFromRows(aiEditCodexCliEnvRows.value) : {},
     claudeCodeCliPath: aiEditClaudeCodeCliPath.value.trim() || undefined,
     claudeCodeCliEnv: aiIsClaudeCodeCli.value ? cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value) : {},
+    piAgentCliPath: aiEditPiAgentCliPath.value.trim() || undefined,
+    piAgentCliEnv: aiIsPiAgentCli.value ? cliEnvFromRows(aiEditPiAgentCliEnvRows.value) : {},
   };
 }
 
@@ -2412,16 +2411,12 @@ function aiSelectProvider(provider: AiProvider) {
   aiEditApiKey.value = "";
   aiEditAuthMethod.value = preset.authMethod;
   aiEditEndpoint.value = preset.endpoint;
-  aiEditModel.value = preset.model;
+  aiEditModel.value = "";
+  aiEditLegacyModels.value = [];
   aiEditApiStyle.value = preset.apiStyle;
+  aiEditEnableThinking.value = true;
   aiEditReasoningLevel.value = "default";
-  aiEditModels.value = [];
-  aiFetchedModels.value = [];
-  aiLastModelFetchSignature = "";
-  aiModelListRequestToken += 1;
-  aiModelListLoading.value = false;
   if (CLI_AI_PROVIDERS.has(provider)) void ensureCliMcpStatus();
-  if (provider === "claude-code-cli") void aiFetchModelList();
 }
 
 function aiSelectApiStyle(style: AiApiStyle) {
@@ -2449,6 +2444,10 @@ function aiEnterEditMode(configId?: string) {
       aiEditAuthMethod.value = config.authMethod;
       aiEditEndpoint.value = config.endpoint;
       aiEditModel.value = config.model;
+      aiEditLegacyModels.value = (config.models ?? []).map((model) => ({
+        ...model,
+        supportedEffortLevels: model.supportedEffortLevels ? [...model.supportedEffortLevels] : undefined,
+      }));
       aiEditApiStyle.value = config.apiStyle;
       aiEditProxyEnabled.value = config.proxyEnabled ?? false;
       aiEditProxyUrl.value = config.proxyUrl ?? "";
@@ -2459,16 +2458,17 @@ function aiEnterEditMode(configId?: string) {
       aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(config.codexCliEnv);
       aiEditClaudeCodeCliPath.value = config.claudeCodeCliPath ?? "";
       aiEditClaudeCodeCliEnvRows.value = aiEnvRowsFromConfig(config.claudeCodeCliEnv);
-      aiEditModels.value = config.models ? config.models.map((model) => ({ ...model, supportedEffortLevels: model.supportedEffortLevels ? [...model.supportedEffortLevels] : undefined })) : [];
+      aiEditPiAgentCliPath.value = config.piAgentCliPath ?? "";
+      aiEditPiAgentCliEnvRows.value = aiEnvRowsFromConfig(config.piAgentCliEnv);
     }
   } else {
     aiEditConfigName.value = "";
-    aiEditModels.value = [];
     aiEditProvider.value = "claude";
     aiEditApiKey.value = "";
     aiEditAuthMethod.value = AI_PROVIDER_PRESETS["claude"].authMethod;
     aiEditEndpoint.value = AI_PROVIDER_PRESETS["claude"].endpoint;
-    aiEditModel.value = AI_PROVIDER_PRESETS["claude"].model;
+    aiEditModel.value = "";
+    aiEditLegacyModels.value = [];
     aiEditApiStyle.value = AI_PROVIDER_PRESETS["claude"].apiStyle;
     aiEditProxyEnabled.value = false;
     aiEditProxyUrl.value = "";
@@ -2479,194 +2479,8 @@ function aiEnterEditMode(configId?: string) {
     aiEditCodexCliEnvRows.value = [];
     aiEditClaudeCodeCliPath.value = "";
     aiEditClaudeCodeCliEnvRows.value = [];
-  }
-  aiFetchedModels.value = [];
-  aiLastModelFetchSignature = "";
-  if (aiIsClaudeCodeCli.value) void aiFetchModelList();
-}
-
-function aiAddModel() {
-  aiEditModels.value.push({ name: "", label: "" });
-}
-
-function aiRemoveModel(index: number) {
-  aiEditModels.value.splice(index, 1);
-}
-
-async function aiFetchModelList() {
-  if (aiModelListLoading.value) return;
-  if (!aiCanListModels.value) return;
-  const token = ++aiModelListRequestToken;
-  const signature = aiModelFetchSignature.value;
-  aiModelListLoading.value = true;
-  aiModelError.value = "";
-  try {
-    const models = await aiListModels({
-      provider: aiEditProvider.value,
-      apiKey: aiEditApiKey.value,
-      endpoint: aiEditEndpoint.value,
-      model: aiEditModel.value,
-      authMethod: aiEditAuthMethod.value,
-      apiStyle: aiEditApiStyle.value,
-      proxyEnabled: aiEditProxyEnabled.value,
-      proxyUrl: aiEditProxyUrl.value,
-      enableThinking: aiEditEnableThinking.value,
-      reasoningLevel: aiEditReasoningLevel.value,
-      contextWindow: aiEditContextWindow.value,
-      codexCliPath: aiEditCodexCliPath.value,
-      codexCliEnv: cliEnvFromRows(aiEditCodexCliEnvRows.value),
-      claudeCodeCliPath: aiEditClaudeCodeCliPath.value,
-      claudeCodeCliEnv: cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value),
-    });
-    if (token !== aiModelListRequestToken) return;
-    aiFetchedModels.value = normalizeAiModelOptions(models);
-    aiLastModelFetchSignature = signature;
-    const fetchedById = new Map(aiFetchedModels.value.map((model) => [model.id, model]));
-    aiEditModels.value = aiEditModels.value.map((model) => {
-      const fetched = fetchedById.get(model.name);
-      if (!fetched) return model;
-      return {
-        name: model.name,
-        label: fetched.displayName || model.label,
-        supportedEffortLevels: fetched.supportedEffortLevels,
-      };
-    });
-    if (aiIsClaudeCodeCli.value) {
-      aiEditReasoningLevel.value = normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value);
-    }
-  } catch (e: any) {
-    if (token === aiModelListRequestToken) {
-      aiModelError.value = e?.message || String(e);
-    }
-  } finally {
-    if (token === aiModelListRequestToken) aiModelListLoading.value = false;
-  }
-}
-
-function aiIsModelSelected(modelId: string): boolean {
-  return aiEditModels.value.some((m) => m.name === modelId);
-}
-
-function aiToggleModel(model: AiModelInfo) {
-  const index = aiEditModels.value.findIndex((m) => m.name === model.id);
-  if (index >= 0) {
-    aiEditModels.value.splice(index, 1);
-  } else {
-    aiEditModels.value.push({
-      name: model.id,
-      label: model.displayName || model.id,
-      supportedEffortLevels: normalizeAiModelEffortLevels(model.supportedEffortLevels),
-    });
-  }
-}
-
-const aiFilteredFetchedModels = computed(() => {
-  const search = aiModelMultiSelectSearch.value.trim().toLowerCase();
-  if (!search) return aiFetchedModels.value;
-  return aiFetchedModels.value.filter((m) => m.id.toLowerCase().includes(search) || (m.displayName && m.displayName.toLowerCase().includes(search)));
-});
-
-const aiModelFetchSignature = computed(() =>
-  JSON.stringify({
-    provider: aiEditProvider.value,
-    endpoint: aiEditEndpoint.value.trim(),
-    apiKey: aiEditApiKey.value.trim(),
-    authMethod: aiEditAuthMethod.value,
-    apiStyle: aiEditApiStyle.value,
-    codexCliPath: aiEditCodexCliPath.value.trim(),
-    codexCliEnv: cliEnvFromRows(aiEditCodexCliEnvRows.value),
-    claudeCodeCliPath: aiEditClaudeCodeCliPath.value.trim(),
-    claudeCodeCliEnv: cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value),
-  }),
-);
-
-let aiLastModelFetchSignature = "";
-
-function normalizeAiModelOptions(models: AiModelInfo[]): AiModelInfo[] {
-  const seen = new Set<string>();
-  const normalized: AiModelInfo[] = [];
-  for (const model of models) {
-    const id = model.id?.trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const supportedEffortLevels = normalizeAiModelEffortLevels(model.supportedEffortLevels);
-    normalized.push({
-      id,
-      displayName: model.displayName?.trim() || undefined,
-      supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
-    });
-  }
-  return normalized;
-}
-
-const aiSelectedModelInfo = computed<AiModelInfo | undefined>(() => {
-  if (aiModelFetchSignature.value === aiLastModelFetchSignature) {
-    const fetched = aiFetchedModels.value.find((model) => model.id === aiEditModel.value);
-    if (fetched) return fetched;
-  }
-  const configured = aiEditModels.value.find((model) => model.name === aiEditModel.value);
-  if (!configured) return undefined;
-  return {
-    id: configured.name,
-    displayName: configured.label,
-    supportedEffortLevels: configured.supportedEffortLevels,
-  };
-});
-const aiClaudeCodeEffortLevels = computed(() => normalizeAiModelEffortLevels(aiSelectedModelInfo.value?.supportedEffortLevels));
-const aiReasoningLevelOptions = computed<Array<{ value: AiReasoningLevel; labelKey: string }>>(() => {
-  if (!aiIsClaudeCodeCli.value) return codexReasoningLevelOptions;
-  return [{ value: "default", labelKey: "ai.reasoningLevelDefault" }, ...aiClaudeCodeEffortLevels.value.map((value) => ({ value, labelKey: effortLevelLabelKeys[value] }))];
-});
-const aiReasoningLevelDisabled = computed(() => aiIsClaudeCodeCli.value && aiClaudeCodeEffortLevels.value.length === 0);
-const aiReasoningLevelHint = computed(() => {
-  if (!aiIsClaudeCodeCli.value) return t("ai.reasoningLevelHint");
-  if (aiModelListLoading.value && aiClaudeCodeEffortLevels.value.length === 0) return t("ai.loadingModels");
-  return aiClaudeCodeEffortLevels.value.length ? t("ai.claudeCodeEffortHint") : t("ai.claudeCodeEffortUnavailable");
-});
-
-watch([aiIsClaudeCodeCli, aiSelectedModelInfo], () => {
-  if (!aiIsClaudeCodeCli.value) return;
-  aiEditReasoningLevel.value = normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value);
-});
-
-function aiModelsForSave(): AiConfiguredModel[] | undefined {
-  const models = aiEditModels.value
-    .map((model) => {
-      const supportedEffortLevels = normalizeAiModelEffortLevels(model.supportedEffortLevels);
-      return {
-        name: model.name.trim(),
-        label: model.label?.trim() || undefined,
-        supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
-      };
-    })
-    .filter((model) => model.name);
-
-  if (aiIsClaudeCodeCli.value && aiEditModel.value.trim() && aiSelectedModelInfo.value) {
-    const modelId = aiEditModel.value.trim();
-    const supportedEffortLevels = normalizeAiModelEffortLevels(aiSelectedModelInfo.value.supportedEffortLevels);
-    const configuredModel = models.find((model) => model.name === modelId);
-    if (configuredModel) {
-      configuredModel.label = aiSelectedModelInfo.value.displayName || configuredModel.label;
-      configuredModel.supportedEffortLevels = supportedEffortLevels.length ? supportedEffortLevels : undefined;
-    } else {
-      models.unshift({
-        name: modelId,
-        label: aiSelectedModelInfo.value.displayName,
-        supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
-      });
-    }
-  }
-
-  return models.length ? models : undefined;
-}
-
-function aiOnModelPopoverOpen(open: boolean) {
-  if (!open) return;
-  if (aiModelFetchSignature.value !== aiLastModelFetchSignature) {
-    aiFetchedModels.value = [];
-    if (aiCanListModels.value) void aiFetchModelList();
-  } else if (aiFetchedModels.value.length === 0 && aiCanListModels.value) {
-    void aiFetchModelList();
+    aiEditPiAgentCliPath.value = "";
+    aiEditPiAgentCliEnvRows.value = [];
   }
 }
 
@@ -2682,13 +2496,10 @@ async function aiSaveConfig() {
   }
 
   const editConfig = currentAiEditConfig();
-  aiEditReasoningLevel.value = editConfig.reasoningLevel;
-  const models = aiModelsForSave();
   const config: AiConfigItem = {
     id: aiEditConfigId.value || generateId(),
     name: aiEditConfigName.value,
     ...editConfig,
-    models,
   };
 
   try {
@@ -2735,7 +2546,7 @@ async function aiSetDefaultConfig(id: string) {
 }
 
 async function aiTestConn() {
-  if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || (!aiIsCliProvider.value && !aiEditEndpoint.value.trim()) || (!aiIsCliProvider.value && !aiEditModel.value.trim())) return;
+  if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || (!aiIsCliProvider.value && !aiEditEndpoint.value.trim())) return;
   if (aiCliValidationError.value) {
     aiTestResult.value = "error";
     aiTestError.value = aiCliValidationError.value;
@@ -2747,9 +2558,16 @@ async function aiTestConn() {
   aiTestLatency.value = null;
   aiTestErrorCopied.value = false;
   try {
-    const result = await aiTestConnection(currentAiEditConfig());
+    const config = currentAiEditConfig();
+    if (aiIsCliProvider.value) {
+      const result = await aiTestConnection(config);
+      aiTestLatency.value = result.latencyMs ?? null;
+    } else {
+      const startedAt = performance.now();
+      await aiListModels(config);
+      aiTestLatency.value = Math.round(performance.now() - startedAt);
+    }
     aiTestResult.value = "success";
-    aiTestLatency.value = result.latencyMs ?? null;
   } catch (e: any) {
     aiTestResult.value = "error";
     aiTestError.value = translateBackendError(t, e?.message || String(e));
@@ -3630,8 +3448,8 @@ onUnmounted(cleanupPreviewEditor);
                     allow-custom
                     :display-name="displayFontFamily"
                     :normalize-custom="normalizeCustomFontFamilyInput"
-                    trigger-variant="outline"
-                    trigger-class="h-9 w-full max-w-none justify-between"
+                    :trigger-class="appearanceFontSearchTriggerClass"
+                    :trigger-icon-class="appearanceFontSearchTriggerIconClass"
                     content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
                     @update:model-value="onTableFontFamilyChange"
                     @update:open="(open: boolean) => open && loadSystemFontOptions()"
@@ -3657,16 +3475,7 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="settings-appearance-group min-w-0">
                   <Label>{{ t("settings.theme") }}</Label>
                   <div class="settings-appearance-button-row flex flex-wrap gap-2">
-                    <Button
-                      v-for="option in appThemeModeOptions"
-                      :key="option.value"
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      class="settings-choice-button h-8 gap-1.5 px-3"
-                      :class="themeMode === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
-                      @click="setThemeMode(option.value)"
-                    >
+                    <Button v-for="option in appThemeModeOptions" :key="option.value" type="button" variant="outline" size="sm" class="settings-choice-button h-8 gap-1.5 px-3" :class="themeMode === option.value ? 'dbx-choice-selected' : 'text-foreground'" @click="setThemeMode(option.value)">
                       <component :is="option.icon" class="h-3.5 w-3.5" />
                       {{ option.label }}
                     </Button>
@@ -3683,7 +3492,7 @@ onUnmounted(cleanupPreviewEditor);
                       variant="outline"
                       size="sm"
                       class="settings-choice-button h-8 px-3"
-                      :class="cornerStyle === option.value ? 'settings-choice-button--selected border-primary/40 bg-primary/10 text-primary ring-1 ring-primary/30' : 'text-foreground'"
+                      :class="cornerStyle === option.value ? 'dbx-choice-selected' : 'text-foreground'"
                       :style="{ borderRadius: option.previewRadius }"
                       @click="setCornerStyle(option.value)"
                     >
@@ -3698,7 +3507,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="settings-appearance-group">
                 <Label>{{ t("settings.appLayout") }}</Label>
                 <div class="settings-appearance-choice-grid">
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editAppLayout === 'separated' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('separated')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editAppLayout === 'separated' ? 'dbx-choice-selected' : ''" @click="setAppLayout('separated')">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger as-child>
@@ -3713,7 +3522,7 @@ onUnmounted(cleanupPreviewEditor);
                       </Tooltip>
                     </TooltipProvider>
                   </Button>
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editAppLayout === 'classic' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setAppLayout('classic')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editAppLayout === 'classic' ? 'dbx-choice-selected' : ''" @click="setAppLayout('classic')">
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger as-child>
@@ -3736,13 +3545,13 @@ onUnmounted(cleanupPreviewEditor);
               <div class="settings-appearance-group">
                 <Label>{{ t("settings.tabLayout") }}</Label>
                 <div class="settings-appearance-choice-grid">
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'scroll' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setTabLayout('scroll')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'scroll' ? 'dbx-choice-selected' : ''" @click="setTabLayout('scroll')">
                     <div class="w-full min-w-0 text-left">
                       <div class="text-sm font-medium">{{ t("settings.tabLayoutScroll") }}</div>
                       <div class="text-xs text-muted-foreground">{{ t("settings.tabLayoutScrollDescription") }}</div>
                     </div>
                   </Button>
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'wrap' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setTabLayout('wrap')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'wrap' ? 'dbx-choice-selected' : ''" @click="setTabLayout('wrap')">
                     <div class="w-full min-w-0 text-left">
                       <div class="text-sm font-medium">{{ t("settings.tabLayoutWrap") }}</div>
                       <div class="text-xs text-muted-foreground">{{ t("settings.tabLayoutWrapDescription") }}</div>
@@ -3755,7 +3564,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="settings-appearance-group">
                 <Label>{{ t("settings.iconTheme") }}</Label>
                 <div class="settings-appearance-choice-grid">
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('default')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'dbx-choice-selected' : ''" @click="setIconTheme('default')">
                     <div class="flex items-center gap-3 text-left w-full min-w-0">
                       <img src="/icon-preview-default.png" alt="DBX" class="h-12 w-12 shrink-0" />
                       <TooltipProvider>
@@ -3773,7 +3582,7 @@ onUnmounted(cleanupPreviewEditor);
                       </TooltipProvider>
                     </div>
                   </Button>
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setIconTheme('black')">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'dbx-choice-selected' : ''" @click="setIconTheme('black')">
                     <div class="flex items-center gap-3 text-left w-full min-w-0">
                       <img src="/icon-preview-black.png" alt="DBX" class="h-12 w-12 shrink-0" />
                       <TooltipProvider>
@@ -3991,7 +3800,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarActivation") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarActivation('single')">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('single')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.sidebarActivationSingle") }}</div>
                       <div class="text-xs text-muted-foreground">
@@ -3999,7 +3808,7 @@ onUnmounted(cleanupPreviewEditor);
                       </div>
                     </div>
                   </Button>
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarActivation('double')">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('double')">
                     <div class="text-left">
                       <div class="text-sm font-medium">{{ t("settings.sidebarActivationDouble") }}</div>
                       <div class="text-xs text-muted-foreground">
@@ -4021,7 +3830,7 @@ onUnmounted(cleanupPreviewEditor);
               <div class="space-y-2">
                 <Label>{{ t("settings.sidebarObjectDisplay") }}</Label>
                 <div class="grid grid-cols-2 gap-2">
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'grouped' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarObjectDisplay('grouped')">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'grouped' ? 'dbx-choice-selected' : ''" @click="setSidebarObjectDisplay('grouped')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
                         <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplayGrouped") }}</div>
@@ -4038,7 +3847,7 @@ onUnmounted(cleanupPreviewEditor);
                       </div>
                     </div>
                   </Button>
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'simple' ? 'border-blue-300 ring-2 ring-blue-300/50' : ''" @click="setSidebarObjectDisplay('simple')">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'simple' ? 'dbx-choice-selected' : ''" @click="setSidebarObjectDisplay('simple')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
                         <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplaySimple") }}</div>
@@ -4716,7 +4525,7 @@ onUnmounted(cleanupPreviewEditor);
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="github">GitHub Gist</SelectItem>
-                          <SelectItem value="gitee">Gitee 代码片段</SelectItem>
+                          <SelectItem value="gitee">{{ t("settings.syncSnippetProviderGitee") }}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
@@ -4837,7 +4646,7 @@ onUnmounted(cleanupPreviewEditor);
                           <span class="text-sm font-medium">{{ config.name }}</span>
                           <Badge v-if="config.isDefault" variant="default" class="h-5 text-[10px]"> {{ t("ai.default") }} </Badge>
                         </div>
-                        <div class="text-xs text-muted-foreground">{{ AI_PROVIDER_PRESETS[config.provider].label }} - {{ config.model }}</div>
+                        <div class="text-xs text-muted-foreground">{{ AI_PROVIDER_PRESETS[config.provider].label }}</div>
                       </div>
                     </div>
                     <div class="flex items-center gap-1">
@@ -5093,106 +4902,13 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
-                <!-- Model -->
-                <div class="grid grid-cols-3 items-start gap-3">
-                  <Label class="pt-2 text-right text-xs">{{ t("ai.defaultModel") }}</Label>
-                  <div class="col-span-2">
-                    <Input v-model="aiEditModel" autocomplete="off" class="h-8 text-xs" />
-                  </div>
-                </div>
-
-                <!-- Model List -->
-                <div class="grid grid-cols-3 items-start gap-3">
-                  <Label class="pt-2 text-right text-xs">{{ t("ai.modelList") }}</Label>
-                  <div class="col-span-2 space-y-2">
-                    <div v-for="(m, index) in aiEditModels" :key="index" class="flex items-center gap-2">
-                      <Input v-model="m.name" :placeholder="t('ai.modelId')" class="h-8 flex-1 text-xs" />
-                      <Input v-model="m.label" :placeholder="t('ai.modelDisplayName')" class="h-8 flex-1 text-xs" />
-                      <Button type="button" variant="ghost" size="icon" class="h-8 w-8 shrink-0" @click="aiRemoveModel(index)">
-                        <X class="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                    <div class="flex gap-2">
-                      <Button type="button" size="sm" variant="outline" class="h-7 px-2 text-xs" @click="aiAddModel">
-                        <Plus class="mr-1 h-3 w-3" />
-                        {{ t("ai.add") }}
-                      </Button>
-                      <Popover v-model:open="aiModelMultiSelectOpen" @update:open="aiOnModelPopoverOpen">
-                        <PopoverTrigger as-child>
-                          <Button type="button" size="sm" variant="outline" class="h-7 px-2 text-xs" :disabled="!aiCanListModels">
-                            <Loader2 v-if="aiModelListLoading" class="mr-1 h-3 w-3 animate-spin" />
-                            <Download v-else class="mr-1 h-3 w-3" />
-                            {{ aiModelListLoading ? t("ai.fetching") : t("ai.fetchModelList") }}
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent class="w-56 p-0" align="start">
-                          <div class="flex flex-col">
-                            <div class="border-b px-3 py-2">
-                              <Input v-model="aiModelMultiSelectSearch" :placeholder="t('ai.searchModels')" class="h-8 text-xs" />
-                            </div>
-                            <div class="max-h-60 overflow-y-auto p-1">
-                              <div v-if="aiFilteredFetchedModels.length === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
-                                {{ aiModelListLoading ? t("ai.loadingModels") : aiModelError || t("ai.noModels") }}
-                              </div>
-                              <button v-for="model in aiFilteredFetchedModels" :key="model.id" type="button" class="flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="aiToggleModel(model)">
-                                <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="aiIsModelSelected(model.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
-                                  <Check v-if="aiIsModelSelected(model.id)" class="h-3 w-3" />
-                                </div>
-                                <span class="flex-1 truncate text-left">{{ model.displayName || model.id }}</span>
-                              </button>
-                            </div>
-                          </div>
-                        </PopoverContent>
-                      </Popover>
-                    </div>
-                    <p v-if="aiModelError" class="text-xs text-destructive">{{ aiModelError }}</p>
-                  </div>
-                </div>
-
-                <!-- Reasoning Level -->
-                <div v-if="aiIsCodexCli || aiIsClaudeCodeCli" class="grid grid-cols-3 items-start gap-3">
-                  <Label class="pt-2 text-right text-xs">{{ t("ai.reasoningLevel") }}</Label>
-                  <div class="col-span-2 space-y-1.5">
-                    <Select v-model="aiEditReasoningLevel" :disabled="aiReasoningLevelDisabled">
-                      <SelectTrigger inputClass="h-8 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="option in aiReasoningLevelOptions" :key="option.value" :value="option.value">
-                          {{ t(option.labelKey) }}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <p class="text-[11px] text-muted-foreground">{{ aiReasoningLevelHint }}</p>
-                  </div>
-                </div>
-
                 <!-- API Style -->
                 <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">API</Label>
                   <div class="col-span-2 flex gap-2">
-                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'completions' }" @click="aiSelectApiStyle('completions')">/chat/completions</Button>
-                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'responses' }" @click="aiSelectApiStyle('responses')">/responses</Button>
-                    <Button v-if="aiSupportsAnthropicApiStyle" size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'border-blue-300 border-2 ring-2 ring-blue-300/50': aiEditApiStyle === 'anthropic-messages' }" @click="aiSelectApiStyle('anthropic-messages')">/messages</Button>
-                  </div>
-                </div>
-
-                <!-- Enable Thinking -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
-                  <Label class="text-right text-xs">{{ t("ai.enableThinking") }}</Label>
-                  <div class="col-span-2 flex items-center gap-2">
-                    <label class="flex items-center gap-2 text-xs text-muted-foreground">
-                      <input v-model="aiEditEnableThinking" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" :disabled="!aiCompletionsMode || aiEditProvider === 'gemini'" />
-                      {{ aiEditEnableThinking ? t("ai.enableThinkingOn") : t("ai.enableThinkingOff") }}
-                    </label>
-                    <Popover>
-                      <PopoverTrigger as-child>
-                        <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                      </PopoverTrigger>
-                      <PopoverContent class="max-w-[320px] text-xs leading-relaxed" side="top" align="start">
-                        {{ t("ai.enableThinkingHint") }}
-                      </PopoverContent>
-                    </Popover>
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'completions' }" @click="aiSelectApiStyle('completions')">/chat/completions</Button>
+                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'responses' }" @click="aiSelectApiStyle('responses')">/responses</Button>
+                    <Button v-if="aiSupportsAnthropicApiStyle" size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'anthropic-messages' }" @click="aiSelectApiStyle('anthropic-messages')">/messages</Button>
                   </div>
                 </div>
 
@@ -5320,7 +5036,7 @@ onUnmounted(cleanupPreviewEditor);
                       :tabindex="mcpExecutionMode === 'read_only' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
-                      :class="mcpExecutionMode === 'read_only' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      :class="mcpExecutionMode === 'read_only' ? 'dbx-choice-selected' : ''"
                       @click="onMcpExecutionModeChange('read_only')"
                       @keydown="onMcpExecutionModeKeydown($event, 'read_only')"
                     >
@@ -5335,7 +5051,7 @@ onUnmounted(cleanupPreviewEditor);
                       :tabindex="mcpExecutionMode === 'safe_write' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
-                      :class="mcpExecutionMode === 'safe_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      :class="mcpExecutionMode === 'safe_write' ? 'dbx-choice-selected' : ''"
                       @click="onMcpExecutionModeChange('safe_write')"
                       @keydown="onMcpExecutionModeKeydown($event, 'safe_write')"
                     >
@@ -5351,7 +5067,7 @@ onUnmounted(cleanupPreviewEditor);
                       :tabindex="mcpExecutionMode === 'high_risk_write' ? 0 : -1"
                       variant="outline"
                       class="settings-choice-card h-auto justify-center border p-3"
-                      :class="mcpExecutionMode === 'high_risk_write' ? 'settings-choice-card--selected border-blue-300 ring-2 ring-blue-300/50' : ''"
+                      :class="mcpExecutionMode === 'high_risk_write' ? 'dbx-choice-selected' : ''"
                       @click="onMcpExecutionModeChange('high_risk_write')"
                       @keydown="onMcpExecutionModeKeydown($event, 'high_risk_write')"
                     >
@@ -5700,7 +5416,7 @@ onUnmounted(cleanupPreviewEditor);
             </template>
             <template v-else>
               <div class="flex min-w-0 flex-1 items-center gap-2">
-                <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim()) || (!aiIsCliProvider && !aiEditModel?.trim())" @click="aiTestConn">
+                <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim())" @click="aiTestConn">
                   <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
                   {{ t("connection.test") }}
                 </Button>
@@ -5856,34 +5572,6 @@ onUnmounted(cleanupPreviewEditor);
   }
 }
 
-.settings-category-button--active {
-  background-color: rgb(23, 23, 23) !important;
-  color: rgb(255, 255, 255) !important;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-}
-
-.settings-choice-button {
-  color: rgb(23, 23, 23);
-}
-
-.settings-choice-button--selected {
-  border-color: rgb(96, 165, 250) !important;
-  background-color: rgba(59, 130, 246, 0.1) !important;
-  color: rgb(29, 78, 216) !important;
-  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.45) !important;
-}
-
-.settings-choice-button--selected svg {
-  color: currentColor !important;
-}
-
-.settings-choice-card--selected {
-  border-color: rgb(96, 165, 250) !important;
-  background-color: rgba(59, 130, 246, 0.04) !important;
-  color: rgb(23, 23, 23) !important;
-  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.45) !important;
-}
-
 .settings-appearance-top-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5927,28 +5615,5 @@ onUnmounted(cleanupPreviewEditor);
   .settings-appearance-choice-grid {
     grid-template-columns: 1fr;
   }
-}
-
-.dark .settings-category-button--active {
-  background-color: rgb(245, 245, 245) !important;
-  color: rgb(23, 23, 23) !important;
-}
-
-.dark .settings-choice-button {
-  color: rgb(245, 245, 245);
-}
-
-.dark .settings-choice-button--selected {
-  border-color: rgb(147, 197, 253) !important;
-  background-color: rgba(96, 165, 250, 0.18) !important;
-  color: rgb(191, 219, 254) !important;
-  box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.5) !important;
-}
-
-.dark .settings-choice-card--selected {
-  border-color: rgb(147, 197, 253) !important;
-  background-color: rgba(96, 165, 250, 0.12) !important;
-  color: rgb(245, 245, 245) !important;
-  box-shadow: 0 0 0 2px rgba(147, 197, 253, 0.45) !important;
 }
 </style>

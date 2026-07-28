@@ -4,8 +4,11 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import CommonOptions from "./CommonOptions.vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{ params: GeneratorParams }>();
+
+const { t } = useI18n();
 
 const cardTypes = [
   { value: "american_express", label: "American Express" },
@@ -95,7 +98,7 @@ function refresh() {
 <template>
   <div class="space-y-3">
     <div class="rounded-md border bg-muted/10 p-3">
-      <div class="text-xs text-muted-foreground mb-2">类型选择</div>
+      <div class="text-xs text-muted-foreground mb-2">{{ t("dataGenerate.typeLabel") }}</div>
       <div class="flex flex-wrap gap-1.5">
         <button v-for="c in cardTypes" :key="c.value" type="button" class="px-2 py-1 rounded border text-xs" :class="(params.cardTypes ?? []).includes(c.value) ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="toggleCardType(c.value)">{{ c.label }}</button>
       </div>
@@ -103,7 +106,7 @@ function refresh() {
 
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="flex items-center gap-2 text-xs">
-        <span class="text-muted-foreground shrink-0">预览</span>
+        <span class="text-muted-foreground shrink-0">{{ t("dataGenerate.preview") }}</span>
         <span :key="previewKey" class="font-mono text-sm">{{ previewVal }}</span>
         <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="refresh">
           <RefreshCw class="h-3 w-3" />

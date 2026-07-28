@@ -302,18 +302,25 @@ pub async fn get_collection_detail(
     match client.kind {
         VectorDbKind::Qdrant => get_qdrant_collection_detail(client, collection).await,
         VectorDbKind::Milvus => get_milvus_collection_detail(client, database, collection).await,
-        VectorDbKind::Weaviate => {
-            // Weaviate REST API does not expose vector dimension
-            Ok(CollectionInfo {
-                name: collection.to_string(),
-                id: collection.to_string(),
-                dimension: None,
-                kind: None,
-                bucket_name: None,
-            })
-        }
+        VectorDbKind::Weaviate => get_weaviate_collection_detail(client, collection).await,
         VectorDbKind::ChromaDb => get_chroma_collection_detail(client, collection).await,
     }
+}
+
+async fn get_weaviate_collection_detail(client: &VectorClient, collection: &str) -> Result<CollectionInfo, String> {
+    let query = format!("{{ Get {{ {collection}(limit: 1) {{ _additional {{ vector }} }} }} }}");
+    let dimension =
+        match send_json(client.post("/v1/graphql").json(&serde_json::json!({ "query": query })), "Weaviate").await {
+            Ok(body) => weaviate_vector_dimension_from_graphql(&body, collection),
+            Err(_) => None,
+        };
+    Ok(CollectionInfo {
+        name: collection.to_string(),
+        id: collection.to_string(),
+        dimension,
+        kind: None,
+        bucket_name: None,
+    })
 }
 
 async fn get_qdrant_collection_detail(client: &VectorClient, collection: &str) -> Result<CollectionInfo, String> {
@@ -466,6 +473,18 @@ fn weaviate_graphql_to_rows(body: &Value) -> Option<Vec<Value>> {
             })
             .collect(),
     )
+}
+
+fn weaviate_vector_dimension_from_graphql(body: &Value, collection: &str) -> Option<u32> {
+    let vector = body
+        .get("data")?
+        .get("Get")?
+        .get(collection)?
+        .as_array()?
+        .first()?
+        .pointer("/_additional/vector")?
+        .as_array()?;
+    u32::try_from(vector.len()).ok().filter(|dimension| *dimension > 0)
 }
 
 fn weaviate_collection_names_from_schema(body: &Value) -> Vec<String> {
@@ -782,7 +801,8 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
 mod tests {
     use super::{
         chroma_get_response_to_rows, starts_with_http_method, values_to_query_result, vector_auth,
-        weaviate_collection_names_from_schema, CollectionInfo, VectorAuth, VectorDbKind,
+        weaviate_collection_names_from_schema, weaviate_vector_dimension_from_graphql, CollectionInfo, VectorAuth,
+        VectorDbKind,
     };
     use serde_json::json;
     use std::time::Instant;
@@ -812,6 +832,25 @@ mod tests {
             ]
         }));
         assert_eq!(names, vec!["Article".to_string(), "Product".to_string()]);
+    }
+
+    #[test]
+    fn extracts_weaviate_vector_dimension_from_first_object() {
+        let vector = vec![0.0; 1024];
+        let body = json!({
+            "data": {
+                "Get": {
+                    "Article": [{ "_additional": { "vector": vector } }]
+                }
+            }
+        });
+        assert_eq!(weaviate_vector_dimension_from_graphql(&body, "Article"), Some(1024));
+    }
+
+    #[test]
+    fn leaves_weaviate_dimension_unknown_for_empty_collections() {
+        let body = json!({ "data": { "Get": { "Article": [] } } });
+        assert_eq!(weaviate_vector_dimension_from_graphql(&body, "Article"), None);
     }
 
     #[test]

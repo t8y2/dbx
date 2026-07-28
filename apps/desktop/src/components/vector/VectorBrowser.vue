@@ -75,6 +75,8 @@ const operationIcon = computed(() => {
       return Play;
   }
 });
+const needsExplicitSearchVector = computed(() => operationMode.value === "search" && props.databaseType === "weaviate" && props.dimension == null && parseVector(searchVector.value) == null);
+const executeDisabled = computed(() => loading.value || !requestText.value.trim() || needsExplicitSearchVector.value);
 
 watch(
   () => [props.databaseType, props.database, props.collection] as const,
@@ -87,7 +89,7 @@ watch(
 );
 
 watch(
-  () => [operationMode.value, searchVector.value, searchTopK.value] as const,
+  () => [operationMode.value, searchVector.value, searchTopK.value, props.dimension] as const,
   () => {
     if (operationMode.value === "search") {
       requestText.value = defaultRequestText(props.databaseType, props.database, props.collection, operationMode.value);
@@ -216,11 +218,18 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
   return `POST /collections/${collectionPath}/points/scroll\n${JSON.stringify({ limit: 100, with_payload: true, with_vector: false }, null, 2)}`;
 }
 
-function tryParseVector(input: string): number[] {
+function parseVector(input: string): number[] | undefined {
   try {
     const parsed = JSON.parse(input);
-    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
   } catch {}
+  return undefined;
+}
+
+function tryParseVector(input: string): number[] {
+  const parsed = parseVector(input);
+  if (parsed) return parsed;
+  if (props.databaseType === "weaviate" && props.dimension == null) return [];
   return sampleVector();
 }
 
@@ -343,7 +352,7 @@ function setOperationMode(mode: VectorOperationMode) {
           <RefreshCcw class="h-3.5 w-3.5" />
           {{ t("vector.refresh") }}
         </Button>
-        <Button size="sm" class="h-7 gap-1.5 px-2" :disabled="loading || !requestText.trim()" @click="runRequest">
+        <Button size="sm" class="h-7 gap-1.5 px-2" :disabled="executeDisabled" @click="runRequest">
           <component :is="operationIcon" class="h-3.5 w-3.5" />
           {{ executeLabel }}
         </Button>
@@ -359,6 +368,7 @@ function setOperationMode(mode: VectorOperationMode) {
         <span>topK</span>
         <input v-model.number="searchTopK" type="number" min="1" max="1000" class="h-7 w-16 rounded border bg-muted/30 px-2 text-xs outline-none focus:border-primary" />
       </div>
+      <span v-if="needsExplicitSearchVector" class="text-xs text-amber-600 dark:text-amber-400">{{ t("vector.vectorDimensionRequired") }}</span>
     </div>
     <div class="grid min-h-0 flex-1 grid-rows-[minmax(9rem,15rem)_1fr]">
       <div class="min-h-0 border-b">

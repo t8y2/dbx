@@ -925,12 +925,12 @@ async function onFileSelected(event: Event) {
           <template v-else>
             <div class="flex items-center justify-between px-3 py-2 border-b bg-muted/10">
               <div class="flex items-center gap-2">
-                <span class="text-xs text-muted-foreground">{{ t("dataGenerate.target") }}：</span>
+                <span class="text-xs text-muted-foreground">{{ t("dataGenerate.target") }}:</span>
                 <select v-if="generatedResults.length > 1" v-model="previewTableIndex" class="h-7 rounded border bg-background px-2 text-xs">
                   <option v-for="(r, i) in generatedResults" :key="i" :value="i">{{ r.tableName }}</option>
                 </select>
                 <span v-else class="text-sm font-medium">{{ generatedResults[0].tableName }}</span>
-                <span class="text-xs text-muted-foreground">{{ currentPreview.rows.length }} 行</span>
+                <span class="text-xs text-muted-foreground">{{ t("dataGenerate.previewRowCount", { count: currentPreview.rows.length }) }}</span>
               </div>
               <Button variant="outline" size="sm" class="h-7 text-xs" @click="regenerate">{{ t("dataGenerate.regenerate") }}</Button>
             </div>
@@ -1041,7 +1041,7 @@ async function onFileSelected(event: Event) {
     <Dialog v-model:open="optionsDialogOpen">
       <DialogContent class="max-w-sm">
         <DialogHeader>
-          <DialogTitle class="text-sm">生成选项</DialogTitle>
+          <DialogTitle class="text-sm">{{ t("dataGenerate.generateOptions") }}</DialogTitle>
         </DialogHeader>
         <div class="space-y-3 py-2">
           <label class="flex items-center gap-3 cursor-pointer">

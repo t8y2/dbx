@@ -58,9 +58,13 @@ fn effective_mcp_policy_with_legacy_allow_writes(
     state: McpGlobalPolicyState,
     legacy_allow_writes: Option<bool>,
 ) -> McpGlobalPolicy {
-    let configured = state.configured;
     let mut policy = state.policy();
-    if !configured && legacy_allow_writes == Some(false) {
+    // When DBX_MCP_ALLOW_WRITES is explicitly set to false by the CLI agent
+    // for an unconfirmed run, force read-only regardless of the configured
+    // persistent MCP policy. Run-scoped CLI restrictions must override the
+    // persistent policy, otherwise a user with a writable configured policy
+    // can execute unconfirmed writes through CLI providers.
+    if legacy_allow_writes == Some(false) {
         policy.read_only = true;
     }
     policy
@@ -296,7 +300,8 @@ impl DbxBackend for LocalBackend {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult {
-        let call = ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments };
+        let call =
+            ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments, provider_payload: None };
         agent_tools::execute_tool(&call, &self.state, &connection.id, database, &connection.db_type, permissions).await
     }
 
@@ -636,7 +641,7 @@ impl DbxBackend for WebBackend {
         database: &str,
         tool_name: &str,
         arguments: Value,
-        _permissions: AgentSqlPermissions,
+        permissions: AgentSqlPermissions,
     ) -> ToolResult {
         let result = async {
             if tool_name != "execute_query" {
@@ -649,6 +654,29 @@ impl DbxBackend for WebBackend {
             }
             self.ensure_connected(connection).await?;
             let sql = arguments.get("sql").and_then(Value::as_str).ok_or("Missing SQL query")?;
+
+            // Replicate the confirmed-SQL binding check here because the
+            // /api/query/execute endpoint performs its own risk checks but
+            // does NOT receive the confirmed_write_sql binding from the MCP
+            // layer.  Without this, a CLI/MCP agent could execute a different
+            // write/DDL statement after a single user confirmation.
+            let risk = dbx_core::sql_risk::classify_sql_risk_for_database(sql, connection.db_type)
+                .map_err(|error| format!("SQL risk classification failed: {error}"))?;
+            if risk != dbx_core::sql_risk::SqlRisk::ReadOnly {
+                if let Some(ref confirmed) = permissions.confirmed_write_sql {
+                    let normalized = agent_tools::normalize_sql_for_confirmation(sql);
+                    let normalized_confirmed = agent_tools::normalize_sql_for_confirmation(confirmed);
+                    if normalized != normalized_confirmed {
+                        return Err(format!(
+                            "Blocked: the executed SQL does not match the user-confirmed SQL.\n\
+                             Confirmed: {}\n\
+                             Attempted: {}",
+                            confirmed, sql,
+                        ));
+                    }
+                }
+            }
+
             let max_rows = arguments.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
             let response = self
                 .request(
@@ -1397,11 +1425,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_read_only_only_restricts_an_unconfigured_policy() {
+    fn legacy_read_only_overrides_configured_and_unconfigured_policies() {
+        // DBX_MCP_ALLOW_WRITES=0 always forces read_only, even when the
+        // persistent MCP policy is configured as writable.
         assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(false, false), Some(false)).read_only);
         assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(false, false), Some(true)).read_only);
-        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(false)).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(false)).read_only);
+        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), Some(true)).read_only);
+        // Configured read_only is a hard upper bound — env var cannot relax it.
         assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), Some(true)).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), Some(false)).read_only);
+        // Unset env var leaves the policy as-is.
+        assert!(!effective_mcp_policy_with_legacy_allow_writes(policy_state(true, false), None).read_only);
+        assert!(effective_mcp_policy_with_legacy_allow_writes(policy_state(true, true), None).read_only);
     }
 
     #[test]

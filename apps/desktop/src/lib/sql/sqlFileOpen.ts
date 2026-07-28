@@ -46,3 +46,60 @@ export function externalSqlFileDisplayTitles(paths: string[]): string[] {
 export function externalSqlFilePaths(paths: string[]): string[] {
   return paths.filter(isSqlFilePath);
 }
+
+export const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES = 64 * 1024 * 1024;
+
+export class ExternalSqlFileTooLargeError extends Error {
+  constructor(
+    readonly sizeBytes: number,
+    readonly maxSizeBytes: number,
+  ) {
+    super("SQL file is too large to open in the editor");
+    this.name = "ExternalSqlFileTooLargeError";
+  }
+}
+
+export function isExternalSqlFileTooLargeError(error: unknown): error is ExternalSqlFileTooLargeError {
+  return error instanceof ExternalSqlFileTooLargeError;
+}
+
+export function readBrowserSqlFile(file: Blob): Promise<string> {
+  if (file.size > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES) {
+    return Promise.reject(new ExternalSqlFileTooLargeError(file.size, MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES));
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") resolve(reader.result);
+      else reject(new Error("Failed to read SQL file as text"));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read SQL file"));
+    reader.onabort = () => reject(new Error("SQL file read was cancelled"));
+    reader.readAsText(file);
+  });
+}
+
+export function formatSqlFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${unit}`;
+}
+
+export function externalSqlFileOpenErrorMessage(error: unknown, translate: (key: string, params: { size: string; limit: string }) => string): string {
+  if (isExternalSqlFileTooLargeError(error)) {
+    return translate("sqlFile.tooLargeForEditor", {
+      size: formatSqlFileSize(error.sizeBytes),
+      limit: formatSqlFileSize(error.maxSizeBytes),
+    });
+  }
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+  return String(error);
+}

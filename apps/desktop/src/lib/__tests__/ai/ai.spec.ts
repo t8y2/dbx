@@ -31,4 +31,30 @@ describe("AI SQL dialect prompt", () => {
     expect(prompt).toContain('double quotes "name"');
     expect(prompt).toContain("Do not switch dialects merely because the user mentions another database in prose.");
   });
+
+  it("agent mode instructs to ask for write confirmation instead of blocking", () => {
+    const prompt = buildSystemPrompt("general", context(), "agent");
+
+    expect(prompt).not.toContain("explain why it is blocked");
+    expect(prompt).toContain("ask for explicit confirmation");
+    expect(prompt).toContain("Never execute writes without confirmation");
+  });
+
+  it("agent mode zh instructs to ask for write confirmation instead of blocking", async () => {
+    await setLocale("zh-CN");
+    const prompt = buildSystemPrompt("general", context(), "agent");
+
+    expect(prompt).not.toContain("不要执行");
+    expect(prompt).toContain("明确询问用户是否确认执行");
+    expect(prompt).toContain("禁止不经确认直接执行写入");
+    await setLocale("en");
+  });
+
+  it("ask mode does not include agent write-confirmation prompt", () => {
+    const prompt = buildSystemPrompt("general", context(), "ask");
+
+    expect(prompt).not.toContain("ask for explicit confirmation");
+    expect(prompt).not.toContain("Never execute writes without confirmation");
+    expect(prompt).toContain("Ask mode");
+  });
 });

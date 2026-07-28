@@ -3,6 +3,7 @@ import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { buildMongoCompletionItemsFromContext, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import { CLOUDFLARE_D1_COMMON_FUNCTION_NAMES } from "@/lib/sql/cloudflareD1";
 import type { SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import { DEFAULT_SQL_SNIPPETS, MANTICORESEARCH_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
@@ -1587,6 +1588,9 @@ function currentSqlLikeLineBlockSpan(sql: string, cursor: number): { start: numb
   }
 
   if (start == null) return null;
+
+  const blockPrefixTokens = tokenizeSqlSemantic(sql.slice(start, safeCursor));
+  if (blockPrefixTokens.some((token) => token.kind === "punctuation" && token.text === ";" && token.depth === 0)) return null;
 
   let end = sql.length;
   let inSingleQuote = false;

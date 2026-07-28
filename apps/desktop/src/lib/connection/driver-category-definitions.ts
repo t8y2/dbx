@@ -46,7 +46,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   "oceanbase-oracle": "domestic",
   oracle: "sql",
   oscar: "domestic",
-  prestosql: "lightweight",
+  prestosql: "analytics",
   rabbitmq: "mq",
   rocketmq: "mq",
   saphana: "analytics",

@@ -817,20 +817,37 @@ const categoryFilteredDrivers = computed(() => {
   return searchedDrivers.value.filter((driver) => getCategoryForAgentDriver(driver.db_type) === selectedDriverCategory.value);
 });
 
-// Reorder: updatable first, then stable
+// Count updatable drivers across ALL drivers (global, unaffected by category filter)
+const globalUpdatableCount = computed(() => {
+  let count = 0;
+  for (const driver of builtinDriverRows.value) {
+    if (driver.update_available) count++;
+  }
+  return count;
+});
+
+// Reorder: updatable drivers are always global (across all categories),
+// stable drivers are category-filtered.
 const orderedFilteredDrivers = computed(() => {
   const updatable: AgentDriverInfo[] = [];
+  const updatableDbTypes = new Set<string>();
+  for (const driver of searchedDrivers.value) {
+    if (driver.update_available) {
+      updatable.push(driver);
+      updatableDbTypes.add(driver.db_type);
+    }
+  }
   const stable: AgentDriverInfo[] = [];
   for (const driver of categoryFilteredDrivers.value) {
-    if (driver.update_available) updatable.push(driver);
-    else stable.push(driver);
+    if (!updatableDbTypes.has(driver.db_type)) {
+      stable.push(driver);
+    }
   }
   return { updatable, stable, updatableCount: updatable.length };
 });
 
 const filteredUpdatableDrivers = computed(() => orderedFilteredDrivers.value.updatable);
 const filteredStableDrivers = computed(() => orderedFilteredDrivers.value.stable);
-const filteredUpdatableCount = computed(() => orderedFilteredDrivers.value.updatableCount);
 
 // Category selection handler
 function selectDriverCategory(key: string) {
@@ -1436,6 +1453,18 @@ watch(driverStoreTab, (tab) => {
 
                 <!-- Search results: cross-category view -->
                 <div v-else-if="isDriverSearchActive && searchedDriversByCategory.length > 0" class="space-y-4">
+                  <!-- Global upgrade banner (always visible when updatable drivers exist, even during search) -->
+                  <div v-if="filteredUpdatableDrivers.length > 0" class="flex items-center justify-between rounded-lg border bg-amber-500/10 px-4 py-2.5">
+                    <div class="min-w-0">
+                      <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ globalUpdatableCount }})</div>
+                      <p class="text-xs text-muted-foreground">{{ t("driverStore.updatesAvailableDescription") }}</p>
+                    </div>
+                    <Button size="sm" class="h-7 rounded-md text-xs shrink-0 ml-3" :disabled="installing !== null || upgradingAll || importingZip" @click="upgradeAll">
+                      <Loader2 v-if="upgradingAll" class="h-3 w-3 animate-spin mr-1" />
+                      <Download v-else class="h-3 w-3 mr-1" />
+                      {{ upgradingAll ? t("driverStore.upgradingProgress", { current: upgradingCompletedCount, total: upgradingTotal }) : t("driverStore.upgradeAll") }}
+                    </Button>
+                  </div>
                   <div v-for="group in searchedDriversByCategory" :key="group.key" class="space-y-2">
                     <h3 class="px-4 text-sm font-medium text-muted-foreground">{{ group.title }}</h3>
                     <div class="rounded-lg border divide-y">
@@ -1518,7 +1547,7 @@ watch(driverStoreTab, (tab) => {
                   <!-- Updates Available header -->
                   <div v-if="filteredUpdatableDrivers.length > 0" class="flex items-center justify-between px-4 py-2.5 bg-amber-500/10">
                     <div class="min-w-0">
-                      <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ filteredUpdatableCount }})</div>
+                      <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ globalUpdatableCount }})</div>
                       <p class="text-xs text-muted-foreground">{{ t("driverStore.updatesAvailableDescription") }}</p>
                     </div>
                     <Button size="sm" class="h-7 rounded-md text-xs shrink-0 ml-3" :disabled="installing !== null || upgradingAll || importingZip" @click="upgradeAll">

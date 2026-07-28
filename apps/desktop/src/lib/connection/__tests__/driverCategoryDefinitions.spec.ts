@@ -66,12 +66,86 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       expect(validCategoryKeys.has(category), `Driver "${driverKey}" maps to unknown category "${category}"`).toBe(true);
     }
   });
+
+  it("covers all known agent driver keys with no stale entries", () => {
+    // Golden set — mirrors the store-visible entries in agent_catalog.rs
+    // plus EXTRA_DRIVER_STORE_ENTRIES (kafka, rocketmq, rabbitmq,
+    // sqlserver-legacy) and the PrestoSQL built-in driver.
+    // When an Agent driver is added to the catalog its key MUST appear here;
+    // removing a key from the map without removing it from the list below
+    // will fail this test.
+    const expectedKeys = new Set([
+      // sql
+      "db2",
+      "firebird",
+      "informix",
+      "iris",
+      "oracle",
+      "sqlserver-legacy",
+      // analytics
+      "bigquery",
+      "databend",
+      "databricks",
+      "exasol",
+      "hive",
+      "kylin",
+      "prestosql",
+      "saphana",
+      "snowflake",
+      "spark",
+      "teradata",
+      "trino",
+      "vertica",
+      // domestic
+      "dameng",
+      "gbase8a",
+      "gbase8s",
+      "goldendb",
+      "highgo",
+      "kingbase",
+      "oceanbase-oracle",
+      "oscar",
+      "sundb",
+      "uxdb",
+      "vastbase",
+      "xugu",
+      "yashandb",
+      // lightweight
+      "access",
+      "h2",
+      "h2-legacy",
+      // document
+      "cassandra",
+      "mongodb",
+      // graph_ai
+      "neo4j",
+      // timeseries
+      "influxdb",
+      "iotdb",
+      "tdengine",
+      // mq
+      "kafka",
+      "rabbitmq",
+      "rocketmq",
+      // registry_config
+      "etcd",
+      "zookeeper",
+    ]);
+    const actualKeys = Object.keys(AGENT_DRIVER_CATEGORY_MAP);
+
+    expect(actualKeys).toHaveLength(expectedKeys.size);
+
+    const actualSet = new Set(actualKeys);
+    const missing = [...expectedKeys].filter((k) => !actualSet.has(k));
+    const extra = actualKeys.filter((k) => !expectedKeys.has(k));
+
+    expect(missing, `Missing from AGENT_DRIVER_CATEGORY_MAP: ${missing.join(", ")}`).toEqual([]);
+    expect(extra, `Extra keys in AGENT_DRIVER_CATEGORY_MAP not in expected set: ${extra.join(", ")}`).toEqual([]);
+  });
 });
 
-describe("prestosql special case", () => {
-  it("is mapped to lightweight", () => {
-    const category = getCategoryForAgentDriver("prestosql");
-
-    expect(category).toBe("lightweight");
+describe("prestosql matches ConnectionDialog category", () => {
+  it("is mapped to analytics (same as ConnectionDialog dbCategoryDefinitions)", () => {
+    expect(getCategoryForAgentDriver("prestosql")).toBe("analytics");
   });
 });

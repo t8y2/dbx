@@ -33,6 +33,7 @@ import { PRESTOSQL_DRIVER_DB_TYPE, prestoSqlBuiltinDriverRow, prestoSqlMavenBund
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { isOfflineDriverPackage, webDriverImportAccept } from "@/lib/driverStore/driverImportSelection";
 import { DRIVER_CATEGORIES, getCategoryForAgentDriver, assertAgentDriverCategoriesComplete } from "@/lib/connection/driver-category-definitions";
+import { selectUpdatableDrivers, selectStableDrivers } from "@/lib/connection/driverListFilter";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -818,10 +819,10 @@ const categoryFilteredDrivers = computed(() => {
 });
 
 // Global updatable drivers — always shown above category navigation, regardless of filter.
-const globalUpdatableDrivers = computed(() => builtinDriverRows.value.filter((d) => d.update_available));
+const globalUpdatableDrivers = computed(() => selectUpdatableDrivers(builtinDriverRows.value));
 
 // Category-filtered drivers, excluding those already shown in the global update banner.
-const categoryStableDrivers = computed(() => categoryFilteredDrivers.value.filter((d) => !d.update_available));
+const categoryStableDrivers = computed(() => selectStableDrivers(categoryFilteredDrivers.value));
 
 // Category selection handler
 function selectDriverCategory(key: string) {
@@ -1384,17 +1385,88 @@ watch(driverStoreTab, (tab) => {
               <Search class="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input v-model="agentDriverSearch" class="h-8 pl-8 text-xs" :placeholder="t('driverStore.searchDrivers')" />
             </div>
-            <!-- Global update banner — always above category navigation -->
-            <div v-if="globalUpdatableDrivers.length > 0" class="flex items-center justify-between rounded-lg border bg-amber-500/10 px-4 py-2.5">
-              <div class="min-w-0">
-                <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ globalUpdatableDrivers.length }})</div>
-                <p class="text-xs text-muted-foreground">{{ t("driverStore.updatesAvailableDescription") }}</p>
+            <!-- Global update section — always above category navigation -->
+            <div v-if="globalUpdatableDrivers.length > 0" class="rounded-lg border divide-y">
+              <div class="flex items-center justify-between bg-amber-500/10 px-4 py-2.5">
+                <div class="min-w-0">
+                  <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ globalUpdatableDrivers.length }})</div>
+                  <p class="text-xs text-muted-foreground">{{ t("driverStore.updatesAvailableDescription") }}</p>
+                </div>
+                <Button size="sm" class="h-7 rounded-md text-xs shrink-0 ml-3" :disabled="installing !== null || upgradingAll || importingZip" @click="upgradeAll">
+                  <Loader2 v-if="upgradingAll" class="h-3 w-3 animate-spin mr-1" />
+                  <Download v-else class="h-3 w-3 mr-1" />
+                  {{ upgradingAll ? t("driverStore.upgradingProgress", { current: upgradingCompletedCount, total: upgradingTotal }) : t("driverStore.upgradeAll") }}
+                </Button>
               </div>
-              <Button size="sm" class="h-7 rounded-md text-xs shrink-0 ml-3" :disabled="installing !== null || upgradingAll || importingZip" @click="upgradeAll">
-                <Loader2 v-if="upgradingAll" class="h-3 w-3 animate-spin mr-1" />
-                <Download v-else class="h-3 w-3 mr-1" />
-                {{ upgradingAll ? t("driverStore.upgradingProgress", { current: upgradingCompletedCount, total: upgradingTotal }) : t("driverStore.upgradeAll") }}
-              </Button>
+              <div
+                v-for="driver in globalUpdatableDrivers"
+                :key="driver.db_type"
+                :data-driver-store-focus="`driver:${driver.db_type}`"
+                class="driver-store-agent-row flex items-center gap-3 px-4 py-2 transition hover:bg-muted/30"
+                :class="{ 'driver-store-focus-highlight': highlightedFocusKey === `driver:${driver.db_type}` }"
+              >
+                <span class="flex h-8 w-8 items-center justify-center rounded-md bg-muted/60 shrink-0">
+                  <DatabaseIcon :db-type="driver.db_type" class="h-4 w-4" />
+                </span>
+                <div class="driver-store-agent-name min-w-0 flex-1">
+                  <div class="text-sm font-medium">{{ driver.label }}</div>
+                </div>
+                <div class="driver-store-agent-meta flex shrink-0 items-center gap-1.5">
+                  <span v-if="driverRequiresJavaRuntime(driver) && driver.jre" class="rounded-full px-2 py-0.5 text-[11px]" :class="driver.jre !== '21' ? 'bg-blue-500/10 text-blue-600' : 'bg-muted text-muted-foreground'">JRE {{ driver.jre }}</span>
+                  <span v-if="driver.installed" class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">v{{ driver.installed_version }}</span>
+                  <span v-if="driver.installed && driver.update_available" class="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-600">→ v{{ driver.version }}</span>
+                  <span v-if="!driver.installed && driver.version" class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">v{{ driver.version }}</span>
+                  <span v-if="formatSize(driver.size)" class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">{{ formatSize(driver.size) }}</span>
+                </div>
+                <div class="driver-store-agent-actions flex shrink-0 items-center gap-2">
+                  <Button
+                    v-if="!driver.installed && isDriverQueued(driver.db_type)"
+                    size="sm"
+                    variant="outline"
+                    class="h-7 rounded-md border-green-500/30 bg-green-500/10 text-xs text-green-700 hover:bg-green-500/15"
+                    :disabled="upgradingAll || importingZip"
+                    @click="removeQueuedDriverInstall(driver.db_type)"
+                  >
+                    <Clock3 class="h-3 w-3 mr-1" />
+                    {{ t("driverStore.queued") }}
+                  </Button>
+                  <DriverInstallProgressCircle v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.installing'))" />
+                  <Button v-else-if="!driver.installed" size="sm" class="h-7 rounded-md text-xs" :disabled="upgradingAll || importingZip" @click="installDriver(driver.db_type)">
+                    <Download class="h-3 w-3 mr-1" />
+                    {{ t("driverStore.install") }}
+                  </Button>
+                  <Button
+                    v-if="!driver.installed && !isPrestoSqlBuiltinDriver(driver.db_type) && !isDriverProgressActive(driver.db_type) && !isDriverQueued(driver.db_type)"
+                    size="sm"
+                    variant="ghost"
+                    class="h-7 w-7 rounded-md text-xs text-muted-foreground"
+                    :title="t('driverStore.importLocalJar')"
+                    :disabled="upgradingAll || installing !== null || importingZip"
+                    @click="importDriverFile(driver)"
+                  >
+                    <FileUp class="h-3.5 w-3.5" />
+                  </Button>
+                  <Check v-if="driver.installed && !(driver.update_available && isDriverProgressActive(driver.db_type))" class="h-4 w-4 text-green-600" />
+                  <Button
+                    v-if="driver.installed && driver.update_available && isDriverQueued(driver.db_type)"
+                    size="sm"
+                    variant="outline"
+                    class="h-7 rounded-md border-green-500/30 bg-green-500/10 text-xs text-green-700 hover:bg-green-500/15"
+                    :disabled="upgradingAll || importingZip"
+                    @click="removeQueuedDriverInstall(driver.db_type)"
+                  >
+                    <Clock3 class="h-3 w-3 mr-1" />
+                    {{ t("driverStore.queued") }}
+                  </Button>
+                  <DriverInstallProgressCircle v-else-if="driver.installed && driver.update_available && isDriverProgressActive(driver.db_type)" :percent="getAgentProgressPercent(driver.db_type)" :title="getAgentProgressTitle(driver.db_type, t('driverStore.updating'))" />
+                  <Button v-else-if="driver.installed && driver.update_available" size="sm" variant="outline" class="h-7 rounded-md text-xs" :disabled="upgradingAll || importingZip" @click="installDriver(driver.db_type)">
+                    {{ t("driverStore.update") }}
+                  </Button>
+                  <Button v-if="driver.installed" variant="ghost" size="sm" class="h-7 rounded-md text-xs text-muted-foreground hover:text-destructive" :disabled="installing !== null || upgradingAll || importingZip || isDriverQueued(driver.db_type)" @click="uninstallDriver(driver.db_type)">
+                    {{ t("driverStore.uninstall") }}
+                  </Button>
+                </div>
+              </div>
             </div>
             <!-- Category nav + driver list container -->
             <div class="min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-0">

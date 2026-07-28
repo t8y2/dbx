@@ -41,6 +41,8 @@ macro_rules! try_sqlserver {
 
 const ORACLE_TABLE_COMMENT_BATCH_SIZE: usize = 500;
 const TDENGINE_COMMENT_SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
+const TDENGINE_COMMENT_SEARCH_CACHE_TTL: Duration = Duration::from_secs(10);
+const TDENGINE_LIKE_PATTERN_MAX_BYTES: usize = 100;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1532,11 +1534,7 @@ fn tdengine_table_comment_sql(database: &str, table: &str) -> String {
 }
 
 fn tdengine_table_comments_sql(database: &str, filter: &str) -> String {
-    let normalized_filter = filter.trim().to_lowercase();
-    let pattern = crate::sql::fuzzy_like_pattern_with_escape(&normalized_filter, |value| match value {
-        "\\" | "%" | "_" => format!("\\{value}"),
-        _ => value.to_string(),
-    });
+    let pattern = tdengine_table_comment_like_pattern(filter);
     format!(
         "SELECT stable_name, table_comment FROM information_schema.ins_stables \
          WHERE db_name = {database} AND table_comment IS NOT NULL AND LOWER(table_comment) LIKE {pattern} \
@@ -1545,6 +1543,32 @@ fn tdengine_table_comments_sql(database: &str, filter: &str) -> String {
         database = sql_string(database),
         pattern = sql_string(&pattern),
     )
+}
+
+fn tdengine_table_comment_like_pattern(filter: &str) -> String {
+    let normalized_filter = filter.trim().to_lowercase();
+    if normalized_filter.is_empty() {
+        return "%%".to_string();
+    }
+
+    let mut pattern = String::with_capacity(TDENGINE_LIKE_PATTERN_MAX_BYTES);
+    pattern.push('%');
+    for ch in normalized_filter.chars() {
+        let fragment = match ch {
+            '\\' | '%' | '_' => format!("\\{ch}"),
+            _ => ch.to_string(),
+        };
+        if pattern.len() + fragment.len() + 1 > TDENGINE_LIKE_PATTERN_MAX_BYTES {
+            break;
+        }
+        pattern.push_str(&fragment);
+        pattern.push('%');
+    }
+    pattern
+}
+
+fn tdengine_table_comment_cache_key(database: &str, schema: &str, filter: &str) -> String {
+    serde_json::json!([database, schema, filter.trim().to_lowercase()]).to_string()
 }
 
 fn oracle_table_comment_from_query_result(result: db::QueryResult) -> Result<Option<String>, String> {
@@ -2077,8 +2101,11 @@ async fn load_tdengine_table_comments_for_filter(
 ) -> Result<(), String> {
     let metadata_database = if schema.trim().is_empty() { database } else { schema };
     let sql = tdengine_table_comments_sql(metadata_database, filter);
+    let cache_key = tdengine_table_comment_cache_key(database, schema, filter);
     let result = client
-        .execute_query_with_timeout::<db::QueryResult>(
+        .execute_query_cached_with_timeout::<db::QueryResult>(
+            cache_key,
+            TDENGINE_COMMENT_SEARCH_CACHE_TTL,
             agent_execute_query_params(
                 &sql,
                 if database.is_empty() { None } else { Some(database) },
@@ -2947,16 +2974,16 @@ mod tests {
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error,
-        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_metadata_catalog,
-        normalize_information_schema_table_type, oracle_columns_from_query_result, oracle_columns_sql,
-        oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        metadata_name_or_comment_matches, mysql_object_source_ddl_column_index, mysql_object_source_sql,
+        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
+        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
         should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
-        tdengine_table_comment_sql, tdengine_table_comments_sql, visible_schema_filter, TableNameFilter,
-        TDENGINE_COMMENT_SEARCH_TIMEOUT,
+        tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
+        visible_schema_filter, TableNameFilter, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -3838,6 +3865,41 @@ mod tests {
         assert!(sql.contains("table_comment IS NOT NULL"));
         assert!(sql.contains("LOWER(table_comment) LIKE '%s%\\_%\\%%\\\\%q%'"));
         assert!(!sql.contains("LIMIT"));
+    }
+
+    #[test]
+    fn tdengine_table_comment_pattern_respects_ascii_boundary() {
+        let filter_49 = "a".repeat(49);
+        let filter_50 = format!("{filter_49}b");
+        let pattern_49 = tdengine_table_comment_like_pattern(&filter_49);
+        let pattern_50 = tdengine_table_comment_like_pattern(&filter_50);
+
+        assert_eq!(pattern_49.len(), 99);
+        assert_eq!(pattern_50, pattern_49);
+        assert!(pattern_50.len() <= TDENGINE_LIKE_PATTERN_MAX_BYTES);
+        assert!(!metadata_name_or_comment_matches("table", Some(&filter_49), &filter_50));
+    }
+
+    #[test]
+    fn tdengine_table_comment_pattern_keeps_escaped_fragments_within_limit() {
+        assert_eq!(tdengine_table_comment_like_pattern("%_\\"), r"%\%%\_%\\%");
+
+        let pattern_33 = tdengine_table_comment_like_pattern(&"%".repeat(33));
+        let pattern_34 = tdengine_table_comment_like_pattern(&"%".repeat(34));
+        assert_eq!(pattern_33.len(), TDENGINE_LIKE_PATTERN_MAX_BYTES);
+        assert_eq!(pattern_34, pattern_33);
+        assert!(pattern_34.ends_with('%'));
+    }
+
+    #[test]
+    fn tdengine_table_comment_pattern_truncates_only_at_utf8_boundaries() {
+        let pattern_24 = tdengine_table_comment_like_pattern(&"你".repeat(24));
+        let pattern_25 = tdengine_table_comment_like_pattern(&"你".repeat(25));
+
+        assert_eq!(pattern_24.len(), 97);
+        assert_eq!(pattern_25, pattern_24);
+        assert!(pattern_25.is_char_boundary(pattern_25.len()));
+        assert!(pattern_25.len() <= TDENGINE_LIKE_PATTERN_MAX_BYTES);
     }
 
     #[test]

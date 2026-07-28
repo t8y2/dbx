@@ -1,5 +1,13 @@
 export type ContextMenuClose = () => void;
 
+/** Marker attribute on scrollable context menu / submenu roots. */
+export const CONTEXT_MENU_SCROLL_ROOT_ATTR = "data-dbx-context-menu";
+
+export function isContextMenuInternalScroll(event: Event): boolean {
+  const target = event.target;
+  return target instanceof Element && target.closest(`[${CONTEXT_MENU_SCROLL_ROOT_ATTR}]`) !== null;
+}
+
 export interface ContextMenuRegistration {
   setOpen(open: boolean): void;
   dispose(): void;
@@ -20,10 +28,16 @@ export function createContextMenuRegistry(documentTarget: EventTarget, windowTar
     for (const close of closers) close();
   }
 
+  function closeAllOnScroll(event: Event) {
+    // Ignore scroll that originates from within an open menu/submenu.
+    if (isContextMenuInternalScroll(event)) return;
+    closeAll();
+  }
+
   function attachListeners() {
     if (listenersAttached) return;
     documentTarget.addEventListener("contextmenu", closeAll, true);
-    documentTarget.addEventListener("scroll", closeAll, true);
+    documentTarget.addEventListener("scroll", closeAllOnScroll, true);
     windowTarget.addEventListener("resize", closeAll);
     listenersAttached = true;
   }
@@ -31,7 +45,7 @@ export function createContextMenuRegistry(documentTarget: EventTarget, windowTar
   function detachListeners() {
     if (!listenersAttached) return;
     documentTarget.removeEventListener("contextmenu", closeAll, true);
-    documentTarget.removeEventListener("scroll", closeAll, true);
+    documentTarget.removeEventListener("scroll", closeAllOnScroll, true);
     windowTarget.removeEventListener("resize", closeAll);
     listenersAttached = false;
     openMenus.clear();

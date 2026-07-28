@@ -5,6 +5,7 @@ import { createApp, defineComponent, h, KeepAlive, nextTick, ref, type Component
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { calendarDateTimeToUnixSeconds } from "@/components/ui/date-time-picker/dateTimePicker";
+import type { RedisKeyInfo } from "@/lib/backend/api";
 
 const mocks = vi.hoisted(() => ({
   redisScanKeysBatch: vi.fn(),
@@ -367,6 +368,32 @@ function mountBrowser() {
   mountedApps.push({ unmount: () => app.unmount(), host });
 }
 
+function mountScopedBrowser() {
+  const connectionId = ref("connection");
+  const db = ref(0);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp(
+    defineComponent({
+      setup() {
+        return () => h(RedisKeyBrowser, { connectionId: connectionId.value, db: db.value, blockDangerousRedisCommands: false });
+      },
+    }),
+  );
+  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  app.mount(host);
+  mountedApps.push({ unmount: () => app.unmount(), host });
+
+  return {
+    host,
+    async setScope(nextConnectionId: string, nextDb: number) {
+      connectionId.value = nextConnectionId;
+      db.value = nextDb;
+      await settle();
+    },
+  };
+}
+
 function mountKeptAliveBrowser() {
   const active = ref(true);
   const host = document.createElement("div");
@@ -520,6 +547,34 @@ afterEach(() => {
     host.remove();
   }
   resetLocalTimeZone();
+});
+
+describe("RedisKeyBrowser scope changes", () => {
+  it("reloads the new database and discards a late scan from the previous one", async () => {
+    const previousDatabase = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const currentKey = { key_display: "db1-key", key_raw: "ZGIxLWtleQ==", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, db: number) => {
+      if (db === 0) return previousDatabase.promise;
+      return Promise.resolve({ cursor: 0, keys: [currentKey], total_keys: 1 });
+    });
+    const browser = mountScopedBrowser();
+    await settle();
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledWith("connection", 0, 0, "*", 100, 8, false);
+
+    await browser.setScope("connection", 1);
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledWith("connection", 1, 0, "*", 100, 8, false);
+    previousDatabase.resolve({
+      cursor: 0,
+      keys: [{ key_display: "db0-key", key_raw: "ZGIwLWtleQ==", key_type: "string", ttl: -1 }],
+      total_keys: 1,
+    });
+    await settle();
+
+    expect(browser.host.textContent).toContain("db1-key");
+    expect(browser.host.textContent).not.toContain("db0-key");
+  });
 });
 
 describe("RedisKeyBrowser expiry creation", () => {

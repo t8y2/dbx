@@ -163,6 +163,123 @@ impl std::str::FromStr for AiEffortLevel {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AiCapabilitySource {
+    ProviderApi,
+    LocalCli,
+    OfficialRegistry,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum AiEffortSelection {
+    ProviderDefault,
+    Disabled,
+    Enum(String),
+    Integer(i64),
+    Boolean(bool),
+    Text(String),
+}
+
+impl AiEffortSelection {
+    pub fn explicit_string(&self) -> Option<&str> {
+        match self {
+            Self::Enum(value) | Self::Text(value) => Some(value),
+            Self::ProviderDefault | Self::Disabled | Self::Integer(_) | Self::Boolean(_) => None,
+        }
+    }
+
+    pub fn cli_value(&self) -> Option<String> {
+        match self {
+            Self::ProviderDefault => None,
+            Self::Disabled => Some("none".to_string()),
+            Self::Enum(value) | Self::Text(value) => {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            }
+            Self::Integer(value) => Some(value.to_string()),
+            Self::Boolean(value) => Some(if *value { "high" } else { "none" }.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiEffortOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub selection: AiEffortSelection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AiEffortCapability {
+    Enum {
+        options: Vec<AiEffortOption>,
+        default: AiEffortSelection,
+        source: AiCapabilitySource,
+    },
+    Integer {
+        min: i64,
+        max: i64,
+        step: i64,
+        default: AiEffortSelection,
+        #[serde(default, rename = "specialValues", skip_serializing_if = "Vec::is_empty")]
+        special_values: Vec<AiEffortOption>,
+        source: AiCapabilitySource,
+    },
+    Boolean {
+        default: AiEffortSelection,
+        source: AiCapabilitySource,
+    },
+    FreeText {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+        source: AiCapabilitySource,
+    },
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiActiveModelSelection {
+    pub config_id: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiModelEffortPreference {
+    pub config_id: String,
+    pub model_id: String,
+    pub selection: AiEffortSelection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatSelectionState {
+    #[serde(default = "default_ai_chat_selection_version")]
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<AiActiveModelSelection>,
+    #[serde(default)]
+    pub effort_preferences: Vec<AiModelEffortPreference>,
+}
+
+impl Default for AiChatSelectionState {
+    fn default() -> Self {
+        Self { version: default_ai_chat_selection_version(), active: None, effort_preferences: Vec::new() }
+    }
+}
+
+fn default_ai_chat_selection_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiConfigItem {
@@ -214,6 +331,10 @@ pub struct AiConfig {
     pub enable_thinking: bool,
     #[serde(default)]
     pub reasoning_level: AiReasoningLevel,
+    /// Per-request effort selected in the assistant. Provider settings do not
+    /// persist this field; it is attached to a runtime config clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_effort: Option<AiEffortSelection>,
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
@@ -255,6 +376,10 @@ pub struct ToolCallRef {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Opaque provider response data that must be replayed unchanged in
+    /// follow-up requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -323,11 +448,13 @@ pub struct AiModelInfo {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_effort_levels: Vec<AiEffortLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_capability: Option<AiEffortCapability>,
 }
 
 impl AiModelInfo {
     pub fn new(id: impl Into<String>, display_name: Option<String>) -> Self {
-        Self { id: id.into(), display_name, supported_effort_levels: Vec::new() }
+        Self { id: id.into(), display_name, supported_effort_levels: Vec::new(), effort_capability: None }
     }
 }
 
@@ -393,6 +520,19 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
         let base = ep.trim_end_matches("/v1beta");
         return format!("{base}/v1beta/models/{}:generateContent", config.model);
     }
+    if matches!(config.provider, AiProvider::Openai) {
+        let base = ep
+            .strip_suffix("/chat/completions")
+            .or_else(|| ep.strip_suffix("/responses"))
+            .unwrap_or(ep)
+            .trim_end_matches('/');
+        let base = ensure_openai_version_prefix(base);
+        return if config.api_style == AiApiStyle::Responses {
+            format!("{base}/responses")
+        } else {
+            format!("{base}/chat/completions")
+        };
+    }
     if ep.ends_with("/chat/completions") || ep.ends_with("/responses") || ep.ends_with("/messages") {
         return ep.to_string();
     }
@@ -434,7 +574,12 @@ fn resolve_gemini_stream_endpoint(config: &AiConfig) -> String {
 
 pub fn resolve_model_list_endpoint(config: &AiConfig) -> Result<String, String> {
     if matches!(config.provider, AiProvider::Gemini) {
-        return Err("Model listing is only supported for OpenAI-compatible and Claude providers".to_string());
+        let ep = config.endpoint.trim().trim_end_matches('/');
+        if ep.is_empty() {
+            return Err("Endpoint is required".to_string());
+        }
+        let base = ep.split("/v1beta/models/").next().unwrap_or(ep).trim_end_matches("/v1beta").trim_end_matches('/');
+        return Ok(format!("{base}/v1beta/models"));
     }
 
     let ep = config.endpoint.trim().trim_end_matches('/');
@@ -632,6 +777,9 @@ fn is_kimi_model(model: &str) -> bool {
 }
 
 fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &AiConfig) {
+    if config.runtime_effort.is_some() {
+        return;
+    }
     if config.enable_thinking {
         return;
     }
@@ -650,6 +798,14 @@ fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &
         body["extra_body"] = json!({
             "chat_template_kwargs": { "enable_thinking": false }
         });
+    }
+}
+
+fn runtime_thinking_enabled(config: &AiConfig) -> bool {
+    match config.runtime_effort.as_ref() {
+        Some(AiEffortSelection::Disabled | AiEffortSelection::Boolean(false)) => false,
+        Some(_) => true,
+        None => config.enable_thinking,
     }
 }
 
@@ -819,6 +975,7 @@ fn normalized_api_key(config: &AiConfig) -> &str {
 }
 
 fn validate_config(config: &AiConfig) -> Result<(), String> {
+    crate::ai_effort::validate_runtime_effort(config)?;
     if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
         return Ok(());
     }
@@ -937,9 +1094,80 @@ fn parse_model_list_response(data: &serde_json::Value) -> Result<Vec<AiModelInfo
             .filter(|name| !name.trim().is_empty() && *name != id)
             .map(ToString::to_string);
 
-        models.push(AiModelInfo::new(id, display_name));
+        let mut model = AiModelInfo::new(id, display_name);
+        model.effort_capability = parse_dynamic_effort_capability(item, AiCapabilitySource::ProviderApi);
+        models.push(model);
     }
 
+    Ok(models)
+}
+
+fn parse_dynamic_effort_capability(
+    model: &serde_json::Value,
+    source: AiCapabilitySource,
+) -> Option<AiEffortCapability> {
+    let effort = model
+        .pointer("/capabilities/effort")
+        .or_else(|| model.pointer("/capabilities/reasoning/effort"))
+        .or_else(|| model.get("effort"));
+    if effort.and_then(|value| value.get("supported")).and_then(serde_json::Value::as_bool) == Some(false) {
+        return Some(AiEffortCapability::Unsupported);
+    }
+    if let Some(levels) = effort.and_then(serde_json::Value::as_object) {
+        let mut supported = levels
+            .iter()
+            .filter(|(level, capability)| {
+                level.as_str() != "supported"
+                    && capability.get("supported").and_then(serde_json::Value::as_bool) == Some(true)
+            })
+            .map(|(level, _)| level.as_str())
+            .collect::<Vec<_>>();
+        const EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+        supported.sort_by_key(|level| EFFORT_ORDER.iter().position(|known| known == level).unwrap_or(usize::MAX));
+        if let Some(capability) = crate::ai_effort::dynamic_enum_capability(supported, source.clone()) {
+            return Some(capability);
+        }
+    }
+    let levels = effort
+        .and_then(|value| {
+            value
+                .get("supported_effort_levels")
+                .or_else(|| value.get("supportedEffortLevels"))
+                .or_else(|| value.get("values"))
+                .or_else(|| value.get("levels"))
+        })
+        .or_else(|| model.get("supported_effort_levels"))
+        .or_else(|| model.get("supportedEffortLevels"))
+        .and_then(serde_json::Value::as_array)?;
+    crate::ai_effort::dynamic_enum_capability(levels.iter().filter_map(serde_json::Value::as_str), source)
+}
+
+fn decorate_model_capabilities(config: &AiConfig, models: &mut [AiModelInfo]) {
+    for model in models {
+        if model.effort_capability.is_none() {
+            model.effort_capability = crate::ai_effort::static_effort_capability(config, &model.id);
+        }
+    }
+}
+
+fn parse_gemini_model_list_response(data: &serde_json::Value) -> Result<Vec<AiModelInfo>, String> {
+    let items = data["models"].as_array().ok_or_else(|| "Invalid Gemini model list response".to_string())?;
+    let mut seen = HashSet::new();
+    let mut models = Vec::new();
+    for item in items {
+        if !crate::ai_model_filter::gemini_item_is_assistant_compatible(item) {
+            continue;
+        }
+        let Some(name) = item["name"].as_str() else {
+            continue;
+        };
+        let id = name.trim().trim_start_matches("models/");
+        if id.is_empty() || !seen.insert(id.to_string()) {
+            continue;
+        }
+        let display_name = item["displayName"].as_str().filter(|name| !name.trim().is_empty()).map(ToString::to_string);
+        models.push(AiModelInfo::new(id, display_name));
+    }
     Ok(models)
 }
 
@@ -958,6 +1186,40 @@ async fn list_claude_models(client: &reqwest::Client, config: &AiConfig) -> Resu
     }
 
     parse_model_list_response(&data)
+}
+
+async fn list_gemini_models(client: &reqwest::Client, config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
+    let endpoint = resolve_model_list_endpoint(config)?;
+    let mut page_token: Option<String> = None;
+    let mut seen = HashSet::new();
+    let mut models = Vec::new();
+
+    loop {
+        let mut request = client.get(&endpoint).query(&[("key", config.api_key.as_str()), ("pageSize", "1000")]);
+        if let Some(token) = page_token.as_deref() {
+            request = request.query(&[("pageToken", token)]);
+        }
+
+        let res = request.send().await.map_err(|e| format!("Gemini model list request failed: {e}"))?;
+        let status = res.status();
+        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(extract_error(&data).unwrap_or_else(|| format!("Gemini model list API error: {status}")));
+        }
+
+        for model in parse_gemini_model_list_response(&data)? {
+            if seen.insert(model.id.clone()) {
+                models.push(model);
+            }
+        }
+
+        page_token = data["nextPageToken"].as_str().filter(|token| !token.trim().is_empty()).map(ToString::to_string);
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    Ok(models)
 }
 
 async fn list_openai_compatible_models(
@@ -980,36 +1242,166 @@ async fn list_openai_compatible_models(
     parse_model_list_response(&data)
 }
 
+fn resolve_ollama_show_endpoint(config: &AiConfig) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(&resolve_model_list_endpoint(config)?)
+        .map_err(|e| format!("Invalid Ollama model endpoint: {e}"))?;
+    let path = url.path().trim_end_matches('/');
+    let base_path =
+        path.strip_suffix("/v1/models").or_else(|| path.strip_suffix("/models")).unwrap_or(path).trim_end_matches('/');
+    let show_path = if base_path.is_empty() { "/api/show".to_string() } else { format!("{base_path}/api/show") };
+    url.set_path(&show_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+async fn fetch_ollama_model_details(
+    client: &reqwest::Client,
+    config: &AiConfig,
+    show_endpoint: &str,
+    model_id: &str,
+) -> Result<serde_json::Value, String> {
+    let response = client
+        .post(show_endpoint)
+        .headers(maybe_bearer_headers(config)?)
+        .timeout(std::time::Duration::from_secs(5))
+        .json(&json!({ "model": model_id }))
+        .send()
+        .await
+        .map_err(|error| format!("Ollama model capability request failed for {model_id}: {error}"))?;
+    let status = response.status();
+    let data: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(extract_error(&data).unwrap_or_else(|| format!("Ollama model capability API error: {status}")));
+    }
+    Ok(data)
+}
+
+async fn ollama_model_completion_support(
+    client: &reqwest::Client,
+    config: &AiConfig,
+    show_endpoint: &str,
+    model_id: &str,
+) -> Result<Option<bool>, String> {
+    let data = fetch_ollama_model_details(client, config, show_endpoint, model_id).await?;
+    Ok(crate::ai_model_filter::ollama_completion_capability(&data))
+}
+
+pub(crate) async fn ollama_selected_model_tool_support(config: &AiConfig) -> Result<Option<bool>, String> {
+    let model_id = config.model.trim();
+    if model_id.is_empty() {
+        return Err("Model is required".to_string());
+    }
+    let client = build_ai_http_client(config, 5)?;
+    let show_endpoint = resolve_ollama_show_endpoint(config)?;
+    let data = fetch_ollama_model_details(&client, config, &show_endpoint, model_id).await?;
+    Ok(crate::ai_model_filter::ollama_tool_capability(&data))
+}
+
+async fn retain_ollama_completion_models(
+    client: &reqwest::Client,
+    config: &AiConfig,
+    models: Vec<AiModelInfo>,
+) -> Vec<AiModelInfo> {
+    const CAPABILITY_CONCURRENCY: usize = 8;
+
+    let Ok(show_endpoint) = resolve_ollama_show_endpoint(config) else {
+        return models;
+    };
+    let mut checked = futures::stream::iter(models.into_iter().enumerate().map(|(index, model)| {
+        let show_endpoint = show_endpoint.clone();
+        async move {
+            let support = ollama_model_completion_support(client, config, &show_endpoint, &model.id).await;
+            (index, model, support)
+        }
+    }))
+    .buffer_unordered(CAPABILITY_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    checked.sort_by_key(|(index, _, _)| *index);
+    checked
+        .into_iter()
+        .filter_map(|(_, model, support)| match support {
+            Ok(Some(false)) => None,
+            Ok(Some(true) | None) => Some(model),
+            Err(error) => {
+                log::debug!("[ai][models] {error}; preserving model {}", model.id);
+                Some(model)
+            }
+        })
+        .collect()
+}
+
 pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    if matches!(config.provider, AiProvider::CodexCli) {
-        return crate::ai_codex_cli::list_codex_models(config).await;
-    }
-    if matches!(config.provider, AiProvider::ClaudeCodeCli) {
-        return crate::ai_claude_code_cli::list_claude_code_models(config).await;
-    }
-    validate_model_list_config(config)?;
-
-    let client = build_ai_http_client(config, 30)?;
-
-    match config.provider {
-        AiProvider::Claude => list_claude_models(&client, config).await,
-        AiProvider::Openai
-        | AiProvider::Deepseek
-        | AiProvider::Qwen
-        | AiProvider::Ollama
-        | AiProvider::OpenaiCompatible => list_openai_compatible_models(&client, config).await,
-        AiProvider::Custom => {
-            if uses_anthropic_messages_api(config) {
-                list_claude_models(&client, config).await
-            } else {
-                list_openai_compatible_models(&client, config).await
+    let mut models = match config.provider {
+        AiProvider::CodexCli => crate::ai_codex_cli::list_codex_models(config).await?,
+        AiProvider::ClaudeCodeCli => crate::ai_claude_code_cli::list_claude_code_models(config).await?,
+        _ => {
+            validate_model_list_config(config)?;
+            let client = build_ai_http_client(config, 30)?;
+            match config.provider {
+                AiProvider::Claude => list_claude_models(&client, config).await?,
+                AiProvider::Gemini => list_gemini_models(&client, config).await?,
+                AiProvider::Ollama => {
+                    let models = list_openai_compatible_models(&client, config).await?;
+                    retain_ollama_completion_models(&client, config, models).await
+                }
+                AiProvider::Openai | AiProvider::Deepseek | AiProvider::Qwen | AiProvider::OpenaiCompatible => {
+                    list_openai_compatible_models(&client, config).await?
+                }
+                AiProvider::Custom => {
+                    if uses_anthropic_messages_api(config) {
+                        list_claude_models(&client, config).await?
+                    } else {
+                        list_openai_compatible_models(&client, config).await?
+                    }
+                }
+                AiProvider::CodexCli | AiProvider::ClaudeCodeCli => unreachable!(),
             }
         }
-        AiProvider::CodexCli | AiProvider::ClaudeCodeCli => unreachable!(),
-        AiProvider::Gemini => {
-            Err("Model listing is only supported for OpenAI-compatible and Claude providers".to_string())
+    };
+    crate::ai_model_filter::retain_known_assistant_models(&config.provider, &mut models);
+    decorate_model_capabilities(config, &mut models);
+    Ok(models)
+}
+
+pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Result<AiEffortCapability, String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return Err("Model is required".to_string());
+    }
+
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+        let models = list_models_core(config).await?;
+        return Ok(models
+            .into_iter()
+            .find(|model| model.id == model_id)
+            .and_then(|model| model.effort_capability)
+            .unwrap_or(AiEffortCapability::Unsupported));
+    }
+
+    if matches!(config.provider, AiProvider::Claude) {
+        let client = build_ai_http_client(config, 30)?;
+        let mut url = reqwest::Url::parse(&resolve_model_list_endpoint(config)?)
+            .map_err(|e| format!("Invalid Claude model endpoint: {e}"))?;
+        url.path_segments_mut().map_err(|_| "Invalid Claude model endpoint".to_string())?.push(model_id);
+        let response = client
+            .get(url)
+            .headers(claude_headers(config)?)
+            .send()
+            .await
+            .map_err(|e| format!("Claude model capability request failed: {e}"))?;
+        let status = response.status();
+        let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(extract_error(&data).unwrap_or_else(|| format!("Claude model capability API error: {status}")));
+        }
+        if let Some(capability) = parse_dynamic_effort_capability(&data, AiCapabilitySource::ProviderApi) {
+            return Ok(capability);
         }
     }
+
+    Ok(crate::ai_effort::static_effort_capability(config, model_id).unwrap_or(AiEffortCapability::Unsupported))
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,12 +1409,13 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
 // ---------------------------------------------------------------------------
 
 pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
-    let body = json!({
+    let mut body = json!({
         "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1057,6 +1450,7 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
     });
     set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
     apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
+    crate::ai_effort::apply_runtime_effort(&mut body_obj, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1078,11 +1472,12 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
 pub async fn call_responses_api(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let body = json!({
+    let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
         "max_output_tokens": responses_max_output_tokens(request.max_tokens),
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1111,7 +1506,7 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
         }));
     }
 
-    let body = json!({
+    let mut body = json!({
         "systemInstruction": {
             "parts": [{ "text": request.system_prompt }],
         },
@@ -1120,6 +1515,7 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
             "maxOutputTokens": request.max_tokens.unwrap_or(2048),
         },
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1681,7 +2077,7 @@ pub async fn stream(
         return Err("CLI providers are only supported in DBX AI agent mode".to_string());
     }
 
-    let stream_timeout = if request.config.enable_thinking { 600 } else { 120 };
+    let stream_timeout = if runtime_thinking_enabled(&request.config) { 600 } else { 120 };
     let client = build_ai_http_client(&request.config, stream_timeout)?;
 
     match request.config.provider {
@@ -1718,13 +2114,14 @@ async fn stream_claude(
     cancelled: &Notify,
     on_chunk: &impl Fn(AiStreamChunk),
 ) -> Result<(), String> {
-    let body = json!({
+    let mut body = json!({
         "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": request.messages,
         "stream": true,
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1804,6 +2201,7 @@ async fn stream_openai(
     });
     set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
     apply_chat_completion_thinking_toggle(&mut body_obj, &request.config);
+    crate::ai_effort::apply_runtime_effort(&mut body_obj, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1892,12 +2290,13 @@ async fn stream_responses_api(
 ) -> Result<(), String> {
     let headers = maybe_bearer_headers(&request.config)?;
 
-    let body = json!({
+    let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
         "max_output_tokens": responses_max_output_tokens(request.max_tokens),
         "stream": true,
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -1974,7 +2373,7 @@ async fn stream_gemini(
         }));
     }
 
-    let body = json!({
+    let mut body = json!({
         "systemInstruction": {
             "parts": [{ "text": request.system_prompt }],
         },
@@ -1983,6 +2382,7 @@ async fn stream_gemini(
             "maxOutputTokens": request.max_tokens.unwrap_or(2048),
         },
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_gemini_stream_endpoint(&request.config))
@@ -2051,6 +2451,8 @@ pub enum StreamToolEvent {
     ToolCallStart { index: u32, id: String, name: String },
     /// An argument fragment for an in-progress tool call.
     ToolCallDelta { index: u32, fragment: String },
+    /// Opaque provider response data required to replay the tool call.
+    ToolCallProviderPayload { index: u32, payload: serde_json::Value },
     /// A tool_use / function_call block has ended.
     ToolCallComplete { index: u32 },
 }
@@ -2061,6 +2463,7 @@ struct PartialToolCall {
     id: String,
     name: String,
     arguments: String,
+    provider_payload: Option<serde_json::Value>,
 }
 
 /// Accumulates streaming tool-call events into complete `ToolCall` objects.
@@ -2099,7 +2502,8 @@ impl StreamingToolCallAccumulator {
                         existing.name = name;
                     }
                 } else {
-                    self.calls.insert(index, PartialToolCall { id, name, arguments: String::new() });
+                    self.calls
+                        .insert(index, PartialToolCall { id, name, arguments: String::new(), provider_payload: None });
                 }
                 if !self.ordered_indices.contains(&index) {
                     self.ordered_indices.push(index);
@@ -2108,6 +2512,11 @@ impl StreamingToolCallAccumulator {
             StreamToolEvent::ToolCallDelta { index, fragment } => {
                 if let Some(tc) = self.calls.get_mut(&index) {
                     tc.arguments.push_str(&fragment);
+                }
+            }
+            StreamToolEvent::ToolCallProviderPayload { index, payload } => {
+                if let Some(tc) = self.calls.get_mut(&index) {
+                    tc.provider_payload = Some(payload);
                 }
             }
             StreamToolEvent::ToolCallComplete { index: _ } => {
@@ -2125,6 +2534,7 @@ impl StreamingToolCallAccumulator {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                     arguments: args,
+                    provider_payload: tc.provider_payload.clone(),
                 });
             }
         }
@@ -2185,7 +2595,7 @@ async fn stream_claude_with_tools(
 
     let tool_json: Vec<serde_json::Value> = tools.iter().map(|t| t.to_anthropic_tool()).collect();
 
-    let body = json!({
+    let mut body = json!({
         "model": claude_http_model(&request.config.model),
         "max_tokens": request.max_tokens.unwrap_or(4096),
         "system": claude_system_prompt(&request.system_prompt),
@@ -2193,6 +2603,7 @@ async fn stream_claude_with_tools(
         "tools": tool_json,
         "stream": true,
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -2369,7 +2780,7 @@ async fn stream_openai_with_tools(
     });
     set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens.unwrap_or(4096));
 
-    if !request.config.enable_thinking {
+    if request.config.runtime_effort.is_none() && !request.config.enable_thinking {
         if matches!(request.config.provider, AiProvider::Ollama) {
             apply_chat_completion_thinking_toggle(&mut body, &request.config);
         } else if matches!(request.config.provider, AiProvider::Deepseek) {
@@ -2377,6 +2788,7 @@ async fn stream_openai_with_tools(
             body["thinking"] = json!({ "type": "disabled" });
         }
     }
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -2492,7 +2904,7 @@ async fn stream_responses_with_tools(
     let headers = maybe_bearer_headers(&request.config)?;
     let tool_json: Vec<serde_json::Value> = tools.iter().map(responses_function_tool).collect();
 
-    let body = json!({
+    let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input_with_tools(&request.system_prompt, &request.messages),
         "max_output_tokens": responses_max_output_tokens(request.max_tokens),
@@ -2500,6 +2912,7 @@ async fn stream_responses_with_tools(
         "tool_choice": "auto",
         "stream": true,
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -2609,18 +3022,10 @@ async fn stream_responses_with_tools(
     Ok(token_usage)
 }
 
-/// Streaming Gemini call with tool support.
-async fn stream_gemini_with_tools(
-    client: &reqwest::Client,
-    session_id: &str,
-    request: &AiCompletionRequest,
-    tools: &[crate::agent_events::ToolDefinition],
-    cancelled: &Notify,
-    on_event: &impl Fn(StreamToolEvent),
-) -> Result<Option<TokenUsage>, String> {
+fn build_gemini_contents(messages: &[AiMessage]) -> Vec<serde_json::Value> {
     let mut contents: Vec<serde_json::Value> = Vec::new();
     let mut pending_function_responses: Vec<serde_json::Value> = Vec::new();
-    for m in &request.messages {
+    for m in messages {
         if m.role == "tool" {
             let tool_name = m
                 .tool_call_id
@@ -2648,7 +3053,13 @@ async fn stream_gemini_with_tools(
                     parts.push(json!({ "text": m.content }));
                 }
                 for tc in &m.tool_calls {
-                    parts.push(json!({ "functionCall": { "name": tc.name, "args": tc.arguments } }));
+                    if let Some(payload) =
+                        tc.provider_payload.as_ref().filter(|payload| payload.get("functionCall").is_some())
+                    {
+                        parts.push(payload.clone());
+                    } else {
+                        parts.push(json!({ "functionCall": { "name": tc.name, "args": tc.arguments } }));
+                    }
                 }
                 contents.push(json!({ "role": "model", "parts": parts }));
             } else {
@@ -2665,9 +3076,37 @@ async fn stream_gemini_with_tools(
         }));
     }
 
+    contents
+}
+
+fn emit_gemini_tool_call_part(part: &serde_json::Value, index: u32, on_event: &impl Fn(StreamToolEvent)) -> bool {
+    let Some(function_call) = part.get("functionCall") else {
+        return false;
+    };
+
+    let name = function_call["name"].as_str().unwrap_or_default().to_string();
+    let arguments = function_call["args"].clone();
+    let id = format!("gemini-tc-{name}-{index}");
+    on_event(StreamToolEvent::ToolCallStart { index, id, name });
+    on_event(StreamToolEvent::ToolCallProviderPayload { index, payload: part.clone() });
+    on_event(StreamToolEvent::ToolCallDelta { index, fragment: arguments.to_string() });
+    on_event(StreamToolEvent::ToolCallComplete { index });
+    true
+}
+
+/// Streaming Gemini call with tool support.
+async fn stream_gemini_with_tools(
+    client: &reqwest::Client,
+    session_id: &str,
+    request: &AiCompletionRequest,
+    tools: &[crate::agent_events::ToolDefinition],
+    cancelled: &Notify,
+    on_event: &impl Fn(StreamToolEvent),
+) -> Result<Option<TokenUsage>, String> {
+    let contents = build_gemini_contents(&request.messages);
     let tool_declarations: Vec<serde_json::Value> = tools.iter().map(|t| t.to_gemini_tool()).collect();
 
-    let body = json!({
+    let mut body = json!({
         "contents": contents,
         "systemInstruction": { "parts": [{ "text": request.system_prompt }] },
         "tools": [{ "functionDeclarations": tool_declarations }],
@@ -2675,6 +3114,7 @@ async fn stream_gemini_with_tools(
             "maxOutputTokens": request.max_tokens.unwrap_or(4096),
         }
     });
+    crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
     let res = client
         .post(resolve_gemini_stream_endpoint(&request.config))
@@ -2725,21 +3165,7 @@ async fn stream_gemini_with_tools(
                                         }));
                                     }
                                     // Function call (Gemini sends complete objects, not deltas)
-                                    if let Some(fc) = part.get("functionCall") {
-                                        let name = fc["name"].as_str().unwrap_or_default().to_string();
-                                        let args = fc["args"].clone();
-                                        let id = format!("gemini-tc-{name}-{tool_call_idx}");
-                                        let args_str = args.to_string();
-                                        on_event(StreamToolEvent::ToolCallStart {
-                                            index: tool_call_idx,
-                                            id: id.clone(),
-                                            name: name.clone(),
-                                        });
-                                        on_event(StreamToolEvent::ToolCallDelta {
-                                            index: tool_call_idx,
-                                            fragment: args_str,
-                                        });
-                                        on_event(StreamToolEvent::ToolCallComplete { index: tool_call_idx });
+                                    if emit_gemini_tool_call_part(part, tool_call_idx, on_event) {
                                         tool_call_idx += 1;
                                     }
                                 }
@@ -2772,7 +3198,7 @@ pub async fn stream_with_tools(
         return Err("CLI providers are only supported through the DBX AI agent loop".to_string());
     }
 
-    let stream_timeout = if config.enable_thinking { 600 } else { 120 };
+    let stream_timeout = if runtime_thinking_enabled(config) { 600 } else { 120 };
     let client = build_ai_http_client(config, stream_timeout)?;
 
     let accumulator = Arc::new(std::sync::Mutex::new(StreamingToolCallAccumulator::new()));
@@ -2878,17 +3304,20 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        apply_chat_completion_thinking_toggle, build_ai_http_client, build_responses_input_with_tools, call_claude,
-        classify_error, claude_headers, claude_system_prompt, drain_next_stream_line,
-        emit_responses_function_call_item, format_transport_error, gemini_text, is_kimi_model, maybe_bearer_headers,
-        measure_first_stream_chunk, openai_response_text, openai_stream_reasoning, openai_stream_text,
-        parse_model_list_response, resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_list_endpoint,
-        responses_function_tool, responses_max_output_tokens, responses_stream_text, responses_text,
-        responses_token_usage, set_chat_completion_token_limit, stream_claude, stream_claude_with_tools,
-        stream_data_payload, stream_openai_with_tools, uses_anthropic_messages_api, validate_config,
-        validate_model_list_config, AiApiStyle, AiAuthMethod, AiCompletionRequest, AiConfig, AiMessage, AiModelInfo,
-        AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
-        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
+        build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt,
+        drain_next_stream_line, emit_gemini_tool_call_part, emit_responses_function_call_item, format_transport_error,
+        gemini_text, is_kimi_model, maybe_bearer_headers, measure_first_stream_chunk,
+        ollama_selected_model_tool_support, openai_response_text, openai_stream_reasoning, openai_stream_text,
+        parse_dynamic_effort_capability, parse_gemini_model_list_response, parse_model_list_response, resolve_endpoint,
+        resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
+        resolve_ollama_show_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
+        responses_text, responses_token_usage, retain_ollama_completion_models, set_chat_completion_token_limit,
+        stream_claude, stream_claude_with_tools, stream_data_payload, stream_openai_with_tools,
+        uses_anthropic_messages_api, validate_config, validate_model_list_config, AiApiStyle, AiAuthMethod,
+        AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability, AiEffortOption, AiEffortSelection,
+        AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
+        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     struct CapturedJsonRequest {
@@ -2955,6 +3384,7 @@ mod tests {
                 proxy_url: String::new(),
                 enable_thinking: true,
                 reasoning_level: AiReasoningLevel::Default,
+                runtime_effort: None,
                 context_window: Some(1_000_000),
                 codex_cli_path: None,
                 codex_cli_env: Default::default(),
@@ -3046,6 +3476,77 @@ mod tests {
             "tool name was wiped to empty by a re-sent ToolCallStart — this is the \"Unknown tool:\" bug"
         );
         assert_eq!(calls[0].arguments["table"], "record_trip_id_t", "arguments were reset by a re-sent ToolCallStart");
+    }
+
+    #[test]
+    fn gemini_tool_call_replays_provider_payload_unchanged() {
+        let response_part = serde_json::json!({
+            "functionCall": {
+                "name": "list_tables",
+                "args": { "schema": "public" }
+            },
+            "thoughtSignature": "encrypted-signature"
+        });
+        let accumulator = RefCell::new(StreamingToolCallAccumulator::new());
+
+        assert!(emit_gemini_tool_call_part(&response_part, 0, &|event| {
+            accumulator.borrow_mut().process(event, &|_| {});
+        }));
+
+        let calls = accumulator.into_inner().finalize();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_tables");
+        assert_eq!(calls[0].arguments, serde_json::json!({ "schema": "public" }));
+        assert_eq!(calls[0].provider_payload.as_ref(), Some(&response_part));
+
+        let contents = build_gemini_contents(&[
+            AiMessage {
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![ToolCallRef {
+                    id: calls[0].id.clone(),
+                    name: calls[0].name.clone(),
+                    arguments: calls[0].arguments.clone(),
+                    provider_payload: calls[0].provider_payload.clone(),
+                }],
+            },
+            AiMessage {
+                role: "tool".to_string(),
+                content: "users".to_string(),
+                tool_call_id: Some(calls[0].id.clone()),
+                tool_calls: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(contents[0]["role"], "model");
+        assert_eq!(contents[0]["parts"][0], response_part);
+        assert_eq!(contents[1]["parts"][0]["functionResponse"]["name"], "list_tables");
+    }
+
+    #[test]
+    fn gemini_tool_call_without_provider_payload_uses_canonical_part() {
+        let contents = build_gemini_contents(&[AiMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![ToolCallRef {
+                id: "gemini-tc-list_tables-0".to_string(),
+                name: "list_tables".to_string(),
+                arguments: serde_json::json!({ "schema": "public" }),
+                provider_payload: None,
+            }],
+        }]);
+
+        assert_eq!(
+            contents[0]["parts"][0],
+            serde_json::json!({
+                "functionCall": {
+                    "name": "list_tables",
+                    "args": { "schema": "public" }
+                }
+            })
+        );
     }
 
     #[test]
@@ -3197,6 +3698,7 @@ mod tests {
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3223,6 +3725,7 @@ mod tests {
             proxy_url: "127.0.0.1:7890".to_string(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3247,6 +3750,7 @@ mod tests {
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3271,6 +3775,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3299,6 +3804,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3324,6 +3830,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3361,6 +3868,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3381,6 +3889,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3404,6 +3913,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3451,6 +3961,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3497,6 +4008,38 @@ mod tests {
     }
 
     #[test]
+    fn official_openai_endpoint_tracks_api_style() {
+        let config = AiConfig {
+            provider: AiProvider::Openai,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            model: "gpt-5.6-luna".to_string(),
+            models: Vec::new(),
+            api_style: AiApiStyle::Responses,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
+        };
+
+        assert_eq!(resolve_endpoint(&config), "https://api.openai.com/v1/responses");
+
+        let completions = AiConfig {
+            endpoint: "https://api.openai.com/v1/responses".to_string(),
+            api_style: AiApiStyle::Completions,
+            ..config
+        };
+        assert_eq!(resolve_endpoint(&completions), "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
     fn claude_headers_support_api_key_and_bearer_auth() {
         let mut config = AiConfig {
             provider: AiProvider::Claude,
@@ -3510,6 +4053,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3569,6 +4113,182 @@ mod tests {
                 AiModelInfo::new("claude-sonnet-4-20250514", Some("Claude Sonnet 4".to_string())),
             ]
         );
+    }
+
+    #[test]
+    fn parses_only_assistant_compatible_gemini_models() {
+        let data = serde_json::json!({
+            "models": [
+                {
+                    "name": "models/gemini-2.5-pro",
+                    "displayName": "Gemini 2.5 Pro",
+                    "supportedGenerationMethods": ["generateContent", "countTokens"]
+                },
+                {
+                    "name": "models/gemini-embedding-001",
+                    "supportedGenerationMethods": ["embedContent"]
+                },
+                {
+                    "name": "models/gemini-3-pro-image-preview",
+                    "supportedGenerationMethods": ["generateContent"]
+                },
+                {
+                    "name": "models/future-chat-model"
+                },
+                {
+                    "name": "models/gemini-2.5-pro",
+                    "supportedGenerationMethods": ["generateContent"]
+                }
+            ]
+        });
+
+        assert_eq!(
+            parse_gemini_model_list_response(&data).unwrap(),
+            vec![
+                AiModelInfo::new("gemini-2.5-pro", Some("Gemini 2.5 Pro".to_string())),
+                AiModelInfo::new("future-chat-model", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_ollama_native_show_endpoint_from_openai_compatibility_url() {
+        let config = AiConfig {
+            provider: AiProvider::Ollama,
+            api_key: String::new(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "http://localhost:11434/v1/chat/completions".to_string(),
+            model: String::new(),
+            models: Vec::new(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
+        };
+        assert_eq!(resolve_ollama_show_endpoint(&config).unwrap(), "http://localhost:11434/api/show");
+
+        let prefixed = AiConfig { endpoint: "https://example.com/ollama/v1".to_string(), ..config };
+        assert_eq!(resolve_ollama_show_endpoint(&prefixed).unwrap(), "https://example.com/ollama/api/show");
+    }
+
+    #[tokio::test]
+    async fn ollama_selected_model_tool_support_reads_show_capabilities() {
+        let (endpoint, server) =
+            spawn_json_capture_server("application/json", r#"{"capabilities":["completion","tools"]}"#).await;
+        let config = AiConfig {
+            provider: AiProvider::Ollama,
+            api_key: String::new(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint,
+            model: "qwen3:0.6b".to_string(),
+            models: Vec::new(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
+        };
+
+        assert_eq!(ollama_selected_model_tool_support(&config).await.unwrap(), Some(true));
+        assert_eq!(server.await.unwrap().body["model"], "qwen3:0.6b");
+    }
+
+    #[tokio::test]
+    async fn ollama_catalog_excludes_models_with_explicit_non_completion_capability() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requested_models = Vec::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let header_end = loop {
+                    if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "request ended before headers were complete");
+                    request.extend_from_slice(&chunk[..read]);
+                };
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                assert!(headers.starts_with("POST /api/show "));
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < header_end + content_length {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "request ended before body was complete");
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+                let model = body["model"].as_str().unwrap().to_string();
+                requested_models.push(model.clone());
+                let response_body = match model.as_str() {
+                    "qwen3:0.6b" => r#"{"capabilities":["completion","tools"]}"#,
+                    "embeddinggemma:latest" => r#"{"capabilities":["embedding"]}"#,
+                    "legacy-model" => r#"{"details":{"family":"legacy"}}"#,
+                    other => panic!("unexpected model request: {other}"),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requested_models.sort();
+            requested_models
+        });
+
+        let config = AiConfig {
+            provider: AiProvider::Ollama,
+            api_key: String::new(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: format!("http://{address}/v1"),
+            model: String::new(),
+            models: Vec::new(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
+        };
+        let models = vec![
+            AiModelInfo::new("qwen3:0.6b", None),
+            AiModelInfo::new("embeddinggemma:latest", None),
+            AiModelInfo::new("legacy-model", None),
+        ];
+
+        let filtered = retain_ollama_completion_models(&reqwest::Client::new(), &config, models).await;
+
+        assert_eq!(filtered.into_iter().map(|model| model.id).collect::<Vec<_>>(), vec!["qwen3:0.6b", "legacy-model"]);
+        assert_eq!(server.await.unwrap(), vec!["embeddinggemma:latest", "legacy-model", "qwen3:0.6b"]);
     }
 
     #[test]
@@ -3642,6 +4362,7 @@ mod tests {
                         id: "call_1".to_string(),
                         name: "list_tables".to_string(),
                         arguments: serde_json::json!({"schema": "public"}),
+                        provider_payload: None,
                     }],
                 },
                 AiMessage {
@@ -3809,6 +4530,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3864,6 +4586,67 @@ mod tests {
     }
 
     #[test]
+    fn parses_claude_effort_capability_object_in_strength_order() {
+        let capability = parse_dynamic_effort_capability(
+            &serde_json::json!({
+                "capabilities": {
+                    "effort": {
+                        "max": { "supported": true },
+                        "low": { "supported": true },
+                        "medium": { "supported": false },
+                        "high": { "supported": true },
+                        "future": { "supported": true }
+                    }
+                }
+            }),
+            AiCapabilitySource::ProviderApi,
+        )
+        .unwrap();
+        let AiEffortCapability::Enum { options, .. } = capability else {
+            panic!("expected enum capability");
+        };
+
+        assert_eq!(
+            options.iter().map(|option| option.id.as_str()).collect::<Vec<_>>(),
+            ["low", "high", "max", "future"]
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_effort_capability_propagates_model_api_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /v1/models/claude-opus-4-6 "));
+
+            let response_body = r#"{"error":{"message":"invalid x-api-key"}}"#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let endpoint = format!("http://{address}/v1/messages");
+        let config = claude_http_test_request(endpoint).config;
+
+        let error = resolve_model_effort_core(&config, "claude-opus-4-6").await.unwrap_err();
+
+        assert_eq!(error, "invalid x-api-key");
+        server.await.unwrap();
+    }
+
+    #[test]
     fn omits_extra_body_for_kimi_test_connection_body() {
         let config = AiConfig {
             provider: AiProvider::OpenaiCompatible,
@@ -3877,6 +4660,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3910,6 +4694,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3949,6 +4734,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -3966,6 +4752,39 @@ mod tests {
             }))
         );
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn runtime_provider_default_suppresses_legacy_thinking_toggle() {
+        let mut config = AiConfig {
+            provider: AiProvider::OpenaiCompatible,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://example.com/v1".to_string(),
+            model: "qwen3".to_string(),
+            models: vec![],
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::High,
+            runtime_effort: Some(AiEffortSelection::ProviderDefault),
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
+        };
+        let mut body = serde_json::json!({ "model": &config.model });
+
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+
+        assert!(body.get("extra_body").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+
+        config.runtime_effort = None;
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+        assert!(body.get("extra_body").is_some());
     }
 
     #[tokio::test]
@@ -4010,6 +4829,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -4064,6 +4884,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -4166,5 +4987,27 @@ mod tests {
         .unwrap();
 
         assert!(matches!(claude.provider, AiProvider::Claude));
+    }
+
+    #[test]
+    fn serializes_integer_effort_special_values_in_camel_case() {
+        let capability = AiEffortCapability::Integer {
+            min: 128,
+            max: 32_768,
+            step: 1,
+            default: AiEffortSelection::Integer(-1),
+            special_values: vec![AiEffortOption {
+                id: "auto".to_string(),
+                label: "Auto".to_string(),
+                description: None,
+                selection: AiEffortSelection::Integer(-1),
+            }],
+            source: AiCapabilitySource::OfficialRegistry,
+        };
+
+        let value = serde_json::to_value(&capability).unwrap();
+        assert!(value.get("specialValues").is_some());
+        assert!(value.get("special_values").is_none());
+        assert_eq!(serde_json::from_value::<AiEffortCapability>(value).unwrap(), capability);
     }
 }

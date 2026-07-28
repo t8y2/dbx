@@ -10,19 +10,23 @@ import DataGridExportMenu from "@/components/grid/DataGridExportMenu.vue";
 
 const { t } = useI18n();
 
-defineProps<{
-  selectionSummary: { cellCount: number; rowCount: number } | null;
-  selectionSummarySumText: string;
-  loading: boolean;
-  infiniteScrollEnabled: boolean;
-  infiniteScrollAllLoaded: boolean;
-  pageSize: number;
-  pageSizeMenuItems: LightDropdownItem[];
-  exportMenuItems: LightDropdownItem[];
-  currentPage: number;
-  canGoNextPage: boolean;
-  canJumpLastPage: boolean;
-}>();
+withDefaults(
+  defineProps<{
+    paginationEnabled?: boolean;
+    selectionSummary: { cellCount: number; rowCount: number } | null;
+    selectionSummarySumText: string;
+    loading: boolean;
+    infiniteScrollEnabled: boolean;
+    infiniteScrollAllLoaded: boolean;
+    pageSize: number;
+    pageSizeMenuItems: LightDropdownItem[];
+    exportMenuItems: LightDropdownItem[];
+    currentPage: number;
+    canGoNextPage: boolean;
+    canJumpLastPage: boolean;
+  }>(),
+  { paginationEnabled: true },
+);
 
 const customPageSizeInput = defineModel<string>("customPageSizeInput", { default: "" });
 
@@ -47,10 +51,10 @@ const emit = defineEmits<{
       </div>
     </div>
     <Loader2 v-if="loading" class="w-3 h-3 animate-spin text-muted-foreground" />
-    <template v-if="infiniteScrollEnabled">
+    <template v-if="paginationEnabled && infiniteScrollEnabled">
       <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">{{ t("grid.allLoaded") }}</span>
     </template>
-    <template v-if="!infiniteScrollEnabled">
+    <template v-if="paginationEnabled && !infiniteScrollEnabled">
       <LightDropdown
         :model-value="String(pageSize)"
         :items="pageSizeMenuItems"

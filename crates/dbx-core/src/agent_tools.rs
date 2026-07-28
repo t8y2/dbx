@@ -662,6 +662,7 @@ async fn execute_get_sample_data(
         id: tool_call.id.clone(),
         name: "execute_query".to_string(),
         arguments: serde_json::json!({ "sql": sql, "limit": limit }),
+        provider_payload: None,
     };
     execute_execute_query(&synthetic_call, state, connection_id, database, db_type, AgentSqlPermissions::default())
         .await

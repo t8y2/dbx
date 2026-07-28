@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec, AgentMethod, AgentRuntimeClient};
+use crate::db::agent_driver::{
+    validate_dameng_java_system_properties, AgentDriverClient, AgentLaunchSpec, AgentMethod, AgentRuntimeClient,
+};
 use crate::models::connection::DatabaseType;
 
 pub const DEFAULT_JRE_KEY: &str = "21";
@@ -668,6 +670,9 @@ impl AgentManager {
         jre_key: &str,
         extra_java_args: &[String],
     ) -> Result<AgentLaunchSpec, String> {
+        if driver_key == "dameng" {
+            validate_dameng_java_system_properties(extra_java_args)?;
+        }
         let driver_dir = self.driver_dir(driver_key);
         let config_path = self.driver_launch_config_path(driver_key);
         if config_path.exists() {

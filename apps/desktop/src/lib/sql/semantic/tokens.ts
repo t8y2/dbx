@@ -58,6 +58,12 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSema
       continue;
     }
 
+    if (ch === "#" && dialectId === "postgres") {
+      index += 1;
+      tokens.push(token("operator", ch, start, index, depth));
+      continue;
+    }
+
     if (ch === "/" && next === "*") {
       index += 2;
       while (index < input.length && !(input[index] === "*" && input[index + 1] === "/")) index += 1;
@@ -116,7 +122,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSema
 
     if (WORD_START.test(ch)) {
       index += 1;
-      while (index < input.length && WORD_PART.test(input[index] ?? "")) index += 1;
+      while (index < input.length && WORD_PART.test(input[index] ?? "") && !(dialectId === "postgres" && input[index] === "#")) index += 1;
       tokens.push(token("word", input.slice(start, index), start, index, depth));
       continue;
     }

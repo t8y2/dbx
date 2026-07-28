@@ -46,7 +46,7 @@ import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMon
 import { resolveSqlCompletionRoutineLookupTarget, resolveSqlCompletionTableLookupTarget } from "@/lib/sql/sqlCompletionLookupTarget";
 import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
 import { extractIdentifierDetailsAt, isSqlKeyword, matchTable, mergeSqlObjectNavigationType, splitQualifiedIdentifier, sqlObjectHoverDetail, sqlObjectNavigationTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
-import { buildHoverTableSql, quoteQualifiedName, reformatHoverDdl } from "@/lib/editor/hoverTableSql";
+import { buildHoverTableSql, hoverTableMatchesScope, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sql/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -416,6 +416,13 @@ const loadedColumnsByTable = new Set<string>();
 // Hover tooltip uses the shared table metadata cache (loadTableMetadata)
 // which provides TTL, invalidation, and in-flight deduplication.
 let hoverSqlHighlighter: SqlHighlighter | null = null;
+
+function sqlCompletionDialectOptions() {
+  return {
+    databaseType: props.databaseType,
+    dialect: props.syntaxDialect ?? props.dialect,
+  };
+}
 
 function usesOracleSessionCompletionColumns(schema?: string | null): boolean {
   return shouldUseOracleSessionCompletionColumns({
@@ -1811,10 +1818,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   let semanticModel: ReturnType<typeof buildSqlSemanticModel> | null = null;
   if (SEMANTIC_SQL_COMPLETION_ENABLED) {
     try {
-      semanticModel = buildSqlSemanticModel(sql, pos, {
-        databaseType: props.databaseType,
-        dialect: props.syntaxDialect ?? props.dialect,
-      });
+      semanticModel = buildSqlSemanticModel(sql, pos, sqlCompletionDialectOptions());
     } catch (error) {
       semanticModel = null;
       console.warn(`[DBX] Failed to build semantic model for hover tooltip:`, error);
@@ -1825,42 +1829,41 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   const tableLookupName = semanticTarget && !semanticQualifierIsRowSource ? semanticTarget.name : name;
   const qualifiedTableLookup = semanticTarget?.schema ? `${semanticTarget.schema}.${semanticTarget.name}` : identifier;
 
-  // Resolve the database/schema for cross-database qualified references early,
-  // so all table lookups (including the initial listCompletionTables call) use
-  // the correct target instead of always searching props.database.
-  const resolvedLookupDatabase = (semanticTarget?.database || props.database) as string;
-  const resolvedLookupSchema = (semanticTarget?.schema || props.schema) as string | undefined;
+  const hoverTarget = completionMetadataTarget({
+    name: tableLookupName,
+    catalog: props.catalog,
+    database: semanticTarget?.database,
+    schema: semanticTarget?.schema,
+  });
+  if (!hoverTarget) return null;
+  const hoverScope: HoverTableScope = {
+    catalog: hoverTarget.catalog,
+    database: hoverTarget.database,
+    schema: hoverTarget.schema,
+  };
 
   try {
-    let hoverTables: SqlCompletionTable[] = [];
-    if (cachedTables.length === 0) {
-      hoverTables = usesLocalOnlyCompletionMetadata()
-        ? connectionStore.lookupLocalCompletionTables(props.connectionId, resolvedLookupDatabase, tableLookupName, MAX_COMPLETION_TABLES, resolvedLookupSchema, props.catalog)
-        : await connectionStore.listCompletionTables(props.connectionId, resolvedLookupDatabase, tableLookupName, MAX_COMPLETION_TABLES, resolvedLookupSchema, false, resolvedLookupSchema, props.catalog);
-      // Share the result with the completion feature only when looking up the
-      // current tab's database, to avoid polluting completion with tables from
-      // a different database on cross-database qualified references.
-      if (resolvedLookupDatabase === props.database) {
-        cachedTables = hoverTables;
-      }
-    } else {
-      hoverTables = cachedTables;
+    let hoverTables = cachedTables.filter((table) => hoverTableMatchesScope(table, hoverScope));
+    if (hoverTables.length === 0) {
+      const loadedTables = usesLocalOnlyCompletionMetadata()
+        ? connectionStore.lookupLocalCompletionTables(props.connectionId, hoverScope.database, tableLookupName, MAX_COMPLETION_TABLES, hoverScope.schema, hoverScope.catalog)
+        : await connectionStore.listCompletionTables(props.connectionId, hoverScope.database, tableLookupName, MAX_COMPLETION_TABLES, hoverScope.schema, false, hoverScope.schema, hoverScope.catalog);
+      hoverTables = scopeHoverTables(loadedTables, hoverScope);
+      cachedTables = mergeCompletionTables(cachedTables, hoverTables);
     }
 
     let table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     if (!table && !usesLocalOnlyCompletionMetadata()) {
-      const remoteHoverTables = await connectionStore.listCompletionTables(props.connectionId, resolvedLookupDatabase, tableLookupName, MAX_COMPLETION_TABLES, resolvedLookupSchema, false, resolvedLookupSchema, props.catalog);
+      const loadedTables = await connectionStore.listCompletionTables(props.connectionId, hoverScope.database, tableLookupName, MAX_COMPLETION_TABLES, hoverScope.schema, false, hoverScope.schema, hoverScope.catalog);
+      const remoteHoverTables = scopeHoverTables(loadedTables, hoverScope);
       hoverTables = mergeCompletionTables(hoverTables, remoteHoverTables);
-      // Only share with completion cache when looking up the current tab's database.
-      if (resolvedLookupDatabase === props.database) {
-        cachedTables = hoverTables;
-      }
+      cachedTables = mergeCompletionTables(cachedTables, remoteHoverTables);
       table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     }
     if (table && !semanticQualifierIsRowSource && (!qualifier || table.schema?.toLowerCase() === qualifier.toLowerCase() || table.name === name)) {
-      const hoverDatabase: string = resolvedLookupDatabase;
-      const hoverSchema = resolvedLookupSchema ?? table.schema ?? "";
-      const hoverQualifiedName = [hoverDatabase, hoverSchema, table.name].filter(Boolean).join(".");
+      const hoverDatabase = hoverScope.database;
+      const hoverSchema = hoverScope.schema ?? table.schema ?? "";
+      const hoverQualifiedName = [hoverScope.catalog, hoverDatabase, hoverSchema, table.name].filter(Boolean).join(".");
       let sqlContent: string | undefined;
       let metadataLoadFailed = false;
 
@@ -1869,7 +1872,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       // fields and rebuild with vertical field alignment (name, type, extra,
       // default, nullable, comment), stripping charset/COLLATE noise.
       try {
-        const rawDdl = await api.getTableDdl(props.connectionId, hoverDatabase, hoverSchema, table.name, undefined, props.catalog);
+        const rawDdl = await api.getTableDdl(props.connectionId, hoverDatabase, hoverSchema, table.name, undefined, hoverScope.catalog);
         if (rawDdl && rawDdl.trim()) {
           sqlContent = reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
         }
@@ -1890,6 +1893,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
             schema: hoverSchema,
             tableName: table.name,
             databaseType: props.databaseType ?? "",
+            catalog: hoverScope.catalog,
           });
           fullColumns = result.metadata.columns;
           fullIndexes = result.metadata.indexes;
@@ -1899,7 +1903,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
         }
         if (!metadataLoadFailed) {
           try {
-            const commentResult = await api.getTableComment(props.connectionId, hoverDatabase, hoverSchema, table.name);
+            const commentResult = await api.getTableComment(props.connectionId, hoverDatabase, hoverSchema, table.name, hoverScope.catalog);
             if (commentResult) tableComment = commentResult;
           } catch (error) {
             console.warn(`[DBX] Failed to load table comment for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
@@ -1923,7 +1927,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       };
     }
 
-    const legacyContext = getSqlCompletionContext(sql, pos);
+    const legacyContext = getSqlCompletionContext(sql, pos, sqlCompletionDialectOptions());
     const context = semanticModel ? sqlCompletionContextFromSemantic(semanticModel, legacyContext) : legacyContext;
     const candidates = qualifier ? context.referencedTables.filter((rt) => rt.alias?.toLowerCase() === qualifier.toLowerCase() || rt.name.toLowerCase() === qualifier.toLowerCase()) : context.referencedTables;
 
@@ -2618,7 +2622,7 @@ async function provideSqlCompletions(context: CompletionContext) {
     return provideMongoCompletions(currentState, position, explicit);
   }
   if (props.databaseType === "elasticsearch") {
-    if (!isSqlLikeCompletionStatement(fullDoc, position)) {
+    if (!isSqlLikeCompletionStatement(fullDoc, position, sqlCompletionDialectOptions())) {
       return provideElasticsearchCompletions(currentState, position, explicit);
     }
   }
@@ -2631,15 +2635,10 @@ async function provideSqlCompletions(context: CompletionContext) {
 
   try {
     if (isSqlCompletionSuppressedContext(fullDoc, position)) return null;
-    if (!explicit && !shouldAutoOpenSqlCompletion(fullDoc, position)) return null;
+    if (!explicit && !shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions())) return null;
 
-    const legacyCompletionContext = getSqlCompletionContext(fullDoc, position);
-    const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED
-      ? buildSqlSemanticModel(fullDoc, position, {
-          databaseType: props.databaseType,
-          dialect: props.syntaxDialect ?? props.dialect,
-        })
-      : null;
+    const legacyCompletionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+    const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED ? buildSqlSemanticModel(fullDoc, position, sqlCompletionDialectOptions()) : null;
     const completionContext = semanticModel ? sqlCompletionContextFromSemantic(semanticModel, legacyCompletionContext) : legacyCompletionContext;
 
     if (!hasDatabase) {
@@ -2749,7 +2748,7 @@ function flushImeComposition() {
   emit("cursorChange", currentView.state.selection.main.head);
   latestSelection = readEditorSelection(currentView);
   if (editorIsActive) emitEditorSelection(latestSelection);
-  if (shouldAutoOpenSqlCompletion(currentView.state.doc.toString(), currentView.state.selection.main.head)) {
+  if (shouldAutoOpenSqlCompletion(currentView.state.doc.toString(), currentView.state.selection.main.head, sqlCompletionDialectOptions())) {
     scheduleSqlCompletionStart(currentView);
   }
 }
@@ -2758,20 +2757,20 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: s
   const position = currentView.state.selection.main.head;
   const fullDoc = currentView.state.doc.toString();
   if (!insertedText && removedText) {
-    const completionContext = getSqlCompletionContext(fullDoc, position);
-    return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position);
+    const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+    return isTableNameCompletionContext(completionContext) && shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
   }
   if (insertedText.endsWith(".")) return true;
   if (/[,(]$/.test(insertedText)) {
-    const completionContext = getSqlCompletionContext(fullDoc, position);
+    const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
     return !!completionContext.insertTable;
   }
   if (/\s$/.test(insertedText)) {
-    return shouldAutoOpenSqlCompletion(fullDoc, position);
+    return shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
   }
   if (!/[\w$@]$/.test(insertedText)) return false;
-  const completionContext = getSqlCompletionContext(fullDoc, position);
-  return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position);
+  const completionContext = getSqlCompletionContext(fullDoc, position, sqlCompletionDialectOptions());
+  return isTableNameCompletionContext(completionContext) || shouldAutoOpenSqlCompletion(fullDoc, position, sqlCompletionDialectOptions());
 }
 
 function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number) {
@@ -3299,9 +3298,9 @@ function isTableNameCompletionContext(completionContext: ReturnType<typeof getSq
 
 function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]) {
   const merged = [...existing];
-  const indexes = new Map(existing.map((object, index) => [`${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}`.toLowerCase(), index]));
+  const indexes = new Map(existing.map((object, index) => [completionObjectIdentityKey(object), index]));
   for (const object of incoming) {
-    const key = `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}`.toLowerCase();
+    const key = completionObjectIdentityKey(object);
     const index = indexes.get(key);
     if (index == null) {
       indexes.set(key, merged.length);
@@ -3311,6 +3310,10 @@ function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCo
     }
   }
   return merged;
+}
+
+function completionObjectIdentityKey(object: SqlCompletionObject): string {
+  return `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}:${object.signature?.trim() ?? ""}`.toLowerCase();
 }
 
 function completionObjectsDiffer(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]): boolean {
@@ -3367,7 +3370,7 @@ onMounted(async () => {
   })();
 
   const [
-    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, closeHoverTooltips, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
+    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, closeHoverTooltips, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, scrollPastEnd, ViewPlugin },
     { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },

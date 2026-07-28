@@ -2,6 +2,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use dbx_core::sql::decode_sql_file_bytes;
+use serde::Serialize;
+use tokio::io::AsyncReadExt;
+
+const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn exceeds_external_sql_editor_limit(size_bytes: u64) -> bool {
+    size_bytes > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ExternalSqlFileReadResult {
+    Content { content: String },
+    TooLarge { size_bytes: u64, max_size_bytes: u64 },
+}
 use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
@@ -13,7 +28,7 @@ pub fn pending_open_sql_files(state: tauri::State<'_, ExternalSqlOpenState>) -> 
 }
 
 #[tauri::command]
-pub async fn read_external_sql_file(path: String) -> Result<String, String> {
+pub async fn read_external_sql_file(path: String) -> Result<ExternalSqlFileReadResult, String> {
     read_external_sql_file_content_async(PathBuf::from(path)).await
 }
 
@@ -90,20 +105,45 @@ pub fn is_sql_file_path(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-fn read_external_sql_file_content(path: &Path) -> Result<String, String> {
+fn read_external_sql_file_content(path: &Path) -> Result<ExternalSqlFileReadResult, String> {
     if !is_sql_file_path(path) {
         return Err("Only .sql files can be opened this way".to_string());
     }
+    let metadata = std::fs::metadata(path).map_err(|e| format!("Failed to inspect SQL file: {e}"))?;
+    if exceeds_external_sql_editor_limit(metadata.len()) {
+        return Ok(ExternalSqlFileReadResult::TooLarge {
+            size_bytes: metadata.len(),
+            max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
+        });
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("Failed to read SQL file: {e}"))?;
-    decode_sql_file_bytes(&bytes)
+    decode_sql_file_bytes(&bytes).map(|content| ExternalSqlFileReadResult::Content { content })
 }
 
-async fn read_external_sql_file_content_async(path: PathBuf) -> Result<String, String> {
+async fn read_external_sql_file_content_async(path: PathBuf) -> Result<ExternalSqlFileReadResult, String> {
     if !is_sql_file_path(&path) {
         return Err("Only .sql files can be opened this way".to_string());
     }
-    let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Failed to read SQL file: {e}"))?;
-    decode_sql_file_bytes(&bytes)
+    let file = tokio::fs::File::open(&path).await.map_err(|e| format!("Failed to read SQL file: {e}"))?;
+    let metadata = file.metadata().await.map_err(|e| format!("Failed to inspect SQL file: {e}"))?;
+    if exceeds_external_sql_editor_limit(metadata.len()) {
+        return Ok(ExternalSqlFileReadResult::TooLarge {
+            size_bytes: metadata.len(),
+            max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
+        });
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("Failed to read SQL file: {e}"))?;
+    if exceeds_external_sql_editor_limit(bytes.len() as u64) {
+        return Ok(ExternalSqlFileReadResult::TooLarge {
+            size_bytes: bytes.len() as u64,
+            max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
+        });
+    }
+    decode_sql_file_bytes(&bytes).map(|content| ExternalSqlFileReadResult::Content { content })
 }
 
 #[cfg(test)]
@@ -186,7 +226,7 @@ mod tests {
         let result = read_external_sql_file_content(&path);
 
         let _ = std::fs::remove_file(&path);
-        assert_eq!(result.unwrap(), "select 1;");
+        assert_eq!(result.unwrap(), ExternalSqlFileReadResult::Content { content: "select 1;".to_string() });
     }
 
     #[test]
@@ -197,7 +237,7 @@ mod tests {
         let result = read_external_sql_file_content(&path);
 
         let _ = std::fs::remove_file(&path);
-        assert_eq!(result.unwrap(), "select '中文';");
+        assert_eq!(result.unwrap(), ExternalSqlFileReadResult::Content { content: "select '中文';".to_string() });
     }
 
     #[test]
@@ -209,6 +249,60 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         assert!(result.unwrap_err().contains(".sql"));
+    }
+
+    #[test]
+    fn external_sql_editor_limit_is_inclusive() {
+        assert!(!exceeds_external_sql_editor_limit(MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES));
+        assert!(exceeds_external_sql_editor_limit(MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1));
+    }
+
+    #[test]
+    fn rejects_oversized_external_sql_before_reading_content() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+        let file = std::fs::File::create(&path).unwrap();
+        let file_size = MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1;
+        file.set_len(file_size).unwrap();
+
+        let result = read_external_sql_file_content(&path);
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            result.unwrap(),
+            ExternalSqlFileReadResult::TooLarge {
+                size_bytes: file_size,
+                max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_external_sql_in_async_command_path() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+        let file = std::fs::File::create(&path).unwrap();
+        let file_size = MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1;
+        file.set_len(file_size).unwrap();
+
+        let result = read_external_sql_file_content_async(path.clone()).await;
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            result.unwrap(),
+            ExternalSqlFileReadResult::TooLarge {
+                size_bytes: file_size,
+                max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn serializes_external_sql_file_limit_for_frontend() {
+        let result = ExternalSqlFileReadResult::TooLarge { size_bytes: 100, max_size_bytes: 64 };
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({ "kind": "tooLarge", "sizeBytes": 100, "maxSizeBytes": 64 })
+        );
     }
 
     #[test]

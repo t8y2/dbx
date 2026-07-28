@@ -1764,6 +1764,8 @@ impl AppState {
                         &probe_id,
                         &ssh.host,
                         ssh.port,
+                        &ssh.host,
+                        ssh.port,
                         &ssh.user,
                         &ssh.password,
                         &ssh.key_path,

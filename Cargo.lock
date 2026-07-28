@@ -4755,7 +4755,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.37.0"
-source = "git+https://github.com/t8y2/mysql_async.git?rev=5c1186d05e62f712e717632a5b66dd030466e9b3#5c1186d05e62f712e717632a5b66dd030466e9b3"
+source = "git+https://github.com/t8y2/mysql_async.git?rev=2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec#2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec"
 dependencies = [
  "bytes",
  "crossbeam-queue",

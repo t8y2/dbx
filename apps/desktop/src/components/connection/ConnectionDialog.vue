@@ -40,6 +40,7 @@ import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedV
 import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
 import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
@@ -532,6 +533,7 @@ const hiveKrb5ConfPath = ref("");
 const hiveJaasConfigPath = ref("");
 const hiveUseSubjectCredsOnlyFalse = ref(false);
 const hiveExtraJavaOptions = ref("");
+const damengJvmOptions = ref("");
 const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
@@ -1178,6 +1180,10 @@ function resetHiveKerberosFields(config?: Pick<ConnectionConfig, "url_params" | 
   hiveJaasConfigPath.value = kerberos.jaasConfigPath;
   hiveUseSubjectCredsOnlyFalse.value = kerberos.useSubjectCredsOnlyFalse;
   hiveExtraJavaOptions.value = kerberos.extraJavaOptions;
+}
+
+function resetDamengJvmOptions(config?: Pick<ConnectionConfig, "agent_java_options">) {
+  damengJvmOptions.value = damengJvmSystemPropertiesText(config?.agent_java_options);
 }
 
 function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
@@ -1850,6 +1856,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     form.value.username = profile.user;
     form.value.url_params = profile.urlParams || "";
     form.value.agent_java_options = [];
+    damengJvmOptions.value = "";
     if (profile.host) {
       form.value.host = profile.host;
     }
@@ -2013,6 +2020,7 @@ watch(
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
       resetHiveKerberosFields(config.db_type === "hive" ? config : undefined);
+      resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
       selectedTransportLayerId.value = form.value.transport_layers?.[0]?.id || null;
@@ -2050,6 +2058,7 @@ watch(
       resetInfluxDbFields();
       resetElasticsearchProxyFields();
       resetHiveKerberosFields();
+      resetDamengJvmOptions();
       oceanbaseSubMode.value = "mysql";
       h2ConnectionMode.value = "file";
       dremioConnectionMode.value = "legacy";
@@ -3137,6 +3146,15 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     });
     config.url_params = hiveKerberos.urlParams;
     config.agent_java_options = hiveKerberos.agentJavaOptions;
+  } else if (config.db_type === "dameng") {
+    try {
+      config.agent_java_options = parseDamengJvmSystemProperties(damengJvmOptions.value);
+    } catch (error) {
+      if (error instanceof DamengJvmSystemPropertyError) {
+        throw new Error(t("connection.damengJvmOptionsInvalid", { line: error.lineNumber }));
+      }
+      throw error;
+    }
   } else if (!(config.db_type === "jdbc" && config.driver_profile === JDBCX_DRIVER_PROFILE)) {
     config.agent_java_options = undefined;
   }
@@ -6076,6 +6094,20 @@ function openExternalUrl(url: string) {
                       />
                       <p v-if="form.db_type === 'mysql' || form.db_type === 'doris' || form.db_type === 'starrocks'" class="text-xs leading-5 text-muted-foreground">
                         {{ t("connection.localInfilePathHint") }}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div v-if="form.db_type === 'dameng'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.damengJvmOptions") }}</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <textarea
+                        v-model="damengJvmOptions"
+                        class="min-h-16 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        :placeholder="t('connection.damengJvmOptionsPlaceholder')"
+                      />
+                      <p class="text-xs leading-5 text-muted-foreground">
+                        {{ t("connection.damengJvmOptionsHint") }}
                       </p>
                     </div>
                   </div>

@@ -1,5 +1,33 @@
 import type { ColumnInfo, IndexInfo } from "@/types/database";
+import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { isSqlKeyword } from "@/lib/sql/sqlNavigation";
+
+export interface HoverTableScope {
+  catalog?: string;
+  database: string;
+  schema?: string;
+}
+
+function normalizedScopePart(value: string | null | undefined): string | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized || undefined;
+}
+
+export function scopeHoverTables(tables: SqlCompletionTable[], scope: HoverTableScope): SqlCompletionTable[] {
+  return tables.map((table) => ({
+    ...table,
+    catalog: table.catalog ?? scope.catalog,
+    database: table.database ?? scope.database,
+    schema: table.schema ?? scope.schema,
+  }));
+}
+
+export function hoverTableMatchesScope(table: SqlCompletionTable, scope: HoverTableScope): boolean {
+  if (normalizedScopePart(table.database) !== normalizedScopePart(scope.database)) return false;
+  if (normalizedScopePart(scope.catalog) && normalizedScopePart(table.catalog) !== normalizedScopePart(scope.catalog)) return false;
+  if (normalizedScopePart(scope.schema) && normalizedScopePart(table.schema) !== normalizedScopePart(scope.schema)) return false;
+  return true;
+}
 
 /**
  * Format a column's data type for display in the hover DDL.
@@ -602,11 +630,27 @@ export function reformatHoverDdl(rawDdl: string, qualifiedName?: string): string
   const statements = splitTopLevel(sanitized, ";")
     .map((s) => s.trim())
     .filter(Boolean);
+  // Companion statements can carry database-specific semantics that this
+  // lightweight formatter cannot reproduce losslessly (for example Postgres
+  // USING / INCLUDE / WHERE index clauses). Keep the sanitized backend DDL.
+  if (statements.length !== 1) return sanitized;
   const createIdx = statements.findIndex((s) => /^\s*create\s+(?:or\s+replace\s+)?(?:global\s+|local\s+|temporary\s+|temp\s+|unlogged\s+|external\s+)*table\b/i.test(s));
   if (createIdx === -1) return sanitized;
 
   const parsed = parseCreateTableStatement(statements[createIdx]);
   if (!parsed || parsed.columns.length === 0) return sanitized;
+
+  // Table suffixes such as PARTITION BY, DISTRIBUTED BY, ENGINE, TABLESPACE,
+  // and storage options are backend-specific. Rebuilding them partially would
+  // silently remove structure, so only reformat a CREATE TABLE whose suffix is
+  // empty or consists solely of a table COMMENT that the parser preserves.
+  const createStatement = statements[createIdx];
+  const header = /^\s*create\s+(?:or\s+replace\s+)?(?:global\s+|local\s+|temporary\s+|temp\s+|unlogged\s+|external\s+)*table\s+(?:if\s+not\s+exists\s+)?/i.exec(createStatement);
+  const rest = header ? createStatement.slice(header[0].length) : "";
+  const bodyToken = tokenizeDdl(rest).find((token) => token.text.startsWith("("));
+  const suffix = bodyToken ? rest.slice(bodyToken.end).trim() : "";
+  const suffixWithoutComment = suffix.replace(/^comment\s*=?\s*('(?:\\'|''|[^'])*')\s*$/i, "").trim();
+  if (suffixWithoutComment) return sanitized;
 
   const passthrough: string[] = [];
   for (let i = 0; i < statements.length; i++) {

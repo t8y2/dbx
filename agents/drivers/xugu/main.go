@@ -40,6 +40,11 @@ const xuguCatalogTableNameSelectSQL = `
 SELECT s.SCHEMA_NAME, t.TABLE_NAME
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID`
+const xuguCatalogSequenceNameSelectSQL = `
+SELECT s.SCHEMA_NAME, q.SEQ_NAME
+FROM ALL_SEQUENCES q
+JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
+WHERE q.IS_SYS = FALSE`
 const xuguPrimaryKeyColumnsSQL = `
 SELECT c.DEFINE
 FROM ALL_CONSTRAINTS c
@@ -409,6 +414,21 @@ type xuguIdentityInfo struct {
 	Start           int64
 	Step            int64
 	SystemGenerated bool
+}
+
+// xuguSequenceMetadata contains the ALL_SEQUENCES fields needed to reproduce
+// a user-managed sequence. IS_ORDER and VALID are runtime/catalog state and
+// do not have CREATE SEQUENCE clauses, so they are intentionally omitted.
+type xuguSequenceMetadata struct {
+	Schema  string
+	Name    string
+	Current any
+	Minimum any
+	Maximum any
+	Step    any
+	Cache   any
+	Cycle   any
+	Comment any
 }
 
 // xuguIndexKey preserves the catalog spelling and SQL semantics of an index
@@ -1617,6 +1637,7 @@ SELECT q.SEQ_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, NULL AS COMMENTS, N
 FROM ALL_SEQUENCES q
 JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND q.IS_SYS = FALSE
 UNION ALL
 SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID
 FROM ALL_TYPES u
@@ -2002,6 +2023,9 @@ func (s *server) listSubpartitions(schema, table string) ([]subpartitionInfo, er
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
+	if strings.EqualFold(strings.TrimSpace(objectType), "SEQUENCE") {
+		return s.getSequenceSource(schema, name)
+	}
 	var err error
 	schema, err = s.normalizeSchema(schema)
 	if err != nil {
@@ -2031,6 +2055,186 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		result["editable"] = false
 	}
 	return result, rows.Err()
+}
+
+// getSequenceSource reconstructs sequence DDL from ALL_SEQUENCES. Unlike
+// programmable objects, sequences have no stored DEFINE text. Reconstructing
+// the statement avoids DBMS_METADATA permissions and matches the approach used
+// by the Xugu DBeaver extension.
+func (s *server) getSequenceSource(schema, name string) (map[string]any, error) {
+	catalogSchema, catalogName, err := s.resolveCatalogSequenceName(schema, name)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.queryRows(xuguSequenceMetadataQuery(catalogSchema, catalogName), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+
+	result := map[string]any{"name": catalogName, "object_type": "SEQUENCE", "schema": catalogSchema, "source": "", "editable": false}
+	if !rows.Next() {
+		return result, rows.Err()
+	}
+	var sequence xuguSequenceMetadata
+	if err := rows.Scan(
+		&sequence.Schema, &sequence.Name,
+		&sequence.Current, &sequence.Minimum, &sequence.Maximum, &sequence.Step,
+		&sequence.Cache, &sequence.Cycle, &sequence.Comment,
+	); err != nil {
+		return nil, err
+	}
+	result["name"] = sequence.Name
+	result["schema"] = sequence.Schema
+	result["source"] = renderXuguSequenceDDL(sequence)
+	return result, rows.Err()
+}
+
+// resolveCatalogSequenceName follows the same exact-case-first policy used by
+// table DDL export. A case-insensitive lookup is only safe when it resolves to
+// one catalog object; selecting the first row would export a different quoted
+// sequence when catalog objects differ only by case.
+func (s *server) resolveCatalogSequenceName(schema, name string) (string, string, error) {
+	schema = strings.TrimSpace(schema)
+	name = strings.TrimSpace(name)
+	if schema == "" {
+		current, err := s.currentSchema()
+		if err != nil {
+			return "", "", err
+		}
+		schema = current
+	}
+	if name == "" {
+		return "", "", errors.New("sequence name is required")
+	}
+	candidates, err := s.catalogSequenceNameCandidates(xuguCatalogSequenceNameQuery(schema, name, false))
+	if err != nil {
+		return "", "", err
+	}
+	if len(candidates) > 0 {
+		return selectXuguCatalogSequenceName(schema, name, candidates)
+	}
+
+	candidates, err = s.catalogSequenceNameCandidates(xuguCatalogSequenceNameQuery(schema, name, true))
+	if err != nil {
+		return "", "", err
+	}
+	return selectXuguCatalogSequenceName(schema, name, candidates)
+}
+
+func xuguSequenceMetadataQuery(schema, name string) string {
+	return `
+SELECT s.SCHEMA_NAME, q.SEQ_NAME,
+       q.CURR_VAL, q.MIN_VAL, q.MAX_VAL, q.STEP_VAL,
+       q.CACHE_VAL, q.IS_CYCLE, q.COMMENTS
+FROM ALL_SEQUENCES q
+JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
+WHERE s.SCHEMA_NAME = ` + quoteStringLiteral(schema) + `
+  AND q.SEQ_NAME = ` + quoteStringLiteral(name) + `
+  AND q.IS_SYS = FALSE`
+}
+
+type xuguCatalogSequenceName struct {
+	Schema string
+	Name   string
+}
+
+func xuguCatalogSequenceNameQuery(schema, name string, caseInsensitive bool) string {
+	schemaExpr := quoteStringLiteral(schema)
+	nameExpr := quoteStringLiteral(name)
+	if caseInsensitive {
+		schemaExpr = quoteStringLiteral(strings.ToUpper(schema))
+		nameExpr = quoteStringLiteral(strings.ToUpper(name))
+		return xuguCatalogSequenceNameSelectSQL + "\n  AND UPPER(s.SCHEMA_NAME) = " + schemaExpr +
+			"\n  AND UPPER(q.SEQ_NAME) = " + nameExpr
+	}
+	return xuguCatalogSequenceNameSelectSQL + "\n  AND s.SCHEMA_NAME = " + schemaExpr +
+		"\n  AND q.SEQ_NAME = " + nameExpr
+}
+
+func (s *server) catalogSequenceNameCandidates(query string) ([]xuguCatalogSequenceName, error) {
+	rows, err := s.queryRows(strings.TrimSpace(query), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var candidates []xuguCatalogSequenceName
+	for rows.Next() {
+		var candidate xuguCatalogSequenceName
+		if err := rows.Scan(&candidate.Schema, &candidate.Name); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+func selectXuguCatalogSequenceName(schema, name string, candidates []xuguCatalogSequenceName) (string, string, error) {
+	for _, candidate := range candidates {
+		if candidate.Schema == schema && candidate.Name == name {
+			return candidate.Schema, candidate.Name, nil
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0].Schema, candidates[0].Name, nil
+	}
+	if len(candidates) == 0 {
+		return "", "", fmt.Errorf("sequence not found: %s.%s", schema, name)
+	}
+	return "", "", fmt.Errorf("sequence name is ambiguous: %s.%s; specify the catalog's exact case", schema, name)
+}
+
+func renderXuguSequenceDDL(sequence xuguSequenceMetadata) string {
+	var builder strings.Builder
+	builder.WriteString("CREATE SEQUENCE ")
+	builder.WriteString(quoteIdentifier(sequence.Schema))
+	builder.WriteByte('.')
+	builder.WriteString(quoteIdentifier(sequence.Name))
+
+	if value := xuguSequenceNumber(sequence.Step); value != "" {
+		builder.WriteString("\n  INCREMENT BY ")
+		builder.WriteString(value)
+	}
+	if value := xuguSequenceNumber(sequence.Current); value != "" {
+		builder.WriteString("\n  START WITH ")
+		builder.WriteString(value)
+	}
+	if value := xuguSequenceNumber(sequence.Minimum); value != "" {
+		builder.WriteString("\n  MINVALUE ")
+		builder.WriteString(value)
+	} else {
+		builder.WriteString("\n  NOMINVALUE")
+	}
+	if value := xuguSequenceNumber(sequence.Maximum); value != "" {
+		builder.WriteString("\n  MAXVALUE ")
+		builder.WriteString(value)
+	} else {
+		builder.WriteString("\n  NOMAXVALUE")
+	}
+	if value := xuguSequenceNumber(sequence.Cache); value != "" && xuguInt(sequence.Cache) > 1 {
+		builder.WriteString("\n  CACHE ")
+		builder.WriteString(value)
+	} else {
+		builder.WriteString("\n  NOCACHE")
+	}
+	if truthy(sequence.Cycle) {
+		builder.WriteString("\n  CYCLE")
+	} else {
+		builder.WriteString("\n  NOCYCLE")
+	}
+	if comment := strings.TrimSpace(xuguString(sequence.Comment)); comment != "" {
+		builder.WriteString("\n  COMMENT ")
+		builder.WriteString(quoteStringLiteral(comment))
+	}
+	builder.WriteString(";")
+	return builder.String()
+}
+
+func xuguSequenceNumber(value any) string {
+	return strings.TrimSpace(xuguString(value))
 }
 
 func (s *server) getTableDDL(schema, table string) (string, error) {

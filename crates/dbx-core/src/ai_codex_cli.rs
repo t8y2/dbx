@@ -1,5 +1,5 @@
 use crate::agent_events::AgentEvent;
-use crate::ai::{AiConfig, AiModelInfo, AiTestConnectionResult};
+use crate::ai::{AiCapabilitySource, AiConfig, AiModelInfo, AiTestConnectionResult};
 use crate::ai_cli_agent::{
     append_config_overrides, build_cli_agent_prompt, cli_command, dbx_mcp_enabled_tools, dbx_mcp_scope_env,
     model_infos, parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec,
@@ -417,8 +417,12 @@ pub fn build_codex_exec_command(config: &AiConfig, _prompt: &str, options: &Code
         "read-only".to_string(),
     ];
     let mut config_overrides = vec!["features.shell_tool=false".to_string(), "web_search=\"disabled\"".to_string()];
-    if let Some(reasoning_effort) = config.reasoning_level.as_codex_effort() {
-        config_overrides.push(format!("model_reasoning_effort={}", toml_string(reasoning_effort)));
+    let reasoning_effort = match config.runtime_effort.as_ref() {
+        Some(effort) => effort.cli_value(),
+        None => config.reasoning_level.as_codex_effort().map(ToString::to_string),
+    };
+    if let Some(reasoning_effort) = reasoning_effort {
+        config_overrides.push(format!("model_reasoning_effort={}", toml_string(&reasoning_effort)));
     }
     append_config_overrides(&mut args, config_overrides.into_iter().chain(codex_mcp_config_overrides(options)));
 
@@ -483,7 +487,21 @@ fn parse_codex_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(ToString::to_string);
-        result.push(AiModelInfo::new(id, display_name));
+        let mut info = AiModelInfo::new(id, display_name);
+        let levels = model
+            .get("supported_reasoning_levels")
+            .or_else(|| model.get("supportedReasoningLevels"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|level| {
+                level
+                    .as_str()
+                    .or_else(|| level.get("effort").and_then(Value::as_str))
+                    .or_else(|| level.get("value").and_then(Value::as_str))
+            });
+        info.effort_capability = crate::ai_effort::dynamic_enum_capability(levels, AiCapabilitySource::LocalCli);
+        result.push(info);
     }
 
     (result.len() > 1).then_some(result)
@@ -596,7 +614,7 @@ mod tests {
         windows_npm_codex_shim_command,
     };
     use crate::agent_events::AgentEvent;
-    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
+    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiEffortSelection, AiProvider, AiReasoningLevel};
     use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
 
     fn codex_config(model: &str) -> AiConfig {
@@ -612,6 +630,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            runtime_effort: None,
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
@@ -685,6 +704,21 @@ mod tests {
 
         assert!(!spec.args.contains(&"--reasoning-effort".to_string()));
         assert!(spec.args.contains(&"model_reasoning_effort=\"high\"".to_string()));
+    }
+
+    #[test]
+    fn runtime_effort_takes_priority_over_legacy_reasoning_level() {
+        let mut config = codex_config("default");
+        config.reasoning_level = AiReasoningLevel::High;
+        config.runtime_effort = Some(AiEffortSelection::ProviderDefault);
+
+        let spec = build_codex_exec_command(&config, "hello", &run_options());
+
+        assert!(!spec.args.iter().any(|arg| arg.starts_with("model_reasoning_effort=")));
+
+        config.runtime_effort = Some(AiEffortSelection::Enum("xhigh".to_string()));
+        let spec = build_codex_exec_command(&config, "hello", &run_options());
+        assert!(spec.args.contains(&"model_reasoning_effort=\"xhigh\"".to_string()));
     }
 
     #[test]

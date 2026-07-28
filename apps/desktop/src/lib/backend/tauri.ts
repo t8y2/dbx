@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -47,7 +48,7 @@ import type {
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
-import type { AiConfig, AiConfigItem, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
+import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -358,6 +359,7 @@ export interface AiModelInfo {
   id: string;
   displayName?: string;
   supportedEffortLevels?: AiEffortLevel[];
+  effortCapability?: AiEffortCapability;
 }
 
 export async function aiComplete(request: AiCompletionRequest): Promise<string> {
@@ -443,6 +445,18 @@ export async function aiTestConnection(config: AiConfig): Promise<AiTestConnecti
 
 export async function aiListModels(config: AiConfig): Promise<AiModelInfo[]> {
   return invoke("ai_list_models", { config });
+}
+
+export async function aiResolveModelEffort(config: AiConfig, modelId: string): Promise<AiEffortCapability> {
+  return invoke("ai_resolve_model_effort", { config, modelId });
+}
+
+export async function saveAiChatSelection(selection: AiChatSelectionState): Promise<void> {
+  return invoke("save_ai_chat_selection", { selection });
+}
+
+export async function loadAiChatSelection(): Promise<AiChatSelectionState | null> {
+  return invoke("load_ai_chat_selection");
 }
 
 export async function aiCancelStream(sessionId: string): Promise<boolean> {
@@ -657,7 +671,11 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
 }
 
 export async function readExternalSqlFile(path: string): Promise<string> {
-  return invoke("read_external_sql_file", { path });
+  const result = await invoke<{ kind: "content"; content: string } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
+  if (result.kind === "tooLarge") {
+    throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
+  }
+  return result.content;
 }
 
 export async function writeExternalSqlFile(path: string, content: string): Promise<void> {
@@ -919,6 +937,42 @@ export async function executeMulti(
   },
 ): Promise<QueryResult[]> {
   return invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...options });
+}
+
+export interface ExecuteMultiProgress {
+  executionId: string;
+  completed: number;
+  total: number;
+  success: boolean;
+}
+
+export async function executeMultiWithProgress(
+  connectionId: string,
+  database: string,
+  sql: string,
+  onProgress: (progress: ExecuteMultiProgress) => void,
+  schema?: string,
+  options?: {
+    maxRows?: number;
+    fetchSize?: number;
+    pageSize?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    useTransaction?: boolean;
+    continueOnError?: boolean;
+    executionMode?: "simple";
+  },
+): Promise<QueryResult[]> {
+  const executionId = crypto.randomUUID();
+  const unlisten = await listen<ExecuteMultiProgress>("query-batch-progress", (event) => {
+    if (event.payload.executionId === executionId) onProgress(event.payload);
+  });
+  try {
+    return await invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...options });
+  } finally {
+    unlisten();
+  }
 }
 
 export async function refreshConnections(): Promise<void> {
@@ -1637,6 +1691,37 @@ export interface RedisStreamEntry {
   fields: RedisStreamField[];
 }
 
+// Redis counters above Number.MAX_SAFE_INTEGER are transported as decimal strings.
+export type RedisStreamMetric = number | string;
+
+export interface RedisStreamGroup {
+  name: RedisBlob;
+  consumers: RedisStreamMetric;
+  pending: RedisStreamMetric;
+  last_delivered_id: string;
+  entries_read?: RedisStreamMetric;
+  lag?: RedisStreamMetric;
+}
+
+export interface RedisStreamConsumer {
+  name: RedisBlob;
+  pending: RedisStreamMetric;
+  idle_ms: RedisStreamMetric;
+  inactive_ms?: RedisStreamMetric;
+}
+
+export interface RedisStreamPendingEntry {
+  id: string;
+  consumer: RedisBlob;
+  idle_ms: RedisStreamMetric;
+  deliveries: RedisStreamMetric;
+}
+
+export interface RedisStreamPendingPage {
+  entries: RedisStreamPendingEntry[];
+  next_cursor?: string;
+}
+
 export type RedisValueData =
   | { kind: "string"; content: RedisBlob }
   | { kind: "json"; value: string }
@@ -1703,6 +1788,18 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return invoke("redis_get_value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
+  return invoke("redis_get_stream_groups", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamConsumers(connectionId: string, db: number, keyRaw: string, groupRaw: string): Promise<RedisStreamConsumer[]> {
+  return invoke("redis_get_stream_consumers", { connectionId, db, keyRaw, groupRaw });
+}
+
+export async function redisGetStreamPending(connectionId: string, db: number, keyRaw: string, groupRaw: string, cursor?: string, consumerRaw?: string): Promise<RedisStreamPendingPage> {
+  return invoke("redis_get_stream_pending", { connectionId, db, keyRaw, groupRaw, cursor, ...(consumerRaw === undefined ? {} : { consumerRaw }) });
 }
 
 export async function redisSetString(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {

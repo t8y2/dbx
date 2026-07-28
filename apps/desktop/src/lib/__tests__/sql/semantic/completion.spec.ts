@@ -16,7 +16,7 @@ function mergeColumns(...maps: Array<Map<string, SqlCompletionColumn[]> | undefi
 function semanticCompletion(markedSql: string, input: Partial<SqlCompletionProviderInput> = {}, options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" } = {}) {
   const { sql, cursor } = sqlFixtureCursor(markedSql);
   const model = buildSqlSemanticModel(sql, cursor, options);
-  const context = sqlCompletionContextFromSemantic(model, getSqlCompletionContext(sql, cursor));
+  const context = sqlCompletionContextFromSemantic(model, getSqlCompletionContext(sql, cursor, options));
   const columnsByTable = mergeColumns(sqlSemanticLocalColumnsByTable(model), input.columnsByTable);
   const items = buildSqlCompletionItemsFromContext(context, {
     tables: input.tables ?? [],
@@ -35,6 +35,57 @@ function semanticCompletion(markedSql: string, input: Partial<SqlCompletionProvi
 }
 
 describe("semantic SQL completion candidates", () => {
+  it("does not mix SELECT aliases into a following UPDATE statement", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["codex_completion_a", [{ name: "id", table: "codex_completion_a", schema: "public" }]],
+      ["codex_completion_b", [{ name: "id", table: "codex_completion_b", schema: "public" }]],
+    ]);
+
+    const { context, items } = semanticCompletion("SELECT ph.id FROM codex_completion_a AS ph;\n\nUPDATE codex_completion_b\nSET status = 0\nWHERE id|", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.referencedTables).toEqual([expect.objectContaining({ name: "codex_completion_b" })]);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id"]);
+  });
+
+  it("treats PostgreSQL hash operators as part of the preceding statement", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["codex_completion_a", [{ name: "legacy_id", table: "codex_completion_a", schema: "public" }]],
+      ["codex_completion_b", [{ name: "current_id", table: "codex_completion_b", schema: "public" }]],
+    ]);
+
+    const { context, items } = semanticCompletion("SELECT ph.legacy_id # 1 FROM codex_completion_a AS ph;\nUPDATE codex_completion_b SET current_id = 0 WHERE ph.|", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.statementKind).toBe("update");
+    expect(context.referencedTables).toEqual([expect.objectContaining({ name: "codex_completion_b" })]);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).not.toContain("legacy_id");
+  });
+
+  it("ignores line-comment semicolons after a real statement boundary", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["codex_completion_a", [{ name: "legacy_id", table: "codex_completion_a", schema: "public" }]],
+      ["codex_completion_b", [{ name: "current_id", table: "codex_completion_b", schema: "public" }]],
+    ]);
+
+    const { context, items } = semanticCompletion("SELECT ph.legacy_id FROM codex_completion_a AS ph; -- separator ; trailing words\nUPDATE codex_completion_b SET current_id = 0 WHERE current_|", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.statementKind).toBe("update");
+    expect(context.referencedTables).toEqual([expect.objectContaining({ name: "codex_completion_b" })]);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["current_id"]);
+  });
+
+  it("ignores block-comment semicolons after a real statement boundary", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["codex_completion_a", [{ name: "legacy_id", table: "codex_completion_a", schema: "public" }]],
+      ["codex_completion_b", [{ name: "current_id", table: "codex_completion_b", schema: "public" }]],
+    ]);
+
+    const { context, items } = semanticCompletion("SELECT ph.legacy_id FROM codex_completion_a AS ph; /* separator ; trailing words */\nUPDATE codex_completion_b SET current_id = 0 WHERE current_|", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.statementKind).toBe("update");
+    expect(context.referencedTables).toEqual([expect.objectContaining({ name: "codex_completion_b" })]);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["current_id"]);
+  });
+
   it("loads nested alias columns through the database-qualified metadata key", () => {
     const { context, items } = semanticCompletion(
       "SELECT * FROM aa.tb t WHERE EXISTS (SELECT 1 FROM aa.tb1 t1, aa.tb2 t2 WHERE t1.|)",

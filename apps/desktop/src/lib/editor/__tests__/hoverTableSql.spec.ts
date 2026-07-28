@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildHoverTableSql, reformatHoverDdl, sanitizeHoverDdl } from "@/lib/editor/hoverTableSql";
+import { buildHoverTableSql, hoverTableMatchesScope, reformatHoverDdl, sanitizeHoverDdl, scopeHoverTables } from "@/lib/editor/hoverTableSql";
 import type { ColumnInfo, IndexInfo } from "@/types/database";
 
 type ColumnOverride = Partial<ColumnInfo> & { name: string; data_type: string };
@@ -207,7 +207,7 @@ describe("buildHoverTableSql", () => {
 });
 
 describe("reformatHoverDdl", () => {
-  it("rebuilds MySQL SHOW CREATE TABLE with aligned fields and no charset noise", () => {
+  it("preserves sanitized raw MySQL DDL when table options are present", () => {
     const raw = `CREATE TABLE \`users\` (
   \`id\` int(11) unsigned NOT NULL AUTO_INCREMENT COMMENT '主键',
   \`email\` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '' COMMENT 'Email',
@@ -217,23 +217,10 @@ describe("reformatHoverDdl", () => {
   UNIQUE KEY \`ux_users_email\` (\`email\`),
   KEY \`ix_users_created\` (\`created_at\` DESC)
 ) ENGINE=InnoDB AUTO_INCREMENT=42 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户表'`;
-    expect(reformatHoverDdl(raw)).toMatchInlineSnapshot(`
-      "create table "users" (
-          "id"         int(11) unsigned AUTO_INCREMENT                                        not null comment '主键',
-          "email"      varchar(255)                                 default ''                not null comment 'Email',
-          "bio"        text                                                                   null,
-          "created_at" timestamp        ON UPDATE CURRENT_TIMESTAMP default CURRENT_TIMESTAMP null,
-        primary key ("id")
-      ) comment '用户表';
-
-      create unique index "ux_users_email"
-        on "users" ("email");
-      create index "ix_users_created"
-        on "users" ("created_at");"
-    `);
+    expect(reformatHoverDdl(raw)).toBe(sanitizeHoverDdl(raw));
   });
 
-  it("merges Postgres COMMENT ON and CREATE INDEX companion statements", () => {
+  it("preserves Postgres companion statements verbatim", () => {
     const raw = `CREATE TABLE "public"."orders" (
   "id" bigint NOT NULL DEFAULT nextval('orders_id_seq'::regclass),
   "total" numeric(10,2),
@@ -243,17 +230,26 @@ describe("reformatHoverDdl", () => {
 COMMENT ON TABLE "public"."orders" IS 'Order headers';
 COMMENT ON COLUMN "public"."orders"."total" IS 'Amount';
 CREATE INDEX "ix_orders_total" ON "public"."orders" ("total");`;
-    expect(reformatHoverDdl(raw)).toMatchInlineSnapshot(`
-      "create table "public"."orders" (
-          "id"    bigint                 default nextval('orders_id_seq'::regclass) not null,
-          "total" numeric(10,2)                                                     null     comment 'Amount',
-          "note"  character varying(255)                                            null,
-        primary key ("id")
-      ) comment 'Order headers';
+    expect(reformatHoverDdl(raw)).toBe(raw);
+  });
 
-      create index "ix_orders_total"
-        on "public"."orders" ("total");"
-    `);
+  it("preserves PostgreSQL index USING, INCLUDE, and WHERE clauses", () => {
+    const raw = `CREATE TABLE "public"."orders" (
+  "id" bigint NOT NULL,
+  "email" text,
+  "deleted_at" timestamptz
+);
+CREATE INDEX "ix_orders_email" ON "public"."orders" USING btree ("email") INCLUDE ("id") WHERE "deleted_at" IS NULL;`;
+    expect(reformatHoverDdl(raw)).toBe(raw);
+  });
+
+  it("preserves partition and distribution table clauses", () => {
+    const raw = `CREATE TABLE analytics.events (
+  event_date date NOT NULL,
+  tenant_id bigint NOT NULL
+) PARTITION BY RANGE (event_date)
+DISTRIBUTED BY HASH (tenant_id);`;
+    expect(reformatHoverDdl(raw)).toBe(raw);
   });
 
   it("uses the provided qualified name override for the table and indexes", () => {
@@ -289,8 +285,24 @@ CREATE INDEX "ix_orders_total" ON "public"."orders" ("total");`;
 
   it("passes through unrecognized companion statements", () => {
     const raw = `CREATE TABLE t (a int);\nALTER TABLE t OWNER TO app;`;
-    const sql = reformatHoverDdl(raw);
-    expect(sql).toContain('create table "t" (');
-    expect(sql).toContain("ALTER TABLE t OWNER TO app;");
+    expect(reformatHoverDdl(raw)).toBe(raw);
+  });
+});
+
+describe("hover table scope", () => {
+  it("annotates loaded tables with their catalog, database, and schema", () => {
+    expect(scopeHoverTables([{ name: "orders" }], { catalog: "hive", database: "sales", schema: "public" })).toEqual([{ name: "orders", catalog: "hive", database: "sales", schema: "public" }]);
+  });
+
+  it("rejects a bare-name cache hit from another database or schema", () => {
+    const target = { catalog: "hive", database: "sales", schema: "public" };
+    expect(hoverTableMatchesScope({ name: "orders", catalog: "hive", database: "archive", schema: "public" }, target)).toBe(false);
+    expect(hoverTableMatchesScope({ name: "orders", catalog: "hive", database: "sales", schema: "audit" }, target)).toBe(false);
+    expect(hoverTableMatchesScope({ name: "orders", catalog: "iceberg", database: "sales", schema: "public" }, target)).toBe(false);
+    expect(hoverTableMatchesScope({ name: "orders", catalog: "hive", database: "sales", schema: "public" }, target)).toBe(true);
+  });
+
+  it("does not trust an unscoped cached table", () => {
+    expect(hoverTableMatchesScope({ name: "orders" }, { database: "sales", schema: "public" })).toBe(false);
   });
 });

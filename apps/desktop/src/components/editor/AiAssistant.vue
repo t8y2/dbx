@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   Bot,
   Check,
+  ChevronLeft,
   ChevronRight,
   CircleSlash,
   Copy,
@@ -39,7 +40,7 @@ import {
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore, AI_PROVIDER_PRESETS, normalizeAiConfig } from "@/stores/settingsStore";
@@ -54,9 +55,10 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext, type CustomPromptContext } from "@/lib/ai/ai";
-import { getAiConfigModelIds, isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
-import { normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
+import { effortPreferenceUpdateForCapability, effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
+import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
 import { ACTIVE_TEMPLATES_TOTAL_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
@@ -70,6 +72,7 @@ import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
 import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
+import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
@@ -303,16 +306,24 @@ function onEditKeydown(event: KeyboardEvent, visibleIndex: number) {
 // Inline model selector
 const providerSelectorOpen = ref(false);
 const modelSearchQuery = ref("");
+const collapsedModelConfigIds = ref<Set<string>>(new Set());
+const effortMenuOpen = ref(false);
+const manualModelConfigId = ref("");
+const manualModelId = ref("");
+const effortTextValue = ref("");
+const effortIntegerValue = ref(0);
+let effortMenuCloseTimer: ReturnType<typeof setTimeout> | null = null;
+const { catalogs: modelCatalogs, effortCatalogs, loadModels, resolveEffort, effortKey } = useAiModelCatalog();
 
 // Configured providers for quick switching - get from aiConfigs
 const configuredProviders = computed(() => {
   const providers = orderAiConfigsForDisplay(settings.aiConfigs.filter((config) => isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey)));
-  // Apply search filter - hide providers with no matching models
   if (modelSearchQuery.value.trim()) {
     const query = modelSearchQuery.value.trim().toLowerCase();
     return providers.filter((c) => {
+      if (configMatchesModelQuery(c, query)) return true;
       const models = getModelsForConfig(c.id);
-      return models.some((model) => model.toLowerCase().includes(query));
+      return models.some((model) => model.id.toLowerCase().includes(query) || model.displayName?.toLowerCase().includes(query));
     });
   }
   return providers;
@@ -323,39 +334,184 @@ const activeFullConfig = computed(() => {
   const item = settings.aiConfigs.find((c) => c.id === settings.activeModel!.configId);
   if (!item) return null;
   const modelId = settings.activeModel.modelId;
-  const config = normalizeAiConfig({ ...item, model: modelId });
-  if (config.provider === "claude-code-cli") {
-    config.reasoningLevel = normalizeClaudeCodeReasoningLevel(
-      config.reasoningLevel,
-      item.models?.find((model) => model.name === modelId),
-    );
-  }
-  return config;
+  return normalizeAiConfig({ ...item, model: modelId, runtimeEffort: runtimeEffortFromPreference(settings.activeEffort) });
 });
 
-function getModelsForConfig(configId: string): string[] {
-  const config = settings.aiConfigs.find((c) => c.id === configId);
-  if (!config) return [];
-  return getAiConfigModelIds(config);
+function getModelsForConfig(configId: string) {
+  return modelCatalogs.get(configId)?.models ?? [];
 }
 
-function getConfigModelOptionIds(configId: string): string[] {
-  const config = settings.aiConfigs.find((c) => c.id === configId);
-  if (!config) return [];
-  let models = getModelsForConfig(configId);
-  // Apply search filter
-  if (modelSearchQuery.value.trim()) {
-    const query = modelSearchQuery.value.trim().toLowerCase();
-    models = models.filter((model) => model.toLowerCase().includes(query));
+function configMatchesModelQuery(config: AiConfigItem, query: string): boolean {
+  return config.name.toLowerCase().includes(query) || config.provider.toLowerCase().includes(query) || AI_PROVIDER_PRESETS[config.provider].label.toLowerCase().includes(query);
+}
+
+function getConfigModelOptions(config: AiConfigItem) {
+  const models = getModelsForConfig(config.id);
+  const query = modelSearchQuery.value.trim().toLowerCase();
+  if (!query || configMatchesModelQuery(config, query)) return models;
+  return models.filter((model) => model.id.toLowerCase().includes(query) || model.displayName?.toLowerCase().includes(query));
+}
+
+function getModelCatalog(configId: string) {
+  return modelCatalogs.get(configId) ?? { status: "idle" as const, models: [] };
+}
+
+function isModelConfigCollapsed(configId: string): boolean {
+  return collapsedModelConfigIds.value.has(configId);
+}
+
+function toggleModelConfig(configId: string) {
+  const next = new Set(collapsedModelConfigIds.value);
+  if (next.has(configId)) next.delete(configId);
+  else next.add(configId);
+  collapsedModelConfigIds.value = next;
+}
+
+async function loadConfiguredModelCatalogs(force = false) {
+  const configs = settings.aiConfigs.filter((config) => isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey));
+  const queue = [...configs];
+  const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+    while (queue.length) {
+      const config = queue.shift();
+      if (!config) return;
+      await loadModels(config, force).catch(() => {});
+    }
+  });
+  await Promise.all(workers);
+}
+
+watch(providerSelectorOpen, (open) => {
+  if (open) {
+    void loadConfiguredModelCatalogs();
+  } else {
+    modelSearchQuery.value = "";
+    closeEffortMenu();
+    manualModelConfigId.value = "";
+    manualModelId.value = "";
   }
-  return models;
+});
+
+async function ensureModelEffort(config: AiConfigItem, modelId: string, force = false) {
+  try {
+    const capability = await resolveEffort(config, modelId, force);
+    const isActiveModel = settings.activeModel?.configId === config.id && settings.activeModel.modelId === modelId;
+    if (isActiveModel) {
+      const preferenceUpdate = effortPreferenceUpdateForCapability(capability, settings.activeEffort);
+      if (preferenceUpdate !== undefined) settings.updateActiveEffort(preferenceUpdate);
+    }
+    syncEffortInputs(capability);
+  } catch {
+    // The effort section exposes the scoped retry state.
+  }
 }
 
 function handleModelSelect(configId: string, modelId: string) {
   const config = settings.aiConfigs.find((c) => c.id === configId);
   if (!config) return;
   settings.updateActiveModel({ configId, modelId });
-  providerSelectorOpen.value = false;
+  closeEffortMenu();
+}
+
+function startManualModel(configId: string) {
+  manualModelConfigId.value = configId;
+  manualModelId.value = settings.activeModel?.configId === configId ? settings.activeModel.modelId : "";
+  nextTick(() => document.querySelector<HTMLInputElement>("[data-manual-model-input]")?.focus());
+}
+
+function applyManualModel(configId: string) {
+  const modelId = manualModelId.value.trim();
+  if (!modelId) return;
+  handleModelSelect(configId, modelId);
+  manualModelConfigId.value = "";
+  manualModelId.value = "";
+}
+
+const activeEffortEntry = computed(() => {
+  const active = settings.activeModel;
+  if (!active) return undefined;
+  return effortCatalogs.get(effortKey(active.configId, active.modelId));
+});
+
+const activeEffortCapability = computed(() => activeEffortEntry.value?.capability);
+
+function syncEffortInputs(capability = activeEffortCapability.value) {
+  const selection = settings.activeEffort;
+  effortTextValue.value = selection?.kind === "text" ? selection.value : "";
+  if (capability?.kind === "integer") {
+    const selectedValue = selection?.kind === "integer" ? selection.value : undefined;
+    const defaultValue = capability.default.kind === "integer" ? capability.default.value : undefined;
+    effortIntegerValue.value = selectedValue !== undefined && selectedValue >= capability.min && selectedValue <= capability.max ? selectedValue : defaultValue !== undefined && defaultValue >= capability.min && defaultValue <= capability.max ? defaultValue : capability.min;
+  }
+}
+
+function clearEffortMenuCloseTimer() {
+  if (!effortMenuCloseTimer) return;
+  clearTimeout(effortMenuCloseTimer);
+  effortMenuCloseTimer = null;
+}
+
+function openEffortMenu() {
+  clearEffortMenuCloseTimer();
+  if (settings.activeModel) effortMenuOpen.value = true;
+}
+
+function closeEffortMenu() {
+  clearEffortMenuCloseTimer();
+  effortMenuOpen.value = false;
+}
+
+function scheduleEffortMenuClose() {
+  clearEffortMenuCloseTimer();
+  effortMenuCloseTimer = setTimeout(() => {
+    effortMenuOpen.value = false;
+    effortMenuCloseTimer = null;
+  }, 120);
+}
+
+watch(effortMenuOpen, (open) => {
+  const active = settings.activeModel;
+  if (!open || !active) return;
+  const config = settings.aiConfigs.find((item) => item.id === active.configId);
+  if (config) void ensureModelEffort(config, active.modelId);
+});
+
+function selectEffort(selection: AiEffortSelection) {
+  settings.updateActiveEffort(selection);
+  syncEffortInputs();
+}
+
+function selectEffortOption(option: AiEffortOption) {
+  selectEffort(option.selection);
+}
+
+function commitIntegerEffort(capability: Extract<AiEffortCapability, { kind: "integer" }>) {
+  const steppedValue = capability.min + Math.round((effortIntegerValue.value - capability.min) / capability.step) * capability.step;
+  const value = Math.min(capability.max, Math.max(capability.min, steppedValue));
+  effortIntegerValue.value = value;
+  selectEffort({ kind: "integer", value });
+}
+
+function commitTextEffort() {
+  const value = effortTextValue.value.trim();
+  settings.updateActiveEffort(value ? { kind: "text", value } : { kind: "providerDefault" });
+}
+
+function effortSelectionLabel(selection: AiEffortSelection | null): string {
+  if (!selection || selection.kind === "providerDefault") return t("ai.providerDefault");
+  const capability = activeEffortCapability.value;
+  const options = capability?.kind === "enum" ? capability.options : capability?.kind === "integer" ? capability.specialValues : undefined;
+  const matchingOption = options?.find((option) => effortSelectionEquals(selection, option.selection));
+  if (matchingOption) return matchingOption.label;
+  if (selection.kind === "disabled") return t("ai.effortDisabled");
+  if (selection.kind === "boolean") return selection.value ? t("ai.effortEnabled") : t("ai.effortDisabled");
+  return String(selection.value);
+}
+
+function retryActiveEffort() {
+  const active = settings.activeModel;
+  if (!active) return;
+  const config = settings.aiConfigs.find((item) => item.id === active.configId);
+  if (config) void ensureModelEffort(config, active.modelId, true);
 }
 
 /** Deferred context compaction info; applied after stream ends to avoid shifting assistantIdx. */
@@ -1882,6 +2038,7 @@ function stopResize() {
 onUnmounted(() => {
   if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
   clearTimeout(mentionTimer);
+  clearEffortMenuCloseTimer();
   cancelStream();
   detachMessageScrollListener();
   // 清理拖拽事件监听，防止内存泄漏
@@ -2408,50 +2565,187 @@ async function openExternalUrl(url: string) {
                     <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                   </button>
                 </PopoverTrigger>
-                <PopoverContent
-                  align="end"
-                  class="w-80 gap-0 p-1.5"
-                  @open-auto-focus.prevent
-                  @update:open="
-                    (open: boolean) => {
-                      if (!open) modelSearchQuery = '';
-                    }
-                  "
-                >
-                  <!-- Search input -->
+                <PopoverContent align="end" class="max-h-(--reka-popover-content-available-height) w-80 gap-0 overflow-y-auto p-1.5" @open-auto-focus.prevent>
                   <div class="relative px-1 pb-1">
                     <Search class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
                     <input v-model="modelSearchQuery" type="text" :placeholder="t('ai.searchModels')" class="w-full rounded-sm border bg-background py-1.5 pl-7 pr-2 text-xs outline-none focus:ring-1 focus:ring-primary" @click.stop />
                   </div>
-                  <!-- All configured providers with their models -->
                   <div class="max-h-80 overflow-auto">
                     <template v-for="config in configuredProviders" :key="config.id">
-                      <!-- Provider header -->
-                      <div class="flex items-center gap-2 rounded-sm px-2 py-1.5 text-xs" :class="config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : 'text-foreground'">
+                      <button
+                        type="button"
+                        class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted"
+                        :class="config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : 'text-foreground'"
+                        :aria-expanded="!isModelConfigCollapsed(config.id)"
+                        @click="toggleModelConfig(config.id)"
+                      >
+                        <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': !isModelConfigCollapsed(config.id) }" />
                         <AiProviderLogo :provider="config.provider" :label="AI_PROVIDER_PRESETS[config.provider]?.label ?? config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
-                        <span class="font-medium">{{ config.name }}</span>
+                        <span class="min-w-0 flex-1 truncate font-medium">{{ config.name }}</span>
+                        <Loader2 v-if="getModelCatalog(config.id).status === 'loading'" class="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
                         <span v-if="config.isDefault" class="ml-auto text-[10px] text-muted-foreground">{{ t("ai.default") }}</span>
-                      </div>
-                      <!-- No models hint -->
-                      <div v-if="!getConfigModelOptionIds(config.id).length" class="px-2 py-2 text-xs text-muted-foreground">
-                        {{ t("ai.noModel") }}
-                      </div>
-                      <!-- Model list -->
-                      <template v-else>
-                        <button
-                          v-for="modelId in getConfigModelOptionIds(config.id)"
-                          :key="modelId"
-                          type="button"
-                          class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
-                          :class="modelId === settings.activeModel?.modelId && config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : ''"
-                          @click="handleModelSelect(config.id, modelId)"
-                        >
-                          <span class="min-w-0 flex-1 truncate">{{ modelId }}</span>
-                          <Check v-if="modelId === settings.activeModel?.modelId && config.id === settings.activeModel?.configId" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                      </button>
+                      <div v-if="!isModelConfigCollapsed(config.id)">
+                        <div v-if="getModelCatalog(config.id).status === 'loading' && !getModelsForConfig(config.id).length" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                          <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                          {{ t("ai.loadingModels") }}
+                        </div>
+                        <div v-else-if="getModelCatalog(config.id).status === 'error' && !getModelsForConfig(config.id).length" class="space-y-1 px-2 py-2 text-xs text-muted-foreground">
+                          <div class="truncate" :title="getModelCatalog(config.id).error">{{ t("ai.modelLoadFailed") }}</div>
+                          <button type="button" class="text-primary hover:underline" @click="loadModels(config, true)">{{ t("ai.retry") }}</button>
+                        </div>
+                        <div v-else-if="getModelCatalog(config.id).status === 'ready' && !getConfigModelOptions(config).length" class="px-2 py-2 text-xs text-muted-foreground">
+                          {{ modelSearchQuery.trim() ? t("ai.noModelMatch") : t("ai.noModels") }}
+                        </div>
+                        <template v-if="getConfigModelOptions(config).length">
+                          <button
+                            v-for="model in getConfigModelOptions(config)"
+                            :key="model.id"
+                            type="button"
+                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                            :class="model.id === settings.activeModel?.modelId && config.id === settings.activeModel?.configId ? 'bg-accent text-accent-foreground' : ''"
+                            @click="handleModelSelect(config.id, model.id)"
+                          >
+                            <span class="min-w-0 flex-1 truncate">
+                              {{ model.displayName || model.id }}
+                              <span v-if="model.displayName && model.displayName !== model.id" class="ml-1 text-[10px] text-muted-foreground">{{ model.id }}</span>
+                            </span>
+                            <Check v-if="model.id === settings.activeModel?.modelId && config.id === settings.activeModel?.configId" class="h-3.5 w-3.5 shrink-0 text-primary" />
+                          </button>
+                        </template>
+                        <div v-if="getModelCatalog(config.id).status === 'error' && getModelsForConfig(config.id).length" class="flex items-center justify-between gap-2 px-2 py-1 text-[10px] text-muted-foreground">
+                          <span class="truncate" :title="getModelCatalog(config.id).error">{{ t("ai.modelLoadFailed") }}</span>
+                          <button type="button" class="shrink-0 text-primary hover:underline" @click="loadModels(config, true)">{{ t("ai.retry") }}</button>
+                        </div>
+                        <form v-if="manualModelConfigId === config.id" class="flex items-center gap-1 px-2 py-1" @submit.prevent="applyManualModel(config.id)">
+                          <input v-model="manualModelId" data-manual-model-input type="text" :placeholder="t('ai.manualModelPlaceholder')" class="min-w-0 flex-1 rounded-sm border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary" @click.stop />
+                          <Button type="submit" size="sm" class="h-6 px-2 text-[10px]" :disabled="!manualModelId.trim()">{{ t("common.confirm") }}</Button>
+                        </form>
+                        <button v-else type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" @click="startManualModel(config.id)">
+                          <Pencil class="h-3 w-3" />
+                          {{ t("ai.manualModel") }}
                         </button>
-                      </template>
+                      </div>
                       <div class="my-1 border-t" />
                     </template>
+                  </div>
+                  <div v-if="settings.activeModel" class="border-t pt-1">
+                    <Popover v-model:open="effortMenuOpen">
+                      <PopoverAnchor as-child>
+                        <button
+                          type="button"
+                          class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted focus-visible:bg-muted focus-visible:outline-none"
+                          :aria-expanded="effortMenuOpen"
+                          aria-haspopup="menu"
+                          @mouseenter="openEffortMenu"
+                          @mouseleave="scheduleEffortMenuClose"
+                          @focus="openEffortMenu"
+                          @click.stop="openEffortMenu"
+                        >
+                          <ChevronLeft class="h-3.5 w-3.5 shrink-0" />
+                          <span>{{ t("ai.effort") }}</span>
+                          <span class="ml-auto max-w-[160px] truncate text-muted-foreground">{{ effortSelectionLabel(settings.activeEffort) }}</span>
+                        </button>
+                      </PopoverAnchor>
+                      <PopoverContent
+                        side="left"
+                        align="end"
+                        :side-offset="6"
+                        :collision-padding="8"
+                        class="max-h-(--reka-popover-content-available-height) w-72 gap-1 overflow-y-auto p-2"
+                        @mouseenter="openEffortMenu"
+                        @mouseleave="scheduleEffortMenuClose"
+                        @open-auto-focus.prevent
+                        @close-auto-focus.prevent
+                        @pointerdown.stop
+                        @click.stop
+                        @keydown.stop
+                      >
+                        <button
+                          type="button"
+                          class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                          :class="!settings.activeEffort || settings.activeEffort.kind === 'providerDefault' ? 'bg-accent text-accent-foreground' : ''"
+                          @click="selectEffort({ kind: 'providerDefault' })"
+                        >
+                          <span class="flex-1">{{ t("ai.providerDefault") }}</span>
+                          <Check v-if="!settings.activeEffort || settings.activeEffort.kind === 'providerDefault'" class="h-3.5 w-3.5 text-primary" />
+                        </button>
+                        <div v-if="activeEffortEntry?.status === 'loading'" class="flex items-center gap-2 py-2 text-xs text-muted-foreground">
+                          <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                          {{ t("ai.loadingEffort") }}
+                        </div>
+                        <div v-else-if="activeEffortEntry?.status === 'error'" class="flex items-center justify-between gap-2 py-2 text-xs text-muted-foreground">
+                          <span class="truncate" :title="activeEffortEntry.error">{{ t("ai.effortLoadFailed") }}</span>
+                          <button type="button" class="shrink-0 text-primary hover:underline" @click="retryActiveEffort">
+                            {{ t("ai.retry") }}
+                          </button>
+                        </div>
+                        <template v-else-if="activeEffortCapability?.kind === 'enum'">
+                          <button
+                            v-for="option in activeEffortCapability.options"
+                            :key="option.id"
+                            type="button"
+                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                            :class="effortSelectionEquals(settings.activeEffort, option.selection) ? 'bg-accent text-accent-foreground' : ''"
+                            @click="selectEffortOption(option)"
+                          >
+                            <span class="flex-1">{{ option.label }}</span>
+                            <Check v-if="effortSelectionEquals(settings.activeEffort, option.selection)" class="h-3.5 w-3.5 text-primary" />
+                          </button>
+                        </template>
+                        <template v-else-if="activeEffortCapability?.kind === 'integer'">
+                          <button
+                            v-for="option in activeEffortCapability.specialValues"
+                            :key="option.id"
+                            type="button"
+                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent"
+                            :class="effortSelectionEquals(settings.activeEffort, option.selection) ? 'bg-accent text-accent-foreground' : ''"
+                            @click="selectEffortOption(option)"
+                          >
+                            <span class="flex-1">{{ option.label }}</span>
+                            <Check v-if="effortSelectionEquals(settings.activeEffort, option.selection)" class="h-3.5 w-3.5 text-primary" />
+                          </button>
+                          <div class="flex items-center gap-2 py-1">
+                            <input v-model.number="effortIntegerValue" type="range" class="min-w-0 flex-1" :min="activeEffortCapability.min" :max="activeEffortCapability.max" :step="activeEffortCapability.step" @change="commitIntegerEffort(activeEffortCapability)" />
+                            <input
+                              v-model.number="effortIntegerValue"
+                              type="number"
+                              class="w-20 rounded-sm border bg-background px-2 py-1 text-xs"
+                              :min="activeEffortCapability.min"
+                              :max="activeEffortCapability.max"
+                              :step="activeEffortCapability.step"
+                              @change="commitIntegerEffort(activeEffortCapability)"
+                              @click.stop
+                            />
+                          </div>
+                        </template>
+                        <template v-else-if="activeEffortCapability?.kind === 'boolean'">
+                          <button type="button" class="flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent" @click="selectEffort({ kind: 'boolean', value: true })">
+                            <span class="flex-1 text-left">{{ t("ai.effortEnabled") }}</span>
+                            <Check v-if="settings.activeEffort?.kind === 'boolean' && settings.activeEffort.value" class="h-3.5 w-3.5 text-primary" />
+                          </button>
+                          <button type="button" class="flex w-full items-center rounded-sm px-2 py-1.5 text-xs hover:bg-accent" @click="selectEffort({ kind: 'boolean', value: false })">
+                            <span class="flex-1 text-left">{{ t("ai.effortDisabled") }}</span>
+                            <Check v-if="settings.activeEffort?.kind === 'boolean' && !settings.activeEffort.value" class="h-3.5 w-3.5 text-primary" />
+                          </button>
+                        </template>
+                        <form v-else-if="activeEffortCapability?.kind === 'freeText'" class="flex items-center gap-1 py-1" @submit.prevent="commitTextEffort">
+                          <input
+                            v-model="effortTextValue"
+                            type="text"
+                            maxlength="64"
+                            :placeholder="activeEffortCapability.placeholder || t('ai.customEffortPlaceholder')"
+                            class="min-w-0 flex-1 rounded-sm border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary"
+                            @click.stop
+                            @blur="commitTextEffort"
+                          />
+                          <Button type="submit" size="sm" class="h-6 px-2 text-[10px]">{{ t("common.confirm") }}</Button>
+                        </form>
+                        <div v-else-if="activeEffortCapability?.kind === 'unsupported'" class="px-2 py-2 text-xs text-muted-foreground">
+                          {{ t("ai.effortUnsupported") }}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
                   </div>
                 </PopoverContent>
               </Popover>

@@ -1,5 +1,6 @@
 use super::column_format::{
     column_data_type, column_extra_clause, has_dameng_identity, is_dameng_identity_compatible_type,
+    is_mysql_character_data_type,
 };
 use super::comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
@@ -48,6 +49,14 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
     for column in &active_columns {
         let data_type = column_data_type(dialect, column);
         let mut parts = vec![quote_ident(dialect, &column.name), data_type];
+        if dialect == StructureDialect::Mysql && is_mysql_character_data_type(&column.data_type) {
+            if !column.character_set.trim().is_empty() {
+                parts.push(format!("CHARACTER SET {}", quote_ident(dialect, &column.character_set)));
+            }
+            if !column.collation.trim().is_empty() {
+                parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
+            }
+        }
         if !column.is_nullable
             && !column.is_primary_key
             && !matches!(dialect, StructureDialect::ClickHouse | StructureDialect::ManticoreSearch)

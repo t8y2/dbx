@@ -2757,6 +2757,35 @@ fn mysql_create_table_with_auto_increment() {
 }
 
 #[test]
+fn mysql_create_table_keeps_column_charset_collation_and_comment() {
+    let mut name = column("name");
+    name.data_type = "varchar(255)".to_string();
+    name.character_set = "gbk".to_string();
+    name.collation = "gbk_bin".to_string();
+    name.comment = "测试".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("User accounts".to_string()),
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE `users` (\n  `name` varchar(255) CHARACTER SET `gbk` COLLATE `gbk_bin` COMMENT '测试'\n) COMMENT = 'User accounts';"
+        ]
+    );
+}
+
+#[test]
 fn mysql_create_table_with_on_update_current_timestamp() {
     let mut col = column("updated_at");
     col.data_type = "timestamp".to_string();

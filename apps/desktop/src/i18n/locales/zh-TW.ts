@@ -3095,6 +3095,8 @@ export default withEnglishFallback({
     browse: "瀏覽",
     previewingLines: "預覽 {count} 行",
     previewingFirstLines: "預覽前 {count} 行",
+    tooLargeForEditor: "SQL 檔案大小為 {size}，超過編輯器 {limit} 的限制。請使用「執行 SQL 檔案」以串流方式處理。",
+    largeFileExecutionOpened: "此 SQL 檔案大小為 {size}，無法載入編輯器，已開啟「執行 SQL 檔案」進行串流處理。",
     target: "目標",
     connection: "連線",
     selectConnection: "選擇連線",

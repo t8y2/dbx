@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -637,7 +638,11 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
 }
 
 export async function readExternalSqlFile(path: string): Promise<string> {
-  return invoke("read_external_sql_file", { path });
+  const result = await invoke<{ kind: "content"; content: string } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
+  if (result.kind === "tooLarge") {
+    throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
+  }
+  return result.content;
 }
 
 export async function writeExternalSqlFile(path: string, content: string): Promise<void> {

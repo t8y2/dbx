@@ -3618,6 +3618,8 @@ export default withEnglishFallback({
     browse: "浏览",
     previewingLines: "预览 {count} 行",
     previewingFirstLines: "预览前 {count} 行",
+    tooLargeForEditor: "SQL 文件大小为 {size}，超过编辑器 {limit} 的限制。请使用“执行 SQL 文件”以流式方式处理。",
+    largeFileExecutionOpened: "该 SQL 文件大小为 {size}，无法载入编辑器，已打开“执行 SQL 文件”进行流式处理。",
     target: "目标",
     connection: "连接",
     selectConnection: "选择连接",

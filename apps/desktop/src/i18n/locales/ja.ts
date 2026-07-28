@@ -3424,6 +3424,8 @@ export default withEnglishFallback({
     browse: "参照",
     previewingLines: "{count}行をプレビュー中",
     previewingFirstLines: "先頭{count}行をプレビュー中",
+    tooLargeForEditor: "このSQLファイルは{size}あり、エディターの上限{limit}を超えています。ストリーム処理するには「SQLファイルを実行」を使用してください。",
+    largeFileExecutionOpened: "{size}のSQLファイルはエディターには大きすぎるため、ストリーム処理用の「SQLファイルを実行」を開きました。",
     target: "対象",
     connection: "接続",
     selectConnection: "接続を選択",

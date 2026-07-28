@@ -3618,6 +3618,8 @@ export default {
     browse: "Browse",
     previewingLines: "Previewing {count} lines",
     previewingFirstLines: "Previewing first {count} lines",
+    tooLargeForEditor: "This SQL file is {size}, exceeding the editor limit of {limit}. Use Execute SQL File to process it as a stream.",
+    largeFileExecutionOpened: "This {size} SQL file is too large for the editor. Execute SQL File has been opened for streaming.",
     target: "Target",
     connection: "Connection",
     selectConnection: "Select connection",

@@ -3424,6 +3424,8 @@ export default withEnglishFallback({
     browse: "Procurar",
     previewingLines: "Pré-visualizando {count} linhas",
     previewingFirstLines: "Pré-visualizando as primeiras {count} linhas",
+    tooLargeForEditor: "Este arquivo SQL tem {size} e excede o limite de {limit} do editor. Use Executar Arquivo SQL para processá-lo por streaming.",
+    largeFileExecutionOpened: "O arquivo SQL de {size} é grande demais para o editor. Executar Arquivo SQL foi aberto para processamento por streaming.",
     target: "Destino",
     connection: "Conexão",
     selectConnection: "Selecionar conexão",

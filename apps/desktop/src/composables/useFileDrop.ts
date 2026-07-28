@@ -7,6 +7,7 @@ import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import type { ConnectionConfig } from "@/types/database";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
+import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 
 function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path);
@@ -72,7 +73,7 @@ export function useFileDrop() {
               const content = await api.readExternalSqlFile(path);
               await openDroppedSqlFile(name, content, path);
             } catch (e: any) {
-              toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+              toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
             }
             continue;
           }

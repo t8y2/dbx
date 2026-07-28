@@ -117,6 +117,7 @@ import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableI
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
+import { cacheObjectBrowserRows, getCachedObjectBrowserRows, type ObjectBrowserRowsCacheScope } from "@/lib/table/objectBrowserRowsCache";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -2169,39 +2170,66 @@ async function loadSchemas() {
   }
 }
 
-async function loadObjects() {
+function objectBrowserRowsCacheScope(schema: string): ObjectBrowserRowsCacheScope {
+  return {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema,
+    catalog: props.catalog,
+  };
+}
+
+function applyObjectBrowserRows(nextRows: ObjectBrowserRow[]) {
+  rows.value = nextRows;
+  const availableTableIds = new Set(rows.value.filter((row) => row.type === "TABLE").map((row) => row.id));
+  setSelectedTableIds(new Set([...selectedTableIds.value].filter((id) => availableTableIds.has(id))));
+  expandedPartitionParentIds.value = new Set([...expandedPartitionParentIds.value].filter((id) => rows.value.some((row) => row.id === id && row.partitionCount)));
+}
+
+function finishObjectBrowserRowsLoad() {
+  loadingObjects.value = false;
+  if (!userHasSelectedFilter.value && objectCounts.value.tables > 0) {
+    // The default table filter is a presentation choice, not a user query
+    // change, so preserve the tab's saved scroll offset across remounts.
+    preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
+    objectFilter.value = "tables";
+  }
+  restoreObjectBrowserViewport();
+}
+
+async function loadObjects(options?: { allowCached?: boolean }) {
   const id = ++loadId;
-  loadingObjects.value = true;
   error.value = "";
+  const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
+  const cacheScope = objectBrowserRowsCacheScope(schema);
+  if (options?.allowCached) {
+    const cachedRows = getCachedObjectBrowserRows(cacheScope);
+    if (cachedRows) {
+      applyObjectBrowserRows(cachedRows);
+      finishObjectBrowserRowsLoad();
+      return;
+    }
+  }
+
+  loadingObjects.value = true;
   rows.value = [];
   try {
-    const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
     const objects: ObjectInfo[] = await api.listObjects(props.connection.id, props.database, schema, undefined, undefined, undefined, undefined, props.catalog);
     if (id !== loadId) return;
-    rows.value = buildObjectBrowserRows({
+    const nextRows = buildObjectBrowserRows({
       objects,
       database: props.database,
       fallbackSchema: schema,
       rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
     });
-    const availableTableIds = new Set(rows.value.filter((row) => row.type === "TABLE").map((row) => row.id));
-    setSelectedTableIds(new Set([...selectedTableIds.value].filter((id) => availableTableIds.has(id))));
-    expandedPartitionParentIds.value = new Set([...expandedPartitionParentIds.value].filter((id) => rows.value.some((row) => row.id === id && row.partitionCount)));
+    applyObjectBrowserRows(nextRows);
+    cacheObjectBrowserRows(cacheScope, nextRows);
     void loadObjectStatistics(id, schema);
   } catch (e: any) {
     if (id !== loadId) return;
     error.value = e?.message || String(e);
   } finally {
-    if (id === loadId) {
-      loadingObjects.value = false;
-      if (!userHasSelectedFilter.value && objectCounts.value.tables > 0) {
-        // The default table filter is a presentation choice, not a user query
-        // change, so preserve the tab's saved scroll offset across remounts.
-        preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
-        objectFilter.value = "tables";
-      }
-      restoreObjectBrowserViewport();
-    }
+    if (id === loadId) finishObjectBrowserRowsLoad();
   }
 }
 
@@ -2228,6 +2256,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
     };
   });
+  cacheObjectBrowserRows(objectBrowserRowsCacheScope(fallbackSchema), rows.value);
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {
@@ -2238,9 +2267,9 @@ function normalizeStatisticNumber(value: number | null | undefined): number | nu
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-async function reload() {
+async function reload(options?: { allowCachedObjects?: boolean }) {
   await loadSchemas();
-  await loadObjects();
+  await loadObjects({ allowCached: options?.allowCachedObjects });
 }
 
 function refresh(): boolean {
@@ -2329,7 +2358,7 @@ watch(
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connection.id, e);
     }
-    void reload();
+    void reload({ allowCachedObjects: true });
   },
   { immediate: true },
 );

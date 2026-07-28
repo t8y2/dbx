@@ -110,6 +110,7 @@ import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator,
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
 import { MetadataResultCache, type MetadataCacheInvalidation } from "@/lib/metadata/metadataResultCache";
 import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { TreeNodeLoadRegistry, type TreeNodeLoadHandle } from "@/lib/metadata/treeNodeLoadHandle";
 import i18n from "@/i18n";
@@ -1471,7 +1472,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function invalidateMetadataCaches(match: MetadataCacheInvalidation): number {
-    return metadataListPageCache.invalidate(match) + invalidateTableMetadataCache(match);
+    return metadataListPageCache.invalidate(match) + invalidateTableMetadataCache(match) + invalidateObjectBrowserRowsCache(match);
   }
 
   function invalidateMetadataCachesByTreePrefix(prefix: string) {
@@ -2601,6 +2602,7 @@ export const useConnectionStore = defineStore("connection", () => {
       activeConnectionId.value = null;
     }
     invalidateCompletionCache(connectionId);
+    invalidateObjectBrowserRowsCache({ connectionId });
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
     switch (settingsStore.editorSettings.disconnectTabHandlingMode) {
@@ -2645,6 +2647,7 @@ export const useConnectionStore = defineStore("connection", () => {
       clearLoadedChildrenCache(node.id);
     }
     invalidateCompletionCache(connectionId, database);
+    invalidateObjectBrowserRowsCache({ connectionId, database });
   }
 
   async function ensureConnected(connectionId: string) {

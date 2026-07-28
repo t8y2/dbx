@@ -51,6 +51,8 @@ interface TransferFailureState {
   indexes: Map<string, number>;
   retainedBytes: number;
   omittedHashes: Set<number>;
+  localOmittedCount: number;
+  replayOmittedCount: number;
 }
 
 const taskMap = reactive<Map<string, ExportTask>>(new Map());
@@ -96,16 +98,24 @@ function getTransferFailureState(task: ExportTask): TransferFailureState {
     indexes: new Map(failures.map((failure, index) => [failure.table, index])),
     retainedBytes: failures.reduce((total, failure) => total + utf8ByteLength(failure.table) + utf8ByteLength(failure.error), 0),
     omittedHashes: new Set(),
+    localOmittedCount: task.transferFailuresOmitted ?? 0,
+    replayOmittedCount: 0,
   };
   transferFailureStates.set(task.exportId, state);
   return state;
 }
 
+function syncTransferFailureOmittedCount(task: ExportTask, state: TransferFailureState) {
+  task.transferFailuresOmitted = state.localOmittedCount + state.replayOmittedCount;
+}
+
 function recordOmittedTransferFailure(task: ExportTask, state: TransferFailureState, table: string) {
   const hash = failureTableHash(table);
   if (state.omittedHashes.has(hash)) return;
-  if (state.omittedHashes.size < MAX_TRACKED_OMITTED_FAILURES) state.omittedHashes.add(hash);
-  task.transferFailuresOmitted = (task.transferFailuresOmitted ?? 0) + 1;
+  if (state.omittedHashes.size >= MAX_TRACKED_OMITTED_FAILURES) return;
+  state.omittedHashes.add(hash);
+  state.localOmittedCount += 1;
+  syncTransferFailureOmittedCount(task, state);
 }
 
 function recordTransferFailure(task: ExportTask, table: string, error: string) {
@@ -398,6 +408,11 @@ export function useExportTracker() {
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {
     const task = taskMap.get(transferId);
     if (!task) return;
+    if (progress.transferFailuresOmitted !== undefined) {
+      const state = getTransferFailureState(task);
+      state.replayOmittedCount = Math.max(state.replayOmittedCount, progress.transferFailuresOmitted);
+      syncTransferFailureOmittedCount(task, state);
+    }
     if (progress.status === "error" && !progress.terminal && progress.table && progress.error) {
       recordTransferFailure(task, progress.table, progress.error);
     }

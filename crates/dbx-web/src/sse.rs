@@ -1,5 +1,6 @@
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -20,6 +21,7 @@ struct TransferReplayHistory {
     failures: VecDeque<String>,
     failure_bytes: usize,
     latest: Option<String>,
+    omitted_failures: usize,
 }
 
 pub struct TransferProgressChannel {
@@ -33,10 +35,14 @@ impl TransferProgressChannel {
         Self { tx, history: Mutex::new(TransferReplayHistory::default()) }
     }
 
-    pub fn send(&self, data: String, kind: TransferReplayEventKind) {
+    pub fn send(&self, mut data: String, kind: TransferReplayEventKind) {
         let mut history = self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         match kind {
-            TransferReplayEventKind::Progress | TransferReplayEventKind::Terminal => {
+            TransferReplayEventKind::Progress => {
+                history.latest = Some(data.clone());
+            }
+            TransferReplayEventKind::Terminal => {
+                data = attach_omitted_failure_count(data, history.omitted_failures);
                 history.latest = Some(data.clone());
             }
             TransferReplayEventKind::Failure => {
@@ -48,11 +54,14 @@ impl TransferProgressChannel {
                 {
                     if let Some(removed) = history.failures.pop_front() {
                         history.failure_bytes = history.failure_bytes.saturating_sub(removed.len());
+                        history.omitted_failures = history.omitted_failures.saturating_add(1);
                     }
                 }
                 if data.len() <= TRANSFER_REPLAY_MAX_BYTES {
                     history.failure_bytes += data.len();
                     history.failures.push_back(data.clone());
+                } else {
+                    history.omitted_failures = history.omitted_failures.saturating_add(1);
                 }
             }
         }
@@ -70,6 +79,20 @@ impl TransferProgressChannel {
         }
         (replay, rx)
     }
+}
+
+fn attach_omitted_failure_count(data: String, omitted_failures: usize) -> String {
+    if omitted_failures == 0 {
+        return data;
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(&data) else {
+        return data;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return data;
+    };
+    object.insert("transferFailuresOmitted".to_string(), Value::from(omitted_failures as u64));
+    serde_json::to_string(&value).unwrap_or(data)
 }
 
 pub fn sse_from_channel(
@@ -159,5 +182,23 @@ mod tests {
         assert!(body.contains("data: early failure"));
         assert!(body.contains("data: terminal result"));
         assert!(body.find("early failure") < body.find("terminal result"));
+    }
+
+    #[tokio::test]
+    async fn delayed_transfer_subscription_reports_evicted_failure_count() {
+        let channel = Arc::new(TransferProgressChannel::new());
+        for index in 0..=TRANSFER_REPLAY_MAX_FAILURES {
+            channel.send(format!("failure-{index}"), TransferReplayEventKind::Failure);
+        }
+        channel.send(
+            r#"{"transferId":"transfer-1","status":"done","terminal":true}"#.to_string(),
+            TransferReplayEventKind::Terminal,
+        );
+
+        let response = sse_from_transfer_channel(channel).into_response();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains(r#""transferFailuresOmitted":1"#));
     }
 }

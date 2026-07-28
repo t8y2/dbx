@@ -206,6 +206,13 @@ describe("data transfer failure details", () => {
 
     expect(task.transferFailuresOmitted).toBe(150);
     expect(task.transferFailures?.[0]).toEqual({ table: "table_0", error: "updated retained failure" });
+
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, "done"),
+      transferFailuresOmitted: 12,
+    });
+
+    expect(task.transferFailuresOmitted).toBe(162);
   });
 
   it("limits individual and total UTF-8 error detail bytes without splitting characters", () => {
@@ -231,6 +238,29 @@ describe("data transfer failure details", () => {
 
     expect(retainedBytes).toBeLessThanOrEqual(MAX_TRANSFER_FAILURE_DETAIL_BYTES);
     expect(task.transferFailuresOmitted).toBeGreaterThan(0);
+  });
+
+  it("saturates omitted failure counting after the deduplication cap", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("omitted-cap", "many tables", 4_197);
+
+    for (let index = 0; index < MAX_TRANSFER_FAILURE_DETAILS + 4_097; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+      });
+    }
+
+    expect(task.transferFailuresOmitted).toBe(4_096);
+
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, "error", false),
+      table: "table_4_196",
+      error: "repeated omitted failure",
+    });
+
+    expect(task.transferFailuresOmitted).toBe(4_096);
   });
 });
 

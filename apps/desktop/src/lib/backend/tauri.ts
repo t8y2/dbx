@@ -2472,6 +2472,7 @@ export interface TransferProgress {
   status: "running" | "tableDone" | "done" | "error" | "cancelled";
   error: string | null;
   terminal: boolean;
+  transferFailuresOmitted?: number;
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {

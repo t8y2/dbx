@@ -34,4 +34,6 @@ test("ConnectionDialog database categories stay exhaustive", () => {
   assert.doesNotThrow(() => assertCompleteDatabaseCategories(optionValues, categoryBlocks));
   assert.ok(optionValues.includes("rabbitmq"), "rabbitmq must remain in dbOptions");
   assert.ok(categoryBlocks.some((values) => values.includes("rabbitmq")), "rabbitmq must remain categorized");
+  assert.ok(optionValues.includes("uxdb"), "uxdb must remain in dbOptions");
+  assert.ok(categoryBlocks.some((values) => values.includes("uxdb")), "uxdb must remain categorized");
 });

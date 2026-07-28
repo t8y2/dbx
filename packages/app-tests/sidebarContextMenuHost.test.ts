@@ -33,7 +33,7 @@ test("tree-level context menu opens with the current row items atomically", () =
   assert.match(connectionTree, /<CustomContextMenu ref="sidebarContextMenuRef"/);
   assert.match(contextMenu, /function onContextMenu\(event: MouseEvent, itemsOverride\?: ContextMenuItem\[\]\)/);
   assert.match(contextMenu, /const items = itemsOverride \?\?/);
-  assert.match(contextMenu, /defineExpose\(\{ close \}\)/);
+  assert.match(contextMenu, /defineExpose\(\{ close, menuRef, subRef \}\)/);
 });
 
 test("rare sidebar dialogs share module-level async wrappers with fallbacks", () => {

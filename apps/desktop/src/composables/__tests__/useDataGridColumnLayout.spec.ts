@@ -100,6 +100,63 @@ describe("useDataGridColumnLayout", () => {
     scope.stop();
   });
 
+  it("restores manually hidden columns after the grid scope is recreated", () => {
+    const hiddenColumnKeys = ref<string[]>([]);
+    const options = {
+      columns: ref(["id", "name", "email"]),
+      sourceColumns: ref(undefined),
+      commentByColumn: ref(new Map()),
+      displayableColumnIndexes: ref([0, 1, 2]),
+      allNullColumnIndexes: ref([]),
+      columnOrderKeys: ref(["id\0\0", "name\0\0", "email\0\0"]),
+      layoutScopeKey: ref("visibility-recreated-layout"),
+      tableScopeKey: ref(""),
+      initialHiddenColumnKeys: hiddenColumnKeys,
+      onHiddenColumnKeysChange: (keys: string[]) => {
+        hiddenColumnKeys.value = keys;
+      },
+    };
+    const firstScope = effectScope();
+    const firstState = firstScope.run(() => useDataGridColumnLayoutState(options))!;
+
+    firstState.toggleColumnVisibility(1);
+    expect(hiddenColumnKeys.value).toEqual(["name\0\0"]);
+    firstScope.stop();
+
+    const recreatedScope = effectScope();
+    const recreatedState = recreatedScope.run(() => useDataGridColumnLayoutState(options))!;
+    expect(recreatedState.visibleColumnIndexes.value).toEqual([0, 2]);
+    recreatedState.showAllColumns();
+    expect(hiddenColumnKeys.value).toEqual([]);
+    recreatedScope.stop();
+  });
+
+  it("persists a null column when it is manually hidden after showing all columns", () => {
+    const onHiddenColumnKeysChange = vi.fn();
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["id", "empty"]),
+        sourceColumns: ref(undefined),
+        commentByColumn: ref(new Map()),
+        displayableColumnIndexes: ref([0, 1]),
+        allNullColumnIndexes: ref([1]),
+        columnOrderKeys: ref(["id\0\0", "empty\0\0"]),
+        layoutScopeKey: ref("visibility-null-column-layout"),
+        tableScopeKey: ref(""),
+        hideNullColumns: ref(true),
+        onHiddenColumnKeysChange,
+      }),
+    )!;
+
+    expect(state.visibleColumnIndexes.value).toEqual([0]);
+    state.showAllColumns();
+    state.toggleColumnVisibility(1);
+
+    expect(onHiddenColumnKeysChange).toHaveBeenLastCalledWith(["empty\0\0"]);
+    scope.stop();
+  });
+
   it("keeps a new resize active when the previous resize completion frame is pending", () => {
     const frames = new Map<number, FrameRequestCallback>();
     let nextFrame = 1;

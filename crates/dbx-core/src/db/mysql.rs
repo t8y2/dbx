@@ -637,6 +637,72 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
     setup_mode: MySqlSetupMode,
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
+    let mut retry_url = url.to_string();
+    let mut retry_ca_cert_path = ca_cert_path;
+    let mut result = connect_pool_attempt(
+        url,
+        ca_cert_path,
+        timeout,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+        MySqlEofMode::Deprecate,
+    )
+    .await;
+
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_without_ssl(error)) {
+        if let Some(fallback_url) = ssl_fallback_url(url) {
+            log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
+            retry_url = fallback_url;
+            retry_ca_cert_path = None;
+            result = connect_pool_attempt(
+                &retry_url,
+                None,
+                timeout,
+                max_connections,
+                idle_timeout_secs,
+                setup_database,
+                extra_setup_queries,
+                setup_mode,
+                MySqlEofMode::Deprecate,
+            )
+            .await;
+        }
+    }
+
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+        log::info!("MySQL proxy returned legacy EOF packets; retrying with CLIENT_DEPRECATE_EOF disabled");
+        return connect_pool_attempt(
+            &retry_url,
+            retry_ca_cert_path,
+            timeout,
+            max_connections,
+            idle_timeout_secs,
+            setup_database,
+            extra_setup_queries,
+            setup_mode,
+            MySqlEofMode::Legacy,
+        )
+        .await;
+    }
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_pool_attempt(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+) -> Result<MySqlPool, String> {
     let pool = create_pool(
         url,
         ca_cert_path,
@@ -645,8 +711,9 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
+        eof_mode,
     )?;
-    let result = verify_pool_connection_with_setup_fallback(
+    verify_pool_connection_with_setup_fallback(
         pool,
         timeout,
         url,
@@ -656,39 +723,9 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
+        eof_mode,
     )
-    .await;
-
-    if let Err(ref e) = result {
-        if mysql_error_should_retry_without_ssl(e) {
-            if let Some(fallback_url) = ssl_fallback_url(url) {
-                log::info!("SSL handshake failed, retrying with ssl-mode=disabled");
-                let fallback_pool = create_pool(
-                    &fallback_url,
-                    None,
-                    max_connections,
-                    idle_timeout_secs,
-                    setup_database,
-                    extra_setup_queries,
-                    setup_mode,
-                )?;
-                return verify_pool_connection_with_setup_fallback(
-                    fallback_pool,
-                    timeout,
-                    &fallback_url,
-                    None,
-                    max_connections,
-                    idle_timeout_secs,
-                    setup_database,
-                    extra_setup_queries,
-                    setup_mode,
-                )
-                .await;
-            }
-        }
-    }
-
-    result
+    .await
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -701,6 +738,18 @@ struct MySqlTlsFiles {
 enum MySqlSetupMode {
     Standard,
     Compatible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlEofMode {
+    Deprecate,
+    Legacy,
+}
+
+impl MySqlEofMode {
+    fn deprecate_eof(self) -> bool {
+        self == Self::Deprecate
+    }
 }
 
 const MYSQL_GROUP_CONCAT_MAX_LEN: u64 = 1_048_576;
@@ -724,6 +773,7 @@ async fn verify_pool_connection_with_setup_fallback(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
 ) -> Result<MySqlPool, String> {
     match verify_pool_connection(&pool, timeout).await {
         Ok(()) => Ok(pool),
@@ -742,6 +792,7 @@ async fn verify_pool_connection_with_setup_fallback(
                 setup_database,
                 extra_setup_queries,
                 fallback_mode,
+                eof_mode,
             )?;
             verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
         }
@@ -783,6 +834,7 @@ fn create_pool(
     setup_database: Option<&str>,
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
@@ -816,6 +868,7 @@ fn create_pool(
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
         .tcp_keepalive(Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))))
+        .deprecate_eof(eof_mode.deprecate_eof())
         .setup(setup_queries);
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
         builder = builder.ssl_opts(ssl_opts);
@@ -1323,6 +1376,10 @@ fn mysql_error_should_retry_without_ssl(error: &str) -> bool {
         || (error.contains("client asked for ssl") && error.contains("server does not have this capability"))
 }
 
+fn mysql_error_should_retry_with_legacy_eof(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("packets out of sync")
+}
+
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     (lower.contains("1105") && lower.contains("hy000"))
@@ -1658,9 +1715,36 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
-    let pool =
-        create_pool(url, None, max_connections, None, setup_database, extra_setup_queries, MySqlSetupMode::Compatible)?;
-    verify_pool_connection(&pool, timeout).await.map(|_| pool)
+    let result = connect_pool_attempt(
+        url,
+        None,
+        timeout,
+        max_connections,
+        None,
+        setup_database,
+        extra_setup_queries,
+        MySqlSetupMode::Compatible,
+        MySqlEofMode::Deprecate,
+    )
+    .await;
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+        log::info!(
+            "MySQL proxy returned legacy EOF packets; retrying bare connection with CLIENT_DEPRECATE_EOF disabled"
+        );
+        return connect_pool_attempt(
+            url,
+            None,
+            timeout,
+            max_connections,
+            None,
+            setup_database,
+            extra_setup_queries,
+            MySqlSetupMode::Compatible,
+            MySqlEofMode::Legacy,
+        )
+        .await;
+    }
+    result
 }
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
@@ -1919,6 +2003,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1944,6 +2029,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1969,6 +2055,7 @@ pub async fn completion_assistant_search(
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
                 data_type: get_opt_str(&row, "data_type"),
+                signature: None,
             });
         }
     }
@@ -1990,6 +2077,7 @@ pub async fn completion_assistant_search(
                         .map(|s| fix_potential_double_encoding(&s))
                         .filter(|s| !s.is_empty()),
                     data_type: Some(get_str_by_name(&row, "data_type")),
+                    signature: None,
                 });
             }
         }
@@ -4947,6 +5035,22 @@ mod tests {
         let error = "MySQL connection failed: Input/output error: Input/output error: packet out of order";
 
         assert!(mysql_error_should_retry_without_ssl(error));
+        assert!(!mysql_error_should_retry_with_legacy_eof(error));
+    }
+
+    #[test]
+    fn mysql_packets_out_of_sync_retries_with_legacy_eof() {
+        let error = "MySQL connection failed: Input/output error: Input/output error: Packets out of sync";
+
+        assert!(mysql_error_should_retry_with_legacy_eof(error));
+        assert!(!mysql_error_should_retry_without_ssl(error));
+    }
+
+    #[test]
+    fn mysql_async_builder_can_disable_deprecated_eof_protocol() {
+        let opts = mysql_async::Opts::from(mysql_async::OptsBuilder::default().deprecate_eof(false));
+
+        assert!(!opts.deprecate_eof());
     }
 
     #[test]

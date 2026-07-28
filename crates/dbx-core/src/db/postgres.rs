@@ -30,6 +30,22 @@ use crate::types::{
     OwnerInfo, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresTablePrivilegeInfo {
+    pub grantor: String,
+    pub grantee: String,
+    pub privilege_type: String,
+    pub is_grantable: bool,
+    pub column_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresTableAccessInfo {
+    pub owner: String,
+    pub owner_default_privileges: Vec<String>,
+    pub privileges: Vec<PostgresTablePrivilegeInfo>,
+}
+
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
     if let Ok(v) = row.try_get::<_, DateTime<Local>>(idx) {
         return Some(serde_json::Value::String(format_pg_timestamptz(v)));
@@ -507,7 +523,7 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
             }
             serde_json::Value::Null
         }
-        PgColType::Bool => row.try_get::<_, bool>(idx).map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
+        PgColType::Bool => pg_bool_value_to_json(row, idx),
         PgColType::Interval => row
             .try_get::<_, PgInterval>(idx)
             .map(|interval| serde_json::Value::String(format_pg_interval(interval)))
@@ -1853,6 +1869,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: None,
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1881,6 +1898,7 @@ pub async fn completion_assistant_search(
                 parent_name: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
                 data_type: None,
+                signature: None,
             });
         }
     }
@@ -1909,6 +1927,7 @@ pub async fn completion_assistant_search(
                 parent_name: None,
                 comment: row.try_get::<_, Option<String>>(3).ok().flatten(),
                 data_type: row.try_get::<_, Option<String>>(4).ok().flatten(),
+                signature: row.try_get::<_, Option<String>>(5).ok().flatten(),
             });
         }
     }
@@ -1946,6 +1965,7 @@ pub async fn completion_assistant_search(
                     parent_name: Some(table.to_string()),
                     comment: row.try_get::<_, Option<String>>(2).ok().flatten(),
                     data_type: Some(pg_row_try_string(&row, 1)),
+                    signature: None,
                 });
             }
         }
@@ -1974,7 +1994,8 @@ fn postgres_completion_tables_sql() -> &'static str {
 
 fn postgres_completion_routines_sql() -> &'static str {
     "SELECT p.proname, n.nspname, CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
-            obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type \
+            obj_description(p.oid) AS routine_comment, COALESCE(pg_get_function_result(p.oid), '') AS data_type, \
+            pg_get_function_identity_arguments(p.oid) AS signature \
      FROM pg_catalog.pg_proc p \
      JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
      WHERE n.nspname = $1 AND p.prokind::text = ANY($3::text[]) \
@@ -2615,11 +2636,42 @@ fn parse_enum_values_from_row(row: &Row, index: usize) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(&raw).ok()
 }
 
+/// Decode a boolean column to JSON, tolerating databases (e.g. GaussDB) that
+/// encode booleans as the ASCII bytes `t` (0x74) / `f` (0x66) in the binary
+/// protocol instead of the standard PostgreSQL 0x00 / 0x01.
+fn pg_bool_value_to_json(row: &Row, idx: usize) -> serde_json::Value {
+    if let Some(v) = pg_row_try_bool(row, idx) {
+        return serde_json::Value::Bool(v);
+    }
+    serde_json::Value::Null
+}
+
+/// Map raw boolean bytes to a Rust `bool`.
+///
+/// Standard PostgreSQL binary uses `[0x00]` / `[0x01]`; GaussDB sends the ASCII
+/// text representation `[b't']` / `[b'f']` instead.
+fn decode_bool_bytes(raw: &[u8]) -> Option<bool> {
+    match raw {
+        [0x00] => Some(false),
+        [0x01] => Some(true),
+        [b't'] | [b'T'] => Some(true),
+        [b'f'] | [b'F'] => Some(false),
+        _ => None,
+    }
+}
+
+fn decode_bool_candidates(raw: Option<&[u8]>, standard: Option<bool>) -> Option<bool> {
+    raw.and_then(decode_bool_bytes).or(standard)
+}
+
 /// Read a boolean column from a PostgreSQL row, tolerating databases that
 /// encode booleans as integers (0/1) or text ('t'/'f') instead of the standard
 /// `bool` OID.  Returns `None` when the column is NULL or truly unreadable.
 fn pg_row_try_bool(row: &Row, idx: usize) -> Option<bool> {
-    if let Ok(v) = row.try_get::<_, bool>(idx) {
+    // GaussDB encodes boolean as ASCII 't' (0x74) / 'f' (0x66) in binary.
+    let raw = row.try_get::<_, PgRawBytes>(idx).ok();
+    let standard = row.try_get::<_, bool>(idx).ok();
+    if let Some(v) = decode_bool_candidates(raw.as_ref().map(|value| value.0.as_slice()), standard) {
         return Some(v);
     }
     if let Ok(v) = row.try_get::<_, i32>(idx) {
@@ -3338,6 +3390,37 @@ const POSTGRES_OWNERS_SQL: &str =
      WHERE n.nspname = $1 \
        AND c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')";
 
+const POSTGRES_TABLE_OWNER_SQL: &str = "SELECT pg_get_userbyid(c.relowner)::text, \
+            ARRAY(SELECT default_acl.privilege_type::text \
+                  FROM pg_catalog.aclexplode(pg_catalog.acldefault('r', c.relowner)) default_acl \
+                  WHERE default_acl.grantee = c.relowner \
+                  ORDER BY default_acl.privilege_type) \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY c.oid LIMIT 1";
+
+const POSTGRES_TABLE_ACL_PRIVILEGES_SQL: &str =
+    "SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END::text, \
+            acl.privilege_type::text, acl.is_grantable, pg_get_userbyid(acl.grantor)::text \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) acl ON true \
+     LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY 4, 1, 2, 3";
+
+const POSTGRES_COLUMN_ACL_PRIVILEGES_SQL: &str =
+    "SELECT CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END::text, \
+            acl.privilege_type::text, acl.is_grantable, a.attname::text, pg_get_userbyid(acl.grantor)::text \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+     JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl ON true \
+     LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p') \
+     ORDER BY 5, 1, 2, 3, 4";
+
 fn postgres_owner_object_type(relkind: &str) -> &str {
     match relkind {
         "r" => "TABLE",
@@ -3813,6 +3896,53 @@ pub async fn list_owners(pool: &Pool, schema: &str) -> Result<Vec<OwnerInfo>, St
             }
         })
         .collect())
+}
+
+pub async fn get_table_access(pool: &Pool, schema: &str, table: &str) -> Result<PostgresTableAccessInfo, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
+    let owner_rows =
+        postgres_query_cached(&client, POSTGRES_TABLE_OWNER_SQL, &params).await.map_err(pg_error_to_string)?;
+    let owner_row = owner_rows.first().ok_or_else(|| "Table owner not found".to_string())?;
+    let owner = pg_row_try_string(owner_row, 0);
+    if owner.is_empty() {
+        return Err("Table owner not found".to_string());
+    }
+    let owner_default_privileges = owner_row.try_get::<_, Vec<String>>(1).unwrap_or_default();
+    if owner_default_privileges.is_empty() {
+        return Err("Table owner default privileges are unavailable".to_string());
+    }
+
+    let (table_privileges, column_privileges) = tokio::try_join!(
+        postgres_query_cached(&client, POSTGRES_TABLE_ACL_PRIVILEGES_SQL, &params),
+        postgres_query_cached(&client, POSTGRES_COLUMN_ACL_PRIVILEGES_SQL, &params),
+    )
+    .map_err(pg_error_to_string)?;
+
+    let privileges = table_privileges
+        .iter()
+        .map(|row| PostgresTablePrivilegeInfo {
+            grantor: pg_row_try_string(row, 3),
+            grantee: pg_row_try_string(row, 0),
+            privilege_type: pg_row_try_string(row, 1),
+            is_grantable: pg_row_try_bool(row, 2).unwrap_or(false),
+            column_name: None,
+        })
+        .chain(column_privileges.iter().map(|row| PostgresTablePrivilegeInfo {
+            grantor: pg_row_try_string(row, 4),
+            grantee: pg_row_try_string(row, 0),
+            privilege_type: pg_row_try_string(row, 1),
+            is_grantable: pg_row_try_bool(row, 2).unwrap_or(false),
+            column_name: Some(pg_row_try_string(row, 3)),
+        }))
+        .collect::<Vec<_>>();
+    if privileges.iter().any(|privilege| {
+        privilege.grantor.is_empty() || privilege.grantee.is_empty() || privilege.privilege_type.is_empty()
+    }) {
+        return Err("Table ACL metadata is incomplete".to_string());
+    }
+
+    Ok(PostgresTableAccessInfo { owner, owner_default_privileges, privileges })
 }
 
 /// Execute multiple SQL statements in a single round-trip using batch_execute.
@@ -4403,6 +4533,33 @@ mod tests {
     }
 
     #[test]
+    fn decode_bool_bytes_handles_standard_and_gaussdb_encodings() {
+        // Standard PostgreSQL binary boolean: 0x00 / 0x01
+        assert_eq!(decode_bool_bytes(&[0x00]), Some(false));
+        assert_eq!(decode_bool_bytes(&[0x01]), Some(true));
+        // GaussDB binary boolean: ASCII 't' (0x74) / 'f' (0x66)
+        assert_eq!(decode_bool_bytes(&[0x74]), Some(true));
+        assert_eq!(decode_bool_bytes(&[0x66]), Some(false));
+        assert_eq!(decode_bool_bytes(b"t"), Some(true));
+        assert_eq!(decode_bool_bytes(b"f"), Some(false));
+        assert_eq!(decode_bool_bytes(b"T"), Some(true));
+        assert_eq!(decode_bool_bytes(b"F"), Some(false));
+        // Unrecognized encodings return None
+        assert_eq!(decode_bool_bytes(&[0x02]), None);
+        assert_eq!(decode_bool_bytes(&[0x74, 0x66]), None);
+        assert_eq!(decode_bool_bytes(&[]), None);
+    }
+
+    #[test]
+    fn raw_gaussdb_boolean_takes_precedence_over_standard_decoder() {
+        assert_eq!(decode_bool_candidates(Some(b"f"), Some(true)), Some(false));
+        assert_eq!(decode_bool_candidates(Some(b"t"), Some(true)), Some(true));
+        assert_eq!(decode_bool_candidates(Some(&[0x00]), Some(true)), Some(false));
+        assert_eq!(decode_bool_candidates(Some(&[0x01]), Some(false)), Some(true));
+        assert_eq!(decode_bool_candidates(Some(&[0x02]), Some(false)), Some(false));
+    }
+
+    #[test]
     fn postgres_foreign_keys_sql_selects_referential_actions() {
         let sql = postgres_foreign_keys_sql();
 
@@ -4615,6 +4772,19 @@ mod tests {
         // Double quotes should be doubled, not breaking out
         assert_eq!(escaped, r#""public""; DROP TABLE users; --""#);
         assert!(escaped.matches('"').count().is_multiple_of(2), "quote count should be even");
+    }
+
+    #[test]
+    fn postgres_table_access_reads_complete_catalog_acls() {
+        assert!(POSTGRES_TABLE_OWNER_SQL.contains("acldefault('r', c.relowner)"));
+        assert!(
+            POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))")
+        );
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("aclexplode(a.attacl)"));
+        assert!(POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("acl.grantee = 0 THEN 'PUBLIC'"));
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("acl.grantee = 0 THEN 'PUBLIC'"));
+        assert!(POSTGRES_TABLE_ACL_PRIVILEGES_SQL.contains("pg_get_userbyid(acl.grantor)"));
+        assert!(POSTGRES_COLUMN_ACL_PRIVILEGES_SQL.contains("pg_get_userbyid(acl.grantor)"));
     }
 
     // --- query_result_row_limit ---
@@ -5544,6 +5714,7 @@ mod tests {
         assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
         assert!(postgres_completion_routines_sql().contains("p.proname ILIKE $2 ESCAPE '~'"));
         assert!(postgres_completion_routines_sql().contains("p.prokind::text = ANY($3::text[])"));
+        assert!(postgres_completion_routines_sql().contains("pg_get_function_identity_arguments(p.oid) AS signature"));
         assert!(postgres_completion_routines_sql().contains("ORDER BY p.proname LIMIT $4"));
         assert!(postgres_completion_columns_sql().contains("a.attname ILIKE $3 ESCAPE '~'"));
         assert!(postgres_visible_table_schema_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));

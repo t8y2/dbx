@@ -100,6 +100,20 @@ describe("sqlCompletion quoted schema qualifiers", () => {
 });
 
 describe("sqlCompletion table targets", () => {
+  it("suggests tables after a database qualifier in an EXISTS table list", () => {
+    const sql = "SELECT * FROM aa.tb t WHERE EXISTS (SELECT 1 FROM aa.tb1 t1, aa.";
+    const context = getSqlCompletionContext(sql, sql.length);
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "mysql",
+      tables: [{ name: "tb2", schema: "aa", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(context.qualifier).toBe("aa");
+    expect(context.suggestTables).toBe(true);
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "tb2", type: "table" })]));
+  });
+
   it("does not suggest aliases while completing an empty FROM target before LIMIT", () => {
     const sql = "SELECT *\nFROM \nLIMIT 100;";
     const cursor = "SELECT *\nFROM ".length;

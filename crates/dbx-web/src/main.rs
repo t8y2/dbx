@@ -2,6 +2,7 @@ mod auth;
 mod error;
 mod routes;
 mod sse;
+mod ssh_prompt;
 mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -233,12 +234,16 @@ async fn main() {
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
+        transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
+        ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
     });
+
+    ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
 
     // API routes
     let api = Router::new()
@@ -282,6 +287,8 @@ async fn main() {
         // System
         .route("/system/fonts", get(routes::jdbc::list_system_fonts))
         .route("/ssh/config-hosts", get(routes::ssh_config::list_ssh_config_hosts))
+        .route("/ssh/prompts", get(routes::ssh_prompt::stream_ssh_prompts))
+        .route("/ssh/prompts/resolve", post(routes::ssh_prompt::resolve_ssh_prompt))
         // Tunnel profiles
         .route("/tunnel-profiles/list", get(routes::tunnel_profiles::load_tunnel_profiles))
         .route("/tunnel-profiles/save", post(routes::tunnel_profiles::save_tunnel_profiles))
@@ -459,6 +466,9 @@ async fn main() {
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
+        .route("/redis/get-stream-groups", post(routes::redis::get_stream_groups))
+        .route("/redis/get-stream-consumers", post(routes::redis::get_stream_consumers))
+        .route("/redis/get-stream-pending", post(routes::redis::get_stream_pending))
         .route("/redis/load-more", post(routes::redis::load_more))
         .route("/redis/set-string", post(routes::redis::set_string))
         .route("/redis/delete-key", post(routes::redis::delete_key))
@@ -497,6 +507,14 @@ async fn main() {
         .route("/zookeeper/get", post(routes::zookeeper::get))
         .route("/zookeeper/put", post(routes::zookeeper::put))
         .route("/zookeeper/delete", post(routes::zookeeper::delete))
+        // HBase REST
+        .route("/hbase/table-schema", post(routes::hbase::get_table_schema))
+        .route("/hbase/scan-rows", post(routes::hbase::scan_rows))
+        .route("/hbase/get-row", post(routes::hbase::get_row))
+        .route("/hbase/put-row", post(routes::hbase::put_row))
+        .route("/hbase/delete-row", post(routes::hbase::delete_row))
+        .route("/hbase/create-table", post(routes::hbase::create_table))
+        .route("/hbase/delete-table", post(routes::hbase::delete_table))
         // Nacos
         .route("/nacos/test-connection", post(routes::nacos::test_connection))
         .route("/nacos/namespaces/list", post(routes::nacos::list_namespaces))
@@ -588,6 +606,7 @@ async fn main() {
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
         .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
         .route("/ai/provider-configs", get(routes::ai::load_ai_provider_configs))
+        .route("/ai/chat-selection", post(routes::ai::save_ai_chat_selection).get(routes::ai::load_ai_chat_selection))
         .route("/ai/configs", post(routes::ai::save_ai_configs).get(routes::ai::load_ai_configs))
         .route("/ai/default-config", post(routes::ai::set_default_ai_config))
         .route("/ai/config-item", post(routes::ai::save_ai_config_item))
@@ -601,6 +620,7 @@ async fn main() {
         .route("/ai/cancel-stream", post(routes::ai::ai_cancel_stream))
         .route("/ai/test-connection", post(routes::ai::ai_test_connection))
         .route("/ai/models", post(routes::ai::ai_list_models))
+        .route("/ai/model-effort", post(routes::ai::ai_resolve_model_effort))
         // Prompt templates
         .route(
             "/prompt-templates",

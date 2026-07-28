@@ -70,7 +70,7 @@ describe("McpConnectionScopePicker", () => {
       return node.type === "button" && node.props["class"]?.includes("settings-choice-card");
     });
 
-    expect(modeButtons.find((node) => node.props["data-scope-mode"] === "all")?.props["class"]?.includes("settings-choice-card--selected")).toBe(true);
+    expect(modeButtons.find((node) => node.props["data-scope-mode"] === "all")?.props["class"]?.includes("dbx-choice-selected")).toBe(true);
     expect(modeButtons.find((node) => node.props["data-scope-mode"] === "all")?.props.role).toBe("radio");
     expect(modeButtons.find((node) => node.props["data-scope-mode"] === "all")?.props["aria-checked"]).toBe(true);
     expect(modeButtons.find((node) => node.props["data-scope-mode"] === "selected")?.props.tabindex).toBe(-1);

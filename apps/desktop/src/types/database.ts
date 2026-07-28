@@ -12,6 +12,7 @@ export type DatabaseType =
   | "mongodb"
   | "oracle"
   | "elasticsearch"
+  | "hbase"
   | "qdrant"
   | "milvus"
   | "weaviate"
@@ -105,6 +106,7 @@ export interface CompletionAssistantCandidate {
   parent_name?: string | null;
   comment?: string | null;
   data_type?: string | null;
+  signature?: string | null;
 }
 
 export interface CompletionAssistantResponse {
@@ -558,6 +560,8 @@ export interface QueryResult {
   hidden_column_indexes?: number[];
   /** Local value filters survive DataGrid component eviction when switching tabs. */
   local_column_filters?: Record<string, string[]>;
+  /** Manually hidden columns survive DataGrid component eviction when switching tabs. */
+  local_hidden_column_keys?: string[];
   /**
    * Database type name for each column, parallel to `columns`. Optional and may
    * be shorter/empty when a driver cannot supply types (schemaless stores,
@@ -904,7 +908,31 @@ export interface QueryTab {
   explainClientSessionId?: string;
   /** Invalidates tab-scoped completion metadata after session context changes. */
   completionContextVersion?: number;
-  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "etcd-dashboard" | "zookeeper" | "mq" | "nacos" | "nacos-dashboard" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
+  mode:
+    | "data"
+    | "query"
+    | "redis"
+    | "redis-dashboard"
+    | "mongo"
+    | "mongo-gridfs"
+    | "mongo-bucket"
+    | "vector"
+    | "hbase"
+    | "etcd"
+    | "etcd-dashboard"
+    | "zookeeper"
+    | "mq"
+    | "nacos"
+    | "nacos-dashboard"
+    | "objects"
+    | "structure"
+    | "users"
+    | "dameng-jobs"
+    | "processlist"
+    | "mysql-dashboard"
+    | "postgres-dashboard";
+  /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
+  hbaseCreateTableOnOpen?: boolean;
   mqTenant?: string;
   mqInitialTab?: "topics";
   nacosNamespace?: string;

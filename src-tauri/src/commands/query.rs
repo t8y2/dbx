@@ -1,12 +1,21 @@
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::connection::AppState;
 use dbx_core::db;
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_cancel::RunningTaskMetadata;
 use dbx_core::sql::split_sql_statements;
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecuteMultiProgress {
+    execution_id: String,
+    completed: usize,
+    total: usize,
+    success: bool,
+}
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -59,6 +68,7 @@ pub async fn execute_query(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_multi(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
@@ -83,6 +93,16 @@ pub async fn execute_multi(
         )
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
+    let progress = execution_id.as_ref().map(|execution_id| {
+        let app = app.clone();
+        let execution_id = execution_id.clone();
+        Arc::new(move |completed, total, success| {
+            let _ = app.emit(
+                "query-batch-progress",
+                ExecuteMultiProgress { execution_id: execution_id.clone(), completed, total, success },
+            );
+        }) as dbx_core::query::ExecuteMultiProgressCallback
+    });
     let trace_id = execution_id.as_deref().unwrap_or("no-execution-id").to_string();
     let started_at = Instant::now();
     dbx_core::sql_diagnostics::debug_sql("query:execute_multi:start", &sql);
@@ -94,7 +114,7 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client(
+    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress(
         &state,
         &connection_id,
         &database,
@@ -113,6 +133,7 @@ pub async fn execute_multi(
             continue_on_error: continue_on_error.unwrap_or(false),
             execution_mode: execution_mode.unwrap_or_default(),
         },
+        progress,
     )
     .await;
     match &result {

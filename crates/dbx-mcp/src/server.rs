@@ -793,7 +793,21 @@ fn mcp_permissions(
     dbx_core::agent_tools::AgentSqlPermissions {
         allow_writes: !policy.read_only && !connection.read_only,
         allow_dangerous: !policy.read_only && !connection.read_only && policy.allow_dangerous_sql,
+        confirmed_write_sql: mcp_confirmed_write_sql_from_env(),
     }
+}
+
+/// Read the DBX_MCP_CONFIRMED_WRITE_SQL env var (set by the CLI agent when the
+/// user confirmed a specific write SQL). Returns None when the var is unset or
+/// empty, so desktop-embedded MCP contexts (which don't set this var) continue
+/// to work without a confirmed-SQL binding.
+fn mcp_confirmed_write_sql_from_env() -> Option<String> {
+    normalize_confirmed_write_sql(std::env::var("DBX_MCP_CONFIRMED_WRITE_SQL").ok())
+}
+
+fn normalize_confirmed_write_sql(value: Option<String>) -> Option<String> {
+    let trimmed = value?.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -823,13 +837,24 @@ fn validate_sql_policy(
         ));
     }
     let high_risk = risk == SqlRisk::Ddl || is_dangerous_sql_for_database(sql, connection.db_type);
-    if high_risk && !policy.allow_dangerous_sql {
+    let confirmed_sql = mcp_confirmed_write_sql_from_env();
+    if high_risk && !policy.allow_dangerous_sql && confirmed_sql.is_none() {
         return Err(tool_error("SQL_BLOCKED", "High-risk SQL is disabled in DBX MCP settings."));
     }
     if is_write && targets_production_database(connection, database, sql) {
         return Err(tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database."));
     }
-    Ok(mcp_permissions(connection, policy))
+    let mut permissions = mcp_permissions(connection, policy);
+    // When the user confirmed a specific write/DDL SQL via the CLI agent, the
+    // confirmed-SQL binding authorises dangerous (DDL) execution in the SQL
+    // path only. The precise SQL match check (sql_matches_confirmed_write) in
+    // agent_tools still guards execution — only the exact confirmed statement
+    // can run. Redis and Mongo paths are unaffected; they continue to use the
+    // persistent policy (mcp_permissions) without any confirmed-SQL elevation.
+    if confirmed_sql.is_some() {
+        permissions.allow_dangerous = true;
+    }
+    Ok(permissions)
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -1224,5 +1249,93 @@ mod tests {
             explain_data: None,
         });
         assert!(result_text(&result).contains("Error [MCP_READ_ONLY]: policy changed"));
+    }
+
+    #[test]
+    fn mcp_confirmation_and_policy_guards_fail_closed() {
+        assert_eq!(
+            normalize_confirmed_write_sql(Some("  DELETE FROM sessions WHERE id = 7  ".to_string())),
+            Some("DELETE FROM sessions WHERE id = 7".to_string())
+        );
+        assert_eq!(normalize_confirmed_write_sql(Some(" \n ".to_string())), None);
+
+        let read_only = ConnectionConfig { read_only: true, ..connection("readonly", "readonly", "postgres", "app") };
+        let writable_policy =
+            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let read_only_error =
+            validate_sql_policy(&read_only, &writable_policy, "app", "DELETE FROM sessions").unwrap_err();
+        assert!(result_text(&read_only_error).contains("CONNECTION_READ_ONLY"));
+
+        let mut production = connection("production", "production", "postgres", "app");
+        production.production_databases = vec!["app".to_string()];
+        let production_error =
+            validate_sql_policy(&production, &writable_policy, "app", "DROP TABLE sessions").unwrap_err();
+        assert!(result_text(&production_error).contains("PRODUCTION_WRITE_BLOCKED"));
+    }
+
+    /// RAII guard that sets an env var and restores the original value (or
+    /// removes the var) on drop. Panic-safe — cleanup runs even when an
+    /// assertion fails.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(original) => std::env::set_var(self.key, original),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn confirmed_sql_binding_tests() {
+        let connection = connection("dev", "dev", "postgres", "app");
+
+        // 1. mcp_permissions (Redis/Mongo path) must NOT elevate allow_dangerous.
+        let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
+        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let permissions = mcp_permissions(&connection, &policy);
+        assert!(!permissions.allow_dangerous, "confirmed SQL must NOT elevate allow_dangerous for Redis/Mongo paths");
+        assert!(permissions.allow_writes);
+        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
+
+        // 2. SQL path (validate_sql_policy) elevates allow_dangerous with a confirmed binding.
+        let permissions = validate_sql_policy(&connection, &policy, "app", "CREATE TABLE metrics (id INT)").unwrap();
+        assert!(permissions.allow_dangerous, "SQL path should elevate allow_dangerous with confirmed binding");
+        assert!(permissions.allow_writes);
+        assert_eq!(permissions.confirmed_write_sql.as_deref(), Some("CREATE TABLE metrics (id INT)"));
+        drop(_guard);
+
+        // 3. Without a confirmed binding, high-risk SQL is blocked.
+        let _guard = EnvGuard::remove("DBX_MCP_CONFIRMED_WRITE_SQL");
+        let error = validate_sql_policy(&connection, &policy, "app", "DROP TABLE sessions").unwrap_err();
+        assert!(result_text(&error).contains("SQL_BLOCKED"));
+        assert!(result_text(&error).contains("High-risk SQL is disabled"));
+        drop(_guard);
+
+        // 4. Confirmed SQL must not bypass global read_only.
+        let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
+        let read_only_policy =
+            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let error =
+            validate_sql_policy(&connection, &read_only_policy, "app", "CREATE TABLE metrics (id INT)").unwrap_err();
+        assert!(result_text(&error).contains("MCP_READ_ONLY"), "confirmed SQL must not bypass global read_only");
     }
 }

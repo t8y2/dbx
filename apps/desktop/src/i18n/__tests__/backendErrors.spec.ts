@@ -152,6 +152,15 @@ describe("backend error translation", () => {
     const t = translatorFor("zh-CN");
     expect(translateBackendError(t, "some driver specific failure")).toBe("some driver specific failure");
   });
+
+  test("normalizes Error and structural message objects before translation", () => {
+    const t = translatorFor("zh-CN");
+    const message = "file does not exist: /tmp/missing.sqlite";
+    const expected = t("common.fileNotFound", { path: "/tmp/missing.sqlite" });
+
+    expect(translateBackendError(t, new Error(message))).toBe(expected);
+    expect(translateBackendError(t, { message })).toBe(expected);
+  });
 });
 
 // Matching on message text only works while both sides agree on the wording, so

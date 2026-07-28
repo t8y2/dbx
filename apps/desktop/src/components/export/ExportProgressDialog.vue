@@ -55,8 +55,7 @@ async function revealExportFile() {
   try {
     await api.revealPathInFileManager(props.filePath);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    toast(t("exportProgress.openFolderFailed", { message }), 5000);
+    toast(t("exportProgress.openFolderFailed", { message: translateBackendError(t, error) }), 5000);
   } finally {
     isRevealing.value = false;
   }

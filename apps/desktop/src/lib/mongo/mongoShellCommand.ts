@@ -26,6 +26,15 @@ export interface MongoFindCommand {
   sort?: string;
 }
 
+export interface MongoFindPaginationPlan {
+  pageOffset: number;
+  pageLimit: number;
+  requestSkip: number;
+  requestLimit: number;
+  logicalSkip: number;
+  logicalLimit?: number;
+}
+
 export interface MongoFindOneCommand {
   collection: string;
   filter: string;
@@ -165,6 +174,42 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
     limit,
     sort,
   };
+}
+
+export function planMongoFindPagination(input: string, command: MongoFindCommand, pageOffset: number, pageLimit: number): MongoFindPaginationPlan | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const target = parseFindTarget(source);
+  if (!target) return null;
+
+  const findOpenIndex = source.indexOf("(", target.findCallIndex);
+  const findCloseIndex = findMatchingParen(source, findOpenIndex);
+  if (findCloseIndex < 0) return null;
+  const chain = source.slice(findCloseIndex + 1).trim();
+  if (chain && !chain.startsWith(".")) return null;
+
+  const normalizedPageOffset = Math.max(0, Math.trunc(pageOffset));
+  const normalizedPageLimit = Math.max(1, Math.trunc(pageLimit));
+  const hasExplicitSkip = findChainedMethodCallIndex(chain, "skip") >= 0;
+  const hasExplicitLimit = findChainedMethodCallIndex(chain, "limit") >= 0;
+  const logicalSkip = hasExplicitSkip ? Math.max(0, Math.trunc(command.skip)) : 0;
+  // limit(0) is unbounded in MongoDB; a negative limit keeps the same row
+  // bound while requesting single-batch cursor semantics.
+  const logicalLimit = hasExplicitLimit && command.limit !== 0 ? Math.abs(Math.trunc(command.limit)) : undefined;
+  const remaining = logicalLimit === undefined ? normalizedPageLimit : Math.max(0, logicalLimit - normalizedPageOffset);
+
+  return {
+    pageOffset: normalizedPageOffset,
+    pageLimit: normalizedPageLimit,
+    requestSkip: logicalSkip + normalizedPageOffset,
+    requestLimit: Math.min(normalizedPageLimit, remaining),
+    logicalSkip,
+    logicalLimit,
+  };
+}
+
+export function mongoFindLogicalTotal(total: number, plan: Pick<MongoFindPaginationPlan, "logicalSkip" | "logicalLimit">): number {
+  const afterSkip = Math.max(0, Math.trunc(total) - plan.logicalSkip);
+  return plan.logicalLimit === undefined ? afterSkip : Math.min(afterSkip, plan.logicalLimit);
 }
 
 export function parseMongoFindOneCommand(input: string): MongoFindOneCommand | null {

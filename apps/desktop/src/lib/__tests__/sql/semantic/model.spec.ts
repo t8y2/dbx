@@ -80,6 +80,29 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["b"] }));
   });
 
+  it("keeps nested EXISTS sources and outer correlated sources visible", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM aa.tb t WHERE EXISTS (SELECT 1 FROM aa.tb1 t1, aa.tb2 t2 WHERE t1.|)");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(model.rowSources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "tb1", alias: "t1", metadataTarget: { schema: "aa", table: "tb1" } }),
+        expect.objectContaining({ name: "tb2", alias: "t2", metadataTarget: { schema: "aa", table: "tb2" } }),
+        expect.objectContaining({ name: "tb", alias: "t", metadataTarget: { schema: "aa", table: "tb" } }),
+      ]),
+    );
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["t1"] }));
+    expect(model.cursorIntent.targetSourceId).toBe(model.rowSources.find((source) => source.alias === "t1")?.id);
+  });
+
+  it("classifies an incomplete nested database qualifier as a table context", () => {
+    const { sql, cursor } = sqlFixtureCursor("SELECT * FROM aa.tb t WHERE EXISTS (SELECT 1 FROM aa.tb1 t1, aa.|)");
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(model.rowSources.some((source) => source.name === "aa")).toBe(false);
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "table", qualifierParts: ["aa"], confidence: "high" }));
+  });
+
   it("does not treat an Oracle FOR UPDATE clause as a table alias", () => {
     const sql = "SELECT * FROM APP.USERS FOR UPDATE SKIP LOCKED";
     const model = buildSqlSemanticModel(sql, sql.length, { databaseType: "oracle" });

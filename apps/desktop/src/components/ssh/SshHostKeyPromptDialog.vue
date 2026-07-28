@@ -5,6 +5,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/composables/useToast";
+import { resolveSshPrompt } from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { apiUrl } from "@/lib/common/webPath";
 
 interface SshPromptRequest {
   id: string;
@@ -38,15 +41,51 @@ const remember = ref(true);
 const secretCode = ref("");
 const resolving = ref(false);
 const unlisteners: Array<() => void> = [];
+let webEventSource: EventSource | null = null;
 let mounted = true;
 
-onMounted(async () => {
+function enqueuePrompt(request: SshPromptRequest) {
+  if (queue.value.some((prompt) => prompt.id === request.id)) return;
+  queue.value.push(request);
+  visible.value = true;
+}
+
+function handleNotice(n: SshHostKeyNotice) {
+  let message: string;
+  if (n.kind === "Changed") {
+    message = t("connection.sshHostKeyNoticeChanged", { host: n.host, port: n.port });
+  } else if (n.kind === "Rejected") {
+    message = t("connection.sshHostKeyNoticeRejected", { host: n.host, port: n.port });
+  } else if (n.kind === "LearnFailed") {
+    message = t("connection.sshHostKeyNoticeLearnFailed", { host: n.host, port: n.port });
+  } else {
+    message = n.message || t("connection.sshHostKeyNoticeGeneric");
+  }
+  toast(message, 6000);
+}
+
+function handleWebEvent(data: string) {
+  try {
+    const event = JSON.parse(data) as { type: "sync" | "prompt" | "notice" | "dismiss"; pendingIds?: string[]; request?: SshPromptRequest; notice?: SshHostKeyNotice; id?: string };
+    if (event.type === "sync" && event.pendingIds) {
+      const currentId = queue.value[0]?.id;
+      queue.value = queue.value.filter((prompt) => event.pendingIds?.includes(prompt.id));
+      if (currentId && !queue.value.some((prompt) => prompt.id === currentId)) resetPromptState();
+      visible.value = queue.value.length > 0;
+    } else if (event.type === "prompt" && event.request) enqueuePrompt(event.request);
+    else if (event.type === "notice" && event.notice) handleNotice(event.notice);
+    else if (event.type === "dismiss" && event.id) dismissPrompt(event.id);
+  } catch (error) {
+    console.error("[DBX] invalid SSH prompt event:", error);
+  }
+}
+
+async function setupTauriPromptBridge() {
   try {
     const { listen } = await import("@tauri-apps/api/event");
     if (!mounted) return;
     const promptHandle = await listen<SshPromptRequest>("ssh-prompt", (event) => {
-      queue.value.push(event.payload);
-      visible.value = true;
+      enqueuePrompt(event.payload);
     });
     if (!mounted) {
       promptHandle();
@@ -55,18 +94,7 @@ onMounted(async () => {
     unlisteners.push(promptHandle);
 
     const noticeHandle = await listen<SshHostKeyNotice>("ssh-host-key-notice", (event) => {
-      const n = event.payload;
-      let message: string;
-      if (n.kind === "Changed") {
-        message = t("connection.sshHostKeyNoticeChanged", { host: n.host, port: n.port });
-      } else if (n.kind === "Rejected") {
-        message = t("connection.sshHostKeyNoticeRejected", { host: n.host, port: n.port });
-      } else if (n.kind === "LearnFailed") {
-        message = t("connection.sshHostKeyNoticeLearnFailed", { host: n.host, port: n.port });
-      } else {
-        message = n.message || t("connection.sshHostKeyNoticeGeneric");
-      }
-      toast(message, 6000);
+      handleNotice(event.payload);
     });
     if (!mounted) {
       noticeHandle();
@@ -93,14 +121,29 @@ onMounted(async () => {
       void invoke("ssh_prompt_not_ready").catch(() => undefined);
     }
   } catch {
-    // Not running inside Tauri (e.g. web preview) — no prompts to handle.
+    // The desktop bridge is unavailable, so the connection remains fail-closed.
   }
+}
+
+function setupWebPromptBridge() {
+  webEventSource = new EventSource(apiUrl("/api/ssh/prompts"));
+  webEventSource.onmessage = (event) => handleWebEvent(event.data);
+  webEventSource.onerror = () => {
+    // EventSource automatically retries. Do not close it while the app is mounted.
+  };
+}
+
+onMounted(() => {
+  if (isTauriRuntime()) void setupTauriPromptBridge();
+  else setupWebPromptBridge();
 });
 
 onBeforeUnmount(() => {
   mounted = false;
   unlisteners.forEach((u) => u());
-  void invoke("ssh_prompt_not_ready").catch(() => undefined);
+  webEventSource?.close();
+  webEventSource = null;
+  if (isTauriRuntime()) void import("@tauri-apps/api/core").then(({ invoke }) => invoke("ssh_prompt_not_ready")).catch(() => undefined);
 });
 
 async function resolve(action: "accept" | "reject" | "secret") {
@@ -108,19 +151,14 @@ async function resolve(action: "accept" | "reject" | "secret") {
   if (!prompt || resolving.value) return;
   resolving.value = true;
   try {
-    await invoke("resolve_ssh_prompt", {
-      resolution: {
-        id: prompt.id,
-        action,
-        remember: action === "accept" ? remember.value : undefined,
-        secret: action === "secret" ? secretCode.value : undefined,
-      },
+    await resolveSshPrompt({
+      id: prompt.id,
+      action,
+      remember: action === "accept" ? remember.value : undefined,
+      secret: action === "secret" ? secretCode.value : undefined,
     });
     // Advance to the next queued prompt (if any) and reset per-prompt state.
-    queue.value.shift();
-    remember.value = true;
-    secretCode.value = "";
-    if (queue.value.length === 0) visible.value = false;
+    dismissPrompt(prompt.id);
   } catch (e) {
     console.error("[DBX] resolve_ssh_prompt failed:", e);
     // "No pending" / "already cancelled" mean the backend already dropped this
@@ -138,11 +176,13 @@ function dismissPrompt(id: string) {
   const idx = queue.value.findIndex((p) => p.id === id);
   if (idx === -1) return;
   queue.value.splice(idx, 1);
-  if (idx === 0) {
-    remember.value = true;
-    secretCode.value = "";
-  }
+  if (idx === 0) resetPromptState();
   if (queue.value.length === 0) visible.value = false;
+}
+
+function resetPromptState() {
+  remember.value = true;
+  secretCode.value = "";
 }
 
 function accept() {

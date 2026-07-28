@@ -104,7 +104,14 @@ const paramNames: Record<string, string | string[]> = {
   "auth.rateLimited": "seconds",
 };
 
-export function translateBackendError(t: BackendErrorTranslate, message: string): string {
+function backendErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+  return String(error);
+}
+
+export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {
+  const message = backendErrorMessage(error);
   const tagged = message.match(/^\[([A-Za-z][A-Za-z0-9]+)\]\s*([\s\S]*)$/);
   if (tagged) {
     const [, code, rawDetail] = tagged;

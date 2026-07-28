@@ -1432,9 +1432,19 @@ onDeactivated(pauseRedisBrowserBackgroundWork);
 onUnmounted(pauseRedisBrowserBackgroundWork);
 
 watch(
-  () => props.db,
-  (db) => {
+  () => [props.connectionId, props.db] as const,
+  async ([connectionId, db]) => {
+    // ContentArea remounts this browser for scope changes; keep embedded uses
+    // in sync as well so an old scan cannot populate the new scope.
     commandDb.value = db;
+    resetLoadedKeys();
+    try {
+      await connectionStore.ensureConnected(connectionId);
+    } catch (error) {
+      console.warn("[DBX] ensureConnected failed for", connectionId, error);
+    }
+    if (connectionId !== props.connectionId || db !== props.db) return;
+    void loadKeys();
   },
 );
 

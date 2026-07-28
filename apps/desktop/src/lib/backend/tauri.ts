@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -47,7 +48,7 @@ import type {
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
-import type { AiConfig, AiConfigItem, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
+import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -73,6 +74,13 @@ import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
 import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
+
+export interface SshPromptResolution {
+  id: string;
+  action: "accept" | "reject" | "secret";
+  remember?: boolean;
+  secret?: string;
+}
 
 export interface AgentDriverInfo {
   db_type: string;
@@ -351,6 +359,7 @@ export interface AiModelInfo {
   id: string;
   displayName?: string;
   supportedEffortLevels?: AiEffortLevel[];
+  effortCapability?: AiEffortCapability;
 }
 
 export async function aiComplete(request: AiCompletionRequest): Promise<string> {
@@ -390,7 +399,20 @@ export type AgentEvent =
   | { type: "context_compacted"; summary: string; summary_tokens: number; compacted_messages: number; estimated_before: number; estimated_after: number }
   | { type: "error"; message: string };
 
-export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: AgentEvent) => void, mode?: string, allowWriteSql = false, _signal?: AbortSignal): Promise<string> {
+export async function aiAgentStream(
+  sessionId: string,
+  request: AiCompletionRequest,
+  connectionId: string,
+  database: string,
+  dbType: string,
+  onEvent: (event: AgentEvent) => void,
+  mode?: string,
+  allowWriteSql = false,
+  confirmedWriteSql?: string,
+  confirmedConnectionId?: string,
+  confirmedDatabase?: string,
+  _signal?: AbortSignal,
+): Promise<string> {
   const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
     onEvent(event.payload);
     if (event.payload.type === "agent_end" || event.payload.type === "error") {
@@ -398,7 +420,7 @@ export async function aiAgentStream(sessionId: string, request: AiCompletionRequ
     }
   });
   try {
-    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType, mode, allowWriteSql });
+    return await invoke("ai_agent_stream", { sessionId, request, connectionId, database, dbType, mode, allowWriteSql, confirmedWriteSql, confirmedConnectionId, confirmedDatabase });
   } catch (e) {
     unlisten();
     throw e;
@@ -423,6 +445,18 @@ export async function aiTestConnection(config: AiConfig): Promise<AiTestConnecti
 
 export async function aiListModels(config: AiConfig): Promise<AiModelInfo[]> {
   return invoke("ai_list_models", { config });
+}
+
+export async function aiResolveModelEffort(config: AiConfig, modelId: string): Promise<AiEffortCapability> {
+  return invoke("ai_resolve_model_effort", { config, modelId });
+}
+
+export async function saveAiChatSelection(selection: AiChatSelectionState): Promise<void> {
+  return invoke("save_ai_chat_selection", { selection });
+}
+
+export async function loadAiChatSelection(): Promise<AiChatSelectionState | null> {
+  return invoke("load_ai_chat_selection");
 }
 
 export async function aiCancelStream(sessionId: string): Promise<boolean> {
@@ -637,7 +671,11 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
 }
 
 export async function readExternalSqlFile(path: string): Promise<string> {
-  return invoke("read_external_sql_file", { path });
+  const result = await invoke<{ kind: "content"; content: string } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
+  if (result.kind === "tooLarge") {
+    throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
+  }
+  return result.content;
 }
 
 export async function writeExternalSqlFile(path: string, content: string): Promise<void> {
@@ -899,6 +937,42 @@ export async function executeMulti(
   },
 ): Promise<QueryResult[]> {
   return invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...options });
+}
+
+export interface ExecuteMultiProgress {
+  executionId: string;
+  completed: number;
+  total: number;
+  success: boolean;
+}
+
+export async function executeMultiWithProgress(
+  connectionId: string,
+  database: string,
+  sql: string,
+  onProgress: (progress: ExecuteMultiProgress) => void,
+  schema?: string,
+  options?: {
+    maxRows?: number;
+    fetchSize?: number;
+    pageSize?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    useTransaction?: boolean;
+    continueOnError?: boolean;
+    executionMode?: "simple";
+  },
+): Promise<QueryResult[]> {
+  const executionId = crypto.randomUUID();
+  const unlisten = await listen<ExecuteMultiProgress>("query-batch-progress", (event) => {
+    if (event.payload.executionId === executionId) onProgress(event.payload);
+  });
+  try {
+    return await invoke("execute_multi", { connectionId, database, sql, schema, executionId, ...options });
+  } finally {
+    unlisten();
+  }
 }
 
 export async function refreshConnections(): Promise<void> {
@@ -1202,6 +1276,10 @@ export async function getTableDdl(connectionId: string, database: string, schema
   return invoke("get_table_ddl", { connectionId, database, schema, table, objectType, catalog });
 }
 
+export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
+  return invoke("get_table_ddl", { connectionId, database, schema, table, objectType, catalog, includePostgresAccess: true });
+}
+
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
   return invoke("prepare_schema_diff", { options });
 }
@@ -1261,6 +1339,10 @@ export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<voi
 
 export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
   return invoke("test_tunnel_profile", { profile });
+}
+
+export async function resolveSshPrompt(resolution: SshPromptResolution): Promise<void> {
+  await invoke("resolve_ssh_prompt", { resolution });
 }
 
 export async function readKeychainPassword(service: string): Promise<string> {
@@ -1609,6 +1691,37 @@ export interface RedisStreamEntry {
   fields: RedisStreamField[];
 }
 
+// Redis counters above Number.MAX_SAFE_INTEGER are transported as decimal strings.
+export type RedisStreamMetric = number | string;
+
+export interface RedisStreamGroup {
+  name: RedisBlob;
+  consumers: RedisStreamMetric;
+  pending: RedisStreamMetric;
+  last_delivered_id: string;
+  entries_read?: RedisStreamMetric;
+  lag?: RedisStreamMetric;
+}
+
+export interface RedisStreamConsumer {
+  name: RedisBlob;
+  pending: RedisStreamMetric;
+  idle_ms: RedisStreamMetric;
+  inactive_ms?: RedisStreamMetric;
+}
+
+export interface RedisStreamPendingEntry {
+  id: string;
+  consumer: RedisBlob;
+  idle_ms: RedisStreamMetric;
+  deliveries: RedisStreamMetric;
+}
+
+export interface RedisStreamPendingPage {
+  entries: RedisStreamPendingEntry[];
+  next_cursor?: string;
+}
+
 export type RedisValueData =
   | { kind: "string"; content: RedisBlob }
   | { kind: "json"; value: string }
@@ -1675,6 +1788,18 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return invoke("redis_get_value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
+  return invoke("redis_get_stream_groups", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamConsumers(connectionId: string, db: number, keyRaw: string, groupRaw: string): Promise<RedisStreamConsumer[]> {
+  return invoke("redis_get_stream_consumers", { connectionId, db, keyRaw, groupRaw });
+}
+
+export async function redisGetStreamPending(connectionId: string, db: number, keyRaw: string, groupRaw: string, cursor?: string, consumerRaw?: string): Promise<RedisStreamPendingPage> {
+  return invoke("redis_get_stream_pending", { connectionId, db, keyRaw, groupRaw, cursor, ...(consumerRaw === undefined ? {} : { consumerRaw }) });
 }
 
 export async function redisSetString(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
@@ -2056,6 +2181,35 @@ export async function zookeeperPut(connectionId: string, key: string, value: KvV
 
 export async function zookeeperDelete(connectionId: string, key: string): Promise<KvDeleteResponse> {
   return invoke("zookeeper_delete", { connectionId, key });
+}
+
+// --- HBase ---
+export async function hbaseGetTableSchema(connectionId: string, namespace: string, table: string): Promise<import("@/types/hbase").HBaseTableSchema> {
+  return invoke("hbase_get_table_schema", { connectionId, namespace, table });
+}
+
+export async function hbaseScanRows(connectionId: string, namespace: string, table: string, rowKeyPrefix: string | undefined, limit: number): Promise<import("@/types/hbase").HBaseScanResult> {
+  return invoke("hbase_scan_rows", { connectionId, namespace, table, rowKeyPrefix, limit });
+}
+
+export async function hbaseGetRow(connectionId: string, namespace: string, table: string, rowKey: string, rowKeyEncoding?: import("@/types/hbase").HBaseValueEncoding): Promise<import("@/types/hbase").HBaseRow | null> {
+  return invoke("hbase_get_row", { connectionId, namespace, table, rowKey, rowKeyEncoding });
+}
+
+export async function hbasePutRow(connectionId: string, namespace: string, table: string, input: import("@/types/hbase").HBasePutRowInput): Promise<void> {
+  return invoke("hbase_put_row", { connectionId, namespace, table, input });
+}
+
+export async function hbaseDeleteRow(connectionId: string, namespace: string, table: string, rowKey: string, rowKeyEncoding?: import("@/types/hbase").HBaseValueEncoding): Promise<void> {
+  return invoke("hbase_delete_row", { connectionId, namespace, table, rowKey, rowKeyEncoding });
+}
+
+export async function hbaseCreateTable(connectionId: string, namespace: string, table: string, columnFamilies: string[]): Promise<void> {
+  return invoke("hbase_create_table", { connectionId, namespace, table, columnFamilies });
+}
+
+export async function hbaseDeleteTable(connectionId: string, namespace: string, table: string): Promise<void> {
+  return invoke("hbase_delete_table", { connectionId, namespace, table });
 }
 
 // --- Document stores ---
@@ -2468,6 +2622,7 @@ export interface TransferProgress {
   status: "running" | "tableDone" | "done" | "error" | "cancelled";
   error: string | null;
   terminal: boolean;
+  transferFailuresOmitted?: number;
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {
@@ -2743,7 +2898,7 @@ export interface QueryResultExportRequest {
   databaseType: DatabaseType;
   useAgentCursor: boolean;
   filePath: string;
-  format: "csv" | "xlsx" | "txt";
+  format: "csv" | "xlsx" | "txt" | "sql";
   includeSqlSheet?: boolean;
   pageSize: number;
   rowLimit?: number | null;
@@ -2753,6 +2908,8 @@ export interface QueryResultExportRequest {
   clientSessionId?: string;
   executionId?: string;
   dateTimeFormat?: string;
+  exportTableName?: string;
+  exportColumnTypes?: Array<string | null | undefined>;
   numericColumnRightAlign?: boolean;
 }
 

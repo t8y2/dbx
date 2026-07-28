@@ -9,7 +9,7 @@ test("unused header width keeps the result background", () => {
   const style = descriptor.styles.map((block) => block.content).join("\n");
 
   assert.match(style, /\.data-grid-header-shell\s*\{[^}]*background-color:\s*var\(--background\)/s);
-  assert.match(style, /\.data-grid-header-cell\s*\{[^}]*background-color:\s*rgb\(239, 239, 239\)/s);
+  assert.match(style, /\.data-grid-header-cell\s*\{[^}]*background-color:\s*color-mix\(in srgb, var\(--muted\) 88%, var\(--background\)\)/s);
   assert.doesNotMatch(style, /\.data-grid-header-shell\s*,\s*\.data-grid-header-cell/);
   assert.doesNotMatch(style, /data-grid--dark\s+\.data-grid-header-shell/);
 });

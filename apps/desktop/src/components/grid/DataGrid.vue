@@ -2596,6 +2596,10 @@ function nextPage() {
 
 function infiniteScrollNextPage() {
   if (infiniteScrollLoading.value || props.loading) return;
+  if (!canGoNextPage.value) {
+    infiniteScrollAllLoaded = true;
+    return;
+  }
   const nextOffset = props.result.rows.length;
   const remainingRows = infiniteScrollMaxRows.value - nextOffset;
   if (remainingRows <= 0) return;

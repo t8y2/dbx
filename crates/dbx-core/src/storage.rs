@@ -7,7 +7,7 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, DatabaseName,
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ai::{AiChatMessage, AiConfig, AiConfigItem, AiConversation, AiProvider};
+use crate::ai::{AiChatMessage, AiChatSelectionState, AiConfig, AiConfigItem, AiConversation, AiProvider};
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
@@ -30,6 +30,7 @@ const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
+const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
@@ -1682,6 +1683,18 @@ impl Storage {
             None | Some(serde_json::Value::Null) => String::new(),
             other => other.map(|v| v.to_string()).unwrap_or_default(),
         })
+    }
+
+    pub async fn save_ai_chat_selection(&self, selection: &AiChatSelectionState) -> Result<(), String> {
+        let value = serde_json::to_value(selection).map_err(|e| e.to_string())?;
+        self.save_app_state_value(APP_STATE_AI_CHAT_SELECTION_KEY, &value).await
+    }
+
+    pub async fn load_ai_chat_selection(&self) -> Result<Option<AiChatSelectionState>, String> {
+        self.load_app_state_value(APP_STATE_AI_CHAT_SELECTION_KEY)
+            .await?
+            .map(|value| serde_json::from_value(value).map_err(|e| e.to_string()))
+            .transpose()
     }
 
     pub async fn load_or_create_local_device_secret(&self) -> Result<String, String> {
@@ -3446,6 +3459,7 @@ mod tests {
         maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
         McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
     };
+    use crate::ai::{AiActiveModelSelection, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference};
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
@@ -4601,6 +4615,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ai_chat_selection_roundtrips_in_local_app_state() {
+        let path = temp_db_path("ai-chat-selection");
+        let storage = Storage::open(&path).await.unwrap();
+        let selection = AiChatSelectionState {
+            version: 1,
+            active: Some(AiActiveModelSelection { config_id: "config-1".to_string(), model_id: "model-1".to_string() }),
+            effort_preferences: vec![AiModelEffortPreference {
+                config_id: "config-1".to_string(),
+                model_id: "model-1".to_string(),
+                selection: AiEffortSelection::Enum("high".to_string()),
+            }],
+        };
+
+        storage.save_ai_chat_selection(&selection).await.unwrap();
+
+        assert_eq!(storage.load_ai_chat_selection().await.unwrap(), Some(selection));
+        assert_eq!(storage.load_app_settings_json().await.unwrap().get("ai_chat_selection_v1"), None);
+    }
+
+    #[tokio::test]
     async fn tab_runtime_cache_roundtrips_binary_payloads() {
         let path = temp_db_path("tab-runtime-cache");
         let storage = Storage::open(&path).await.unwrap();
@@ -4784,6 +4818,7 @@ mod tests {
                 proxy_url: String::new(),
                 enable_thinking: true,
                 reasoning_level: AiReasoningLevel::Default,
+                runtime_effort: None,
                 context_window: None,
                 codex_cli_path: None,
                 codex_cli_env: std::collections::HashMap::new(),

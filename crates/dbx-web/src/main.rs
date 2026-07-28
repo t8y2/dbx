@@ -603,6 +603,7 @@ async fn main() {
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
         .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
         .route("/ai/provider-configs", get(routes::ai::load_ai_provider_configs))
+        .route("/ai/chat-selection", post(routes::ai::save_ai_chat_selection).get(routes::ai::load_ai_chat_selection))
         .route("/ai/configs", post(routes::ai::save_ai_configs).get(routes::ai::load_ai_configs))
         .route("/ai/default-config", post(routes::ai::set_default_ai_config))
         .route("/ai/config-item", post(routes::ai::save_ai_config_item))
@@ -616,6 +617,7 @@ async fn main() {
         .route("/ai/cancel-stream", post(routes::ai::ai_cancel_stream))
         .route("/ai/test-connection", post(routes::ai::ai_test_connection))
         .route("/ai/models", post(routes::ai::ai_list_models))
+        .route("/ai/model-effort", post(routes::ai::ai_resolve_model_effort))
         // Prompt templates
         .route(
             "/prompt-templates",

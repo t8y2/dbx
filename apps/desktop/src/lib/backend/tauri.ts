@@ -47,7 +47,7 @@ import type {
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
-import type { AiConfig, AiConfigItem, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
+import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -358,6 +358,7 @@ export interface AiModelInfo {
   id: string;
   displayName?: string;
   supportedEffortLevels?: AiEffortLevel[];
+  effortCapability?: AiEffortCapability;
 }
 
 export async function aiComplete(request: AiCompletionRequest): Promise<string> {
@@ -443,6 +444,18 @@ export async function aiTestConnection(config: AiConfig): Promise<AiTestConnecti
 
 export async function aiListModels(config: AiConfig): Promise<AiModelInfo[]> {
   return invoke("ai_list_models", { config });
+}
+
+export async function aiResolveModelEffort(config: AiConfig, modelId: string): Promise<AiEffortCapability> {
+  return invoke("ai_resolve_model_effort", { config, modelId });
+}
+
+export async function saveAiChatSelection(selection: AiChatSelectionState): Promise<void> {
+  return invoke("save_ai_chat_selection", { selection });
+}
+
+export async function loadAiChatSelection(): Promise<AiChatSelectionState | null> {
+  return invoke("load_ai_chat_selection");
 }
 
 export async function aiCancelStream(sessionId: string): Promise<boolean> {

@@ -48,6 +48,7 @@ import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
+import type { AiChatSelectionState, AiEffortCapability } from "@/types/ai";
 import type {
   AgentDriverInfo,
   AiCompletionRequest,
@@ -1134,6 +1135,18 @@ export async function aiTestConnection(config: AiConfig): Promise<AiTestConnecti
 
 export async function aiListModels(config: AiConfig): Promise<AiModelInfo[]> {
   return post("/api/ai/models", { config });
+}
+
+export async function aiResolveModelEffort(config: AiConfig, modelId: string): Promise<AiEffortCapability> {
+  return post("/api/ai/model-effort", { config, modelId });
+}
+
+export async function saveAiChatSelection(selection: AiChatSelectionState): Promise<void> {
+  return post("/api/ai/chat-selection", { selection });
+}
+
+export async function loadAiChatSelection(): Promise<AiChatSelectionState | null> {
+  return get("/api/ai/chat-selection");
 }
 
 export type { AgentEvent } from "@/lib/backend/tauri";

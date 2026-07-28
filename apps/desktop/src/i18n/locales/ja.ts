@@ -814,6 +814,8 @@ export default withEnglishFallback({
       confirm: "確定",
       selectFirst: "リストテキストを選択してください",
     },
+    selectCatalog: "Catalogを選択",
+    searchCatalog: "Catalogを検索...",
   },
   tabs: {
     sql: "SQL",
@@ -3197,6 +3199,10 @@ export default withEnglishFallback({
     searchConnection: "接続を検索...",
     searchDatabase: "データベースを検索...",
     searchSchema: "スキーマを検索...",
+    sourceCatalog: "ソースCatalog",
+    targetCatalog: "ターゲットCatalog",
+    selectCatalog: "Catalogを選択してください...",
+    searchCatalog: "Catalogを検索...",
   },
   tableImport: {
     title: "テーブルデータをインポート",

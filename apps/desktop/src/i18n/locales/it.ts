@@ -814,6 +814,8 @@ export default withEnglishFallback({
       confirm: "Conferma",
       selectFirst: "Seleziona il testo della lista",
     },
+    selectCatalog: "Seleziona Catalogo",
+    searchCatalog: "Cerca Catalogo...",
   },
   tabs: {
     sql: "SQL",
@@ -3196,6 +3198,10 @@ export default withEnglishFallback({
     searchConnection: "Cerca connessioni...",
     searchDatabase: "Cerca database...",
     searchSchema: "Cerca schemi...",
+    sourceCatalog: "Catalogo sorgente",
+    targetCatalog: "Catalogo destinazione",
+    selectCatalog: "Seleziona Catalogo...",
+    searchCatalog: "Cerca Catalogo...",
   },
   tableImport: {
     title: "Importa Dati Tabella",

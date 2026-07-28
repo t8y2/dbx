@@ -1484,7 +1484,7 @@ async function send() {
   if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length) || isGenerating.value) return;
 
   // Snapshot the target connection/database before any async work so that
-  // awaits during context loading cannot cause a TOCTOU target switch.
+  // suspension points during context loading cannot cause a TOCTOU target switch.
   const connection = props.connection;
   const tab = props.tab;
   if (!connection || !tab) {

@@ -86,26 +86,30 @@ class TDengineAgentMetadataTest {
         Assertions.assertEquals("SHOW DATABASES", JdbcMetadataSqlFake.statements.get(0));
         Assertions.assertEquals("SHOW `power`.STABLES", JdbcMetadataSqlFake.statements.get(1));
         Assertions.assertEquals("SHOW `power`.TABLES", JdbcMetadataSqlFake.statements.get(2));
-        Assertions.assertTrue(JdbcMetadataSqlFake.statements.contains("SELECT stable_name, table_comment FROM information_schema.ins_stables WHERE db_name = ?"));
-        Assertions.assertTrue(JdbcMetadataSqlFake.statements.contains("SELECT table_name, stable_name, table_comment FROM information_schema.ins_tables WHERE db_name = ?"));
+        Assertions.assertFalse(JdbcMetadataSqlFake.statements.stream().anyMatch(sql -> sql.contains("information_schema")));
         Assertions.assertTrue(JdbcMetadataSqlFake.statements.contains("DESCRIBE `power`.`meters`"));
     }
 
     @Test
-    void showMetadataPreservesChildTableHierarchyAndAppliesConstraints() {
+    void showMetadataCachesFullResultsForLocalPaging() {
         List<String> statements = new ArrayList<>();
         List<Integer> maxRows = new ArrayList<>();
         TDengineAgent agent = new TDengineAgent();
         TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
 
-        List<TableInfo> tables = agent.listTables(
+        List<TableInfo> firstPage = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints(null, 2, null, List.of("TABLE"))
+        );
+        List<TableInfo> secondPage = agent.listTables(
             "dbx_alpha",
             new MetadataListConstraints(null, 2, 2, List.of("TABLE"))
         );
 
-        Assertions.assertEquals(List.of("device_b", "standalone"), tables.stream().map(TableInfo::getName).toList());
-        Assertions.assertEquals("meters", tables.get(0).getParent_name());
-        Assertions.assertEquals(List.of(4, 4), maxRows);
+        Assertions.assertEquals(List.of("meters", "device_a"), firstPage.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals(List.of("device_b", "standalone"), secondPage.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals("meters", secondPage.get(0).getParent_name());
+        Assertions.assertTrue(maxRows.isEmpty());
         Assertions.assertEquals(
             List.of(
                 "SHOW `dbx_alpha`.STABLES",
@@ -161,38 +165,34 @@ class TDengineAgentMetadataTest {
     }
 
     @Test
-    void showMetadataEnrichesTableCommentsWithoutBlockingTheShowListing() {
+    void showMetadataDoesNotLoadTableComments() {
         List<String> statements = new ArrayList<>();
         List<Integer> maxRows = new ArrayList<>();
-        List<String> metadataStatements = new ArrayList<>();
-        List<Integer> metadataTimeouts = new ArrayList<>();
         TDengineAgent agent = new TDengineAgent();
-        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows, metadataStatements, metadataTimeouts));
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
 
         List<TableInfo> tables = agent.listTables("dbx_alpha");
 
-        Assertions.assertEquals("meter readings", tables.get(0).getComment());
-        Assertions.assertEquals("device A", tables.get(1).getComment());
-        Assertions.assertEquals(List.of(5, 5), metadataTimeouts);
+        Assertions.assertNull(tables.get(0).getComment());
         Assertions.assertEquals(
             List.of(
-                "SELECT stable_name, table_comment FROM information_schema.ins_stables WHERE db_name = ?",
-                "SELECT table_name, stable_name, table_comment FROM information_schema.ins_tables WHERE db_name = ?"
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
             ),
-            metadataStatements
+            statements
         );
     }
 
     @Test
-    void showMetadataFiltersByEnrichedTableComments() {
+    void showMetadataFiltersByNameWithoutInformationSchema() {
         List<String> statements = new ArrayList<>();
         List<Integer> maxRows = new ArrayList<>();
         TDengineAgent agent = new TDengineAgent();
-        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows, new ArrayList<>(), new ArrayList<>()));
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
 
         List<TableInfo> tables = agent.listTables(
             "dbx_alpha",
-            new MetadataListConstraints("device B", 1, null, List.of("TABLE"))
+            new MetadataListConstraints("device_b", 1, null, List.of("TABLE"))
         );
 
         Assertions.assertEquals(List.of("device_b"), tables.stream().map(TableInfo::getName).toList());
@@ -247,58 +247,13 @@ class TDengineAgentMetadataTest {
     }
 
     private static Connection showMetadataConnection(List<String> statements, List<Integer> maxRows) {
-        return showMetadataConnection(statements, maxRows, null, null);
-    }
-
-    private static Connection showMetadataConnection(
-        List<String> statements,
-        List<Integer> maxRows,
-        List<String> metadataStatements,
-        List<Integer> metadataTimeouts
-    ) {
         return proxy(Connection.class, (proxy, method, args) -> {
             String name = method.getName();
             if ("createStatement".equals(name)) {
                 return showMetadataStatement(statements, maxRows);
             }
-            if ("prepareStatement".equals(name) && metadataStatements != null) {
-                String sql = (String) args[0];
-                metadataStatements.add(sql);
-                return showMetadataStatement(sql, metadataTimeouts);
-            }
             if ("isClosed".equals(name)) return false;
             if ("close".equals(name)) return null;
-            return defaultValue(method.getReturnType());
-        });
-    }
-
-    private static java.sql.PreparedStatement showMetadataStatement(String sql, List<Integer> metadataTimeouts) {
-        return proxy(java.sql.PreparedStatement.class, (proxy, method, args) -> {
-            String name = method.getName();
-            if ("setQueryTimeout".equals(name)) {
-                metadataTimeouts.add((Integer) args[0]);
-                return null;
-            }
-            if ("setString".equals(name) || "close".equals(name)) return null;
-            if ("executeQuery".equals(name)) {
-                if (sql.contains("ins_stables")) {
-                    return showTableResultSet(
-                        List.of(
-                            new String[] {"meters", "meter readings"},
-                            new String[] {"weather", "weather readings"}
-                        ),
-                        0
-                    );
-                }
-                return showTableResultSet(
-                    List.of(
-                        new String[] {"device_a", "meters", "device A"},
-                        new String[] {"device_b", "meters", "device B"},
-                        new String[] {"standalone", "", "standalone readings"}
-                    ),
-                    0
-                );
-            }
             return defaultValue(method.getReturnType());
         });
     }

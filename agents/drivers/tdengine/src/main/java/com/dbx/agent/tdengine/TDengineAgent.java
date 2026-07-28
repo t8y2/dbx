@@ -22,7 +22,6 @@ import com.taosdata.jdbc.rs.RestfulConnection;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -48,7 +47,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class TDengineAgent extends BaseDatabaseAgent {
-    private static final int METADATA_ENRICHMENT_TIMEOUT_SECS = 5;
+    private static final long TABLE_CACHE_TTL_MILLIS = 10_000L;
     private static final DateTimeFormatter TDENGINE_TIMESTAMP_FORMAT =
         new DateTimeFormatterBuilder()
             .appendPattern("yyyy-MM-dd HH:mm:ss")
@@ -64,6 +63,10 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         Pattern.compile("(?i)\\bCOMPOSITE\\s+KEY\\b");
 
     private Connection connection;
+    private final Object tableCacheLock = new Object();
+    private String tableCacheSchema = "";
+    private long tableCacheTimeMillis;
+    private List<TableInfo> tableCache = Collections.emptyList();
 
     @Override
     public Connection getConnection() {
@@ -74,6 +77,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     public void connect(ConnectParams params) {
         uncheckedVoid(() -> {
             connection = TDengineConnectionFactory.open(params);
+            clearTableCache();
         });
     }
 
@@ -119,23 +123,21 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         if (!normalized.tableTypeAllowed("TABLE")) {
             return Collections.emptyList();
         }
-        return normalized.filterTables(listTablesFromShow(schema, normalized));
+        return normalized.filterTables(listTablesFromShow(schema));
     }
 
-    private List<TableInfo> listTablesFromShow(String schema, MetadataListConstraints constraints) {
+    private List<TableInfo> listTablesFromShow(String schema) {
+        List<TableInfo> cached = cachedTables(schema);
+        if (cached != null) {
+            return cached;
+        }
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            int maxRows = constraints.hasFilter() ? 0 : metadataReadMaxRows(constraints);
-            // Keep the metadata listing to TDengine's SHOW statements. The more
-            // elaborate information_schema UNION query used here previously is not
-            // accepted by every supported TDengine 3.x / JDBC combination, even
-            // though a connection itself can be established successfully.
-            // A filter can also match table comments. Fetch and enrich all rows
-            // before applying it locally, otherwise either comment-only matches
-            // or matches after the first sidebar page would be omitted.
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE", false, maxRows));
-            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE", true, maxRows));
-            enrichTableMetadata(schema, result);
+            // Connector/J 3.6.3 ignores Statement#setMaxRows. Read the SHOW
+            // results once and page locally from a short-lived cache instead of
+            // issuing the same full scan for every sidebar page.
+            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE", false));
+            result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE", true));
 
             Map<String, TableInfo> distinct = new LinkedHashMap<>();
             for (TableInfo table : result) {
@@ -143,7 +145,8 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             }
             List<TableInfo> sorted = new ArrayList<>(distinct.values());
             sortTablesForHierarchy(sorted);
-            return sorted;
+            cacheTables(schema, sorted);
+            return copyTables(sorted);
         });
     }
 
@@ -204,7 +207,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
-        return JdbcExecutor.current().execute(
+        QueryResult result = JdbcExecutor.current().execute(
             requireConnected(),
             sql,
             prepareExecutionSchema(schema),
@@ -214,6 +217,10 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             options.getTimeoutSecs(),
             this::tdengineResultValue
         );
+        if (mayChangeMetadata(sql)) {
+            clearTableCache();
+        }
+        return result;
     }
 
     @Override
@@ -247,12 +254,20 @@ public final class TDengineAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeTransaction(List<String> statements, String schema) {
-        return super.executeTransaction(statements, prepareExecutionSchema(schema));
+        QueryResult result = super.executeTransaction(statements, prepareExecutionSchema(schema));
+        if (statements.stream().anyMatch(TDengineAgent::mayChangeMetadata)) {
+            clearTableCache();
+        }
+        return result;
     }
 
     @Override
     public QueryResult executeBatch(List<String> statements, String schema) {
-        return super.executeBatch(statements, prepareExecutionSchema(schema));
+        QueryResult result = super.executeBatch(statements, prepareExecutionSchema(schema));
+        if (statements.stream().anyMatch(TDengineAgent::mayChangeMetadata)) {
+            clearTableCache();
+        }
+        return result;
     }
 
     private String prepareExecutionSchema(String schema) {
@@ -278,88 +293,13 @@ public final class TDengineAgent extends BaseDatabaseAgent {
                 connection.close();
             }
             connection = null;
+            clearTableCache();
         });
     }
 
-    private static int metadataReadMaxRows(MetadataListConstraints constraints) {
-        if (!constraints.hasLimit()) {
-            return 0;
-        }
-        long offset = constraints.hasOffset() ? constraints.getOffset() : 0L;
-        return (int) Math.min(Integer.MAX_VALUE, offset + constraints.getLimit());
-    }
-
-    private void enrichTableMetadata(String schema, List<TableInfo> tables) {
-        try {
-            Map<String, TableMetadata> metadata = loadTableMetadata(schema);
-            for (TableInfo table : tables) {
-                TableMetadata details = metadata.get(table.getTable_type() + ":" + table.getName());
-                if (details == null) {
-                    continue;
-                }
-                table.setComment(details.comment());
-                if (table.getParent_name() == null && details.parentName() != null) {
-                    table.setParent_name(details.parentName());
-                }
-            }
-        } catch (Exception ignored) {
-            // Metadata comments are optional. Keep the SHOW result available if a
-            // server exposes incompatible or slow information_schema views.
-        }
-    }
-
-    private Map<String, TableMetadata> loadTableMetadata(String schema) throws Exception {
-        Map<String, TableMetadata> result = new LinkedHashMap<>();
-        appendTableMetadata(
-            result,
-            "SELECT stable_name, table_comment FROM information_schema.ins_stables WHERE db_name = ?",
-            schema,
-            "STABLE",
-            false
-        );
-        appendTableMetadata(
-            result,
-            "SELECT table_name, stable_name, table_comment FROM information_schema.ins_tables WHERE db_name = ?",
-            schema,
-            "TABLE",
-            true
-        );
-        return result;
-    }
-
-    private void appendTableMetadata(
-        Map<String, TableMetadata> result,
-        String sql,
-        String schema,
-        String tableType,
-        boolean includesStableName
-    ) throws Exception {
-        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-            stmt.setQueryTimeout(METADATA_ENRICHMENT_TIMEOUT_SECS);
-            stmt.setString(1, schema);
-            try (ResultSet rs = stmt.executeQuery()) {
-                while (rs.next()) {
-                    String tableName = rs.getString(1);
-                    String parentName = includesStableName ? optionalString(rs, 2) : null;
-                    String comment = optionalString(rs, includesStableName ? 3 : 2);
-                    result.put(tableType + ":" + tableName, new TableMetadata(parentName, comment));
-                }
-            }
-        }
-    }
-
-    private record TableMetadata(String parentName, String comment) {
-    }
-
-    private List<TableInfo> queryTables(String sql, String tableType, boolean includesStableName, int maxRows) throws Exception {
+    private List<TableInfo> queryTables(String sql, String tableType, boolean includesStableName) throws Exception {
         List<TableInfo> result = new ArrayList<>();
         try (java.sql.Statement stmt = requireConnected().createStatement()) {
-            if (maxRows > 0) {
-                // The sidebar always asks for a page plus one look-ahead row.
-                // Let Connector/J enforce the same bound instead of collecting
-                // every subtable before the local constraint filter runs.
-                stmt.setMaxRows(maxRows);
-            }
             try (ResultSet rs = stmt.executeQuery(sql)) {
                 while (rs.next()) {
                     // SHOW TABLES returns the owning STABLE as its fourth column. It
@@ -374,6 +314,63 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             }
         }
         return result;
+    }
+
+    private List<TableInfo> cachedTables(String schema) {
+        String normalizedSchema = normalizedSchema(schema);
+        synchronized (tableCacheLock) {
+            if (cacheFresh(tableCacheTimeMillis) && tableCacheSchema.equals(normalizedSchema)) {
+                return copyTables(tableCache);
+            }
+        }
+        return null;
+    }
+
+    private void cacheTables(String schema, List<TableInfo> tables) {
+        synchronized (tableCacheLock) {
+            tableCacheSchema = normalizedSchema(schema);
+            tableCache = copyTables(tables);
+            tableCacheTimeMillis = System.currentTimeMillis();
+        }
+    }
+
+    private void clearTableCache() {
+        synchronized (tableCacheLock) {
+            tableCacheSchema = "";
+            tableCacheTimeMillis = 0L;
+            tableCache = Collections.emptyList();
+        }
+    }
+
+    private static boolean cacheFresh(long cachedAtMillis) {
+        return cachedAtMillis > 0L && System.currentTimeMillis() - cachedAtMillis <= TABLE_CACHE_TTL_MILLIS;
+    }
+
+    private static String normalizedSchema(String schema) {
+        return schema == null ? "" : schema.trim();
+    }
+
+    private static List<TableInfo> copyTables(List<TableInfo> tables) {
+        List<TableInfo> copies = new ArrayList<>(tables.size());
+        for (TableInfo table : tables) {
+            copies.add(new TableInfo(
+                table.getName(),
+                table.getTable_type(),
+                table.getComment(),
+                table.getParent_schema(),
+                table.getParent_name()
+            ));
+        }
+        return copies;
+    }
+
+    private static boolean mayChangeMetadata(String sql) {
+        String normalized = sql == null ? "" : sql.trim().toLowerCase(Locale.ROOT);
+        return normalized.startsWith("create ")
+            || normalized.startsWith("drop ")
+            || normalized.startsWith("alter ")
+            || normalized.startsWith("rename ")
+            || normalized.startsWith("truncate ");
     }
 
     static void sortTablesForHierarchy(List<TableInfo> tables) {

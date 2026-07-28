@@ -1469,6 +1469,25 @@ pub async fn get_table_comment_core(
                     let mut client = client.lock().await;
                     return client.get_table_comment::<Option<String>>(database, schema, table, timeout).await;
                 }
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Tdengine) {
+                    let metadata_database = if schema.trim().is_empty() { database } else { schema };
+                    let sql = tdengine_table_comment_sql(metadata_database, table);
+                    let timeout = agent_metadata_timeout(db_config.as_ref());
+                    drop(connections);
+                    let mut client = client.lock().await;
+                    let result = client
+                        .execute_query_with_timeout::<db::QueryResult>(
+                            agent_execute_query_params(
+                                &sql,
+                                Some(database),
+                                (!schema.trim().is_empty()).then_some(schema),
+                                QueryExecutionOptions { max_rows: Some(2), ..Default::default() },
+                            ),
+                            timeout,
+                        )
+                        .await?;
+                    return oracle_table_comment_from_query_result(result);
+                }
             }
         }
 
@@ -1496,6 +1515,17 @@ fn oracle_table_comment_sql(schema: &str, table: &str) -> String {
     format!(
         "SELECT COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = {} AND TABLE_NAME = {} AND TABLE_TYPE IN ('TABLE', 'VIEW')",
         sql_string(schema),
+        sql_string(table),
+    )
+}
+
+fn tdengine_table_comment_sql(database: &str, table: &str) -> String {
+    format!(
+        "SELECT table_comment FROM information_schema.ins_stables WHERE db_name = {} AND stable_name = {} \
+         UNION ALL SELECT table_comment FROM information_schema.ins_tables WHERE db_name = {} AND table_name = {}",
+        sql_string(database),
+        sql_string(table),
+        sql_string(database),
         sql_string(table),
     )
 }
@@ -2856,7 +2886,7 @@ mod tests {
         oracle_table_comments_from_query_result, oracle_table_comments_sql, presto_like_columns_from_query_result,
         presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
         presto_like_tables_from_query_result, should_query_oracle_columns_via_sql_first, table_name_filter_matches,
-        visible_schema_filter, TableNameFilter,
+        tdengine_table_comment_sql, visible_schema_filter, TableNameFilter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -3715,6 +3745,17 @@ mod tests {
         assert!(sql.contains("TABLE_NAME = 'USER''S'"));
         assert!(sql.contains("TABLE_TYPE IN ('TABLE', 'VIEW')"));
         assert!(!sql.contains("ALL_OBJECTS"));
+    }
+
+    #[test]
+    fn tdengine_table_comment_sql_targets_one_name_and_escapes_literals() {
+        let sql = tdengine_table_comment_sql("dbx's", "meter's");
+
+        assert!(sql.contains("information_schema.ins_stables"));
+        assert!(sql.contains("information_schema.ins_tables"));
+        assert!(sql.contains("db_name = 'dbx''s'"));
+        assert!(sql.contains("stable_name = 'meter''s'"));
+        assert!(sql.contains("table_name = 'meter''s'"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alignedSidebarCommentLabelWidths, sidebarTreeNaturalContentWidth, trailingCommentAvailableWidth, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { alignedCommentLeadingWidth, alignedSidebarCommentLabelWidths, canTreeNodeShowExpander, sidebarTreeNaturalContentWidth, trailingCommentAvailableWidth, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 
 describe("sidebar tree item layout", () => {
   it("keeps a table row constrained when it displays a comment", () => {
@@ -9,6 +9,18 @@ describe("sidebar tree item layout", () => {
 
   it("lets a table name consume the available row width before truncating", () => {
     expect(treeLabelWidthClass({ fullWidth: false, hasTrailingComment: true })).toBe("min-w-0 flex-1 truncate");
+  });
+
+  it("keeps a pinned action next to the name while preserving the aligned comment column", () => {
+    expect(treeLabelWidthClass({ fullWidth: false, hasTrailingComment: true, hasInlineAction: true })).toBe("min-w-0 shrink truncate");
+    expect(alignedCommentLeadingWidth(100, true)).toBe(124);
+    expect(alignedCommentLeadingWidth(100, false)).toBe(100);
+    expect(alignedCommentLeadingWidth(undefined, true)).toBeUndefined();
+  });
+
+  it("renders etcd Keys and Dashboard as aligned leaf actions", () => {
+    expect(canTreeNodeShowExpander({ type: "etcd-root", childCount: 0 })).toBe(false);
+    expect(canTreeNodeShowExpander({ type: "etcd-dashboard", childCount: 0 })).toBe(false);
   });
 
   it("aligns comments to the longest sibling name without crossing parent groups", () => {

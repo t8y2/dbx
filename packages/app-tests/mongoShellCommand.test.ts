@@ -9,6 +9,7 @@ import {
   mongoCountToQueryResult,
   mongoDistinctToQueryResult,
   mongoDocumentsToQueryResult,
+  mongoFindLogicalTotal,
   mongoIndexesToQueryResult,
   normalizeRustMongoCommand,
   parseMongoAggregateCommand,
@@ -23,6 +24,7 @@ import {
   parseMongoFindOneAndDeleteCommand,
   parseMongoGetIndexesCommand,
   parseMongoVersionCommand,
+  planMongoFindPagination,
   parseMongoWriteCommand,
   splitMongoCommands,
   splitMongoCommandRanges,
@@ -54,6 +56,39 @@ test("parseMongoFindCommand parses getCollection find with chained sort skip and
     limit: 10,
     sort: '{"createdAt":-1}',
   });
+});
+
+test("planMongoFindPagination pages unbounded find queries", () => {
+  const command = parseMongoFindCommand("db.users.find({})");
+  assert.ok(command);
+  const plan = planMongoFindPagination("db.users.find({})", command, 100, 100);
+
+  assert.deepEqual(plan, {
+    pageOffset: 100,
+    pageLimit: 100,
+    requestSkip: 100,
+    requestLimit: 100,
+    logicalSkip: 0,
+    logicalLimit: undefined,
+  });
+  assert.equal(mongoFindLogicalTotal(824, plan!), 824);
+});
+
+test("planMongoFindPagination preserves explicit skip and limit bounds", () => {
+  const source = "db.users.find({ active: true }).skip(20).limit(150)";
+  const command = parseMongoFindCommand(source);
+  assert.ok(command);
+  const plan = planMongoFindPagination(source, command, 100, 100);
+
+  assert.deepEqual(plan, {
+    pageOffset: 100,
+    pageLimit: 100,
+    requestSkip: 120,
+    requestLimit: 50,
+    logicalSkip: 20,
+    logicalLimit: 150,
+  });
+  assert.equal(mongoFindLogicalTotal(824, plan!), 150);
 });
 
 test("parseMongoFindCommand accepts line breaks before find and chained calls", () => {

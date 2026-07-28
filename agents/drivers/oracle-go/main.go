@@ -952,15 +952,20 @@ func buildDSN(params connectParams) string {
 		return buildGoOraURL(host, port, jdbc.Database, username, params.Password, options)
 	}
 
-	service := strings.TrimSpace(params.Database)
-	if strings.HasPrefix(strings.ToUpper(service), "SYSDBA:") {
-		service = strings.TrimSpace(service[len("SYSDBA:"):])
-	}
+	service := oracleConnectionDatabaseName(params.Database)
 	port := params.Port
 	if port == 0 {
 		port = 1521
 	}
 	return buildGoOraURL(params.Host, port, service, username, params.Password, options)
+}
+
+func oracleConnectionDatabaseName(database string) string {
+	database = strings.TrimSpace(database)
+	if strings.HasPrefix(strings.ToUpper(database), "SYSDBA:") {
+		return strings.TrimSpace(database[len("SYSDBA:"):])
+	}
+	return database
 }
 
 func buildGoOraJDBC(user, password, connStr string, options map[string]string) string {
@@ -2107,16 +2112,7 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 	}
 	upperType := strings.ToUpper(objectType)
 	if upperType == "VIEW" {
-		// ALL_VIEWS.TEXT for views — ALL_SOURCE doesn't contain views, and
-		// DBMS_METADATA.GET_DDL fails on XE editions.
-		var source string
-		err = s.db.QueryRow(
-			"SELECT TEXT FROM ALL_VIEWS WHERE OWNER = :1 AND VIEW_NAME = :2",
-			schema, strings.ToUpper(name),
-		).Scan(&source)
-		if errors.Is(err, sql.ErrNoRows) {
-			return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
-		}
+		source, err := s.getViewSource(schema, name)
 		if err != nil {
 			return nil, err
 		}
@@ -2214,22 +2210,51 @@ func normalizeDDLObjectType(value string) string {
 }
 
 func (s *server) buildViewDDL(schema, name string) (string, error) {
+	source, err := s.getViewSource(schema, name)
+	if err != nil {
+		return "", err
+	}
+	trimmed := strings.TrimSpace(source)
+	upperSource := strings.ToUpper(trimmed)
+	if strings.HasPrefix(upperSource, "CREATE ") || strings.HasPrefix(upperSource, "ALTER ") {
+		return trimmed, nil
+	}
+	return fmt.Sprintf("CREATE OR REPLACE VIEW %s.%s AS\n%s", quoteIdentifier(schema), quoteIdentifier(name), trimmed), nil
+}
+
+func (s *server) getViewSource(schema, name string) (string, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
+	viewName := strings.TrimSpace(name)
+	var ddl string
+	metadataErr := db.QueryRow(
+		"SELECT DBMS_METADATA.GET_DDL('VIEW', :1, :2) FROM DUAL",
+		viewName, schema,
+	).Scan(&ddl)
+	if metadataErr == nil && strings.TrimSpace(ddl) != "" {
+		return strings.TrimSpace(ddl), nil
+	}
+
 	var source string
-	err = db.QueryRow(
+	fallbackErr := db.QueryRow(
 		"SELECT TEXT FROM ALL_VIEWS WHERE OWNER = :1 AND VIEW_NAME = :2",
-		schema, strings.ToUpper(name),
+		schema, viewName,
 	).Scan(&source)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("view not found: %s.%s", schema, name)
+	if fallbackErr == nil && strings.TrimSpace(source) != "" {
+		return strings.TrimSpace(source), nil
 	}
-	if err != nil {
-		return "", err
+	if fallbackErr != nil && !errors.Is(fallbackErr, sql.ErrNoRows) {
+		if metadataErr != nil {
+			return "", fmt.Errorf(
+				"failed to load view source for %s.%s: DBMS_METADATA: %v; ALL_VIEWS: %w",
+				schema, viewName, metadataErr, fallbackErr,
+			)
+		}
+		return "", fmt.Errorf("failed to load view source for %s.%s from ALL_VIEWS: %w", schema, viewName, fallbackErr)
 	}
-	return fmt.Sprintf("CREATE OR REPLACE VIEW %s.%s AS\n%s", quoteIdentifier(schema), quoteIdentifier(name), strings.TrimSpace(source)), nil
+	return "", fmt.Errorf("view source not found: %s.%s", schema, viewName)
 }
 
 func (s *server) buildTableDDL(schema, table string) (string, error) {
@@ -2337,10 +2362,7 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 	}
 	defer conn.Close()
 
-	targetSchema := strings.TrimSpace(schema)
-	if targetSchema == "" && !strings.EqualFold(strings.TrimSpace(database), strings.TrimSpace(s.params.Database)) {
-		targetSchema = strings.TrimSpace(database)
-	}
+	targetSchema := oracleExplainTargetSchema(database, schema, s.params.Database)
 	if targetSchema != "" {
 		var originalSchema string
 		if err := conn.QueryRowContext(ctx, "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL").Scan(&originalSchema); err != nil {
@@ -2380,6 +2402,17 @@ func (s *server) getExplainInfo(sqlText, database, schema string, timeoutSecs in
 		builder.WriteByte('\n')
 	}
 	return strings.TrimSpace(builder.String()), planRows.Err()
+}
+
+func oracleExplainTargetSchema(database, schema, configuredDatabase string) string {
+	if schema = strings.TrimSpace(schema); schema != "" {
+		return schema
+	}
+	database = oracleConnectionDatabaseName(database)
+	if database == "" || strings.EqualFold(database, oracleConnectionDatabaseName(configuredDatabase)) {
+		return ""
+	}
+	return database
 }
 
 func cleanupOracleExplainPlan(conn *sql.Conn, statementID string) {

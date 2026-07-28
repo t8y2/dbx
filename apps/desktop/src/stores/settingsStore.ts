@@ -5,6 +5,7 @@ import { generateId, getConfigKey, aiConfigToItem } from "@/lib/ai/aiConfigList"
 import { normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyExtractorId, normalizeDataGridExtractorOptions, type DataGridCopyExtractorId, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
@@ -311,6 +312,8 @@ const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
 export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
+const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
+export type ResultRunDisplayMode = (typeof RESULT_RUN_DISPLAY_MODES)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
 export const TABLE_FONT_SIZE_MAX = 16;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
@@ -418,9 +421,13 @@ export interface EditorSettings {
   dataGridQuickEntry: boolean;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
+  dataGridCopyExtractor: DataGridCopyExtractorId;
+  dataGridExtractorOptions: DataGridExtractorOptions;
+  resultRunDisplayMode: ResultRunDisplayMode;
   dataGridAutoTransposeSingleRow: boolean;
   dataGridMultiRowTranspose: boolean;
   dataGridHideNullColumns: boolean;
+  numericColumnRightAlign: boolean;
   tableFontFamily: string;
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
@@ -582,9 +589,13 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridQuickEntry: false,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
+  dataGridCopyExtractor: "tsv",
+  dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
+  resultRunDisplayMode: "tabs",
   dataGridAutoTransposeSingleRow: false,
   dataGridMultiRowTranspose: false,
   dataGridHideNullColumns: false,
+  numericColumnRightAlign: true,
   tableFontFamily: DEFAULT_DATA_GRID_FONT_FAMILY,
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
@@ -672,6 +683,10 @@ function normalizeDataGridRenderMode(value: unknown): DataGridRenderMode {
 
 function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
   return DATA_GRID_SEARCH_MODES.includes(value as DataGridSearchMode) ? (value as DataGridSearchMode) : DEFAULT_EDITOR_SETTINGS.dataGridSearchMode;
+}
+
+function normalizeResultRunDisplayMode(value: unknown): ResultRunDisplayMode {
+  return RESULT_RUN_DISPLAY_MODES.includes(value as ResultRunDisplayMode) ? (value as ResultRunDisplayMode) : DEFAULT_EDITOR_SETTINGS.resultRunDisplayMode;
 }
 
 function normalizeTableFontSize(value: unknown): number {
@@ -861,9 +876,13 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
+    dataGridCopyExtractor: normalizeDataGridCopyExtractorId(settings.dataGridCopyExtractor),
+    dataGridExtractorOptions: normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions),
+    resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
     dataGridMultiRowTranspose: settings.dataGridMultiRowTranspose === true,
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
+    numericColumnRightAlign: typeof settings.numericColumnRightAlign === "boolean" ? settings.numericColumnRightAlign : DEFAULT_EDITOR_SETTINGS.numericColumnRightAlign,
     tableFontFamily: normalizeFontFamily(settings.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily),
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
@@ -1233,9 +1252,13 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
+    if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyExtractorId(partial.dataGridCopyExtractor);
+    if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
+    if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
     if (partial.dataGridMultiRowTranspose !== undefined) editorSettings.value.dataGridMultiRowTranspose = partial.dataGridMultiRowTranspose === true;
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
+    if (partial.numericColumnRightAlign !== undefined) editorSettings.value.numericColumnRightAlign = partial.numericColumnRightAlign === true;
     if (partial.tableFontFamily !== undefined) editorSettings.value.tableFontFamily = normalizeFontFamily(partial.tableFontFamily, DEFAULT_EDITOR_SETTINGS.tableFontFamily);
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);

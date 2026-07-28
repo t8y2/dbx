@@ -350,6 +350,7 @@ fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         },
         messages,
     ))
@@ -394,6 +395,7 @@ async fn collect_first_result_limited(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -836,6 +838,7 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
             truncated: result.truncated,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 }
@@ -1832,8 +1835,14 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
 
 pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let sql = sqlserver_indexes_sql(schema, table);
-    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
-    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    let rows = match sqlserver_index_rows(client, &sql).await {
+        Ok(rows) => rows,
+        Err(error) if sqlserver_filter_definition_missing(&error) => {
+            let legacy_sql = sqlserver_legacy_indexes_sql(schema, table);
+            sqlserver_index_rows(client, &legacy_sql).await.map_err(|error| error.to_string())?
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     Ok(rows
         .iter()
         .map(|row| {
@@ -1857,7 +1866,32 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
         .collect())
 }
 
+async fn sqlserver_index_rows(client: &mut SqlServerClient, sql: &str) -> Result<Vec<Row>, tiberius::error::Error> {
+    client.query(sql, &[]).await?.into_first_result().await
+}
+
+fn sqlserver_filter_definition_missing(error: &tiberius::error::Error) -> bool {
+    sqlserver_filter_definition_error(error.code(), &error.to_string())
+}
+
+fn sqlserver_filter_definition_error(code: Option<u32>, message: &str) -> bool {
+    code == Some(207) && message.to_ascii_lowercase().contains("filter_definition")
+}
+
 fn sqlserver_indexes_sql(schema: &str, table: &str) -> String {
+    sqlserver_indexes_sql_with_filter_definition(schema, table, true)
+}
+
+fn sqlserver_legacy_indexes_sql(schema: &str, table: &str) -> String {
+    sqlserver_indexes_sql_with_filter_definition(schema, table, false)
+}
+
+fn sqlserver_indexes_sql_with_filter_definition(schema: &str, table: &str, include_filter_definition: bool) -> String {
+    let filter_definition = if include_filter_definition {
+        "i.filter_definition"
+    } else {
+        "CAST(NULL AS NVARCHAR(MAX)) AS filter_definition"
+    };
     format!(
         "SELECT i.name, \
          STUFF((SELECT ',' + c2.name \
@@ -1873,7 +1907,7 @@ fn sqlserver_indexes_sql(schema: &str, table: &str) -> String {
                 WHERE ic3.object_id = i.object_id AND ic3.index_id = i.index_id AND ic3.is_included_column = 1 \
                 ORDER BY ic3.index_column_id \
                 FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '') AS included_cols, \
-         i.filter_definition, \
+         {filter_definition}, \
          ep.value AS index_comment \
          FROM sys.indexes i \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = i.object_id AND ep.minor_id = i.index_id AND ep.name = N'MS_Description' AND ep.class = 7) ep \
@@ -2011,6 +2045,7 @@ pub async fn execute_query_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         ))
@@ -2028,6 +2063,7 @@ pub async fn execute_query_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         ))
@@ -2058,6 +2094,7 @@ pub async fn execute_batch_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         )]);
@@ -2118,6 +2155,7 @@ pub async fn execute_simple_batch_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 
@@ -2291,11 +2329,11 @@ mod tests {
         is_blocking_sqlserver_unsafe_probe_error, is_sqlserver_spatial_column, is_sqlserver_variant_column,
         query_result_with_server_messages, requires_simple_query_batch, sqlserver_batch_can_use_execute,
         sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
-        sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
-        sqlserver_legacy_probe, sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
-        sqlserver_schema_name_predicate, sqlserver_table_comment_sql, sqlserver_visible_object_predicate,
-        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerResultSet,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error, sqlserver_hidden_schema_names,
+        sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_list_objects_sql,
+        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_schema_name_predicate,
+        sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerResultSet, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -2327,6 +2365,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
         let result = query_result_with_server_messages(empty, vec!["DBCC execution completed".to_string()]);
         assert_eq!(result.columns, vec!["Message"]);
@@ -2342,6 +2381,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
         let result = query_result_with_server_messages(select, vec!["informational".to_string()]);
         assert_eq!(result.columns, vec!["id"]);
@@ -2625,6 +2665,35 @@ mod tests {
         assert!(sql.contains("sys.extended_properties ep"));
         assert!(sql.contains("ep.minor_id = i.index_id"));
         assert!(sql.contains("MS_Description"));
+    }
+
+    #[test]
+    fn sqlserver_legacy_indexes_sql_omits_filtered_index_metadata() {
+        let sql = sqlserver_legacy_indexes_sql("dbo", "orders");
+
+        assert!(!sql.contains("i.filter_definition"));
+        assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS filter_definition"));
+        assert!(sql.contains("ep.value AS index_comment"));
+    }
+
+    #[test]
+    fn sqlserver_filter_definition_fallback_requires_column_error_207() {
+        assert!(sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: Column name 'filter_definition' is invalid. (code: 207)"
+        ));
+        assert!(sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: 列名 'filter_definition' 无效。 (code: 207)"
+        ));
+        assert!(!sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: Column name 'other_column' is invalid. (code: 207)"
+        ));
+        assert!(!sqlserver_filter_definition_error(
+            Some(229),
+            "Token error: SELECT permission denied for filter_definition. (code: 229)"
+        ));
     }
 
     #[test]
@@ -3016,6 +3085,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         strip_dbx_sqlserver_row_number_column(&mut result, sql);

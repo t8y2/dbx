@@ -137,7 +137,7 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
     if !starts_with_keyword(&normalized, "SELECT") {
         return not_editable(QueryEditabilityReason::NotSelect);
     }
-    if has_top_level_keyword(&normalized, &["UNION", "INTERSECT", "EXCEPT"]) {
+    if has_top_level_keyword(&normalized, &["UNION", "INTERSECT", "EXCEPT", "MINUS"]) {
         return not_editable(QueryEditabilityReason::SetOperation);
     }
     if normalized.contains(';') {
@@ -915,6 +915,32 @@ mod tests {
         assert_eq!(analysis.table_name, "users");
         assert!(analysis.select_star);
         assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn recognizes_top_level_sql_set_operations_as_read_only() {
+        for operator in ["UNION", "INTERSECT", "EXCEPT", "MINUS"] {
+            let sql = format!("SELECT id FROM users {operator} SELECT id FROM archived_users");
+            let result = analyze_editable_query_editability(&sql);
+
+            assert!(!result.editable, "{operator}");
+            assert_eq!(result.reason, Some(QueryEditabilityReason::SetOperation), "{operator}");
+        }
+    }
+
+    #[test]
+    fn ignores_minus_in_strings_comments_and_nested_queries() {
+        for sql in [
+            "SELECT id, 'MINUS' AS operation FROM users",
+            "SELECT id FROM users -- MINUS\nWHERE active = 1",
+            "SELECT id FROM users /* MINUS */ WHERE active = 1",
+            "SELECT * FROM users WHERE id IN (SELECT id FROM archived_users MINUS SELECT id FROM blocked_users)",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(result.editable, "{sql}: {:?}", result.reason);
+            assert_eq!(result.analysis.unwrap().table_name, "users", "{sql}");
+        }
     }
 
     #[test]

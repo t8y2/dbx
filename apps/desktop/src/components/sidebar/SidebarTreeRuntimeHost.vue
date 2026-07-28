@@ -516,14 +516,14 @@ async function toggle() {
   // particular, schema-level trigger/type groups have no tableName, so they
   // must use the generic object loader rather than the table-trigger loader.
   const databaseObjectGroup = !!objectTypesForGroupNode(node.type);
-  if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
+  if (databaseObjectGroup && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }
 
-  if (node.type === "group-extensions" && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
+  if (node.type === "group-extensions" && connectionStore.canUseLoadedTreeNodeToggle(node)) {
     node.isExpanded = !node.isExpanded;
     if (wasExpanded && !connectionStore.sidebarSearchQuery) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
@@ -554,6 +554,7 @@ async function toggle() {
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
+        // Expand: list indices (like other db types list databases).
         await connectionStore.loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
         await connectionStore.loadMilvusDatabases(node.connectionId);
@@ -587,6 +588,10 @@ async function toggle() {
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:keys`;
       queryStore.createTab(node.connectionId, "", tabTitle, "etcd");
       refreshActiveKvBrowserAfterOpen("etcd", node.connectionId);
+    } else if (node.type === "etcd-dashboard" && node.connectionId) {
+      await connectionStore.ensureConnected(node.connectionId);
+      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "etcd"}:dashboard`;
+      queryStore.createTab(node.connectionId, "", tabTitle, "etcd-dashboard");
     } else if (node.type === "zookeeper-root" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "ZooKeeper"}:keys`;
@@ -1063,7 +1068,9 @@ async function openServerDashboard() {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
-    if (currentDatabaseType() === "postgres") {
+    if (currentDatabaseType() === "nacos") {
+      queryStore.openNacosDashboard(node.connectionId);
+    } else if (currentDatabaseType() === "postgres") {
       queryStore.openPostgresDashboard(node.connectionId);
     } else {
       queryStore.openMysqlDashboard(node.connectionId);
@@ -1247,9 +1254,9 @@ async function generateDdlTemplate() {
     const schema = node.schema || node.database;
     let ddl: string;
     if (node.type === "table") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
+      ddl = await api.getTableDisplayDdl(node.connectionId, node.database, schema, node.label, undefined, node.catalog);
     } else if (node.type === "materialized_view") {
-      ddl = await api.getTableDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
+      ddl = await api.getTableDisplayDdl(node.connectionId, node.database, schema, node.label, "MATERIALIZED_VIEW", node.catalog);
     } else {
       const result = await api.getObjectSource(node.connectionId, node.database, schema, node.label, "VIEW");
       ddl = await buildViewDdl({
@@ -3560,7 +3567,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
     }
-    if (node.connectionId && (connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))) {
+    if (node.connectionId && (currentDatabaseType() === "nacos" || connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))) {
       items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {
@@ -3788,7 +3795,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 5. Redis DB / Mongo DB
-  if (node.type === "etcd-root" || node.type === "zookeeper-root") {
+  if (node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "zookeeper-root") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;
   }

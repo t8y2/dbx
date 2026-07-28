@@ -31,6 +31,28 @@ export function visibleColumnIndexesForFilter(availableIndexes: number[], hidden
   return visibleIndexes.length > 0 ? visibleIndexes : availableIndexes;
 }
 
+export function hiddenColumnIndexesForKeys(hiddenKeys: readonly string[] | undefined, columnKeys: readonly string[], availableIndexes: readonly number[]): Set<number> {
+  const available = new Set(availableIndexes);
+  const hiddenKeySet = new Set((hiddenKeys ?? []).filter((key): key is string => typeof key === "string"));
+  const hiddenIndexes = new Set<number>();
+
+  for (let index = 0; index < columnKeys.length; index++) {
+    if (available.has(index) && hiddenKeySet.has(columnKeys[index]!)) hiddenIndexes.add(index);
+  }
+
+  if (availableIndexes.length > 0 && hiddenIndexes.size === availableIndexes.length) {
+    hiddenIndexes.delete(availableIndexes[0]!);
+  }
+  return hiddenIndexes;
+}
+
+export function hiddenColumnKeysForIndexes(hiddenIndexes: ReadonlySet<number>, autoHiddenIndexes: ReadonlySet<number>, columnKeys: readonly string[], availableIndexes: readonly number[]): string[] {
+  return availableIndexes.flatMap((index) => {
+    const key = columnKeys[index];
+    return hiddenIndexes.has(index) && !autoHiddenIndexes.has(index) && key ? [key] : [];
+  });
+}
+
 export function nextHiddenColumnIndexes(options: { columnIndex: number; hiddenIndexes: ReadonlySet<number>; totalColumns: number }): Set<number> {
   const next = new Set(options.hiddenIndexes);
   if (next.has(options.columnIndex)) {

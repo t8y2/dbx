@@ -5860,12 +5860,14 @@ mod tests {
                 columns: vec!["id".to_string()],
                 column_types: vec![],
                 rows: vec![vec![serde_json::json!(1)]],
+                numeric_column_right_align: false,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
                 columns: vec!["name".to_string()],
                 column_types: vec![],
                 rows: vec![vec![serde_json::json!("Ada")]],
+                numeric_column_right_align: false,
             },
         ])
         .unwrap();
@@ -5902,12 +5904,14 @@ mod tests {
                 columns: vec!["id".to_string()],
                 column_types: vec![],
                 rows: vec![vec![serde_json::json!(1)]],
+                numeric_column_right_align: false,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
                 columns: vec!["name".to_string()],
                 column_types: vec![],
                 rows: vec![vec![serde_json::json!("Ada")], vec![serde_json::json!("Grace")]],
+                numeric_column_right_align: false,
             },
         ])
         .unwrap();
@@ -6052,6 +6056,7 @@ mod tests {
                 vec![serde_json::json!(1), serde_json::json!("Ada")],
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
             ],
+            numeric_column_right_align: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -6409,6 +6414,7 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
                 vec![serde_json::json!("summary"), serde_json::json!(2)],
             ],
+            numeric_column_right_align: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -6832,6 +6838,7 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
                 vec![serde_json::json!("summary"), serde_json::json!(2)],
             ],
+            numeric_column_right_align: false,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();

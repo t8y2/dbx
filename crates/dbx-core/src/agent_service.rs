@@ -2067,6 +2067,19 @@ mod agent_registry_install_tests {
         AgentRegistry { jre: None, jres: std::collections::HashMap::new(), drivers }
     }
 
+    fn registry_with_jre_version(version: &str) -> AgentRegistry {
+        AgentRegistry {
+            jre: None,
+            jres: [(
+                DEFAULT_JRE_KEY.to_string(),
+                JreInfo { version: version.to_string(), platforms: std::collections::HashMap::new() },
+            )]
+            .into_iter()
+            .collect(),
+            drivers: std::collections::HashMap::new(),
+        }
+    }
+
     fn write_cached_driver_download(
         am: &AgentManager,
         db_type: &str,
@@ -2080,6 +2093,25 @@ mod agent_registry_install_tests {
         std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(&cache_path, bytes).unwrap();
         cache_path
+    }
+
+    #[test]
+    fn managed_jre_content_revision_triggers_install() {
+        let manager = test_manager("jre-content-revision");
+        let java_path = manager.jre_java_path(DEFAULT_JRE_KEY);
+        std::fs::create_dir_all(java_path.parent().unwrap()).unwrap();
+        std::fs::write(&java_path, b"java").unwrap();
+
+        let mut state = crate::agent_manager::AgentState::default();
+        state.jre_versions.insert(DEFAULT_JRE_KEY.to_string(), "21.0.12+kerberos.1".to_string());
+        manager.save_state(&state).unwrap();
+
+        let registry = registry_with_jre_version("21.0.12+kerberos.ec.2");
+        assert!(jre_needs_install(&manager, &registry, DEFAULT_JRE_KEY));
+
+        state.jre_versions.insert(DEFAULT_JRE_KEY.to_string(), "21.0.12+kerberos.ec.2".to_string());
+        manager.save_state(&state).unwrap();
+        assert!(!jre_needs_install(&manager, &registry, DEFAULT_JRE_KEY));
     }
 
     fn registry_with_jre(jre_key: &str, version: &str, url: &str, size: u64) -> AgentRegistry {

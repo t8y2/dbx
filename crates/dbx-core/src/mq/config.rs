@@ -104,6 +104,7 @@ mod tests {
         let mut cfg = ConnectionConfig {
             id: "c1".to_string(),
             name: "mq".to_string(),
+            note: String::new(),
             db_type: crate::models::connection::DatabaseType::MessageQueue,
             driver_profile: None,
             driver_label: None,

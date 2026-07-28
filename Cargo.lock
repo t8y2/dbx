@@ -1674,8 +1674,6 @@ dependencies = [
 [[package]]
 name = "ctor"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "352d39c2f7bef1d6ad73db6f5160efcaed66d94ef8c6c573a8410c00bf909a98"
 dependencies = [
  "ctor-proc-macro",
  "dtor",
@@ -1810,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.67"
+version = "0.5.68"
 dependencies = [
  "anyhow",
  "axum",
@@ -1864,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.43"
+version = "0.4.44"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1904,6 +1902,7 @@ dependencies = [
  "pageant",
  "percent-encoding",
  "portpicker",
+ "prometheus-parse",
  "quick-xml 0.37.5",
  "rayon",
  "redis",
@@ -1930,6 +1929,8 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
+ "utoipa",
  "uuid",
  "webpki-roots 0.26.11",
  "winnow 1.0.3",
@@ -1938,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.43"
+version = "0.4.44"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1955,7 +1956,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.67"
+version = "0.5.68"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -1978,6 +1979,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "utoipa",
  "uuid",
 ]
 
@@ -3912,6 +3914,15 @@ checksum = "173609498df190136aa7dea1a91db051746d339e18476eed5ca40521f02d7aa5"
 dependencies = [
  "is-docker",
  "once_cell",
+]
+
+[[package]]
+name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
 ]
 
 [[package]]
@@ -6049,6 +6060,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "prometheus-parse"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "811031bea65e5a401fb2e1f37d802cca6601e204ac463809a3189352d13b78a5"
+dependencies = [
+ "chrono",
+ "itertools",
+ "once_cell",
+ "regex",
 ]
 
 [[package]]
@@ -9406,6 +9429,30 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "utoipa"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bde15df68e80b16c7d16b9616e80770ad158988daa56a27dccd1e55558b0160"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "utoipa-gen",
+]
+
+[[package]]
+name = "utoipa-gen"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba0b99ee52df3028635d93840c797102da61f8a7bb3cf751032455895b52ef8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "regex",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "uuid"

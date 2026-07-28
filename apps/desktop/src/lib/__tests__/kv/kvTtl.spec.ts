@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseOptionalTtl } from "@/lib/kv/kvTtl";
+import { parseKvLeaseId, parseOptionalTtl } from "@/lib/kv/kvTtl";
 
 describe("parseOptionalTtl", () => {
   it("treats an empty TTL as a permanent key", () => {
@@ -21,5 +21,20 @@ describe("parseOptionalTtl", () => {
     expect(parseOptionalTtl("1.5")).toEqual({ ok: false });
     expect(parseOptionalTtl(1.5)).toEqual({ ok: false });
     expect(parseOptionalTtl("9007199254740992")).toEqual({ ok: false });
+  });
+});
+
+describe("parseKvLeaseId", () => {
+  it("preserves lease IDs above JavaScript's safe integer limit", () => {
+    expect(parseKvLeaseId("9007199254740993")).toBe("9007199254740993");
+    expect(parseKvLeaseId("9223372036854775807")).toBe("9223372036854775807");
+  });
+
+  it("rejects empty, non-positive, decimal, and overflowing lease IDs", () => {
+    expect(parseKvLeaseId("")).toBeNull();
+    expect(parseKvLeaseId("0")).toBeNull();
+    expect(parseKvLeaseId("-1")).toBeNull();
+    expect(parseKvLeaseId("1.5")).toBeNull();
+    expect(parseKvLeaseId("9223372036854775808")).toBeNull();
   });
 });

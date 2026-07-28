@@ -1,8 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["src-tauri", "crates/dbx-core", "crates/dbx-web", "crates/dbx-mcp", "crates/dbx-cli"]
+exclude = ["vendor/ctor"]
 
 [patch.crates-io]
+# Tauri 2.11 uses ctor 0.8, which excludes Rust's win7 vendor. This vendors
+# upstream rust-ctor#443 until tauri-utils moves to ctor 1.x.
+ctor = { path = "vendor/ctor" }
 tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }
 postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }

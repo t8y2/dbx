@@ -176,6 +176,7 @@ mod tests {
         ConnectionConfig {
             id: "mongo".to_string(),
             name: "MongoDB".to_string(),
+            note: String::new(),
             db_type: DatabaseType::MongoDb,
             driver_profile: Some("mongodb".to_string()),
             driver_label: Some("MongoDB".to_string()),

@@ -25,6 +25,10 @@ export interface CanvasEditingCell {
   col: number;
 }
 
+export interface CanvasRightAlignedActionCell extends CanvasHoverCell {
+  reservedWidth: number;
+}
+
 /** 搜索匹配的数值 key：列头匹配 displayRow 为 -1。相比字符串拼接 key，
  * 每次按键构建 matchSet、每帧对可见单元格查询都零字符串分配。
  * ponytail: 列数上限 65536，网格列数远达不到 */
@@ -69,6 +73,8 @@ export interface DrawCanvasDataGridOptions {
   pageSize: number;
   currentPage: number;
   frozenColumnCount?: number;
+  columnAligns?: readonly ("left" | "right")[];
+  rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -85,6 +91,12 @@ interface CanvasRenderState {
   searchFill: string;
   currentSearchFill: string;
   currentSearchBorder: string;
+}
+
+export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean }): string {
+  if (options.isSelected) return theme.cellSelected;
+  if (options.isActive && !options.isDeleted) return theme.cellActive;
+  return rowBase;
 }
 
 const canvasRenderStateCache = new WeakMap<HTMLCanvasElement, CanvasRenderState>();
@@ -105,10 +117,10 @@ export function clearFitCanvasTextCache(): void {
   fitCanvasTextCache.clear();
 }
 
-export function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+export function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, align: "left" | "right" = "left"): string {
   if (maxWidth <= 0) return "";
   const font = ctx.font;
-  const cacheKey = `${font}|${text}|${maxWidth}`;
+  const cacheKey = `${font}|${text}|${maxWidth}|${align}`;
   const cached = fitCanvasTextCache.get(cacheKey);
   if (cached !== undefined) return cached;
   if (ctx.measureText(text).width <= maxWidth) {
@@ -122,13 +134,26 @@ export function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWi
   let high = text.length;
   while (low < high) {
     const mid = Math.ceil((low + high) / 2);
-    if (ctx.measureText(text.slice(0, mid)).width + ellipsisWidth <= maxWidth) low = mid;
+    const candidate = align === "right" ? text.slice(text.length - mid) : text.slice(0, mid);
+    if (ctx.measureText(candidate).width + ellipsisWidth <= maxWidth) low = mid;
     else high = mid - 1;
   }
-  const result = text.slice(0, low) + ellipsis;
+  const result = align === "right" ? ellipsis + text.slice(text.length - low) : text.slice(0, low) + ellipsis;
   if (fitCanvasTextCache.size >= FIT_CANVAS_TEXT_CACHE_MAX) fitCanvasTextCache.clear();
   fitCanvasTextCache.set(cacheKey, result);
   return result;
+}
+
+export function canvasDataGridActionReservedWidth(canQuickDownload: boolean): number {
+  return (canQuickDownload ? 44 : 22) + 6;
+}
+
+export function resolveCanvasCellTextLayout(options: { drawX: number; colWidth: number; dpr: number; isRightAlign: boolean; reservedWidth?: number }): { textAnchorX: number; maxWidth: number } {
+  const reservedWidth = options.isRightAlign ? Math.max(0, options.reservedWidth ?? 0) : 0;
+  return {
+    textAnchorX: alignCanvasPixel(options.isRightAlign ? options.drawX + options.colWidth - 12 - reservedWidth : options.drawX + 12, options.dpr),
+    maxWidth: Math.max(0, options.colWidth - 24 - reservedWidth),
+  };
 }
 
 function canvasFont(style: { family: string; sizePx: number; style?: string; weight?: string | number; lineHeight?: string }): string {
@@ -245,6 +270,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     pageSize,
     currentPage,
     frozenColumnCount = 0,
+    columnAligns,
+    rightAlignedActionCell,
   } = options;
   const dpr = Math.max(1, options.pixelRatio ?? window.devicePixelRatio ?? 1);
   const pixelWidth = Math.max(1, Math.ceil(width * dpr));
@@ -296,14 +323,32 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     if (!item) continue;
     const y = rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - scrollTop;
     const rowIsActive = isRowActive(item.displayIndex);
+    const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
 
     const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.isDraft && !rowIsActive ? theme.rowMuted : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
+    const rowFill = resolveCanvasDataGridRowFill(theme, rowBase, {
+      isActive: rowIsActive,
+      isDeleted: item.isDeleted,
+      isSelected: rowSelectionVisual,
+    });
     const rowBorderY = crispCanvasLine(y + CANVAS_DATA_GRID_ROW_HEIGHT - 1, dpr);
     ctx.globalAlpha = item.isDeleted ? 0.7 : 1;
-    ctx.fillStyle = rowIsActive && !item.isDeleted ? theme.cellSelectedSingle : rowBase;
+    ctx.fillStyle = rowFill;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
-    const rowNumberFill = item.status === "draft" ? theme.rowNumberDefault : item.status === "new" ? theme.rowNumberNew : item.status === "edited" ? theme.rowNumberEdited : item.status === "deleted" ? theme.rowNumberDeleted : theme.rowNumberDefault;
+    const rowNumberFill = rowSelectionVisual
+      ? theme.rowNumberSelected
+      : item.status === "draft"
+        ? theme.rowNumberDefault
+        : item.status === "new"
+          ? theme.rowNumberNew
+          : item.status === "edited"
+            ? theme.rowNumberEdited
+            : item.status === "deleted"
+              ? theme.rowNumberDeleted
+              : rowIsActive
+                ? theme.rowNumberActive
+                : theme.rowNumberDefault;
     ctx.fillStyle = rowNumberFill;
     ctx.fillRect(0, y, rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
     ctx.strokeStyle = theme.border;
@@ -339,10 +384,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       if (drawX + colWidth < rowNumberWidth || drawX >= width) return;
 
       const selectedCell = cellIsSelected(item.displayIndex, visibleColIdx);
-      const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
       const isDirtyCell = item.isDirtyCol[actualColIdx];
       const selectedFillVisual = rowSelectionVisual || selectedCell;
-      const selectedBorderVisual = rowSelectionVisual || selectedCell;
+      const selectedBorderVisual = selectedCell;
       const isSearchMatch = paintSearchMatches && searchMatchKeys.has(dataGridSearchMatchKey(item.displayIndex, actualColIdx));
       const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
       const clippedX = Math.max(drawX, rowNumberWidth);
@@ -357,7 +401,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         ctx.fillStyle = theme.cellHover;
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
-      if ((rowIsActive || selectedCell) && !item.isDeleted && !isDirtyCell) {
+      if (selectedCell && !item.isDeleted && !isDirtyCell) {
         ctx.fillStyle = theme.cellSelectedSingle;
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
@@ -385,23 +429,25 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       ctx.rect(clippedX, y, Math.min(cellPaintWidth, width - clippedX), CANVAS_DATA_GRID_ROW_HEIGHT);
       ctx.clip();
       const value = item.data[actualColIdx];
-      ctx.textAlign = "left";
+      const isRightAlign = columnAligns?.[visibleColIdx] === "right";
+      ctx.textAlign = isRightAlign ? "right" : "left";
       ctx.fillStyle = value === null ? theme.mutedForeground : theme.foreground;
       ctx.font = value === null ? italicFont : tabularFont;
       setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
-      const textLeft = alignCanvasPixel(drawX + 12, dpr);
-      const cellMaxWidth = Math.max(0, colWidth - 24);
+      const reservedWidth = rightAlignedActionCell?.rowIndex === item.displayIndex && rightAlignedActionCell.visibleColIdx === visibleColIdx ? rightAlignedActionCell.reservedWidth : 0;
+      const { textAnchorX, maxWidth: cellMaxWidth } = resolveCanvasCellTextLayout({ drawX, colWidth, dpr, isRightAlign, reservedWidth });
       const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
       const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx);
       const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText);
-      const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth);
-      ctx.fillText(text, textLeft, textY);
+      const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isRightAlign ? "right" : "left");
+      ctx.fillText(text, textAnchorX, textY);
       if (item.isDeleted && text) {
         const textWidth = ctx.measureText(text).width;
+        const lineStartX = isRightAlign ? textAnchorX - textWidth : textAnchorX;
         ctx.strokeStyle = theme.foreground;
         ctx.beginPath();
-        ctx.moveTo(textLeft, textY);
-        ctx.lineTo(alignCanvasPixel(textLeft + textWidth, dpr), textY);
+        ctx.moveTo(lineStartX, textY);
+        ctx.lineTo(alignCanvasPixel(lineStartX + textWidth, dpr), textY);
         ctx.stroke();
       }
       ctx.restore();
@@ -463,16 +509,11 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       // 用不透明底色覆盖冻结区域（遮挡第一轮溢入的非冻结列内容）
       // 注意：rowBase 在浅色主题下可能是 color-mix(..., transparent) 半透明色，
       // 单次半透明填充无法遮挡文字，需先填不透明底再叠加半透明色调
-      if (rowIsActive && !item.isDeleted) {
-        ctx.fillStyle = theme.cellSelectedSingle;
+      ctx.fillStyle = theme.background;
+      ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      if (rowFill !== theme.background) {
+        ctx.fillStyle = rowFill;
         ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-      } else {
-        ctx.fillStyle = theme.background;
-        ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        if (rowBase !== theme.background) {
-          ctx.fillStyle = rowBase;
-          ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
-        }
       }
       // 绘制冻结列的每个单元格（x 坐标不受 scrollLeft 影响）
       for (let fcIdx = 0; fcIdx < frozenColumnCount; fcIdx++) {

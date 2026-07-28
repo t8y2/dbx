@@ -77,6 +77,26 @@ type metadataConn struct {
 	state *metadataDriverState
 }
 
+type connectionAttemptState struct {
+	mu         sync.Mutex
+	attempts   []string
+	dsns       []string
+	deadlines  []time.Time
+	pingErrors map[string]error
+}
+
+type connectionAttemptConnector struct {
+	state   *connectionAttemptState
+	sslMode string
+}
+
+type connectionAttemptDriver struct{}
+
+type connectionAttemptConn struct {
+	state   *connectionAttemptState
+	sslMode string
+}
+
 type valueRows struct {
 	columns []string
 	rows    [][]driver.Value
@@ -248,6 +268,50 @@ func (rows *valueRows) Next(values []driver.Value) error {
 	return nil
 }
 
+func (state *connectionAttemptState) open(cp connectParams, sslMode string) (*sql.DB, error) {
+	state.mu.Lock()
+	state.attempts = append(state.attempts, sslMode)
+	state.dsns = append(state.dsns, buildDSNWithSSLMode(cp, sslMode))
+	state.mu.Unlock()
+	return sql.OpenDB(connectionAttemptConnector{state: state, sslMode: sslMode}), nil
+}
+
+func (connector connectionAttemptConnector) Connect(context.Context) (driver.Conn, error) {
+	return &connectionAttemptConn{state: connector.state, sslMode: connector.sslMode}, nil
+}
+
+func (connectionAttemptConnector) Driver() driver.Driver { return connectionAttemptDriver{} }
+
+func (connectionAttemptDriver) Open(string) (driver.Conn, error) { return nil, driver.ErrSkip }
+
+func (*connectionAttemptConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+
+func (*connectionAttemptConn) Close() error { return nil }
+
+func (*connectionAttemptConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (connection *connectionAttemptConn) Ping(ctx context.Context) error {
+	connection.state.mu.Lock()
+	if deadline, ok := ctx.Deadline(); ok {
+		connection.state.deadlines = append(connection.state.deadlines, deadline)
+	}
+	err := connection.state.pingErrors[connection.sslMode]
+	connection.state.mu.Unlock()
+	return err
+}
+
+func (state *connectionAttemptState) snapshot() ([]string, []time.Time) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.attempts...), append([]time.Time(nil), state.deadlines...)
+}
+
+func (state *connectionAttemptState) connectionStrings() []string {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.dsns...)
+}
+
 func openFakeDB(t *testing.T, rowCount int) (*sql.DB, *fakeDriverState) {
 	t.Helper()
 	registerTestDriver.Do(func() { sql.Register("kingbase-agent-test", fakeDriver{}) })
@@ -337,6 +401,243 @@ func TestBuildDSNConvertsDBXJDBCURL(t *testing.T) {
 	})
 	if strings.HasPrefix(dsn, "jdbc:") || !strings.Contains(dsn, "host='127.0.0.1'") || !strings.Contains(dsn, "dbname='test'") {
 		t.Fatalf("JDBC URL was not converted to a gokb DSN: %s", dsn)
+	}
+}
+
+func TestBuildDSNNormalizesPreferWithoutPassingLiteralMode(t *testing.T) {
+	cp := connectParams{
+		Host:      "127.0.0.1",
+		Port:      54321,
+		Database:  "test",
+		Username:  "system",
+		Password:  "secret",
+		URLParams: "SSLMODE=disable&sslmode=prefer&application_name=dbx",
+	}
+	if mode := effectiveSSLMode(cp); mode != "prefer" {
+		t.Fatalf("unexpected effective SSL mode: %q", mode)
+	}
+	dsn := buildDSN(cp)
+	if strings.Count(strings.ToLower(dsn), "sslmode=") != 1 {
+		t.Fatalf("DSN must contain exactly one sslmode: %s", dsn)
+	}
+	if !strings.Contains(dsn, "sslmode=require") || strings.Contains(strings.ToLower(dsn), "sslmode=prefer") {
+		t.Fatalf("prefer must be converted to the first require attempt: %s", dsn)
+	}
+	if !strings.Contains(dsn, "application_name='dbx'") {
+		t.Fatalf("unrelated URL parameters must be preserved: %s", dsn)
+	}
+}
+
+func TestBuildDSNOverridesPreferInNativeConnectionStrings(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		connectionString   string
+		preservedFragments []string
+	}{
+		{
+			name:             "keyword DSN",
+			connectionString: "host=db.example.com application_name='dbx app' sslmode = 'prefer' options='-c search_path=public tenant'",
+			preservedFragments: []string{
+				"host=db.example.com",
+				"application_name='dbx app'",
+				"options='-c search_path=public tenant'",
+			},
+		},
+		{
+			name:             "Kingbase URL",
+			connectionString: "kingbase://system:secret@db.example.com/test?application_name=dbx&SSLMODE=prefer#section",
+			preservedFragments: []string{
+				"kingbase://system:secret@db.example.com/test?",
+				"application_name=dbx",
+				"#section",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cp := connectParams{ConnectionString: test.connectionString}
+			if mode := effectiveSSLMode(cp); mode != "prefer" {
+				t.Fatalf("unexpected effective SSL mode: %q", mode)
+			}
+			dsn := buildDSN(cp)
+			if strings.Count(strings.ToLower(dsn), "sslmode=") != 1 {
+				t.Fatalf("native DSN must contain exactly one sslmode: %s", dsn)
+			}
+			if strings.Contains(strings.ToLower(dsn), "prefer") || !strings.Contains(strings.ToLower(dsn), "sslmode=require") {
+				t.Fatalf("native prefer must be replaced by require: %s", dsn)
+			}
+			for _, fragment := range test.preservedFragments {
+				if !strings.Contains(dsn, fragment) {
+					t.Fatalf("native DSN lost %q: %s", fragment, dsn)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAndPingDBNativeConnectionStringsWithoutSSLModeUsePreferFallback(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		connectionString   string
+		preservedFragments []string
+	}{
+		{
+			name:             "keyword DSN",
+			connectionString: "host=db.example.com application_name=dbx",
+			preservedFragments: []string{
+				"host=db.example.com",
+				"application_name=dbx",
+			},
+		},
+		{
+			name:             "Kingbase URL",
+			connectionString: "kingbase://system:secret@db.example.com/test?application_name=dbx",
+			preservedFragments: []string{
+				"kingbase://system:secret@db.example.com/test?",
+				"application_name=dbx",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cp := connectParams{ConnectionString: test.connectionString}
+			if mode := effectiveSSLMode(cp); mode != "prefer" {
+				t.Fatalf("native connection string without sslmode must use prefer semantics: %q", mode)
+			}
+
+			state := &connectionAttemptState{pingErrors: map[string]error{"require": gokb.ErrSSLNotSupported}}
+			db, err := openAndPingDB(cp, time.Second, state.open)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			attempts, _ := state.snapshot()
+			if strings.Join(attempts, ",") != "require,disable" {
+				t.Fatalf("unexpected implicit prefer attempts: %v", attempts)
+			}
+			dsns := state.connectionStrings()
+			if len(dsns) != 2 {
+				t.Fatalf("unexpected generated DSNs: %v", dsns)
+			}
+			for index, sslMode := range []string{"require", "disable"} {
+				dsn := dsns[index]
+				lowerDSN := strings.ToLower(dsn)
+				if strings.Count(lowerDSN, "sslmode=") != 1 || !strings.Contains(lowerDSN, "sslmode="+sslMode) {
+					t.Fatalf("attempt %s has unexpected sslmode: %s", sslMode, dsn)
+				}
+				if strings.Contains(lowerDSN, "sslmode=prefer") {
+					t.Fatalf("literal prefer reached native driver DSN: %s", dsn)
+				}
+				for _, fragment := range test.preservedFragments {
+					if !strings.Contains(dsn, fragment) {
+						t.Fatalf("native DSN lost %q: %s", fragment, dsn)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAndPingDBHonorsExplicitNativeConnectionStringMode(t *testing.T) {
+	state := &connectionAttemptState{pingErrors: map[string]error{"require": gokb.ErrSSLNotSupported}}
+	db, err := openAndPingDB(connectParams{ConnectionString: "host=db.example.com sslmode=require"}, time.Second, state.open)
+	if db != nil {
+		db.Close()
+	}
+	if !errors.Is(err, gokb.ErrSSLNotSupported) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	attempts, _ := state.snapshot()
+	if len(attempts) != 1 || attempts[0] != "require" {
+		t.Fatalf("explicit native DSN mode must not downgrade: %v", attempts)
+	}
+}
+
+func TestOpenAndPingDBPreferFallbackUsesOneTimeoutBudget(t *testing.T) {
+	state := &connectionAttemptState{pingErrors: map[string]error{"require": gokb.ErrSSLNotSupported}}
+	db, err := openAndPingDB(connectParams{}, time.Second, state.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts, deadlines := state.snapshot()
+	if strings.Join(attempts, ",") != "require,disable" {
+		t.Fatalf("unexpected prefer attempts: %v", attempts)
+	}
+	if len(deadlines) != 2 || !deadlines[0].Equal(deadlines[1]) {
+		t.Fatalf("prefer attempts must share one deadline: %v", deadlines)
+	}
+}
+
+func TestOpenAndPingDBDoesNotDowngradeUnrelatedErrors(t *testing.T) {
+	authErr := errors.New("authentication failed")
+	state := &connectionAttemptState{pingErrors: map[string]error{"require": authErr}}
+	db, err := openAndPingDB(connectParams{}, time.Second, state.open)
+	if db != nil {
+		db.Close()
+	}
+	if !errors.Is(err, authErr) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	attempts, _ := state.snapshot()
+	if strings.Join(attempts, ",") != "require" {
+		t.Fatalf("unrelated errors must not downgrade: %v", attempts)
+	}
+}
+
+func TestOpenAndPingDBExplicitModesNeverDowngrade(t *testing.T) {
+	for _, sslMode := range []string{"disable", "require", "verify-ca", "verify-full"} {
+		t.Run(sslMode, func(t *testing.T) {
+			state := &connectionAttemptState{pingErrors: map[string]error{sslMode: gokb.ErrSSLNotSupported}}
+			db, err := openAndPingDB(connectParams{URLParams: "sslmode=" + sslMode}, time.Second, state.open)
+			if db != nil {
+				db.Close()
+			}
+			if !errors.Is(err, gokb.ErrSSLNotSupported) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			attempts, _ := state.snapshot()
+			if len(attempts) != 1 || attempts[0] != sslMode {
+				t.Fatalf("explicit mode must use one attempt: %v", attempts)
+			}
+		})
+	}
+}
+
+func TestOpenAndPingDBSSLDefaultsToVerifyFull(t *testing.T) {
+	state := &connectionAttemptState{pingErrors: map[string]error{}}
+	db, err := openAndPingDB(connectParams{SSL: true}, time.Second, state.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts, _ := state.snapshot()
+	if len(attempts) != 1 || attempts[0] != "verify-full" {
+		t.Fatalf("SSL=true must stay verify-full: %v", attempts)
+	}
+}
+
+func TestConnectAndTestConnectionSharePreferFallback(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*server, connectParams) error
+	}{
+		{name: "connect", run: func(server *server, cp connectParams) error { return server.connect(cp) }},
+		{name: "test_connection", run: func(server *server, cp connectParams) error { return server.testConnection(cp) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &connectionAttemptState{pingErrors: map[string]error{"require": gokb.ErrSSLNotSupported}}
+			server := newServer()
+			server.openDatabase = state.open
+			cp := connectParams{URLParams: "sslmode=prefer", MySQLCompatMode: true}
+			if err := test.run(server, cp); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.disconnect() })
+			attempts, _ := state.snapshot()
+			if strings.Join(attempts, ",") != "require,disable" {
+				t.Fatalf("unexpected attempts: %v", attempts)
+			}
+		})
 	}
 }
 

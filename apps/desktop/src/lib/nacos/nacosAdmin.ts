@@ -1,5 +1,5 @@
 import type { NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
-import { diffChars, diffLines } from "diff";
+import { diffArrays, diffChars } from "diff";
 
 export type NacosRawTemplateKey = "serverState" | "namespaceList" | "configDetail" | "serviceList" | "instanceList";
 
@@ -91,9 +91,10 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
     contextPath = hasNacosSuffix ? rawPath : options.contextPath?.trim() || "/nacos";
   } else if (detectedVersion === "v3" || hasNacos3UiSuffix) {
     contextPath = rawPath.replace(/\/(?:next(?:\/index\.html)?|index\.html)$/i, "");
+    if (!contextPath) contextPath = options.contextPath?.trim() || "/nacos";
     if (hasNacos3UiSuffix) warnings.push("The Nacos 3 console route was removed from the API context.");
   } else if (!contextPath) {
-    contextPath = options.contextPath?.trim() || (detectedVersion === "v2" ? "/nacos" : "");
+    contextPath = options.contextPath?.trim() || (versionMode === "v2" ? "/nacos" : "");
   }
   url.pathname = "/";
   url.search = "";
@@ -105,6 +106,27 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
     detectedVersion,
     warnings,
   };
+}
+
+export function normalizeNacosMetricsUrl(input: string): string {
+  const value = input.trim();
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Nacos Prometheus metrics URL must be a valid absolute URL");
+  }
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Nacos Prometheus metrics URL must use HTTP or HTTPS");
+  if (url.username || url.password) throw new Error("Nacos Prometheus metrics URL must not contain embedded credentials");
+  if (value.includes("#")) throw new Error("Nacos Prometheus metrics URL must not contain a fragment");
+  return url.toString();
+}
+
+export function nacosMetricsCandidates(serverAddr: string, contextPath: string, implementation: NacosImplementation): string[] {
+  const base = serverAddr.replace(/\/+$/, "");
+  const context = contextPath.replace(/\/+$/, "");
+  const raw = implementation === "rnacos" ? [`${base}/metrics`, `${base}${context}/metrics`, `${base}/rnacos/metrics`] : [`${base}${context}/actuator/prometheus`, `${base}/nacos/actuator/prometheus`, `${base}/actuator/prometheus`];
+  return [...new Set(raw.map((value) => new URL(value).toString()))];
 }
 
 /**
@@ -480,32 +502,24 @@ export interface NacosInlineDiffRow {
 }
 
 export function summarizeNacosConfigDiff(before: string, after: string, maxPreviewLines = 40): NacosDiffSummary {
-  if (before === after) {
-    return { changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." };
-  }
-  const beforeLines = before.split(/\r?\n/);
-  const afterLines = after.split(/\r?\n/);
-  const max = Math.max(beforeLines.length, afterLines.length);
+  const changes = diffArrays(splitDiffLines(before), splitDiffLines(after));
   const lines: string[] = [];
   let addedLines = 0;
   let removedLines = 0;
-  for (let index = 0; index < max; index += 1) {
-    const left = beforeLines[index];
-    const right = afterLines[index];
-    if (left === right) continue;
-    if (left !== undefined) {
-      removedLines += 1;
-      lines.push(`- ${left}`);
-    }
-    if (right !== undefined) {
-      addedLines += 1;
-      lines.push(`+ ${right}`);
-    }
-    if (lines.length >= maxPreviewLines) {
-      lines.push("...");
-      break;
+
+  for (const change of changes) {
+    if (!change.added && !change.removed) continue;
+    const prefix = change.added ? "+" : "-";
+    for (const line of change.value) {
+      if (change.added) addedLines += 1;
+      else removedLines += 1;
+      if (lines.length < maxPreviewLines) lines.push(`${prefix} ${line}`);
     }
   }
+
+  const changed = addedLines > 0 || removedLines > 0;
+  if (!changed) return { changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." };
+  if (lines.length < addedLines + removedLines) lines.push("...");
   return { changed: true, addedLines, removedLines, preview: lines.join("\n") };
 }
 
@@ -559,7 +573,7 @@ function pairChangedLines(leftLines: string[], rightLines: string[], leftStart: 
 }
 
 export function buildNacosSideBySideDiff(before: string, after: string): NacosSideBySideDiffRow[] {
-  const changes = diffLines(normalizeNacosDiffText(before), normalizeNacosDiffText(after), { newlineIsToken: false });
+  const changes = diffArrays(splitDiffLines(before), splitDiffLines(after));
   const rows: NacosSideBySideDiffRow[] = [];
   let leftLineNumber = 1;
   let rightLineNumber = 1;
@@ -569,7 +583,7 @@ export function buildNacosSideBySideDiff(before: string, after: string): NacosSi
   for (let index = 0; index < changes.length; index += 1) {
     const change = changes[index];
     if (!change.added && !change.removed) {
-      for (const line of splitDiffLines(change.value)) {
+      for (const line of change.value) {
         rows.push({
           id: nextId(),
           leftLineNumber,
@@ -588,10 +602,10 @@ export function buildNacosSideBySideDiff(before: string, after: string): NacosSi
     }
 
     if (change.removed) {
-      const leftLines = splitDiffLines(change.value);
+      const leftLines = change.value;
       const next = changes[index + 1];
       if (next?.added) {
-        const rightLines = splitDiffLines(next.value);
+        const rightLines = next.value;
         pairChangedLines(leftLines, rightLines, leftLineNumber, rightLineNumber, rows, nextId);
         leftLineNumber += leftLines.length;
         rightLineNumber += rightLines.length;
@@ -604,7 +618,7 @@ export function buildNacosSideBySideDiff(before: string, after: string): NacosSi
     }
 
     if (change.added) {
-      const rightLines = splitDiffLines(change.value);
+      const rightLines = change.value;
       pairChangedLines([], rightLines, leftLineNumber, rightLineNumber, rows, nextId);
       rightLineNumber += rightLines.length;
     }

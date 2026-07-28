@@ -112,7 +112,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   if (!normalized) return { editable: false, reason: "not-select" };
   if (/^\s*WITH\b/i.test(normalized)) return { editable: false, reason: "cte" };
   if (!/^SELECT\b/i.test(normalized)) return { editable: false, reason: "not-select" };
-  if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT"])) {
+  if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) {
     return { editable: false, reason: "set-operation" };
   }
   if (normalized.includes(";")) return { editable: false, reason: "complex-source" };

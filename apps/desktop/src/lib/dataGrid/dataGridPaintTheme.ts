@@ -260,6 +260,7 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const cellSelected = paintToken(getVar, "--accent", isDark ? "rgb(20, 40, 60)" : "rgb(239, 246, 255)");
   const cellSelectedDirty = warningBg;
   // Selection outline must stay readable on the selected fill (WCAG non-text ~3:1).
+  // Prefer ring/primary over the generic border token, which is often near the fill.
   const cellSelectedBorder = paintToken(getVar, "--ring", isDark ? "rgb(96, 165, 250)" : primary);
   const cellSelectedSingle = paintToken(getVar, "--muted", isDark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)");
   const cellHover = accent;

@@ -204,38 +204,42 @@
   border-radius: var(--dbx-radius-fixed-6);
 }
 
-/* Shared control / selection chrome — theme-token driven */
-.dbx-control-chrome:not(.border-0):not(.border-transparent) {
-  border-color: var(--input);
-  background-color: var(--background);
-  box-shadow: none;
-}
+/*
+ * Shared control chrome defaults.
+ * Keep these in @layer components + :where() so Tailwind utilities and
+ * aria-invalid / disabled / caller bg-* hover:* focus rings can override.
+ * Do not set box-shadow here — it would erase focus/invalid rings.
+ */
+@layer components {
+  :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled) {
+    border-color: var(--input);
+    background-color: var(--background);
+  }
 
-.dbx-control-chrome:not(.border-0):not(.border-transparent):hover {
-  background-color: color-mix(in srgb, var(--muted) 55%, var(--background));
-}
+  :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled):hover {
+    background-color: color-mix(in srgb, var(--muted) 55%, var(--background));
+  }
 
-.dbx-control-chrome:not(.border-0):not(.border-transparent):focus-visible,
-.dbx-control-chrome:not(.border-0):not(.border-transparent)[data-state="open"],
-.dbx-control-chrome:not(.border-0):not(.border-transparent)[aria-expanded="true"] {
-  border-color: var(--ring);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent);
-}
+  :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled):focus-visible,
+  :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled)[data-state="open"],
+  :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled)[aria-expanded="true"] {
+    border-color: var(--ring);
+  }
 
-.dark .dbx-control-chrome:not(.border-0):not(.border-transparent) {
-  border-color: var(--input);
-  background-color: color-mix(in srgb, var(--input) 30%, transparent);
-}
+  :where(.dark) :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled) {
+    border-color: var(--input);
+    background-color: color-mix(in srgb, var(--input) 30%, transparent);
+  }
 
-.dark .dbx-control-chrome:not(.border-0):not(.border-transparent):hover {
-  background-color: color-mix(in srgb, var(--input) 50%, transparent);
-}
+  :where(.dark) :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled):hover {
+    background-color: color-mix(in srgb, var(--input) 50%, transparent);
+  }
 
-.dark .dbx-control-chrome:not(.border-0):not(.border-transparent):focus-visible,
-.dark .dbx-control-chrome:not(.border-0):not(.border-transparent)[data-state="open"],
-.dark .dbx-control-chrome:not(.border-0):not(.border-transparent)[aria-expanded="true"] {
-  border-color: var(--ring);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 40%, transparent);
+  :where(.dark) :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled):focus-visible,
+  :where(.dark) :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled)[data-state="open"],
+  :where(.dark) :where(.dbx-control-chrome):not(.border-0):not(.border-transparent):not([aria-invalid="true"]):not(:disabled)[aria-expanded="true"] {
+    border-color: var(--ring);
+  }
 }
 
 .dbx-choice-selected {

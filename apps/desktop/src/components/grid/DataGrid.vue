@@ -4423,6 +4423,7 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
     "--data-grid-cell-bg": resolvedRowBg,
     "--data-grid-row-number-bg": rowNumberBg,
     // Keep selection fill/border from [data-grid-root] tokens (primary/ring mix).
+    // Do not flatten them to --accent/--border — that erases outline contrast.
     "--data-grid-cell-selected-dirty-bg": editedBg,
     "--data-grid-row-number-active-bg": activeBg,
   } as CSSProperties;

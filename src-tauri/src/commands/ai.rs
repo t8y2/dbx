@@ -215,7 +215,6 @@ pub async fn delete_ai_conversation(state: State<'_, Arc<AppState>>, id: String)
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn verify_confirmed_target_allows_matching_connection_and_database() {

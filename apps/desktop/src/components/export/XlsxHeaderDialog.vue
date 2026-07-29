@@ -23,10 +23,14 @@ function onCancel() {
   open.value = false;
   emit("cancel");
 }
+
+function onOpenChange(value: boolean) {
+  if (!value) onCancel();
+}
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog v-model:open="open" @update:open="onOpenChange">
     <DialogContent class="sm:max-w-sm" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle>{{ t("grid.xlsxHeaderTitle") }}</DialogTitle>

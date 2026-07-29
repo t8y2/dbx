@@ -136,7 +136,16 @@ pub(crate) fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek
     column_types: &[String],
     trailing_sheets: &[XlsxWorksheetData],
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], trailing_sheets, None, false)
+    start_streaming_xlsx_workbook_with_options(
+        writer,
+        sheet_name,
+        columns,
+        column_types,
+        &[],
+        trailing_sheets,
+        None,
+        false,
+    )
 }
 
 pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
@@ -309,11 +318,7 @@ fn value_text(value: Option<&Value>) -> String {
     }
 }
 
-fn estimate_column_widths(
-    columns: &[String],
-    column_comments: &[Option<String>],
-    rows: &[Vec<Value>],
-) -> Vec<usize> {
+fn estimate_column_widths(columns: &[String], column_comments: &[Option<String>], rows: &[Vec<Value>]) -> Vec<usize> {
     columns
         .iter()
         .enumerate()
@@ -1057,6 +1062,7 @@ mod tests {
                 Some("Temporal"),
                 &columns,
                 &column_types,
+                &[],
                 &[],
                 Some("YYYY/MM/DD HH:mm:ss.SSS"),
                 false,

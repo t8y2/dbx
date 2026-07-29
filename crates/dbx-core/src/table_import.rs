@@ -6056,6 +6056,7 @@ mod tests {
             sheet_name: Some("Rows".to_string()),
             columns: vec!["id".to_string(), "name".to_string()],
             column_types: vec![],
+            column_comments: vec![],
             rows: vec![
                 vec![serde_json::json!(1), serde_json::json!("Ada")],
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
@@ -6412,6 +6413,7 @@ mod tests {
             sheet_name: Some("Rows".to_string()),
             columns: vec!["report".to_string(), "ignored".to_string()],
             column_types: vec![],
+            column_comments: vec![],
             rows: vec![
                 vec![serde_json::json!("id"), serde_json::json!("name")],
                 vec![serde_json::json!(1), serde_json::json!("Ada")],
@@ -6836,6 +6838,7 @@ mod tests {
             sheet_name: Some("Rows".to_string()),
             columns: vec!["report".to_string(), "ignored".to_string()],
             column_types: vec![],
+            column_comments: vec![],
             rows: vec![
                 vec![serde_json::json!("id"), serde_json::json!("name")],
                 vec![serde_json::json!(1), serde_json::json!("Ada")],

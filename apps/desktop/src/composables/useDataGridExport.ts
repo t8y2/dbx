@@ -924,12 +924,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
         const exportPattern = useSettingsStore().editorSettings.globalDateTimeExportFormat;
         const rightAlign = useSettingsStore().editorSettings.numericColumnRightAlign;
-        const columnComments = useCommentHeader ? buildColumnComments(sheets[0]?.result.columns ?? []) : undefined;
         const worksheets = sheets.map((sheet) => ({
           sheetName: sheet.sheetName,
           columns: sheet.result.columns,
           columnTypes: sheet.result.column_types ?? [],
-          columnComments,
+          columnComments: useCommentHeader ? buildColumnComments(sheet.result.columns) : undefined,
           rows: formatTemporalRowsForExport(sheet.result.rows, sheet.result.column_types ?? [], exportPattern),
           numericColumnRightAlign: rightAlign,
         }));

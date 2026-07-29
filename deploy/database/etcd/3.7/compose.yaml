@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/etcd:v3.7.0
     container_name: dbx-etcd-3.7
+    restart: always
     command:
       - /usr/local/bin/etcd
       - --name=s1

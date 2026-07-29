@@ -2,6 +2,7 @@ services:
   database:
     image: docker.cnb.cool/znb/images/redis:7.4.9-alpine
     container_name: dbx-redis-7.4
+    restart: always
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${DB_PASSWORD:-123456}"]
     environment:
       # Keep the password in container env so CMD-SHELL can quote it safely.

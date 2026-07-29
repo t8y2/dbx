@@ -29,6 +29,16 @@ test("infers JDBC dialect from driver profile", () => {
   );
 });
 
+test("uses dedicated ClickHouse editor syntax for inferred JDBC connections", () => {
+  const connection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:clickhouse://127.0.0.1:8123/default",
+  };
+
+  assert.equal(inferJdbcDialect(connection), "clickhouse");
+  assert.equal(codeMirrorSqlDialectForConnection(connection), "clickhouse");
+});
+
 test("infers GaussDB-compatible JDBC connections as schema-aware", () => {
   const gaussdbConnection = {
     db_type: "jdbc" as const,

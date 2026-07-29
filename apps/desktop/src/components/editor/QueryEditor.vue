@@ -68,7 +68,7 @@ import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLa
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh } from "@/lib/editor/codemirrorInsertValueHints";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
-import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
+import { createDbxCodeMirrorSqlDialect, type CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
@@ -106,7 +106,7 @@ const props = defineProps<{
   completionContextVersion?: number;
   databaseType?: DatabaseType;
   dialect?: "mysql" | "postgres" | "sqlserver";
-  syntaxDialect?: "mysql" | "postgres" | "sqlserver";
+  syntaxDialect?: CodeMirrorSqlDialectName;
   formatDialect?: SqlFormatDialect;
   formatRequestId?: number;
   compressRequestId?: number;
@@ -120,6 +120,10 @@ const props = defineProps<{
   initialSelection?: { anchor: number; head: number };
   statementExecutionMarkers?: StatementExecutionMarker[];
 }>();
+
+function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
+  return props.syntaxDialect === "clickhouse" ? props.dialect : (props.syntaxDialect ?? props.dialect);
+}
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
 const COMPLETION_DEBOUNCE_DELAY_MS = 150;
@@ -1749,7 +1753,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED
     ? buildSqlSemanticModel(sql, pos, {
         databaseType: props.databaseType,
-        dialect: props.syntaxDialect ?? props.dialect,
+        dialect: sqlBehaviorDialect(),
       })
     : null;
   const semanticTarget = semanticModel ? resolveSqlSemanticNavigationTarget(semanticModel, parts) : null;
@@ -2082,7 +2086,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
       const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED
         ? buildSqlSemanticModel(range.sql, semanticCursor, {
             databaseType: props.databaseType,
-            dialect: props.syntaxDialect ?? props.dialect,
+            dialect: sqlBehaviorDialect(),
           })
         : null;
       const semanticAnalysis = semanticModel ? mergeSqlSemanticReferenceAnalysis(analysis, semanticModel) : analysis;
@@ -2494,7 +2498,7 @@ async function provideSqlCompletions(context: CompletionContext) {
     const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED
       ? buildSqlSemanticModel(fullDoc, position, {
           databaseType: props.databaseType,
-          dialect: props.syntaxDialect ?? props.dialect,
+          dialect: sqlBehaviorDialect(),
         })
       : null;
     const completionContext = semanticModel ? sqlCompletionContextFromSemantic(semanticModel, legacyCompletionContext) : legacyCompletionContext;
@@ -3500,7 +3504,7 @@ onMounted(async () => {
           const ranges = windows.flatMap((window) =>
             sqlSemanticTableNameSpansForSyntaxTree(sql, window, tree, {
               databaseType: props.databaseType,
-              dialect: props.syntaxDialect ?? props.dialect,
+              dialect: sqlBehaviorDialect(),
             }),
           );
           return Decoration.set(

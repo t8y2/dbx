@@ -1,4 +1,13 @@
-import type { ComposerTranslation } from "vue-i18n";
+/**
+ * Minimal shape of a translate function, satisfied by both `useI18n().t` inside
+ * components and `i18n.global.t` in stores and composables. Using the full
+ * `ComposerTranslation` type here would reject the latter, because the global
+ * composer is typed against the concrete message schema.
+ */
+export type BackendErrorTranslate = {
+  (key: string): string;
+  (key: string, named: Record<string, unknown>): string;
+};
 
 const taggedAiCliErrorKeys: Record<string, string> = {
   claudeCodeNotInstalled: "ai.cliErrors.claudeCodeNotInstalled",
@@ -11,6 +20,16 @@ const taggedAiCliErrorKeys: Record<string, string> = {
   claudeCodeMcpStartupFailed: "ai.cliErrors.claudeCodeMcpStartupFailed",
   claudeCodeCommandLineTooLong: "ai.cliErrors.claudeCodeCommandLineTooLong",
   claudeCodeRunFailed: "ai.cliErrors.claudeCodeRunFailed",
+  piAgentNotInstalled: "ai.cliErrors.piAgentNotInstalled",
+  piAgentCliPathInvalid: "ai.cliErrors.piAgentCliPathInvalid",
+  piAgentEnvInvalid: "ai.cliErrors.piAgentEnvInvalid",
+  piAgentEnvReserved: "ai.cliErrors.piAgentEnvReserved",
+  piAgentNotAuthenticated: "ai.cliErrors.piAgentNotAuthenticated",
+  piAgentMcpStartupFailed: "ai.cliErrors.piAgentMcpStartupFailed",
+  piAgentTimeout: "ai.cliErrors.piAgentTimeout",
+  piAgentProtocolError: "ai.cliErrors.piAgentProtocolError",
+  piAgentModelInvalid: "ai.cliErrors.piAgentModelInvalid",
+  piAgentRunFailed: "ai.cliErrors.piAgentRunFailed",
 };
 
 const patterns: [RegExp, string][] = [
@@ -43,9 +62,36 @@ const patterns: [RegExp, string][] = [
   [/^Proxy host too long for SOCKS5 domain address$/, "settings.tunnelsSocksHostTooLong"],
   [/^SOCKS proxy connect rejected \(code (\d+)\)$/, "settings.tunnelsSocksConnectRejected"],
   [/^Unsupported SOCKS bound address type: (\d+)$/, "settings.tunnelsSocksUnsupportedAddrType"],
+
+  // Query result export limits (crates/dbx-core/src/query_result_export.rs)
+  [/^XLSX supports at most ([\d,]+) data rows\. Use CSV export for the full result\.$/, "exportProgress.xlsxRowLimit"],
+  [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
+  [/^Streaming export needs a result-set session, but this driver returned no session_id\.$/, "exportProgress.agentSessionMissing"],
+
+  // Query execution (crates/dbx-core/src/query.rs)
+  [/^The previous DuckDB query is still stopping\. Please try again shortly\.$/, "editor.duckdbDraining"],
+
+  // Driver / JRE management (crates/dbx-core/src/agent_service.rs, routes/agents.rs)
+  // The Windows variant is multi-line, so it must be tried before the single-line one.
+  [/^Failed to remove the old JRE directory: (.+)\nPossible causes:[\s\S]*\(original error: ([\s\S]+)\)$/, "driverStore.jreDirRemoveFailedWindows"],
+  [/^Failed to remove the old JRE directory: (.+) \(original error: ([\s\S]+)\)$/, "driverStore.jreDirRemoveFailed"],
+  [/^JRE (.+?) is in use by drivers: (.+)\. Uninstall them first\.$/, "driverStore.jreInUseByDrivers"],
+  [/^agent-registry\.json not found in the ZIP; not a valid offline driver package\.$/, "driverStore.offlinePackageRegistryMissing"],
+  [/^Close these database connections before updating drivers: (.+)$/, "driverStore.driverUpdateBlocked"],
+
+  // Message queues (crates/dbx-core/src/mq/adapters/kafka.rs)
+  [/^Kafka does not support unloading topics$/, "mqClients.unloadTopicUnsupportedKafka"],
+
+  // Filesystem (src-tauri/src/commands/fs_open.rs)
+  [/^file does not exist: (.+)$/, "common.fileNotFound"],
+
+  // Web auth rate limiting (crates/dbx-web/src/auth.rs)
+  [/^Please try again in (\d+)s$/, "auth.rateLimited"],
 ];
 
-const paramNames: Record<string, string> = {
+// Named placeholders for each pattern's capture groups, in capture order.
+// A bare string is shorthand for a single capture group.
+const paramNames: Record<string, string | string[]> = {
   "connection.driverNotInstalled": "driver",
   "connection.jreNotInstalled": "jre",
   "ai.configNameExists": "name",
@@ -59,9 +105,23 @@ const paramNames: Record<string, string> = {
   "settings.tunnelsSocksUnsupportedAuth": "method",
   "settings.tunnelsSocksConnectRejected": "code",
   "settings.tunnelsSocksUnsupportedAddrType": "type",
+  "exportProgress.xlsxRowLimit": "limit",
+  "driverStore.jreDirRemoveFailedWindows": ["path", "error"],
+  "driverStore.jreDirRemoveFailed": ["path", "error"],
+  "driverStore.jreInUseByDrivers": ["jre", "drivers"],
+  "driverStore.driverUpdateBlocked": "labels",
+  "common.fileNotFound": "path",
+  "auth.rateLimited": "seconds",
 };
 
-export function translateBackendError(t: ComposerTranslation, message: string): string {
+function backendErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
+  return String(error);
+}
+
+export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {
+  const message = backendErrorMessage(error);
   const tagged = message.match(/^\[([A-Za-z][A-Za-z0-9]+)\]\s*([\s\S]*)$/);
   if (tagged) {
     const [, code, rawDetail] = tagged;
@@ -75,9 +135,15 @@ export function translateBackendError(t: ComposerTranslation, message: string): 
   for (const [regex, key] of patterns) {
     const match = message.match(regex);
     if (match) {
-      const name = paramNames[key];
-      if (name && match[1]) {
-        return t(key, { [name]: match[1] });
+      const names = paramNames[key];
+      if (names) {
+        const ordered = Array.isArray(names) ? names : [names];
+        const params: Record<string, string> = {};
+        ordered.forEach((name, index) => {
+          const captured = match[index + 1];
+          if (captured !== undefined) params[name] = captured;
+        });
+        if (Object.keys(params).length > 0) return t(key, params);
       }
       return t(key);
     }

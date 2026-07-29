@@ -300,7 +300,8 @@ impl DbxBackend for LocalBackend {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult {
-        let call = ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments };
+        let call =
+            ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments, provider_payload: None };
         agent_tools::execute_tool(&call, &self.state, &connection.id, database, &connection.db_type, permissions).await
     }
 

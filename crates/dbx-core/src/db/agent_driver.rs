@@ -15,6 +15,13 @@ use crate::models::connection::DatabaseConnectionInfo;
 
 type PendingAgentResponse = tokio::sync::oneshot::Sender<Result<Value, String>>;
 
+#[derive(Clone)]
+struct CachedAgentQuery {
+    key: String,
+    expires_at: Instant,
+    result: Result<Value, String>,
+}
+
 pub struct AgentRuntimeClient {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
@@ -153,17 +160,27 @@ impl AgentRuntimeClient {
         let response = match (timeout_duration, cancel_token) {
             (Some(duration), Some(token)) => tokio::select! {
                 _ = token.cancelled() => {
-                    self.cancel_session_request(&params).await;
+                    self.cancel_session_request_for_method(method, &params).await;
                     Err("Query canceled".to_string())
                 },
-                result = tokio::time::timeout(duration, receive) => result.map_err(|_| format!("Agent RPC call timed out ({}s)", duration.as_secs()))?,
+                result = tokio::time::timeout(duration, receive) => match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        self.cancel_session_request_for_method(method, &params).await;
+                        Err(format!("Agent RPC call timed out ({}s)", duration.as_secs()))
+                    }
+                },
             },
-            (Some(duration), None) => tokio::time::timeout(duration, receive)
-                .await
-                .map_err(|_| format!("Agent RPC call timed out ({}s)", duration.as_secs()))?,
+            (Some(duration), None) => match tokio::time::timeout(duration, receive).await {
+                Ok(result) => result,
+                Err(_) => {
+                    self.cancel_session_request_for_method(method, &params).await;
+                    Err(format!("Agent RPC call timed out ({}s)", duration.as_secs()))
+                }
+            },
             (None, Some(token)) => tokio::select! {
                 _ = token.cancelled() => {
-                    self.cancel_session_request(&params).await;
+                    self.cancel_session_request_for_method(method, &params).await;
                     Err("Query canceled".to_string())
                 },
                 result = receive => result,
@@ -174,6 +191,12 @@ impl AgentRuntimeClient {
             self.pending.lock().expect("agent pending response lock poisoned").remove(&id);
         }
         decode_agent_response(response?)
+    }
+
+    async fn cancel_session_request_for_method(&self, method: &str, params: &Value) {
+        if method != AgentMethod::CancelSession.as_str() {
+            self.cancel_session_request(params).await;
+        }
     }
 
     async fn cancel_session_request(&self, params: &Value) {
@@ -260,6 +283,11 @@ fn decode_agent_response<T: DeserializeOwned>(response: Value) -> Result<T, Stri
     serde_json::from_value(result.clone()).map_err(|e| format!("Failed to deserialize agent result: {e}"))
 }
 
+fn deserialize_cached_agent_result<T: DeserializeOwned>(result: Result<Value, String>) -> Result<T, String> {
+    result
+        .and_then(|value| serde_json::from_value(value).map_err(|e| format!("Failed to deserialize agent result: {e}")))
+}
+
 fn fail_pending_requests(pending: &Arc<Mutex<HashMap<u64, PendingAgentResponse>>>, error: String) {
     let requests = std::mem::take(&mut *pending.lock().expect("agent pending response lock poisoned"));
     for (_, sender) in requests {
@@ -287,6 +315,7 @@ pub struct AgentDriverClient {
     next_id: u64,
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
+    cached_query: Option<CachedAgentQuery>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -756,6 +785,7 @@ impl AgentDriverClient {
             next_id: 0,
             shared_runtime: None,
             agent_session_id: None,
+            cached_query: None,
         })
     }
 
@@ -769,6 +799,7 @@ impl AgentDriverClient {
             next_id: 0,
             shared_runtime: Some(runtime),
             agent_session_id: Some(agent_session_id),
+            cached_query: None,
         }
     }
 
@@ -989,6 +1020,7 @@ impl AgentDriverClient {
     }
 
     pub async fn disconnect(&mut self) -> Result<Value, String> {
+        self.invalidate_cached_query();
         if self.shared_runtime.is_some() {
             let session_id = self.agent_session_id.as_ref().ok_or("Shared Agent session id is missing")?.clone();
             let result =
@@ -1016,18 +1048,22 @@ impl AgentDriverClient {
         database: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.list_schemas_filtered(database, None, timeout_duration).await
+        self.list_schemas_filtered(database, None, false, timeout_duration).await
     }
 
     pub async fn list_schemas_filtered<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: &str,
         visible_schemas: Option<&[String]>,
+        show_system_schemas: bool,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
         let mut params = serde_json::json!({ "database": database });
         if let Some(visible_schemas) = visible_schemas {
             params["visible_schemas"] = serde_json::json!(visible_schemas);
+        }
+        if show_system_schemas {
+            params["show_system_schemas"] = serde_json::Value::Bool(true);
         }
         self.call_method_with_timeout(AgentMethod::ListSchemas, params, timeout_duration).await
     }
@@ -1292,6 +1328,7 @@ impl AgentDriverClient {
     }
 
     pub async fn execute_query<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method(AgentMethod::ExecuteQuery, params).await
     }
 
@@ -1300,6 +1337,7 @@ impl AgentDriverClient {
         params: Value,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method_with_timeout(AgentMethod::ExecuteQuery, params, timeout_duration).await
     }
 
@@ -1309,14 +1347,37 @@ impl AgentDriverClient {
         timeout_duration: Option<Duration>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method_with_timeout_and_cancel(AgentMethod::ExecuteQuery, params, timeout_duration, cancel_token)
             .await
+    }
+
+    pub async fn execute_query_cached_with_timeout<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        cache_key: String,
+        cache_ttl: Duration,
+        params: Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let now = Instant::now();
+        if let Some(cached) = self.cached_query.as_ref() {
+            if cached.key == cache_key && cached.expires_at > now {
+                return deserialize_cached_agent_result(cached.result.clone());
+            }
+        }
+
+        self.cached_query = None;
+        let result = self.call_method_with_timeout::<Value>(AgentMethod::ExecuteQuery, params, timeout_duration).await;
+        self.cached_query =
+            Some(CachedAgentQuery { key: cache_key, expires_at: Instant::now() + cache_ttl, result: result.clone() });
+        deserialize_cached_agent_result(result)
     }
 
     pub async fn execute_query_page<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
     ) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method(AgentMethod::ExecuteQueryPage, params).await
     }
 
@@ -1325,6 +1386,7 @@ impl AgentDriverClient {
         params: Value,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method_with_timeout(AgentMethod::ExecuteQueryPage, params, timeout_duration).await
     }
 
@@ -1334,6 +1396,7 @@ impl AgentDriverClient {
         timeout_duration: Option<Duration>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method_with_timeout_and_cancel(AgentMethod::ExecuteQueryPage, params, timeout_duration, cancel_token)
             .await
     }
@@ -1375,6 +1438,7 @@ impl AgentDriverClient {
         &mut self,
         params: AgentTableReadStartParams,
     ) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method(AgentMethod::StartTableRead, serde_json::to_value(params).map_err(|e| e.to_string())?).await
     }
 
@@ -1409,6 +1473,7 @@ impl AgentDriverClient {
         statements: &[String],
         schema: Option<&str>,
     ) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method(AgentMethod::ExecuteTransaction, agent_transaction_params(database, statements, schema)).await
     }
 
@@ -1419,12 +1484,17 @@ impl AgentDriverClient {
         schema: Option<&str>,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.invalidate_cached_query();
         self.call_method_with_timeout(
             AgentMethod::ExecuteBatch,
             agent_transaction_params(database, statements, schema),
             timeout_duration,
         )
         .await
+    }
+
+    fn invalidate_cached_query(&mut self) {
+        self.cached_query = None;
     }
 
     pub async fn call_mongo_method<T: DeserializeOwned + Send + 'static>(
@@ -1728,6 +1798,27 @@ fn agent_java_args_with_extra_args(jar_path: &str, extra_java_args: &[String]) -
     agent_java_args_with_extra_opts(jar_path, std::env::var(AGENT_JAVA_OPTS_ENV).ok().as_deref(), extra_java_args)
 }
 
+pub(crate) fn validate_dameng_java_system_properties(options: &[String]) -> Result<(), String> {
+    for (index, option) in options.iter().enumerate() {
+        let option = option.trim();
+        let Some(property) = option.strip_prefix("-D") else {
+            return Err(java_system_property_error(index));
+        };
+        let key = property.split_once('=').map_or(property, |(key, _)| key);
+        if key.is_empty() || key.chars().any(char::is_whitespace) || option.contains('"') || option.contains('\'') {
+            return Err(java_system_property_error(index));
+        }
+    }
+    Ok(())
+}
+
+fn java_system_property_error(index: usize) -> String {
+    format!(
+        "Dameng JVM option #{} must be a Java system property (-Dkey or -Dkey=value) without shell quotes",
+        index + 1
+    )
+}
+
 fn agent_java_args_with_extra_opts(
     jar_path: &str,
     extra_opts: Option<&str>,
@@ -1950,6 +2041,7 @@ impl AgentDriverClient {
             next_id: 0,
             shared_runtime: None,
             agent_session_id: None,
+            cached_query: None,
         }
     }
 
@@ -1983,15 +2075,16 @@ mod tests {
         agent_schema_table_params, agent_supports_capability, agent_transaction_params, format_agent_process_error,
         format_agent_startup_error, is_agent_rpc_response_error, is_unsupported_handshake_error,
         mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
-        read_agent_line, start_stderr_collector, AgentCapability, AgentDriverClient, AgentHandshake, AgentKvMethod,
-        AgentLaunchSpec, AgentMethod, AgentRuntimeClient, AgentTableReadCloseParams, AgentTableReadPageParams,
-        AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
+        read_agent_line, start_stderr_collector, validate_dameng_java_system_properties, AgentCapability,
+        AgentDriverClient, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentRuntimeClient,
+        AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail,
+        AGENT_PROTOCOL_VERSION,
     };
     use std::io::Cursor;
     use std::io::Write;
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -2073,6 +2166,30 @@ mod tests {
     }
 
     #[test]
+    fn connection_java_system_properties_allow_flags_and_values_with_spaces() {
+        validate_dameng_java_system_properties(&[
+            "-Djava.net.preferIPv4Stack".to_string(),
+            "-Ddm.config.path=C:\\Program Files\\DM\\dm.ini".to_string(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn connection_java_system_properties_reject_launcher_options_and_empty_keys() {
+        for option in ["-jar", "-javaagent:agent.jar", "-agentpath:agent.dll", "-Xmx1g", "", "-D", "-D=value"] {
+            assert!(validate_dameng_java_system_properties(&[option.to_string()]).is_err(), "{option}");
+        }
+    }
+
+    #[test]
+    fn connection_java_system_properties_reject_shell_quotes() {
+        assert!(validate_dameng_java_system_properties(&[
+            r#"-Ddm.config.path="C:\Program Files\DM\dm.ini""#.to_string(),
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn agent_java_opts_parser_preserves_quoted_windows_paths() {
         let args = parse_agent_java_opts(
             r#"-Djava.security.krb5.conf="C:\Program Files\MIT\Kerberos5\krb5.ini" -Dsun.security.krb5.debug=true"#,
@@ -2138,6 +2255,8 @@ mod tests {
         let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
         start_stderr_collector(child.stderr.take().expect("stderr should be piped"), Arc::clone(&stderr_tail));
 
+        std::thread::sleep(Duration::from_millis(200));
+
         let message = format_agent_startup_error(
             "Failed to read startup line from agent: end of stream",
             &mut child,
@@ -2170,6 +2289,7 @@ mod tests {
             next_id: 0,
             shared_runtime: None,
             agent_session_id: None,
+            cached_query: None,
         };
 
         let started_at = std::time::Instant::now();
@@ -2186,6 +2306,293 @@ mod tests {
             "Agent RPC error (-1): ETCD_CAS_CONFLICT: key changed after it was loaded"
         ));
         assert!(!is_agent_rpc_response_error("Failed to read response from agent: end of stream"));
+    }
+
+    async fn spawn_stateful_test_runtime(prefix: &str) -> (Arc<AgentRuntimeClient>, std::path::PathBuf) {
+        let script_path = std::env::temp_dir().join(format!("dbx-agent-{prefix}-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json, sys, threading
+print(json.dumps({'ready': True}), flush=True)
+state_lock = threading.Lock()
+output_lock = threading.Lock()
+session_locks = {}
+blocked = {}
+query_count = 0
+cancel_count = 0
+
+def write_response(req, result=None, error=None):
+    response = {'jsonrpc': '2.0', 'id': req['id']}
+    if error is None:
+        response['result'] = result
+    else:
+        response['error'] = {'code': -1, 'message': error}
+    with output_lock:
+        print(json.dumps(response), flush=True)
+
+def session_lock(session_id):
+    with state_lock:
+        return session_locks.setdefault(session_id, threading.Lock())
+
+def respond(req):
+    global query_count, cancel_count
+    method = req['method']
+    params = req.get('params', {})
+    if method == 'handshake':
+        write_response(req, {'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']})
+        return
+    if method == 'query_count':
+        with state_lock:
+            value = query_count
+        write_response(req, value)
+        return
+    if method == 'cancel_count':
+        with state_lock:
+            value = cancel_count
+        write_response(req, value)
+        return
+    if method == 'cancel_session':
+        session_id = params['agentSessionId']
+        with state_lock:
+            cancel_count += 1
+            event = blocked.get(session_id)
+        if event is not None:
+            event.set()
+        write_response(req, {'ok': True})
+        return
+
+    session_id = params.get('agentSessionId', '__legacy__')
+    with session_lock(session_id):
+        if method == 'execute_query':
+            sql = params.get('sql', '')
+            with state_lock:
+                query_count += 1
+                current_count = query_count
+            if sql.startswith('slow'):
+                event = threading.Event()
+                with state_lock:
+                    blocked[session_id] = event
+                event.wait(2)
+                with state_lock:
+                    blocked.pop(session_id, None)
+            if sql == 'error':
+                write_response(req, error='synthetic query error')
+                return
+            write_response(req, {'sql': sql, 'count': current_count})
+            return
+        write_response(req, {'ok': True})
+
+for line in sys.stdin:
+    threading.Thread(target=respond, args=(json.loads(line),), daemon=True).start()
+"#,
+        )
+        .unwrap();
+        let runtime = AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        (runtime, script_path)
+    }
+
+    async fn runtime_counter(runtime: &Arc<AgentRuntimeClient>, method: &str) -> u64 {
+        runtime.call(method, serde_json::json!({}), Some(Duration::from_secs(2)), None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_timeout_cancels_session_with_and_without_token() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("timeout-cancel-test").await;
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "timeout-session".to_string());
+
+        let error = client
+            .execute_query_with_timeout::<serde_json::Value>(
+                serde_json::json!({"sql": "slow-without-token"}),
+                Some(Duration::from_millis(75)),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("Agent RPC call timed out"));
+        let started = Instant::now();
+        client
+            .call_with_timeout::<serde_json::Value>("probe", serde_json::json!({}), Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        let error = client
+            .execute_query_with_timeout_and_cancel::<serde_json::Value>(
+                serde_json::json!({"sql": "slow-with-token"}),
+                Some(Duration::from_millis(75)),
+                Some(CancellationToken::new()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("Agent RPC call timed out"));
+        let started = Instant::now();
+        client
+            .call_with_timeout::<serde_json::Value>("probe", serde_json::json!({}), Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(runtime_counter(&runtime, "cancel_count").await, 2);
+
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn cached_agent_query_handles_hits_errors_ttl_and_invalidation() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("query-cache-test").await;
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "cache-session".to_string());
+        let timeout = Some(Duration::from_secs(2));
+        let cache_ttl = Duration::from_secs(1);
+
+        let first: serde_json::Value = client
+            .execute_query_cached_with_timeout(
+                "same-key".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "same"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        let second: serde_json::Value = client
+            .execute_query_cached_with_timeout(
+                "same-key".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "same"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(runtime_counter(&runtime, "query_count").await, 1);
+
+        let first_error = client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "error-key".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "slow-cache-error"}),
+                Some(Duration::from_millis(75)),
+            )
+            .await
+            .unwrap_err();
+        let second_error = client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "error-key".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "slow-cache-error"}),
+                Some(Duration::from_millis(75)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(first_error, second_error);
+        assert!(first_error.contains("Agent RPC call timed out"));
+        assert_eq!(runtime_counter(&runtime, "query_count").await, 2);
+
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "ttl-key".to_string(),
+                Duration::from_millis(20),
+                serde_json::json!({"sql": "ttl"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "ttl-key".to_string(),
+                Duration::from_millis(20),
+                serde_json::json!({"sql": "ttl"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime_counter(&runtime, "query_count").await, 4);
+
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "query-invalidation".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "cached-before-query"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        client.execute_query::<serde_json::Value>(serde_json::json!({"sql": "ordinary"})).await.unwrap();
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "query-invalidation".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "cached-before-query"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime_counter(&runtime, "query_count").await, 7);
+
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "batch-invalidation".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "cached-before-batch"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        client
+            .execute_batch::<serde_json::Value>(None, &["UPDATE t SET a = 1".to_string()], None, timeout)
+            .await
+            .unwrap();
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "batch-invalidation".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "cached-before-batch"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime_counter(&runtime, "query_count").await, 9);
+
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "transaction-invalidation".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "cached-before-transaction"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        client.execute_transaction::<serde_json::Value>(None, &["UPDATE t SET a = 2".to_string()], None).await.unwrap();
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "transaction-invalidation".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "cached-before-transaction"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runtime_counter(&runtime, "query_count").await, 11);
+
+        client
+            .execute_query_cached_with_timeout::<serde_json::Value>(
+                "disconnect-invalidation".to_string(),
+                cache_ttl,
+                serde_json::json!({"sql": "cached-before-disconnect"}),
+                timeout,
+            )
+            .await
+            .unwrap();
+        assert!(client.cached_query.is_some());
+        client.disconnect().await.unwrap();
+        assert!(client.cached_query.is_none());
+
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
     }
 
     #[tokio::test]

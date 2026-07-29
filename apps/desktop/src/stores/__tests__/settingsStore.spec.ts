@@ -326,7 +326,10 @@ describe("settingsStore AI API key normalization", () => {
 
   it("trims API keys before persisting new configurations", async () => {
     const saveAiConfigItem = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("@/lib/backend/api", () => ({ saveAiConfigItem }));
+    vi.doMock("@/lib/backend/api", () => ({
+      saveAiConfigItem,
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
+    }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useSettingsStore();
@@ -432,6 +435,8 @@ describe("settingsStore activeModel lifecycle", () => {
       loadAiConfigs: vi.fn().mockResolvedValue([]),
       loadAiConfig: vi.fn().mockResolvedValue(null),
       loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
     }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
@@ -451,13 +456,15 @@ describe("settingsStore activeModel lifecycle", () => {
     expect(store.aiConfigs[1].isDefault).toBe(false);
   });
 
-  it("setDefaultAiConfig(id) on success points activeModel to the new default config", async () => {
+  it("setDefaultAiConfig(id) changes the fallback config without replacing the active model", async () => {
     const setDefaultAiConfig = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("@/lib/backend/api", () => ({
       loadAiConfigs: vi.fn().mockResolvedValue([]),
       loadAiConfig: vi.fn().mockResolvedValue(null),
       loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
       setDefaultAiConfig,
     }));
 
@@ -467,16 +474,15 @@ describe("settingsStore activeModel lifecycle", () => {
     store.aiConfigs = [makeTestConfig({ id: "c1", model: "model-a", isDefault: true }), makeTestConfig({ id: "c2", model: "model-b", isDefault: false })];
     store.isAiConfigLoaded = true;
 
-    // 先手动切到非默认的配置
-    store.updateActiveModel({ configId: "c2", modelId: "model-b" });
-    expect(store.activeModel).toEqual({ configId: "c2", modelId: "model-b" });
+    store.updateActiveModel({ configId: "c1", modelId: "model-a" });
+    expect(store.activeModel).toEqual({ configId: "c1", modelId: "model-a" });
 
     await store.setDefaultAiConfig("c2");
 
     expect(setDefaultAiConfig).toHaveBeenCalledWith("c2");
     expect(store.aiConfigs[0].isDefault).toBe(false);
     expect(store.aiConfigs[1].isDefault).toBe(true);
-    expect(store.activeModel).toEqual({ configId: "c2", modelId: "model-b" });
+    expect(store.activeModel).toEqual({ configId: "c1", modelId: "model-a" });
   });
 
   it("setDefaultAiConfig does not mutate state when backend call fails", async () => {
@@ -487,6 +493,8 @@ describe("settingsStore activeModel lifecycle", () => {
       loadAiConfigs: vi.fn().mockResolvedValue([]),
       loadAiConfig: vi.fn().mockResolvedValue(null),
       loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
       setDefaultAiConfig,
     }));
 
@@ -511,6 +519,8 @@ describe("settingsStore activeModel lifecycle", () => {
       loadAiConfigs: vi.fn().mockResolvedValue([]),
       loadAiConfig: vi.fn().mockResolvedValue(null),
       loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
     }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
@@ -525,6 +535,8 @@ describe("settingsStore activeModel lifecycle", () => {
 
     vi.doMock("@/lib/backend/api", () => ({
       loadAiConfigs: vi.fn().mockResolvedValue(configs),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
     }));
 
     const { useSettingsStore } = await import("@/stores/settingsStore");
@@ -532,5 +544,133 @@ describe("settingsStore activeModel lifecycle", () => {
     store.isAiConfigLoaded = false;
     await store.reloadAiConfigs();
     expect(store.activeModel).toEqual({ configId: "c2", modelId: "model-b" });
+  });
+
+  it("restores the locally persisted model and per-model effort independently of legacy config fields", async () => {
+    const configs = [makeTestConfig({ id: "c1", model: "", isDefault: true })];
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue(configs),
+      loadAiChatSelection: vi.fn().mockResolvedValue({
+        version: 1,
+        active: { configId: "c1", modelId: "runtime-model" },
+        effortPreferences: [{ configId: "c1", modelId: "runtime-model", selection: { kind: "enum", value: "high" } }],
+      }),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initAiConfigs();
+
+    expect(store.activeModel).toEqual({ configId: "c1", modelId: "runtime-model" });
+    expect(store.activeEffort).toEqual({ kind: "enum", value: "high" });
+  });
+
+  it("does not invent an active model when the first saved provider has no legacy model", async () => {
+    const saveAiChatSelection = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({
+      saveAiConfigItem: vi.fn().mockResolvedValue(undefined),
+      saveAiChatSelection,
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.createAiConfig(makeTestConfig({ id: "c1", model: "", isDefault: true }));
+
+    expect(store.activeModel).toBeNull();
+    expect(saveAiChatSelection).not.toHaveBeenCalled();
+  });
+
+  it("clears the active model and effort when an existing config changes provider", async () => {
+    const saveAiConfigItem = vi.fn().mockResolvedValue(undefined);
+    const saveAiChatSelection = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({
+      saveAiConfigItem,
+      saveAiChatSelection,
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.aiConfigs = [makeTestConfig({ id: "c1", provider: "openai", model: "" })];
+    store.updateActiveModel({ configId: "c1", modelId: "gpt-5" });
+    store.updateActiveEffort({ kind: "enum", value: "high" });
+
+    await store.updateAiConfigItem("c1", { provider: "gemini" });
+    await vi.waitFor(() => expect(saveAiChatSelection).toHaveBeenLastCalledWith({ version: 1, active: undefined, effortPreferences: [] }));
+
+    expect(saveAiConfigItem).toHaveBeenCalledWith(expect.objectContaining({ id: "c1", provider: "gemini" }));
+    expect(store.activeModel).toBeNull();
+    expect(store.activeEffort).toBeNull();
+  });
+
+  it("preserves the active model and effort when connection details change within the same provider", async () => {
+    const saveAiConfigItem = vi.fn().mockResolvedValue(undefined);
+    const saveAiChatSelection = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({
+      saveAiConfigItem,
+      saveAiChatSelection,
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.aiConfigs = [makeTestConfig({ id: "c1", provider: "openai", model: "" })];
+    store.updateActiveModel({ configId: "c1", modelId: "gpt-5" });
+    store.updateActiveEffort({ kind: "enum", value: "high" });
+
+    await store.updateAiConfigItem("c1", { endpoint: "https://gateway.example/v1" });
+
+    expect(saveAiConfigItem).toHaveBeenCalledWith(expect.objectContaining({ id: "c1", endpoint: "https://gateway.example/v1" }));
+    expect(store.activeModel).toEqual({ configId: "c1", modelId: "gpt-5" });
+    expect(store.activeEffort).toEqual({ kind: "enum", value: "high" });
+  });
+
+  it("serializes rapid model and effort persistence without allowing an older snapshot to win", async () => {
+    let releaseFirstSave!: () => void;
+    const firstSave = new Promise<void>((resolve) => {
+      releaseFirstSave = resolve;
+    });
+    const saveAiChatSelection = vi
+      .fn()
+      .mockImplementationOnce(() => firstSave)
+      .mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({
+      saveAiChatSelection,
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.updateActiveModel({ configId: "c1", modelId: "model-a" });
+    store.updateActiveEffort({ kind: "enum", value: "high" });
+
+    expect(saveAiChatSelection).toHaveBeenCalledTimes(1);
+    releaseFirstSave();
+    await vi.waitFor(() => expect(saveAiChatSelection).toHaveBeenCalledTimes(2));
+
+    expect(saveAiChatSelection.mock.calls[1][0]).toEqual({
+      version: 1,
+      active: { configId: "c1", modelId: "model-a" },
+      effortPreferences: [{ configId: "c1", modelId: "model-a", selection: { kind: "enum", value: "high" } }],
+    });
+  });
+
+  it("clears stale in-memory AI configs and selections when a reload returns no configs", async () => {
+    vi.doMock("@/lib/backend/api", () => ({
+      loadAiConfigs: vi.fn().mockResolvedValue([]),
+      loadAiConfig: vi.fn().mockResolvedValue(null),
+      loadAiProviderConfigs: vi.fn().mockResolvedValue(null),
+      loadAiChatSelection: vi.fn().mockResolvedValue(null),
+      saveAiChatSelection: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.aiConfigs = [makeTestConfig({ id: "stale", model: "stale-model", isDefault: true })];
+    store.activeModel = { configId: "stale", modelId: "stale-model" };
+    store.isAiConfigLoaded = false;
+
+    await store.reloadAiConfigs();
+
+    expect(store.aiConfigs).toEqual([]);
+    expect(store.activeModel).toBeNull();
   });
 });

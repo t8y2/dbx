@@ -7,7 +7,7 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, DatabaseName,
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ai::{AiChatMessage, AiConfig, AiConfigItem, AiConversation, AiProvider};
+use crate::ai::{AiChatMessage, AiChatSelectionState, AiConfig, AiConfigItem, AiConversation, AiProvider};
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
@@ -30,6 +30,7 @@ const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
+const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
@@ -104,6 +105,7 @@ pub fn maybe_import_user_data_db(
     Ok(DataDbImportResult::Imported)
 }
 
+#[derive(Clone)]
 pub struct Storage {
     db: SqliteHandle,
     /// Path to the SQLite database file (`dbx.db`). Its parent directory is the
@@ -377,6 +379,13 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         config_json TEXT NOT NULL,
         is_default INTEGER NOT NULL DEFAULT 0
     )",
+    "CREATE TABLE IF NOT EXISTS state_store (
+        key TEXT PRIMARY KEY,
+        value BLOB NOT NULL,
+        content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+        version INTEGER NOT NULL DEFAULT 1,
+        payload BLOB DEFAULT x''
+    )",
     "CREATE TABLE IF NOT EXISTS prompt_templates (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -411,6 +420,7 @@ impl Storage {
             ensure_saved_sql_columns_sync(conn)?;
             ensure_tab_runtime_cache_columns_sync(conn)?;
             ensure_ai_configs_columns_sync(conn)?;
+            ensure_state_store_columns_sync(conn)?;
             Ok(())
         })
     }
@@ -579,6 +589,19 @@ fn ensure_table_columns(conn: &Connection, table_name: &str, columns: &[(&str, &
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn ensure_state_store_columns_sync(conn: &Connection) -> Result<(), String> {
+    conn.execute("CREATE TABLE IF NOT EXISTS state_store (key TEXT PRIMARY KEY, value BLOB NOT NULL, content_type TEXT NOT NULL DEFAULT 'application/octet-stream', version INTEGER NOT NULL DEFAULT 1)", []).map_err(|e| e.to_string())?;
+
+    // SQLite ALTER TABLE ADD COLUMN rejects parenthesized default expressions.
+    const COLUMNS: &[(&str, &str)] = &[
+        ("value", "BLOB NOT NULL DEFAULT x''"),
+        ("content_type", "TEXT NOT NULL DEFAULT 'application/octet-stream'"),
+        ("version", "INTEGER NOT NULL DEFAULT 1"),
+        ("payload", "BLOB DEFAULT x''"),
+    ];
+    ensure_table_columns(conn, "state_store", COLUMNS)
 }
 
 fn ssh_tunnel_secret_segment(index: usize, hop: &crate::models::connection::SshTunnelConfig) -> String {
@@ -1684,6 +1707,18 @@ impl Storage {
         })
     }
 
+    pub async fn save_ai_chat_selection(&self, selection: &AiChatSelectionState) -> Result<(), String> {
+        let value = serde_json::to_value(selection).map_err(|e| e.to_string())?;
+        self.save_app_state_value(APP_STATE_AI_CHAT_SELECTION_KEY, &value).await
+    }
+
+    pub async fn load_ai_chat_selection(&self) -> Result<Option<AiChatSelectionState>, String> {
+        self.load_app_state_value(APP_STATE_AI_CHAT_SELECTION_KEY)
+            .await?
+            .map(|value| serde_json::from_value(value).map_err(|e| e.to_string()))
+            .transpose()
+    }
+
     pub async fn load_or_create_local_device_secret(&self) -> Result<String, String> {
         let mut settings = self.load_app_settings_json().await?;
         if let Some(secret) = settings.get("local_device_secret").and_then(|value| value.as_str()) {
@@ -2067,6 +2102,54 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     persist_nacos_auth_secrets_in_tx(tx, &config)
 }
 
+fn preserve_unreadable_connections_for_replacement(
+    tx: &rusqlite::Transaction<'_>,
+    replacement_ids: &HashSet<String>,
+) -> Result<Vec<String>, String> {
+    let unreadable_rows = {
+        let mut stmt = tx.prepare("SELECT id, config_json FROM connections").map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|(id, json)| {
+                serde_json::from_str::<ConnectionConfig>(&json).err().map(|error| (id, json, error.to_string()))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    tx.execute("DELETE FROM connections", []).map_err(|e| e.to_string())?;
+
+    let mut preserved_ids = Vec::new();
+    for (id, json, error) in unreadable_rows {
+        if replacement_ids.contains(&id) {
+            continue;
+        }
+        warn!("Preserving unreadable saved connection '{}' during connection list update: {}", id, error);
+        tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![id, json])
+            .map_err(|e| e.to_string())?;
+        preserved_ids.push(id);
+    }
+    Ok(preserved_ids)
+}
+
+fn delete_unreferenced_connection_secrets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    retained_ids: &[String],
+) -> Result<(), String> {
+    if retained_ids.is_empty() {
+        tx.execute("DELETE FROM connection_secrets", []).map_err(|e| e.to_string())?;
+    } else {
+        let placeholders = vec!["?"; retained_ids.len()].join(",");
+        let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({placeholders})");
+        let ids = retained_ids.iter().map(|id| id as &dyn ToSql);
+        tx.execute(&sql, params_from_iter(ids)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 impl Storage {
     pub async fn save_connection_metadata_preserving_secrets(
         &self,
@@ -2075,7 +2158,8 @@ impl Storage {
         let configs = configs.to_vec();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM connections", []).map_err(|e| e.to_string())?;
+            let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+            let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
 
             for config in &configs {
                 let config = config.canonicalized();
@@ -2095,14 +2179,8 @@ impl Storage {
                     .map_err(|e| e.to_string())?;
             }
 
-            if configs.is_empty() {
-                tx.execute("DELETE FROM connection_secrets", []).map_err(|e| e.to_string())?;
-            } else {
-                let placeholders = vec!["?"; configs.len()].join(",");
-                let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({placeholders})");
-                let ids = configs.iter().map(|config| &config.id as &dyn ToSql);
-                tx.execute(&sql, params_from_iter(ids)).map_err(|e| e.to_string())?;
-            }
+            retained_ids.extend(configs.iter().map(|config| config.id.clone()));
+            delete_unreferenced_connection_secrets_in_tx(&tx, &retained_ids)?;
 
             tx.commit().map_err(|e| e.to_string())
         })
@@ -2113,20 +2191,15 @@ impl Storage {
         let configs = configs.to_vec();
         self.with_conn(move |conn| {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
-            tx.execute("DELETE FROM connections", []).map_err(|e| e.to_string())?;
+            let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+            let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
 
             for config in &configs {
                 persist_connection_in_tx(&tx, config)?;
             }
 
-            if configs.is_empty() {
-                tx.execute("DELETE FROM connection_secrets", []).map_err(|e| e.to_string())?;
-            } else {
-                let placeholders = vec!["?"; configs.len()].join(",");
-                let sql = format!("DELETE FROM connection_secrets WHERE connection_id NOT IN ({placeholders})");
-                let ids = configs.iter().map(|config| &config.id as &dyn ToSql);
-                tx.execute(&sql, params_from_iter(ids)).map_err(|e| e.to_string())?;
-            }
+            retained_ids.extend(configs.iter().map(|config| config.id.clone()));
+            delete_unreferenced_connection_secrets_in_tx(&tx, &retained_ids)?;
 
             tx.commit().map_err(|e| e.to_string())
         })
@@ -2199,7 +2272,13 @@ impl Storage {
 
         let mut configs = Vec::new();
         for (id, json) in rows {
-            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            let mut config: ConnectionConfig = match serde_json::from_str(&json) {
+                Ok(config) => config,
+                Err(error) => {
+                    warn!("Skipping unreadable saved connection '{}': {}", id, error);
+                    continue;
+                }
+            };
             config.password = self.get_secret(&id, "password").await?.unwrap_or_default();
             for index in 0..config.transport_layers.len() {
                 let layer_for_key = config.transport_layers[index].clone();
@@ -2850,6 +2929,109 @@ impl Storage {
         })
         .await
     }
+
+    // State persistence store (CAS-aware key-value store for state machines)
+
+    pub async fn save_state(&self, key: &str, value: &[u8], content_type: &str) -> Result<(), String> {
+        let key = key.to_string();
+        let value = value.to_vec();
+        let content_type = content_type.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO state_store (key, value, content_type, version, payload) \
+                 VALUES (?1, ?2, ?3, 1, x'') \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, content_type = excluded.content_type, \
+                 version = version + 1, payload = excluded.payload",
+                params![key, value, content_type],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_state(&self, key: &str) -> Result<Option<(Vec<u8>, String)>, String> {
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT value, content_type FROM state_store WHERE key = ?1")
+                .map_err(|e| e.to_string())?;
+            let result: Option<(Vec<u8>, String)> = stmt
+                .query_row(params![key], |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            Ok(result)
+        })
+        .await
+    }
+
+    pub async fn delete_state(&self, key: &str) -> Result<(), String> {
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM state_store WHERE key = ?1", params![key]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn state_exists(&self, key: &str) -> Result<bool, String> {
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            let exists: bool = conn
+                .query_row("SELECT EXISTS(SELECT 1 FROM state_store WHERE key = ?1)", params![key], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            Ok(exists)
+        })
+        .await
+    }
+
+    pub async fn get_state_version(&self, key: &str) -> Result<Option<u64>, String> {
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            conn.prepare("SELECT version FROM state_store WHERE key = ?1")
+                .and_then(|mut stmt| stmt.query_row(params![key], |row| row.get(0)).optional())
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn compare_and_swap_state(
+        &self,
+        key: &str,
+        expected_version: Option<u64>,
+        new_value: &[u8],
+        content_type: &str,
+    ) -> Result<bool, String> {
+        let key = key.to_string();
+        let new_value = new_value.to_vec();
+        let content_type = content_type.to_string();
+        self.with_conn(move |conn| {
+            let current: Option<u64> = conn
+                .prepare("SELECT version FROM state_store WHERE key = ?1")
+                .and_then(|mut stmt| stmt.query_row(params![&key], |row| row.get(0)).optional())
+                .map_err(|e| e.to_string())?;
+
+            match (current, expected_version) {
+                (None, None) => {
+                    conn.execute(
+                        "INSERT INTO state_store (key, value, content_type, version, payload) VALUES (?1, ?2, ?3, 1, x'')",
+                        params![key, new_value, content_type],
+                    )
+                    .map(|_| true)
+                    .map_err(|e| e.to_string())
+                }
+                (Some(v), Some(expected)) if v == expected => {
+                    conn.execute(
+                        "UPDATE state_store SET value = ?1, content_type = ?2, version = version + 1 WHERE key = ?3 AND version = ?4",
+                        params![new_value, content_type, key, expected],
+                    )
+                    .map(|rows| rows > 0)
+                    .map_err(|e| e.to_string())
+                }
+                _ => Ok(false),
+            }
+        })
+        .await
+    }
 }
 
 // Tab runtime cache
@@ -3446,6 +3628,7 @@ mod tests {
         maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
         McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
     };
+    use crate::ai::{AiActiveModelSelection, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference};
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
         MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
@@ -3733,6 +3916,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3795,6 +3979,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -4012,6 +4197,55 @@ mod tests {
         let loaded = storage.load_connections().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(mq_token(&loaded[0]), Some("mq-token-secret"));
+    }
+
+    #[tokio::test]
+    async fn unreadable_saved_connections_do_not_block_loading_or_get_deleted_by_list_saves() {
+        let path = temp_db_path("unreadable-connection-preservation");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut known = mq_connection("known", "known-secret");
+        storage.save_connections(std::slice::from_ref(&known)).await.unwrap();
+
+        let future_json = serde_json::json!({
+            "id": "future",
+            "name": "Future database",
+            "db_type": "future_database"
+        })
+        .to_string();
+        let inserted_json = future_json.clone();
+        storage
+            .with_conn(move |conn| {
+                let tx = conn.transaction().map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT INTO connections (id, config_json) VALUES (?1, ?2)",
+                    rusqlite::params!["future", inserted_json],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "INSERT INTO connection_secrets (connection_id, key, secret) VALUES (?1, ?2, ?3)",
+                    rusqlite::params!["future", "password", "future-secret"],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.commit().map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "known");
+
+        known.name = "Known updated".to_string();
+        storage.save_connection_metadata_preserving_secrets(std::slice::from_ref(&known)).await.unwrap();
+        assert_eq!(raw_connection_json(&storage, "future").await, future_json);
+        assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
+
+        storage.save_connections(&[]).await.unwrap();
+        assert!(storage.load_connections().await.unwrap().is_empty());
+        assert_eq!(raw_connection_json(&storage, "future").await, future_json);
+        assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -4601,6 +4835,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ai_chat_selection_roundtrips_in_local_app_state() {
+        let path = temp_db_path("ai-chat-selection");
+        let storage = Storage::open(&path).await.unwrap();
+        let selection = AiChatSelectionState {
+            version: 1,
+            active: Some(AiActiveModelSelection { config_id: "config-1".to_string(), model_id: "model-1".to_string() }),
+            effort_preferences: vec![AiModelEffortPreference {
+                config_id: "config-1".to_string(),
+                model_id: "model-1".to_string(),
+                selection: AiEffortSelection::Enum("high".to_string()),
+            }],
+        };
+
+        storage.save_ai_chat_selection(&selection).await.unwrap();
+
+        assert_eq!(storage.load_ai_chat_selection().await.unwrap(), Some(selection));
+        assert_eq!(storage.load_app_settings_json().await.unwrap().get("ai_chat_selection_v1"), None);
+    }
+
+    #[tokio::test]
     async fn tab_runtime_cache_roundtrips_binary_payloads() {
         let path = temp_db_path("tab-runtime-cache");
         let storage = Storage::open(&path).await.unwrap();
@@ -4784,11 +5038,14 @@ mod tests {
                 proxy_url: String::new(),
                 enable_thinking: true,
                 reasoning_level: AiReasoningLevel::Default,
+                runtime_effort: None,
                 context_window: None,
                 codex_cli_path: None,
                 codex_cli_env: std::collections::HashMap::new(),
                 claude_code_cli_path: None,
                 claude_code_cli_env: std::collections::HashMap::new(),
+                pi_agent_cli_path: None,
+                pi_agent_cli_env: std::collections::HashMap::new(),
             },
         }
     }

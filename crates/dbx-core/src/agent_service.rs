@@ -54,23 +54,23 @@ fn remove_jre_dir_with_retry(path: &Path) -> std::io::Result<()> {
     Err(last_err.unwrap_or_else(|| std::io::Error::other("remove_dir_all failed without an error")))
 }
 
-/// Render a friendly Chinese error message when the old JRE directory cannot
-/// be replaced. On Windows, lists likely culprits (process holding java.exe,
+/// Render a friendly error message when the old JRE directory cannot be
+/// replaced. On Windows, lists likely culprits (process holding java.exe,
 /// AV scanning) and suggests restarting dbx; on POSIX returns a concise
 /// message. The original OS error is appended in parentheses for support.
 fn format_jre_dir_remove_error(path: &Path, os_err: &std::io::Error) -> String {
     if cfg!(windows) {
         format!(
-            "无法删除旧的 JRE 目录：{}\n\
-             可能的原因：\n  \
-             - 仍有 dbx Agent / java 进程占用该目录\n  \
-             - 防病毒软件正在扫描\n\
-             请关闭可能持有该目录的进程，或重启 dbx 后重试。\n\
-             （原始错误：{os_err}）",
+            "Failed to remove the old JRE directory: {}\n\
+             Possible causes:\n  \
+             - a dbx Agent / java process still holds the directory\n  \
+             - antivirus software is scanning it\n\
+             Close any process that may hold the directory, or restart dbx and try again.\n\
+             (original error: {os_err})",
             path.display()
         )
     } else {
-        format!("无法删除旧的 JRE 目录：{}（原始错误：{os_err}）", path.display())
+        format!("Failed to remove the old JRE directory: {} (original error: {os_err})", path.display())
     }
 }
 
@@ -538,7 +538,7 @@ pub async fn uninstall_agent_jre(am: &AgentManager, jre_key: &str) -> Result<(),
         .map(|(k, _)| k.as_str())
         .collect();
     if !dependents.is_empty() {
-        return Err(format!("JRE {} 正在被以下驱动使用: {}，请先卸载这些驱动", jre_key, dependents.join(", ")));
+        return Err(format!("JRE {jre_key} is in use by drivers: {}. Uninstall them first.", dependents.join(", ")));
     }
     // Stop daemons first so any java.exe holding the JRE files exits before
     // we try to remove the directory (Windows ERROR_ACCESS_DENIED otherwise).
@@ -1679,7 +1679,7 @@ fn validate_offline_identifier(value: &str, kind: &str) -> Result<(), String> {
 fn read_registry_from_zip(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<AgentRegistry, String> {
     let mut entry = archive
         .by_name("agent-registry.json")
-        .map_err(|_| "ZIP 文件中未找到 agent-registry.json，请确认这是有效的离线驱动包".to_string())?;
+        .map_err(|_| "agent-registry.json not found in the ZIP; not a valid offline driver package.".to_string())?;
     let mut buf = String::new();
     entry.read_to_string(&mut buf).map_err(|e| format!("Failed to read agent-registry.json: {e}"))?;
     serde_json::from_str(&buf).map_err(|e| format!("Invalid agent-registry.json: {e}"))
@@ -2627,16 +2627,16 @@ mod jre_dir_remove_tests {
         let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "拒绝访问。 (os error 5)");
         let rendered = format_jre_dir_remove_error(&path, &err);
         assert!(rendered.contains(&path.display().to_string()), "missing path: {rendered}");
-        assert!(rendered.contains("（原始错误："), "missing original error wrapper: {rendered}");
+        assert!(rendered.contains("(original error:"), "missing original error wrapper: {rendered}");
         assert!(rendered.contains("拒绝访问"), "missing original error text: {rendered}");
         if cfg!(windows) {
-            assert!(rendered.starts_with("无法删除旧的 JRE 目录："), "wrong prefix: {rendered}");
-            assert!(rendered.contains("Agent / java 进程占用"), "missing process advice: {rendered}");
-            assert!(rendered.contains("重启 dbx 后重试"), "missing restart advice: {rendered}");
+            assert!(rendered.starts_with("Failed to remove the old JRE directory:"), "wrong prefix: {rendered}");
+            assert!(rendered.contains("java process still holds the directory"), "missing process advice: {rendered}");
+            assert!(rendered.contains("restart dbx and try again"), "missing restart advice: {rendered}");
         } else {
             // POSIX path: short form, no Windows-specific advice.
-            assert!(rendered.contains("无法删除旧的 JRE 目录"));
-            assert!(!rendered.contains("防病毒"));
+            assert!(rendered.contains("Failed to remove the old JRE directory"));
+            assert!(!rendered.contains("antivirus"));
         }
     }
 

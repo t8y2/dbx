@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   closeQuerySession: vi.fn(),
   ensureConnected: vi.fn(),
   executeMulti: vi.fn(),
+  executeQuery: vi.fn(),
   getConnectionConfig: vi.fn(),
   prepareQueryPaginationExecutionPlan: vi.fn(),
   saveOpenTabsState: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock("@/lib/backend/api", () => ({
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
   executeMulti: mocks.executeMulti,
+  executeQuery: mocks.executeQuery,
   prepareQueryPaginationExecutionPlan: mocks.prepareQueryPaginationExecutionPlan,
   saveOpenTabsState: mocks.saveOpenTabsState,
 }));
@@ -172,6 +174,40 @@ describe("queryStore multi-statement errors", () => {
     await store.executeTabSql(tabA, "-- switch back\nALTER SESSION SET CURRENT_SCHEMA = APP");
     expect(store.tabs.find((tab) => tab.id === tabA)?.completionContextVersion).toBe(2);
     expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.clientSessionId)).toEqual([tabA, tabA, tabA]);
+  });
+
+  it("resolves the actual SAP HANA schema from the executing Agent session", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "hana-1",
+      name: "SAP HANA",
+      db_type: "saphana",
+      database: "",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti
+      .mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }])
+      .mockResolvedValueOnce([{ columns: ["Error"], rows: [["schema missing"]], affected_rows: 0, execution_time_ms: 1, execution_error: true }])
+      .mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["CURRENT_SCHEMA"], rows: [["APP_SCHEMA"]], affected_rows: 0, execution_time_ms: 1 }).mockResolvedValueOnce({ columns: ["CURRENT_SCHEMA"], rows: [["MixedTargetSchema"]], affected_rows: 0, execution_time_ms: 1 });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabA = store.createTab("hana-1", "", "Tab A");
+    const tabB = store.createTab("hana-1", "", "Tab B");
+
+    await store.executeTabSql(tabA, "SET SCHEMA app_schema_synonym");
+    expect(store.tabs.find((tab) => tab.id === tabA)).toMatchObject({ schema: "APP_SCHEMA", completionContextVersion: 1 });
+    expect(store.tabs.find((tab) => tab.id === tabB)?.schema).toBeUndefined();
+
+    await store.executeTabSql(tabA, 'SET SCHEMA "MissingSchema"');
+    expect(store.tabs.find((tab) => tab.id === tabA)).toMatchObject({ schema: "APP_SCHEMA", completionContextVersion: 1 });
+
+    await store.executeTabSql(tabA, '/* switch */ SET SCHEMA "MixedSchema"');
+    expect(store.tabs.find((tab) => tab.id === tabA)).toMatchObject({ schema: "MixedTargetSchema", completionContextVersion: 2 });
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.clientSessionId)).toEqual([tabA, tabA, tabA]);
+    expect(mocks.executeQuery.mock.calls.map((call) => ({ sql: call[2], schema: call[3], clientSessionId: call[5]?.clientSessionId }))).toEqual([
+      { sql: "SELECT CURRENT_SCHEMA FROM DUMMY", schema: undefined, clientSessionId: tabA },
+      { sql: "SELECT CURRENT_SCHEMA FROM DUMMY", schema: undefined, clientSessionId: tabA },
+    ]);
   });
 
   it("invalidates Oracle completion metadata when clearing a tab schema resets its session", async () => {

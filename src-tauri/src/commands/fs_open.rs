@@ -63,7 +63,7 @@ fn validate_path(raw: &str) -> Result<PathBuf, String> {
         return Err(format!("path is not absolute: {expanded}"));
     }
     if !path.exists() {
-        return Err(format!("文件不存在: {expanded}"));
+        return Err(format!("file does not exist: {expanded}"));
     }
     Ok(path)
 }
@@ -151,7 +151,7 @@ mod tests {
             "/__dbx_definitely_missing__/foo.sqlite".to_string()
         };
         let err = validate_path(&probe).unwrap_err();
-        assert!(err.contains("文件不存在"));
+        assert!(err.contains("file does not exist"));
     }
 
     #[test]

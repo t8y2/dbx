@@ -672,6 +672,24 @@ export function buildNacosConfigDeleteConfirm(item: NacosConfigItem, fallbackNam
   return formatNacosConfigIdentity(item, fallbackNamespace);
 }
 
+export function formatNacosHistoryTime(value?: string | null): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return "-";
+  if (/^0+$/.test(trimmed)) return "-";
+  if (/^\d{10}(?:\d{3})?$/.test(trimmed)) {
+    const timestamp = Number(trimmed);
+    const date = new Date(trimmed.length === 10 ? timestamp * 1_000 : timestamp);
+    if (!Number.isNaN(date.getTime())) {
+      const datePart = [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, "0")).join("-");
+      const timePart = [date.getHours(), date.getMinutes(), date.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
+      return `${datePart} ${timePart}`;
+    }
+  }
+  const match = trimmed.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/);
+  if (!match) return trimmed;
+  return `${match[1]} ${match[2]}`;
+}
+
 export function buildNacosConfigHistoryRollbackConfirm(item: NacosConfigHistoryItem, fallbackNamespace = ""): string {
   return [`namespace=${item.namespace || fallbackNamespace || "public"}`, `dataId=${item.dataId}`, `group=${item.group || "DEFAULT_GROUP"}`, item.lastModifiedTime ? `historyTime=${item.lastModifiedTime}` : "", item.operator ? `operator=${item.operator}` : ""].filter(Boolean).join("\n");
 }

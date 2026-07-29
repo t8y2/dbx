@@ -18,3 +18,11 @@ describe("AppTabBar close confirmation layout", () => {
     expect(tabBarSource).toContain('@click="handleCancelClose"');
   });
 });
+
+describe("AppTabBar HBase presentation", () => {
+  it("uses the table icon in regular, pinned, and overflow tab surfaces", () => {
+    expect(tabBarSource).toContain('if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;');
+    expect(tabBarSource.match(/tab\.mode === 'hbase'/g)).toHaveLength(2);
+    expect(tabBarSource).toContain('tab.mode === "hbase" || tab.mode === "objects"');
+  });
+});

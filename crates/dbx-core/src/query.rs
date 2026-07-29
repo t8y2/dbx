@@ -33,6 +33,8 @@ use crate::query_execution_sql::is_write_sql;
 #[cfg(feature = "duckdb-bundled")]
 use crate::sql::starts_with_duckdb_result_sql_keyword;
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword};
+use crate::sql_dialect::{resolve_for_db, CAP_TRANSACTIONAL_DDL};
+use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
 
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
@@ -46,7 +48,7 @@ const SQL_OMITTED_ERROR_CONTEXT: &str =
 #[cfg(feature = "duckdb-bundled")]
 const DUCKDB_INTERRUPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(feature = "duckdb-bundled")]
-const DUCKDB_DRAINING_MESSAGE: &str = "上一条 DuckDB 查询仍在停止，请稍后重试。";
+const DUCKDB_DRAINING_MESSAGE: &str = "The previous DuckDB query is still stopping. Please try again shortly.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolErrorAction {
@@ -77,6 +79,8 @@ pub struct ExecuteMultiResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub statement_index: Option<usize>,
 }
+
+pub type ExecuteMultiProgressCallback = Arc<dyn Fn(usize, usize, bool) + Send + Sync>;
 
 impl ExecuteMultiResult {
     fn execution_error(result: db::QueryResult) -> Self {
@@ -473,6 +477,7 @@ fn duckdb_value_to_json(row: &duckdb::Row<'_>, idx: usize) -> serde_json::Value 
         | ValueRef::Map(..)
         | ValueRef::Enum(..)
         | ValueRef::Union(..) => duckdb_owned_value_to_json(&value_ref.to_owned()),
+        _ => duckdb_owned_value_to_json(&value_ref.to_owned()),
     }
 }
 
@@ -532,6 +537,7 @@ fn duckdb_owned_value_to_json(value: &Value) -> serde_json::Value {
                 .collect(),
         ),
         Value::Union(value) => duckdb_owned_value_to_json(value),
+        _ => serde_json::Value::Null,
     }
 }
 
@@ -2021,6 +2027,30 @@ pub async fn execute_multi_core_with_options_for_client(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
+    execute_multi_core_with_options_for_client_and_progress(
+        state,
+        connection_id,
+        database,
+        sql,
+        schema,
+        cancel_token,
+        options,
+        None,
+    )
+    .await
+}
+
+/// Executes a SQL batch and reports each completed statement to the optional callback.
+pub async fn execute_multi_core_with_options_for_client_and_progress(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+    progress: Option<ExecuteMultiProgressCallback>,
+) -> Result<Vec<ExecuteMultiResult>, String> {
     // Reject MongoDB queries that fall through to the generic executor.
     if connection_is_mongodb(state, connection_id).await {
         return Err(MONGO_SHELL_COMMAND_HINT.to_string());
@@ -2123,6 +2153,7 @@ pub async fn execute_multi_core_with_options_for_client(
             &statements,
             cancel_token,
             options,
+            progress.as_ref(),
         )
         .await;
     }
@@ -2144,10 +2175,18 @@ pub async fn execute_multi_core_with_options_for_client(
         )
         .await
         {
-            Ok(r) => results.push(ExecuteMultiResult::success_with_index(r, statement_index)),
+            Ok(r) => {
+                results.push(ExecuteMultiResult::success_with_index(r, statement_index));
+                if let Some(progress) = progress.as_ref() {
+                    progress(statement_index + 1, statements.len(), true);
+                }
+            }
             Err(e) => {
                 let action = query_pool_error_action(db_type, stmt, &e);
                 results.push(ExecuteMultiResult::execution_error_with_index(error_query_result(e), statement_index));
+                if let Some(progress) = progress.as_ref() {
+                    progress(statement_index + 1, statements.len(), false);
+                }
                 if !should_continue_batch_after_error(options.continue_on_error, action) {
                     break;
                 }
@@ -2194,6 +2233,7 @@ async fn execute_mysql_batch_statements<E>(
     db_type: Option<DatabaseType>,
     cancel_token: Option<CancellationToken>,
     continue_on_error: bool,
+    progress: Option<&ExecuteMultiProgressCallback>,
 ) -> (Vec<ExecuteMultiResult>, Option<PoolErrorAction>)
 where
     E: MysqlBatchStatementExecutor,
@@ -2206,10 +2246,18 @@ where
         }
 
         match executor.execute_statement(statement).await {
-            Ok(result) => results.push(ExecuteMultiResult::success_with_index(result, statement_index)),
+            Ok(result) => {
+                results.push(ExecuteMultiResult::success_with_index(result, statement_index));
+                if let Some(progress) = progress {
+                    progress(statement_index + 1, statements.len(), true);
+                }
+            }
             Err(err) => {
                 let action = pool_error_action(db_type, &err);
                 results.push(ExecuteMultiResult::execution_error_with_index(error_query_result(err), statement_index));
+                if let Some(progress) = progress {
+                    progress(statement_index + 1, statements.len(), false);
+                }
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
                 if !should_continue_batch_after_error(continue_on_error, action) {
@@ -2232,6 +2280,7 @@ async fn execute_multi_mysql(
     statements: &[String],
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
+    progress: Option<&ExecuteMultiProgressCallback>,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
     let query_timeout = resolve_query_timeout(options.timeout_secs);
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
@@ -2265,9 +2314,15 @@ async fn execute_multi_mysql(
         max_rows,
         dialect,
     };
-    let (results, error_action) =
-        execute_mysql_batch_statements(&mut executor, statements, db_type, cancel_token, options.continue_on_error)
-            .await;
+    let (results, error_action) = execute_mysql_batch_statements(
+        &mut executor,
+        statements,
+        db_type,
+        cancel_token,
+        options.continue_on_error,
+        progress,
+    )
+    .await;
     drop(executor);
 
     if matches!(error_action, Some(PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry)) {
@@ -2535,6 +2590,254 @@ pub async fn execute_statements(
 fn is_agent_execute_batch_unsupported(error: &str) -> bool {
     let lower = error.to_lowercase();
     lower.contains("execute_batch") && (lower.contains("unknown method") || lower.contains("method not found"))
+}
+
+/// Deploy result for Schema Diff: single-connection transactional execution.
+/// On statement failure the transaction is rolled back by the underlying path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDiffDeployResult {
+    pub transaction_id: String,
+    pub status: String,
+    pub participants: Vec<crate::two_phase_commit::ParticipantInfo>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub executed_count: usize,
+    pub statement_count: usize,
+    pub error: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaDiffAtomicity {
+    GuaranteedRollback,
+    PartialEffectsPossible,
+}
+
+impl SchemaDiffAtomicity {
+    fn ddl_atomic(self) -> bool {
+        matches!(self, Self::GuaranteedRollback)
+    }
+}
+
+fn database_supports_transactional_ddl(db_type: DatabaseType) -> bool {
+    if resolve_for_db(db_type).has_capability(CAP_TRANSACTIONAL_DDL) {
+        return true;
+    }
+    // SQLite-family DDL is transactional even when dialect registry omits the flag.
+    matches!(db_type, DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+}
+
+fn classify_schema_diff_atomicity(
+    db_type: Option<DatabaseType>,
+    statements: &[String],
+    has_transactional_path: bool,
+) -> SchemaDiffAtomicity {
+    if !has_transactional_path {
+        return SchemaDiffAtomicity::PartialEffectsPossible;
+    }
+
+    let mut contains_ddl = false;
+    for statement in statements {
+        let risk = match db_type {
+            Some(db_type) => classify_sql_risk_for_database(statement, db_type).ok(),
+            None => None,
+        };
+
+        match risk {
+            Some(SqlRisk::Ddl) => {
+                contains_ddl = true;
+            }
+            Some(SqlRisk::Write | SqlRisk::ReadOnly) => {}
+            Some(SqlRisk::Transaction) | None => {
+                return SchemaDiffAtomicity::PartialEffectsPossible;
+            }
+        }
+    }
+
+    if !contains_ddl {
+        return SchemaDiffAtomicity::GuaranteedRollback;
+    }
+
+    match db_type {
+        Some(db_type) if database_supports_transactional_ddl(db_type) => SchemaDiffAtomicity::GuaranteedRollback,
+        _ => SchemaDiffAtomicity::PartialEffectsPossible,
+    }
+}
+
+fn executed_count_before_error(error: &str, statement_count: usize) -> usize {
+    let Some(rest) = error.strip_prefix("Statement ") else {
+        return statement_count;
+    };
+    let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    let Ok(statement_number) = digits.parse::<usize>() else {
+        return statement_count;
+    };
+    statement_number.saturating_sub(1).min(statement_count)
+}
+
+/// Pure failure mapping used by deploy and unit tests.
+fn schema_diff_failure_outcome(
+    atomicity: SchemaDiffAtomicity,
+    error: &str,
+    statement_count: usize,
+) -> (crate::two_phase_commit::TransactionStatus, usize) {
+    if atomicity.ddl_atomic() {
+        (crate::two_phase_commit::TransactionStatus::RolledBack, 0)
+    } else {
+        (crate::two_phase_commit::TransactionStatus::Mixed, executed_count_before_error(error, statement_count))
+    }
+}
+
+fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
+    // DuckDb variants always exist (unit stubs when duckdb-bundled is off).
+    match pool {
+        PoolKind::Postgres(_)
+        | PoolKind::Mysql(_, _)
+        | PoolKind::Sqlite(_)
+        | PoolKind::CloudflareD1(_)
+        | PoolKind::ClickHouse(_)
+        | PoolKind::Rqlite(_)
+        | PoolKind::Turso(_)
+        | PoolKind::SqlServer(_)
+        | PoolKind::Agent(_) => true,
+        PoolKind::MessageQueue
+        | PoolKind::Nacos
+        | PoolKind::HBase(_)
+        | PoolKind::DuckDb(_)
+        | PoolKind::DuckDbWorker(_)
+        | PoolKind::Redis(_)
+        | PoolKind::MongoDb(_)
+        | PoolKind::Elasticsearch(_)
+        | PoolKind::VectorDb(_)
+        | PoolKind::InfluxDb(_)
+        | PoolKind::ExternalTabular(_)
+        | PoolKind::ExternalDriver { .. } => false,
+    }
+}
+
+/// Execute Schema Diff deploy SQL as one real single-connection transaction.
+///
+/// - Uses [`execute_statements_in_transaction`] so partial success rolls back.
+/// - Returns a structured result (never re-executes statements to probe status).
+/// - Comment-only / empty scripts succeed as `committed` with zero statements.
+/// - When the target path cannot guarantee DDL atomicity (MySQL/Oracle DDL
+///   auto-commit, `TxPath::None`, etc.), a failure reports `mixed` and
+///   `executed_count` reflects the statements that were issued before the
+///   error, so the caller can warn the user that partial effects may persist.
+pub async fn execute_schema_diff_deploy(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    statements: &[String],
+    schema: Option<&str>,
+) -> SchemaDiffDeployResult {
+    let tx_id = format!("deploy_{}", uuid::Uuid::new_v4());
+    let now = chrono::Utc::now().to_rfc3339();
+    let db_type = connection_database_type(state, connection_id).await;
+
+    let parsed: Vec<String> = statements
+        .iter()
+        .flat_map(|s| {
+            db_type.map_or_else(|| split_sql_statements(s), |dt| crate::sql::split_sql_statements_for_database(s, dt))
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| {
+            !s.is_empty()
+                && !s.lines().all(|line| {
+                    let t = line.trim();
+                    t.is_empty() || t.starts_with("--")
+                })
+        })
+        .collect();
+
+    let participant = crate::two_phase_commit::ParticipantInfo {
+        id: "connection".to_string(),
+        name: format!("{connection_id}/{database}"),
+        role: "database".to_string(),
+    };
+
+    if parsed.is_empty() {
+        return SchemaDiffDeployResult {
+            transaction_id: tx_id,
+            status: crate::two_phase_commit::TransactionStatus::Committed.as_str().to_string(),
+            participants: vec![participant],
+            created_at: now.clone(),
+            updated_at: now,
+            executed_count: 0,
+            statement_count: 0,
+            error: None,
+            metadata: serde_json::json!({"source": "schema_diff_deploy", "mode": "single_connection_tx"}),
+        };
+    }
+
+    let pool_key = if database.is_empty() {
+        connection_id.to_string()
+    } else {
+        match state.get_or_create_pool(connection_id, Some(database)).await {
+            Ok(key) => key,
+            Err(_) => {
+                return SchemaDiffDeployResult {
+                    transaction_id: tx_id.clone(),
+                    status: crate::two_phase_commit::TransactionStatus::RolledBack.as_str().to_string(),
+                    participants: vec![participant],
+                    created_at: now.clone(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    executed_count: 0,
+                    statement_count: parsed.len(),
+                    error: Some("Connection not available for deploy".to_string()),
+                    metadata: serde_json::json!({"source": "schema_diff_deploy", "mode": "single_connection_tx"}),
+                };
+            }
+        }
+    };
+    let has_transactional_path = {
+        let conns = state.connections.read().await;
+        conns.get(&pool_key).is_some_and(pool_kind_has_transactional_path)
+    };
+    let atomicity = classify_schema_diff_atomicity(db_type, &parsed, has_transactional_path);
+
+    match execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, &parsed, schema).await {
+        Ok(result) => SchemaDiffDeployResult {
+            transaction_id: tx_id,
+            status: crate::two_phase_commit::TransactionStatus::Committed.as_str().to_string(),
+            participants: vec![participant],
+            created_at: now.clone(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            executed_count: parsed.len(),
+            statement_count: parsed.len(),
+            error: None,
+            metadata: serde_json::json!({
+                "source": "schema_diff_deploy",
+                "mode": "single_connection_tx",
+                "affected_rows": result.affected_rows,
+                "execution_time_ms": result.execution_time_ms,
+            }),
+        },
+        Err(e) => {
+            let (status, executed_count) = schema_diff_failure_outcome(atomicity, &e, parsed.len());
+            SchemaDiffDeployResult {
+                transaction_id: tx_id,
+                status: status.as_str().to_string(),
+                participants: vec![participant],
+                created_at: now.clone(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                executed_count,
+                statement_count: parsed.len(),
+                error: Some(e.clone()),
+                metadata: serde_json::json!({
+                    "source": "schema_diff_deploy",
+                    "mode": "single_connection_tx",
+                    "ddl_atomic": atomicity.ddl_atomic(),
+                    "atomicity": match atomicity {
+                        SchemaDiffAtomicity::GuaranteedRollback => "guaranteed_rollback",
+                        SchemaDiffAtomicity::PartialEffectsPossible => "partial_effects_possible",
+                    },
+                    "error": e,
+                }),
+            }
+        }
+    }
 }
 
 /// Execute multiple SQL statements within a single transaction.
@@ -3588,6 +3891,132 @@ mod tests {
     use crate::storage::Storage;
 
     #[test]
+    fn schema_diff_atomicity_marks_mysql_ddl_as_partial() {
+        let atomicity = classify_schema_diff_atomicity(
+            Some(DatabaseType::Mysql),
+            &["CREATE TABLE users (id INT)".to_string(), "ALTER TABLE users ADD COLUMN name VARCHAR(32)".to_string()],
+            true,
+        );
+
+        assert_eq!(atomicity, SchemaDiffAtomicity::PartialEffectsPossible);
+    }
+
+    #[test]
+    fn schema_diff_atomicity_marks_oracle_ddl_as_partial() {
+        let atomicity = classify_schema_diff_atomicity(
+            Some(DatabaseType::Oracle),
+            &["CREATE TABLE users (id INT)".to_string(), "ALTER TABLE users ADD name VARCHAR2(32)".to_string()],
+            true,
+        );
+
+        assert_eq!(atomicity, SchemaDiffAtomicity::PartialEffectsPossible);
+    }
+
+    #[test]
+    fn schema_diff_atomicity_keeps_postgres_ddl_atomic() {
+        let atomicity = classify_schema_diff_atomicity(
+            Some(DatabaseType::Postgres),
+            &["CREATE TABLE users (id INT)".to_string(), "ALTER TABLE users ADD COLUMN name VARCHAR(32)".to_string()],
+            true,
+        );
+
+        assert_eq!(atomicity, SchemaDiffAtomicity::GuaranteedRollback);
+    }
+
+    #[test]
+    fn schema_diff_atomicity_keeps_dml_atomic_when_tx_path_exists() {
+        let atomicity = classify_schema_diff_atomicity(
+            Some(DatabaseType::Mysql),
+            &["INSERT INTO users VALUES (1)".to_string(), "UPDATE users SET active = 1 WHERE id = 1".to_string()],
+            true,
+        );
+
+        assert_eq!(atomicity, SchemaDiffAtomicity::GuaranteedRollback);
+    }
+
+    #[test]
+    fn schema_diff_atomicity_marks_missing_transaction_path_as_partial() {
+        let atomicity = classify_schema_diff_atomicity(
+            Some(DatabaseType::Postgres),
+            &["CREATE TABLE users (id INT)".to_string()],
+            false,
+        );
+
+        assert_eq!(atomicity, SchemaDiffAtomicity::PartialEffectsPossible);
+    }
+
+    #[test]
+    fn executed_count_before_error_uses_failing_statement_index() {
+        assert_eq!(executed_count_before_error("Statement 1 failed: syntax error", 3), 0);
+        assert_eq!(executed_count_before_error("Statement 2 failed: syntax error", 3), 1);
+        assert_eq!(executed_count_before_error("Statement 3 failed: syntax error", 3), 2);
+    }
+
+    #[test]
+    fn schema_diff_failure_outcome_rolls_back_when_atomic() {
+        let (status, executed) =
+            schema_diff_failure_outcome(SchemaDiffAtomicity::GuaranteedRollback, "Statement 2 failed: syntax error", 3);
+        assert_eq!(status, crate::two_phase_commit::TransactionStatus::RolledBack);
+        assert_eq!(executed, 0);
+    }
+
+    #[test]
+    fn schema_diff_failure_outcome_reports_mixed_with_partial_count() {
+        let (status, executed) = schema_diff_failure_outcome(
+            SchemaDiffAtomicity::PartialEffectsPossible,
+            "Statement 2 failed: syntax error",
+            3,
+        );
+        assert_eq!(status, crate::two_phase_commit::TransactionStatus::Mixed);
+        assert_eq!(executed, 1);
+    }
+
+    #[test]
+    fn schema_diff_atomicity_keeps_sqlite_ddl_atomic() {
+        let atomicity = classify_schema_diff_atomicity(
+            Some(DatabaseType::Sqlite),
+            &["CREATE TABLE users (id INTEGER)".to_string()],
+            true,
+        );
+        assert_eq!(atomicity, SchemaDiffAtomicity::GuaranteedRollback);
+    }
+
+    /// MySQL: first DDL may already commit; second fails → mixed + executed_count = 1.
+    #[test]
+    fn mysql_second_ddl_failure_maps_to_mixed_with_partial_executed_count() {
+        let stmts = ["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()];
+        let atomicity = classify_schema_diff_atomicity(Some(DatabaseType::Mysql), &stmts, true);
+        assert_eq!(atomicity, SchemaDiffAtomicity::PartialEffectsPossible);
+        let (status, executed) =
+            schema_diff_failure_outcome(atomicity, "Statement 2 failed: table already exists", stmts.len());
+        assert_eq!(status, crate::two_phase_commit::TransactionStatus::Mixed);
+        assert_eq!(executed, 1);
+    }
+
+    /// Oracle: same non-transactional DDL semantics as MySQL for deploy status.
+    #[test]
+    fn oracle_second_ddl_failure_maps_to_mixed_with_partial_executed_count() {
+        let stmts = ["CREATE TABLE t1 (id NUMBER)".to_string(), "ALTER TABLE t1 ADD name VARCHAR2(32)".to_string()];
+        let atomicity = classify_schema_diff_atomicity(Some(DatabaseType::Oracle), &stmts, true);
+        assert_eq!(atomicity, SchemaDiffAtomicity::PartialEffectsPossible);
+        let (status, executed) = schema_diff_failure_outcome(atomicity, "Statement 2 failed: ORA-00942", stmts.len());
+        assert_eq!(status, crate::two_phase_commit::TransactionStatus::Mixed);
+        assert_eq!(executed, 1);
+    }
+
+    /// Postgres transactional DDL: second fails → rolled_back + executed_count = 0.
+    #[test]
+    fn postgres_second_ddl_failure_maps_to_rolled_back_zero_executed() {
+        let stmts = ["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()];
+        let atomicity = classify_schema_diff_atomicity(Some(DatabaseType::Postgres), &stmts, true);
+        assert_eq!(atomicity, SchemaDiffAtomicity::GuaranteedRollback);
+        let (status, executed) =
+            schema_diff_failure_outcome(atomicity, "Statement 2 failed: relation already exists", stmts.len());
+        assert_eq!(status, crate::two_phase_commit::TransactionStatus::RolledBack);
+        assert_eq!(executed, 0);
+    }
+
+    #[test]
     fn query_execution_mode_deserializes_simple_client_value() {
         let mode: QueryExecutionMode = serde_json::from_str("\"simple\"").unwrap();
 
@@ -3612,6 +4041,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3770,13 +4200,43 @@ mod tests {
         };
 
         let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false).await;
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false, None)
+                .await;
 
         assert_eq!(executor.executed, vec!["first", "fails"]);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].statement_index, Some(0));
         assert_eq!(results[1].statement_index, Some(1));
         assert!(results[1].execution_error);
+        assert_eq!(error_action, Some(PoolErrorAction::Keep));
+    }
+
+    #[tokio::test]
+    async fn mysql_batch_reports_progress_for_each_completed_statement() {
+        let statements = vec!["first".to_string(), "fails".to_string(), "must-not-run".to_string()];
+        let mut executor = FakeMysqlBatchExecutor {
+            outcomes: std::collections::VecDeque::from([Ok(empty_query_result(0)), Err("Duplicate entry".to_string())]),
+            executed: Vec::new(),
+        };
+        let progress_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress: ExecuteMultiProgressCallback = {
+            let progress_events = Arc::clone(&progress_events);
+            Arc::new(move |completed, total, success| progress_events.lock().unwrap().push((completed, total, success)))
+        };
+
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            None,
+            false,
+            Some(&progress),
+        )
+        .await;
+
+        assert_eq!(executor.executed, vec!["first", "fails"]);
+        assert_eq!(results.len(), 2);
+        assert_eq!(*progress_events.lock().unwrap(), vec![(1, 3, true), (2, 3, false)]);
         assert_eq!(error_action, Some(PoolErrorAction::Keep));
     }
 
@@ -3789,7 +4249,8 @@ mod tests {
         };
 
         let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false).await;
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, false, None)
+                .await;
 
         assert_eq!(executor.executed, vec!["fails"]);
         assert_eq!(results.len(), 1);
@@ -3810,7 +4271,8 @@ mod tests {
         };
 
         let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true).await;
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true, None)
+                .await;
 
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 3);
@@ -3831,7 +4293,8 @@ mod tests {
         };
 
         let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true).await;
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true, None)
+                .await;
 
         assert_eq!(executor.executed, statements);
         assert_eq!(results.len(), 2);
@@ -3852,7 +4315,8 @@ mod tests {
         };
 
         let (results, error_action) =
-            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true).await;
+            execute_mysql_batch_statements(&mut executor, &statements, Some(DatabaseType::Mysql), None, true, None)
+                .await;
 
         assert_eq!(executor.executed, vec!["first", "disconnects"]);
         assert_eq!(results.len(), 2);
@@ -4702,6 +5166,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

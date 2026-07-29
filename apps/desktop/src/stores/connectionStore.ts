@@ -110,6 +110,7 @@ import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator,
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
 import { MetadataResultCache, type MetadataCacheInvalidation } from "@/lib/metadata/metadataResultCache";
 import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { TreeNodeLoadRegistry, type TreeNodeLoadHandle } from "@/lib/metadata/treeNodeLoadHandle";
 import i18n from "@/i18n";
@@ -1027,6 +1028,7 @@ export const useConnectionStore = defineStore("connection", () => {
       attached_databases: Array.isArray(config.attached_databases) ? config.attached_databases.filter((database) => database.name?.trim() && database.path?.trim()) : [],
       init_script: config.init_script?.trim() ? config.init_script : undefined,
       transport_layers: Array.isArray(config.transport_layers) ? config.transport_layers : [],
+      show_system_schemas: config.show_system_schemas === true,
       connect_timeout_secs: config.connect_timeout_secs || 10,
       query_timeout_secs: config.query_timeout_secs ?? 30,
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
@@ -1471,7 +1473,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function invalidateMetadataCaches(match: MetadataCacheInvalidation): number {
-    return metadataListPageCache.invalidate(match) + invalidateTableMetadataCache(match);
+    return metadataListPageCache.invalidate(match) + invalidateTableMetadataCache(match) + invalidateObjectBrowserRowsCache(match);
   }
 
   function invalidateMetadataCachesByTreePrefix(prefix: string) {
@@ -2603,6 +2605,7 @@ export const useConnectionStore = defineStore("connection", () => {
       activeConnectionId.value = null;
     }
     invalidateCompletionCache(connectionId);
+    invalidateObjectBrowserRowsCache({ connectionId });
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
     switch (settingsStore.editorSettings.disconnectTabHandlingMode) {
@@ -2647,6 +2650,7 @@ export const useConnectionStore = defineStore("connection", () => {
       clearLoadedChildrenCache(node.id);
     }
     invalidateCompletionCache(connectionId, database);
+    invalidateObjectBrowserRowsCache({ connectionId, database });
   }
 
   async function ensureConnected(connectionId: string) {
@@ -2869,7 +2873,8 @@ export const useConnectionStore = defineStore("connection", () => {
           } else if (config && connectionUsesVisibleSchemaFilter(config)) {
             const schemaFilterConfig = config;
             const effectiveDb = schemaFilterConfig.database || "";
-            const cacheKey = schemaCacheKey(connectionId, effectiveDb, config.db_type === "oracle" ? "schemas-v2" : "schemas");
+            const showSystemSchemas = schemaFilterConfig.show_system_schemas === true;
+            const cacheKey = schemaCacheKey(connectionId, effectiveDb, config.db_type === "oracle" ? "schemas-v2" : "schemas", showSystemSchemas ? "show-system" : "hide-system");
             if (!options?.force) {
               const cached = await loadPersistedTreeChildren(node, cacheKey, load);
               if (cached.hit) {
@@ -2878,7 +2883,7 @@ export const useConnectionStore = defineStore("connection", () => {
               }
             }
             const schemas = await withMetadataLoadTimeout(connectionId, api.listSchemas(connectionId, effectiveDb, true), "schemas");
-            const visibleSchemas = filterSchemaNamesForConnection(schemas, schemaFilterConfig, effectiveDb || "");
+            const visibleSchemas = filterSchemaNamesForConnection(schemas, schemaFilterConfig, effectiveDb || "", { showSystemSchemas });
             const schemaNodes: TreeNode[] = sortSidebarNames(visibleSchemas).map((s) => ({
               id: `${connectionId}:${s}:${s}`,
               label: s,
@@ -3538,7 +3543,8 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           load = reclaimTreeNodeLoad(load, node);
           if (useCachedChildren(node, options, load)) return;
-          const cacheKey = schemaCacheKey(connectionId, database, "schemas-v3");
+          const showSystemSchemas = getConfig(connectionId)?.show_system_schemas === true;
+          const cacheKey = schemaCacheKey(connectionId, database, "schemas-v3", showSystemSchemas ? "show-system" : "hide-system");
           if (!options?.force) {
             const cached = await loadPersistedTreeChildren(node, cacheKey, load);
             if (cached.hit) {
@@ -3553,6 +3559,7 @@ export const useConnectionStore = defineStore("connection", () => {
               schemas.map((schema) => schema.name),
               getConfig(connectionId),
               database,
+              { showSystemSchemas },
             ),
           );
           const children: TreeNode[] = schemas
@@ -3608,7 +3615,9 @@ export const useConnectionStore = defineStore("connection", () => {
       load = reclaimTreeNodeLoad(load, node);
       if (useCachedChildren(node, options, load)) return;
       const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-      const cacheKey = schemaCacheKey(connectionId, database, simpleObjectDisplay ? "sqlserver-schemas-simple-v4" : "sqlserver-schemas-grouped-v4");
+      const config = getConfig(connectionId);
+      const showSystemSchemas = config?.show_system_schemas === true;
+      const cacheKey = schemaCacheKey(connectionId, database, simpleObjectDisplay ? "sqlserver-schemas-simple-v4" : "sqlserver-schemas-grouped-v4", showSystemSchemas ? "show-system" : "hide-system");
       if (!options?.force) {
         const cached = await loadPersistedTreeChildren(node, cacheKey, load);
         if (cached.hit) {
@@ -3616,9 +3625,7 @@ export const useConnectionStore = defineStore("connection", () => {
           return;
         }
       }
-
-      const config = getConfig(connectionId);
-      const schemas = filterSchemaNamesForConnection(await api.listSchemas(connectionId, database), config, database);
+      const schemas = filterSchemaNamesForConnection(await api.listSchemas(connectionId, database), config, database, { showSystemSchemas });
       const children = buildSqlServerDatabaseTreeNodes(connectionId, database, schemas);
       if (isSidebarSearchQueryChanged(options)) return;
       const targetNode = treeNodeLoadTarget(load);
@@ -5173,6 +5180,7 @@ export const useConnectionStore = defineStore("connection", () => {
           parentSchema: candidate.parent_schema ?? undefined,
           parentName: candidate.parent_name ?? undefined,
           dataType,
+          signature: candidate.signature ?? undefined,
           comment: candidate.comment ?? null,
           applyName: completionCandidateApplyName(candidate.name, candidate.schema, preferredSchema),
           boost: oracleMetadata ? completionCandidateSchemaBoost(candidate.schema, preferredSchema) : completionRoutineSchemaBoost(candidate.schema, preferredSchema),
@@ -5779,7 +5787,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const seen = new Set<string>();
     const deduped: SqlCompletionObject[] = [];
     for (const object of objects) {
-      const key = `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}`.toLowerCase();
+      const key = `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}:${object.signature?.trim() ?? ""}`.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
       deduped.push(object);
@@ -5790,9 +5798,10 @@ export const useConnectionStore = defineStore("connection", () => {
   async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean }, catalog?: string): Promise<SqlCompletionColumn[]> {
     const config = getConfig(connectionId);
     const oracleIdentifier = config?.db_type === "oracle";
-    const completionTable = oracleIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
+    const uppercaseUnquotedIdentifier = oracleIdentifier || config?.db_type === "saphana";
+    const completionTable = uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
     const rawCompletionSchema = schema?.trim() || undefined;
-    const completionSchema = oracleIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
+    const completionSchema = uppercaseUnquotedIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
     const usesOracleCurrentSchema = config?.db_type === "oracle" && !completionSchema;
     if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !completionSchema && !usesOracleCurrentSchema) {
       return [];

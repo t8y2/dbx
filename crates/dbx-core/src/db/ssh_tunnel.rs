@@ -185,8 +185,10 @@ fn server_offers_password(remaining_methods: &MethodSet) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 async fn connect_and_authenticate(
-    ssh_host: &str,
-    ssh_port: u16,
+    connect_host: &str,
+    connect_port: u16,
+    host_key_host: &str,
+    host_key_port: u16,
     ssh_user: &str,
     ssh_password: &str,
     ssh_key_path: &str,
@@ -200,19 +202,22 @@ async fn connect_and_authenticate(
     let config = Arc::new(ssh_client_config());
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
 
-    // Verify server identity against the known-hosts store before sending any
-    // credential. The store lives at `<data_dir>/known_hosts` (NOT `~/.ssh`):
-    // an unknown host is trusted on first use (TOFU) and recorded there, a
-    // changed host key is rejected, and an unknown host whose key cannot be
-    // persisted fails closed instead of being silently trusted.
+    // Verify the logical SSH server identity against known_hosts before sending
+    // credentials. For forwarded hops this identity intentionally differs from
+    // the temporary TCP endpoint. Unknown keys require explicit UI acceptance;
+    // changed keys, missing prompt gateways, timeouts, and rejection fail closed.
     let host_key_verifier = Arc::new(HostKeyVerifier::new(known_hosts_path.to_path_buf()));
 
     let mut session = tokio::time::timeout(
         connect_timeout,
         client::connect(
             config,
-            (ssh_host, ssh_port),
-            SshClient { host_key_verifier: host_key_verifier.clone(), host: ssh_host.to_string(), port: ssh_port },
+            (connect_host, connect_port),
+            SshClient {
+                host_key_verifier: host_key_verifier.clone(),
+                host: host_key_host.to_string(),
+                port: host_key_port,
+            },
         ),
     )
     .await
@@ -362,11 +367,11 @@ async fn connect_and_authenticate(
 async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
-    _ssh_agent_sock_path: &str,
+    #[cfg_attr(not(unix), allow(unused_variables))] ssh_agent_sock_path: &str,
     connect_timeout: &Duration,
 ) -> Result<(), String> {
     #[cfg(unix)]
-    let mut agent = if _ssh_agent_sock_path.is_empty() {
+    let mut agent = if ssh_agent_sock_path.is_empty() {
         match AgentClient::connect_env().await {
             Ok(a) => a,
             Err(e) => {
@@ -374,12 +379,12 @@ async fn try_authenticate_with_agent(
             }
         }
     } else {
-        match AgentClient::connect_uds(_ssh_agent_sock_path).await {
+        match AgentClient::connect_uds(ssh_agent_sock_path).await {
             Ok(a) => a,
             Err(e) => {
                 return Err(format!(
                     "No SSH password or key provided, and ssh-agent at '{}' is unavailable: {e}",
-                    _ssh_agent_sock_path
+                    ssh_agent_sock_path
                 ));
             }
         }
@@ -677,6 +682,8 @@ async fn tunnel_reconnect_loop(
     mut session: Handle<SshClient>,
     connect_host: String,
     connect_port: u16,
+    host_key_host: String,
+    host_key_port: u16,
     ssh_user: String,
     ssh_password: String,
     ssh_key_path: String,
@@ -714,6 +721,8 @@ async fn tunnel_reconnect_loop(
             match connect_and_authenticate(
                 &connect_host,
                 connect_port,
+                &host_key_host,
+                host_key_port,
                 &ssh_user,
                 &ssh_password,
                 &ssh_key_path,
@@ -761,12 +770,15 @@ struct TunnelEntry {
 struct PlannedTunnel {
     connect_host: String,
     connect_port: u16,
+    host_key_host: String,
+    host_key_port: u16,
     remote_host: String,
     remote_port: u16,
 }
 
 pub struct TunnelManager {
     tunnels: Mutex<HashMap<String, TunnelEntry>>,
+    start_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// dbx-managed known_hosts path (`<data_dir>/known_hosts`) threaded into
     /// every SSH connection for host-key verification.
     known_hosts_path: PathBuf,
@@ -781,15 +793,26 @@ impl Default for TunnelManager {
 impl TunnelManager {
     pub fn new(data_dir: PathBuf) -> Self {
         let known_hosts_path = data_dir.join("known_hosts");
-        Self { tunnels: Mutex::new(HashMap::new()), known_hosts_path }
+        Self { tunnels: Mutex::new(HashMap::new()), start_locks: Mutex::new(HashMap::new()), known_hosts_path }
+    }
+
+    async fn start_lock(&self, connection_id: &str) -> Arc<Mutex<()>> {
+        self.start_locks
+            .lock()
+            .await
+            .entry(connection_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn start_tunnel(
         &self,
         connection_id: &str,
-        ssh_host: &str,
-        ssh_port: u16,
+        connect_host: &str,
+        connect_port: u16,
+        host_key_host: &str,
+        host_key_port: u16,
         ssh_user: &str,
         ssh_password: &str,
         ssh_key_path: &str,
@@ -802,18 +825,28 @@ impl TunnelManager {
         remote_port: u16,
         expose_to_lan: bool,
     ) -> Result<u16, String> {
-        // Check cache under lock to avoid race with concurrent callers.
-        // Also evict stale entries whose background task has exited.
         {
             let mut tunnels = self.tunnels.lock().await;
             if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
                 return Ok(port);
             }
         }
-        // Slow SSH connection — do this outside the lock.
+
+        let start_lock = self.start_lock(connection_id).await;
+        let _start_guard = start_lock.lock().await;
+
+        // A concurrent caller may have completed while this task waited.
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
+        }
         let (handle, local_port) = spawn_tunnel(
-            ssh_host,
-            ssh_port,
+            connect_host,
+            connect_port,
+            host_key_host,
+            host_key_port,
             ssh_user,
             ssh_password,
             ssh_key_path,
@@ -829,14 +862,7 @@ impl TunnelManager {
         )
         .await?;
 
-        // Re-check under lock: another caller may have beaten us.
-        let mut tunnels = self.tunnels.lock().await;
-        if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
-            // Another task already created a live tunnel; abort ours.
-            handle.abort();
-            return Ok(port);
-        }
-        tunnels.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
+        self.tunnels.lock().await.insert(connection_id.to_string(), TunnelEntry { handles: vec![handle], local_port });
         Ok(local_port)
     }
 
@@ -861,7 +887,6 @@ impl TunnelManager {
         if hops.is_empty() {
             return Err("No SSH tunnel hops configured".to_string());
         }
-        // Check cache under lock; evict stale entries.
         {
             let mut tunnels = self.tunnels.lock().await;
             if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
@@ -869,6 +894,14 @@ impl TunnelManager {
             }
         }
 
+        let start_lock = self.start_lock(connection_id).await;
+        let _start_guard = start_lock.lock().await;
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
+                return Ok(port);
+            }
+        }
         let mut handles = Vec::new();
         let mut next_connect_endpoint: Option<(String, u16)> = None;
         let mut final_local_port = 0;
@@ -886,6 +919,8 @@ impl TunnelManager {
             let (handle, local_port) = spawn_tunnel(
                 &connect_host,
                 connect_port,
+                &hop.host,
+                hop.port,
                 &hop.user,
                 &hop.password,
                 &hop.key_path,
@@ -907,15 +942,10 @@ impl TunnelManager {
             next_connect_endpoint = Some(("127.0.0.1".to_string(), local_port));
         }
 
-        // Re-check under lock: another caller may have beaten us.
-        let mut tunnels = self.tunnels.lock().await;
-        if let Some(port) = Self::get_active_port(&mut tunnels, connection_id) {
-            for handle in handles {
-                handle.abort();
-            }
-            return Ok(port);
-        }
-        tunnels.insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
+        self.tunnels
+            .lock()
+            .await
+            .insert(connection_id.to_string(), TunnelEntry { handles, local_port: final_local_port });
         Ok(final_local_port)
     }
 
@@ -924,22 +954,28 @@ impl TunnelManager {
     }
 
     pub async fn stop_tunnel(&self, connection_id: &str) {
+        let start_lock = self.start_lock(connection_id).await;
+        let _start_guard = start_lock.lock().await;
+
         if let Some(entry) = self.tunnels.lock().await.remove(connection_id) {
             for handle in entry.handles {
                 handle.abort();
             }
         }
+
+        let mut start_locks = self.start_locks.lock().await;
+        let is_idle = start_locks.get(connection_id).is_some_and(|current| Arc::ptr_eq(current, &start_lock))
+            && Arc::strong_count(&start_lock) == 2;
+        if is_idle {
+            start_locks.remove(connection_id);
+        }
     }
 
     pub async fn stop_tunnels_with_prefix(&self, connection_id_prefix: &str) {
-        let mut tunnels = self.tunnels.lock().await;
-        let keys: Vec<String> = tunnels.keys().filter(|key| key.starts_with(connection_id_prefix)).cloned().collect();
+        let keys: Vec<String> =
+            self.tunnels.lock().await.keys().filter(|key| key.starts_with(connection_id_prefix)).cloned().collect();
         for key in keys {
-            if let Some(entry) = tunnels.remove(&key) {
-                for handle in entry.handles {
-                    handle.abort();
-                }
-            }
+            self.stop_tunnel(&key).await;
         }
     }
 }
@@ -948,6 +984,8 @@ impl TunnelManager {
 async fn spawn_tunnel(
     connect_host: &str,
     connect_port: u16,
+    host_key_host: &str,
+    host_key_port: u16,
     ssh_user: &str,
     ssh_password: &str,
     ssh_key_path: &str,
@@ -971,6 +1009,8 @@ async fn spawn_tunnel(
     let session = connect_and_authenticate(
         connect_host,
         connect_port,
+        host_key_host,
+        host_key_port,
         ssh_user,
         ssh_password,
         ssh_key_path,
@@ -987,6 +1027,8 @@ async fn spawn_tunnel(
         session,
         connect_host.to_string(),
         connect_port,
+        host_key_host.to_string(),
+        host_key_port,
         ssh_user.to_string(),
         ssh_password.to_string(),
         ssh_key_path.to_string(),
@@ -1036,7 +1078,14 @@ fn plan_chain(
         } else {
             (hops[index + 1].host.clone(), hops[index + 1].port)
         };
-        planned.push(PlannedTunnel { connect_host, connect_port, remote_host: target_host, remote_port: target_port });
+        planned.push(PlannedTunnel {
+            connect_host,
+            connect_port,
+            host_key_host: hop.host.clone(),
+            host_key_port: hop.port,
+            remote_host: target_host,
+            remote_port: target_port,
+        });
         if let Some(local_port) = local_ports.get(index) {
             next_connect_endpoint = Some(("127.0.0.1".to_string(), *local_port));
         }
@@ -1049,7 +1098,7 @@ mod tests {
     use super::SshClient;
     use super::PROMPT_TEST_LOCK;
     use super::{
-        effective_hop_timeout, openssh_padding_len, plan_chain, read_ssh_string,
+        connect_and_authenticate, effective_hop_timeout, openssh_padding_len, plan_chain, read_ssh_string,
         sanitize_unencrypted_openssh_comment_bytes, server_offers_password, ssh_client_config, HostKeyState,
         HostKeyVerifier, PlannedTunnel, TunnelManager,
     };
@@ -1062,7 +1111,7 @@ mod tests {
     use russh::server::{self, Auth, Server};
     use russh::MethodKind;
     use russh::MethodSet;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
@@ -1131,12 +1180,16 @@ mod tests {
                 PlannedTunnel {
                     connect_host: "bastion-a".to_string(),
                     connect_port: 22,
+                    host_key_host: "bastion-a".to_string(),
+                    host_key_port: 22,
                     remote_host: "bastion-b".to_string(),
                     remote_port: 2200,
                 },
                 PlannedTunnel {
                     connect_host: "127.0.0.1".to_string(),
                     connect_port: 41001,
+                    host_key_host: "bastion-b".to_string(),
+                    host_key_port: 2200,
                     remote_host: "db.internal".to_string(),
                     remote_port: 5432,
                 },
@@ -1411,6 +1464,147 @@ vAAAAAtzc2gtZWQyNTUxOQAAACAVDlhwKBk+QMZN+WNAUKL6qLr3hf3S5p1TdSK4hMhLxw
 AAAEDxqdMQX37UdhziSi5Br3kyRM/Xrpo9ZcXoguYkeogq0hUOWHAoGT5Axk35Y0BQovqo
 uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 -----END OPENSSH PRIVATE KEY-----"#;
+
+    struct AcceptNoneServer;
+
+    impl server::Server for AcceptNoneServer {
+        type Handler = AcceptNoneHandler;
+
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> AcceptNoneHandler {
+            AcceptNoneHandler
+        }
+    }
+
+    struct AcceptNoneHandler;
+
+    impl server::Handler for AcceptNoneHandler {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+            Ok(Auth::Accept)
+        }
+    }
+
+    async fn start_accept_none_server() -> (u16, tokio::task::JoinHandle<()>) {
+        let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
+        let server_config = server::Config { keys: vec![server_key], ..Default::default() };
+        let port = portpicker::pick_unused_port().expect("no free port");
+        let mut server = AcceptNoneServer;
+        let task = tokio::spawn(async move {
+            let _ = server.run_on_address(Arc::new(server_config), ("127.0.0.1", port)).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        (port, task)
+    }
+
+    #[tokio::test]
+    async fn forwarded_connection_checks_logical_host_identity() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let (connect_port, server_task) = start_accept_none_server().await;
+        let dir = tempdir().unwrap();
+        let known_hosts_path = dir.path().join("known_hosts");
+        let (gateway_tx, mut gateway_rx) = mpsc::channel::<ssh_prompt::SshPromptEnvelope>(1);
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let envelope = gateway_rx.recv().await.expect("host-key prompt");
+            let _ = request_tx.send((envelope.request.host.clone(), envelope.request.port));
+            let _ = envelope.responder.send(ssh_prompt::SshPromptAnswer::Accept { remember: true });
+        });
+        ssh_prompt::install_ssh_prompt_gateway(gateway_tx);
+
+        let session = connect_and_authenticate(
+            "127.0.0.1",
+            connect_port,
+            "ssh-target.invalid",
+            2222,
+            "user",
+            "",
+            "",
+            "",
+            false,
+            "",
+            "none",
+            5,
+            &known_hosts_path,
+        )
+        .await
+        .expect("forwarded SSH connection should authenticate");
+
+        assert_eq!(request_rx.await.unwrap(), ("ssh-target.invalid".to_string(), 2222));
+        let known_hosts = std::fs::read_to_string(&known_hosts_path).unwrap();
+        assert!(known_hosts.contains("[ssh-target.invalid]:2222"));
+        assert!(!known_hosts.contains("127.0.0.1"));
+
+        drop(session);
+        ssh_prompt::clear_ssh_prompt_gateway();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn concurrent_tunnel_starts_share_one_handshake() {
+        let _guard = PROMPT_TEST_LOCK.lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let (connect_port, server_task) = start_accept_none_server().await;
+        let dir = tempdir().unwrap();
+        let manager = Arc::new(TunnelManager::new(dir.path().to_path_buf()));
+        let prompt_count = Arc::new(AtomicUsize::new(0));
+        let observed_count = prompt_count.clone();
+        let (gateway_tx, mut gateway_rx) = mpsc::channel::<ssh_prompt::SshPromptEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(envelope) = gateway_rx.recv().await {
+                observed_count.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = envelope.responder.send(ssh_prompt::SshPromptAnswer::Accept { remember: false });
+            }
+        });
+        ssh_prompt::install_ssh_prompt_gateway(gateway_tx);
+
+        let first = manager.start_tunnel(
+            "shared-layer",
+            "127.0.0.1",
+            connect_port,
+            "ssh-target.invalid",
+            2222,
+            "user",
+            "",
+            "",
+            "",
+            false,
+            "",
+            "none",
+            5,
+            "db.internal",
+            5432,
+            false,
+        );
+        let second = manager.start_tunnel(
+            "shared-layer",
+            "127.0.0.1",
+            connect_port,
+            "ssh-target.invalid",
+            2222,
+            "user",
+            "",
+            "",
+            "",
+            false,
+            "",
+            "none",
+            5,
+            "db.internal",
+            5432,
+            false,
+        );
+        let (first_port, second_port) = tokio::join!(first, second);
+
+        assert_eq!(first_port.unwrap(), second_port.unwrap());
+        assert_eq!(prompt_count.load(Ordering::SeqCst), 1);
+
+        manager.stop_tunnel("shared-layer").await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        server_task.abort();
+    }
 
     /// Minimal SSH server used to prove the client never sends a password to a
     /// host whose key does not match the known-hosts store. `auth_password`

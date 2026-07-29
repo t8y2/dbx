@@ -38,7 +38,7 @@ const previewVal = computed(() => {
   return `${formatLocalDate(d)} ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 });
 
-const weekdayLabels = ["日", "一", "二", "三", "四", "五", "六"];
+const weekdayLabels = computed(() => (["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const).map((d) => t(`dataGenerate.weekdayShort.${d}`)));
 
 function toggleWeekday(d: number) {
   if (!props.params.weekdays) props.params.weekdays = [];

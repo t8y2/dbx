@@ -78,6 +78,26 @@ pub struct RedisKeyRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisStreamGroupRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub group_raw: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisStreamPendingRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub group_raw: String,
+    pub cursor: Option<String>,
+    pub consumer_raw: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisLoadMoreRequest {
     pub connection_id: String,
     pub db: u32,
@@ -299,6 +319,51 @@ pub async fn get_value(
     let result = dbx_core::redis_ops::redis_get_value_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
         .await
         .map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn get_stream_groups(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisKeyRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result =
+        dbx_core::redis_ops::redis_stream_groups_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn get_stream_consumers(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisStreamGroupRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::redis_ops::redis_stream_consumers_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.group_raw,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn get_stream_pending(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisStreamPendingRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::redis_ops::redis_stream_pending_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.group_raw,
+        req.cursor.as_deref(),
+        req.consumer_raw.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 

@@ -44,7 +44,7 @@ import ProductionContextBadge from "@/components/common/ProductionContextBadge.v
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
-import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
@@ -64,6 +64,7 @@ import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
+import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
 
 const { t } = useI18n();
 
@@ -226,6 +227,11 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Link, colorClass: "text-blue-400" };
     case "group-triggers":
       return { icon: Zap, colorClass: "text-orange-400" };
+    case "group-constraints":
+      return { icon: Key, colorClass: "text-amber-500" };
+    case "group-table-partitions":
+    case "group-table-subpartitions":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "object-browser":
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
@@ -306,25 +312,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set([
-  "group-columns",
-  "group-indexes",
-  "group-fkeys",
-  "group-triggers",
-  "group-tables",
-  "group-views",
-  "group-materialized-views",
-  "group-procedures",
-  "group-functions",
-  "group-sequences",
-  "group-packages",
-  "group-types",
-  "group-partitions",
-  "group-extensions",
-]);
-
 function isGroupLabel(node: TreeNode): boolean {
-  return groupTypes.has(node.type);
+  return isTreeGroupNodeType(node.type);
 }
 
 function displayLabel(node: TreeNode): string {

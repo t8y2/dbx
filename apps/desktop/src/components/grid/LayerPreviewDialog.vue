@@ -446,7 +446,7 @@ onBeforeUnmount(() => cleanupMap());
 
         <!-- Label property selector -->
         <select v-if="labelProperties.length" v-model="labelProperty" class="h-6 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none" @change="onLabelPropertyChange">
-          <option value="">— 标签 —</option>
+          <option value="">{{ t("grid.layerPreviewLabelNone") }}</option>
           <option v-for="p in labelProperties" :key="p" :value="p">
             {{ p }}
           </option>
@@ -462,13 +462,13 @@ onBeforeUnmount(() => cleanupMap());
         </select>
 
         <!-- Save as image -->
-        <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" title="导出图片" :disabled="isExporting" @click="saveAsImage">
+        <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" :title="t('grid.layerPreviewExportImage')" :disabled="isExporting" @click="saveAsImage">
           <Camera v-if="!isExporting" class="h-3.5 w-3.5" />
           <Loader2 v-else class="h-3.5 w-3.5 animate-spin" />
         </Button>
 
         <!-- Maximise -->
-        <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" :title="isMaximized ? '还原' : '最大化'" @click="toggleMaximize">
+        <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" :title="isMaximized ? t('grid.layerPreviewRestore') : t('grid.layerPreviewMaximize')" @click="toggleMaximize">
           <Maximize2 v-if="!isMaximized" class="h-3.5 w-3.5" />
           <Minimize2 v-else class="h-3.5 w-3.5" />
         </Button>

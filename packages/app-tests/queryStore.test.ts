@@ -6,6 +6,7 @@ import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/query
 import { analyzeEditableQueryEditability } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 import { resultSqlForGrid } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
 import { parseMongoCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
+import { useExportTracker } from "../../apps/desktop/src/composables/useExportTracker.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
@@ -4505,10 +4506,113 @@ test("buildQueryResultExportRequest uses sorted SQL and independent row-limit se
     assert.equal(request?.rowLimit, null);
     assert.equal(request?.totalRows, 123456);
     assert.equal(request?.keysetOptimizationEnabled, false);
-    assert.equal(request?.clientSessionId, `${tabId}:export`);
+    assert.equal(request?.clientSessionId, `${tabId}:export:export-1`);
     assert.match(request?.executionId ?? "", /^[0-9a-f-]{36}$/i);
+
+    const concurrentRequest = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "export-2",
+      filePath: "C:\\tmp\\events-2.csv",
+      format: "csv",
+    });
+    assert.equal(concurrentRequest?.clientSessionId, `${tabId}:export:export-2`);
+    assert.notEqual(concurrentRequest?.clientSessionId, request?.clientSessionId);
   } finally {
     globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("same-tab direct exports use isolated sessions and cancel handlers", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  const originalEventSource = Object.getOwnPropertyDescriptor(globalThis, "EventSource");
+  const startedRequests: Array<Record<string, any>> = [];
+  const cancelRequests: Array<Record<string, any>> = [];
+  const createdExportIds: string[] = [];
+
+  class FakeEventSource {
+    static instances: FakeEventSource[] = [];
+    onopen: ((event: Event) => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+
+    constructor(readonly url: string) {
+      FakeEventSource.instances.push(this);
+    }
+
+    close() {}
+
+    emitOpen() {
+      this.onopen?.({} as Event);
+    }
+
+    emitProgress(progress: Record<string, unknown>) {
+      this.onmessage?.({ data: JSON.stringify(progress) } as MessageEvent);
+    }
+  }
+
+  Object.defineProperty(globalThis, "EventSource", { configurable: true, value: FakeEventSource });
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const tracker = useExportTracker();
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "analytics", "Query", "query", "public");
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const path = String(input);
+    if (path === "/api/export/query-result") {
+      startedRequests.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (path === "/api/export/query-result/cancel") {
+      cancelRequests.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response("null", { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.exportQuerySqlDirect(tabId, "SELECT 1", "csv", "/tmp/first.csv");
+    await store.exportQuerySqlDirect(tabId, "SELECT 2", "csv", "/tmp/second.csv");
+    await waitFor(() => FakeEventSource.instances.length === 2);
+    FakeEventSource.instances.forEach((source) => source.emitOpen());
+    await waitFor(() => startedRequests.length === 2);
+
+    const first = startedRequests[0].request;
+    const second = startedRequests[1].request;
+    createdExportIds.push(first.exportId, second.exportId);
+    assert.equal(first.clientSessionId, `${tabId}:export:${first.exportId}`);
+    assert.equal(second.clientSessionId, `${tabId}:export:${second.exportId}`);
+    assert.notEqual(first.clientSessionId, second.clientSessionId);
+    assert.notEqual(first.executionId, second.executionId);
+
+    await tracker.cancelTask(first.exportId);
+    assert.deepEqual(cancelRequests, [{ exportId: first.exportId, executionId: first.executionId }]);
+    assert.equal(tracker.tasks.value.find((task) => task.exportId === second.exportId)?.status, "Running");
+
+    FakeEventSource.instances[0].emitProgress({
+      exportId: first.exportId,
+      tableName: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Cancelled",
+      errorMessage: "Export cancelled",
+    });
+    FakeEventSource.instances[1].emitProgress({
+      exportId: second.exportId,
+      tableName: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Cancelled",
+      errorMessage: "Export cancelled",
+    });
+    await waitFor(() => tracker.tasks.value.filter((task) => task.exportId === first.exportId || task.exportId === second.exportId).every((task) => task.status === "Cancelled"));
+  } finally {
+    createdExportIds.forEach((exportId) => tracker.removeTask(exportId));
+    globalThis.fetch = originalFetch;
+    if (originalEventSource) Object.defineProperty(globalThis, "EventSource", originalEventSource);
+    else Reflect.deleteProperty(globalThis, "EventSource");
     restoreStorage();
   }
 });
@@ -6117,6 +6221,25 @@ test("duplicating a table structure tab clones its unsaved draft", () => {
   assert.deepEqual(copy.structureDraft, tab.structureDraft);
   copy.structureDraft!.columns[0]!.name = "copy_only";
   assert.equal(tab.structureDraft.columns[0]!.name, "draft_name");
+});
+
+test("duplicateTab does not inherit savedSqlId or externalSqlPath", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  const tabId = store.createTab("conn-1", "db", "A", "query");
+  const tab = store.tabs.find((t) => t.id === tabId)!;
+  tab.savedSqlId = "saved-sql-1";
+  tab.externalSqlPath = "/path/to/sql";
+  tab.sql = "SELECT 1;";
+
+  store.duplicateTab(tabId);
+
+  const copy = store.tabs.find((item) => item.id !== tabId)!;
+  assert.equal(copy.savedSqlId, undefined);
+  assert.equal(copy.externalSqlPath, undefined);
+  assert.equal(copy.originalSql, "");
+  assert.equal(store.isTabDirty(copy), true);
 });
 
 test("reorderTab keeps pinned tabs before unpinned tabs after reorder", () => {

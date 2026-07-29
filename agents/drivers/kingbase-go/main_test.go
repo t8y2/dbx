@@ -706,6 +706,24 @@ func TestMySQLCompatSchemaQueryKeepsUserSchemasWithSystemLikeNames(t *testing.T)
 	}
 }
 
+func TestListSchemasQueryIncludesSystemSchemasWhenEnabled(t *testing.T) {
+	for _, mode := range []kingbaseMode{{}, {postgresCatalog: true}, {mysqlCompat: true}} {
+		query := kingbaseListSchemasSQL(mode, true)
+		if strings.Contains(query, "NOT LIKE") || strings.Contains(query, "<>") {
+			t.Fatalf("show-system query must not filter schemas: %s", query)
+		}
+	}
+}
+
+func TestListSchemasQueryKeepsDefaultTemporarySchemaFilters(t *testing.T) {
+	for _, mode := range []kingbaseMode{{}, {postgresCatalog: true}} {
+		query := kingbaseListSchemasSQL(mode, false)
+		if !strings.Contains(query, "temp_%") {
+			t.Fatalf("default query must keep temporary schema filters: %s", query)
+		}
+	}
+}
+
 func TestMetadataNormalizationHelpers(t *testing.T) {
 	if normalizeTableType("BASE TABLE") != "TABLE" {
 		t.Fatal("BASE TABLE was not normalized")

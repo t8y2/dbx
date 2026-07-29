@@ -48,6 +48,7 @@ import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
+import type { AiChatSelectionState, AiEffortCapability } from "@/types/ai";
 import type {
   AgentDriverInfo,
   AiCompletionRequest,
@@ -67,6 +68,9 @@ import type {
   UpdateDownloadSource,
   RedisCollectionPage,
   RedisDatabaseInfo,
+  RedisStreamConsumer,
+  RedisStreamGroup,
+  RedisStreamPendingPage,
   RedisValue,
   RedisScanResult,
   RedisCommandResult,
@@ -772,6 +776,10 @@ export async function listAvailableExtensions(connectionId: string, database: st
   return get(`/api/schema/available-extensions?${qs({ connection_id: connectionId, database })}`);
 }
 
+export async function listDialectDataTypes(dialectName: string): Promise<string[]> {
+  return get(`/api/dialect/data-types?${qs({ dialect_name: dialectName })}`);
+}
+
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
@@ -816,6 +824,37 @@ export async function executeMulti(
   return post("/api/query/execute-multi", { connectionId, database, sql, schema, executionId, ...options });
 }
 
+export interface ExecuteMultiProgress {
+  executionId: string;
+  completed: number;
+  total: number;
+  success: boolean;
+}
+
+export async function executeMultiWithProgress(
+  connectionId: string,
+  database: string,
+  sql: string,
+  onProgress: (progress: ExecuteMultiProgress) => void,
+  schema?: string,
+  options?: {
+    maxRows?: number;
+    fetchSize?: number;
+    pageSize?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    useTransaction?: boolean;
+    continueOnError?: boolean;
+    executionMode?: "simple";
+  },
+): Promise<QueryResult[]> {
+  const executionId = crypto.randomUUID();
+  const results = await executeMulti(connectionId, database, sql, schema, executionId, options);
+  onProgress({ executionId, completed: results.length, total: results.length, success: !results.some((result) => result.execution_error === true) });
+  return results;
+}
+
 export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string): Promise<boolean> {
   return post("/api/query/close-session", { connectionId, database, sessionId, clientSessionId });
 }
@@ -830,6 +869,10 @@ export async function executeBatch(connectionId: string, database: string, state
 
 export async function executeScript(connectionId: string, database: string, sql: string, schema?: string): Promise<QueryResult> {
   return post("/api/query/execute-script", { connectionId, database, sql, schema });
+}
+
+export async function executeScriptWith2pc(connectionId: string, database: string, statements: string[], schema?: string): Promise<any> {
+  return post("/api/query/execute-script-2pc", { connectionId, database, statements, schema });
 }
 
 export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
@@ -1134,6 +1177,18 @@ export async function aiTestConnection(config: AiConfig): Promise<AiTestConnecti
 
 export async function aiListModels(config: AiConfig): Promise<AiModelInfo[]> {
   return post("/api/ai/models", { config });
+}
+
+export async function aiResolveModelEffort(config: AiConfig, modelId: string): Promise<AiEffortCapability> {
+  return post("/api/ai/model-effort", { config, modelId });
+}
+
+export async function saveAiChatSelection(selection: AiChatSelectionState): Promise<void> {
+  return post("/api/ai/chat-selection", { selection });
+}
+
+export async function loadAiChatSelection(): Promise<AiChatSelectionState | null> {
+  return get("/api/ai/chat-selection");
 }
 
 export type { AgentEvent } from "@/lib/backend/tauri";
@@ -1984,6 +2039,18 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return post("/api/redis/get-value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
+  return post("/api/redis/get-stream-groups", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamConsumers(connectionId: string, db: number, keyRaw: string, groupRaw: string): Promise<RedisStreamConsumer[]> {
+  return post("/api/redis/get-stream-consumers", { connectionId, db, keyRaw, groupRaw });
+}
+
+export async function redisGetStreamPending(connectionId: string, db: number, keyRaw: string, groupRaw: string, cursor?: string, consumerRaw?: string): Promise<RedisStreamPendingPage> {
+  return post("/api/redis/get-stream-pending", { connectionId, db, keyRaw, groupRaw, cursor, ...(consumerRaw === undefined ? {} : { consumerRaw }) });
 }
 
 export async function redisSetString(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {

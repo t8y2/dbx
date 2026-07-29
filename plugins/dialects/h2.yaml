@@ -1,0 +1,170 @@
+dialect:
+  name: "H2"
+  display_name: "H2"
+  versions:
+    - version: "2"
+      status: "RECOMMENDED"
+
+types:
+  - name: "TINYINT"
+    category: "INTEGER"
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INT"
+    category: "INTEGER"
+    aliases: ["INTEGER", "MEDIUMINT"]
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "IDENTITY"
+    category: "INTEGER"
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["NUMERIC", "DEC", "NUMBER"]
+  - name: "DOUBLE"
+    category: "FLOAT"
+    aliases: ["DOUBLE PRECISION", "FLOAT", "FLOAT8"]
+  - name: "REAL"
+    category: "FLOAT"
+    aliases: ["FLOAT4"]
+  - name: "TIME"
+    category: "TIME"
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+    aliases: ["DATETIME"]
+  - name: "TIMESTAMP WITH TIME ZONE"
+    category: "DATETIME"
+    semantic_fidelity_base: 0.9
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+    aliases: ["LONGVARCHAR", "VARCHAR2", "NVARCHAR", "NVARCHAR2", "VARCHAR_CASESENSITIVE"]
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+    aliases: ["CHARACTER", "NCHAR"]
+  - name: "CLOB"
+    category: "STRING"
+  - name: "BLOB"
+    category: "BINARY"
+    aliases: ["LONGVARBINARY", "IMAGE", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB"]
+  - name: "BINARY"
+    category: "BINARY"
+    has_length: true
+    aliases: ["VARBINARY", "RAW"]
+  - name: "BOOLEAN"
+    category: "BOOLEAN"
+    aliases: ["BOOL", "BIT"]
+  - name: "UUID"
+    category: "UUID"
+  - name: "ARRAY"
+    category: "ARRAY"
+    semantic_fidelity_base: 0.5
+  - name: "GEOMETRY"
+    category: "SPATIAL"
+  - name: "JSON"
+    category: "JSON"
+  - name: "ENUM"
+    category: "ENUM"
+  - name: "INTERVAL"
+    category: "INTERVAL"
+    semantic_fidelity_base: 0.6
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  comment: true
+  create_index: true
+  drop_index: true
+  rebuild_index: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_trigger: true
+  drop_trigger: true
+  create_function: true
+  drop_function: true
+  if_not_exists: true
+  temporary_table: true
+  identity_columns: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} ALTER COLUMN {old} RENAME TO {new}"
+    modify_column: "ALTER TABLE {table} ALTER COLUMN {column} {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+    create_index: "CREATE INDEX IF NOT EXISTS {name} ON {table} ({columns})"
+    drop_index: "DROP INDEX IF EXISTS {name}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} ALTER COLUMN {new} RENAME TO {old}"
+  modify_column: "ALTER TABLE {table} ALTER COLUMN {column} {original_type}"
+  create_table: "DROP TABLE IF EXISTS {table}"
+  drop_table: "-- Restore from backup: {table}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+  modify_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+  drop_table:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+  truncate:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+  drop_column: "DANGEROUS"
+  alter_type: "MODIFY"
+  add_column: "SAFE"
+  create_table: "SAFE"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 1600
+  max_indexes_per_table: 100
+  max_query_size_bytes: 131072
+  max_foreign_key_name_length: 256
+  supports_full_text_index: true
+  supports_spatial_index: true
+  supports_on_update_cascade: true
+  supports_on_delete_set_null: true
+  supports_deferrable_constraints: true
+  supports_json_type: true
+  supports_uuid_type: true
+  supports_sequences: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: false
+  max_length: 256
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_TYPE = 'BASE TABLE'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION"
+    performance_profile: "MEDIUM"
+  list_indexes:
+    sql: "SELECT INDEX_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.INDEXES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}'"
+    performance_profile: "MEDIUM"
+  list_foreign_keys:
+    sql: "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM INFORMATION_SCHEMA.CROSS_REFERENCES WHERE PKTABLE_SCHEMA = '{schema}' AND FKTABLE_NAME = '{table}'"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT FKTABLE_NAME AS table_name, PKTABLE_NAME AS ref_table FROM INFORMATION_SCHEMA.CROSS_REFERENCES WHERE PKTABLE_SCHEMA = '{schema}'"
+    depth_support: 2
+    performance_profile: "MEDIUM"

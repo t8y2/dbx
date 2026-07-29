@@ -10,7 +10,11 @@ export function hasSchemaOptionsCacheEntry(options: Record<string, string[]>, ke
   return Object.prototype.hasOwnProperty.call(options, key);
 }
 
-export function schemaOptionsForConnection(schemaNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases" | "visible_schemas"> | undefined, database = ""): string[] {
+export function schemaOptionsCacheKey(connectionId: string, database: string, showSystemSchemas: boolean): string {
+  return `${connectionId}:${database}:${showSystemSchemas ? "show-system" : "hide-system"}`;
+}
+
+export function schemaOptionsForConnection(schemaNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases" | "visible_schemas" | "show_system_schemas"> | undefined, database = ""): string[] {
   // Keep numeric schema suffixes in human order (SCHEMA2 before SCHEMA10), matching the database tree.
   return sortSidebarNames(filterSchemaNamesForConnection(schemaNames, connection, database));
 }
@@ -22,7 +26,7 @@ export function useSchemaOptions() {
   const loadingSchemaOptions = ref<Record<string, boolean>>({});
 
   function cacheKey(connectionId: string, database: string) {
-    return `${connectionId}:${database}`;
+    return schemaOptionsCacheKey(connectionId, database, connectionStore.getConfig(connectionId)?.show_system_schemas === true);
   }
 
   function isSchemaAware(connectionId: string): boolean {

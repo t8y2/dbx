@@ -16,17 +16,12 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -80,7 +75,7 @@ class TDengineAgentMetadataTest {
     }
 
     @Test
-    void usesTdengineMetadataStatements() {
+    void usesTdengineShowStatementsForMetadata() {
         TDengineAgent agent = new TDengineAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
 
@@ -89,66 +84,119 @@ class TDengineAgentMetadataTest {
         agent.getColumns("power", "meters");
 
         Assertions.assertEquals("SHOW DATABASES", JdbcMetadataSqlFake.statements.get(0));
-        Assertions.assertTrue(JdbcMetadataSqlFake.statements.get(1).contains("FROM information_schema.ins_stables"));
-        Assertions.assertTrue(JdbcMetadataSqlFake.statements.get(1).contains("FROM information_schema.ins_tables"));
-        Assertions.assertEquals("param:1=power", JdbcMetadataSqlFake.statements.get(2));
-        Assertions.assertEquals("param:2=power", JdbcMetadataSqlFake.statements.get(3));
-        Assertions.assertEquals("DESCRIBE `power`.`meters`", JdbcMetadataSqlFake.statements.get(4));
+        Assertions.assertEquals("SHOW `power`.STABLES", JdbcMetadataSqlFake.statements.get(1));
+        Assertions.assertEquals("SHOW `power`.TABLES", JdbcMetadataSqlFake.statements.get(2));
+        Assertions.assertFalse(JdbcMetadataSqlFake.statements.stream().anyMatch(sql -> sql.contains("information_schema")));
+        Assertions.assertTrue(JdbcMetadataSqlFake.statements.contains("DESCRIBE `power`.`meters`"));
     }
 
     @Test
-    void constrainedMetadataUsesRequestedDatabaseAndPushesFilterAndPaging() {
+    void showMetadataCachesFullResultsForLocalPaging() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
         TDengineAgent agent = new TDengineAgent();
-        TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
+
+        List<TableInfo> firstPage = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints(null, 2, null, List.of("TABLE"))
+        );
+        List<TableInfo> secondPage = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints(null, 2, 2, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals(List.of("meters", "device_a"), firstPage.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals(List.of("device_b", "standalone"), secondPage.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals("meters", secondPage.get(0).getParent_name());
+        Assertions.assertTrue(maxRows.isEmpty());
+        Assertions.assertEquals(
+            List.of(
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
+            ),
+            statements
+        );
+    }
+
+    @Test
+    void showMetadataFiltersLocallyBeforeApplyingRowLimit() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
+
+        List<TableInfo> tables = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints("stand", 1, null, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals(List.of("standalone"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertTrue(maxRows.isEmpty());
+        Assertions.assertEquals(
+            List.of(
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
+            ),
+            statements
+        );
+    }
+
+    @Test
+    void showMetadataFallsBackToLocalFilteringForLongLikePatterns() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
 
         agent.listTables(
             "dbx_alpha",
-            new MetadataListConstraints("ord", 25, 50, List.of("TABLE"))
+            new MetadataListConstraints("a".repeat(50), 1, null, List.of("TABLE"))
         );
 
-        String sql = JdbcMetadataSqlFake.statements.get(0);
-        Assertions.assertFalse(sql.contains("DATABASE()"), sql);
-        Assertions.assertTrue(sql.contains("FROM information_schema.ins_stables"), sql);
-        Assertions.assertTrue(sql.contains("FROM information_schema.ins_tables"), sql);
-        Assertions.assertTrue(sql.contains("WHERE db_name = ?"), sql);
-        Assertions.assertTrue(sql.contains("table_name LIKE ? OR table_comment LIKE ?"), sql);
-        Assertions.assertTrue(sql.contains("ORDER BY hierarchy_name, hierarchy_rank, table_name"), sql);
-        Assertions.assertTrue(sql.endsWith("LIMIT 25 OFFSET 50"), sql);
+        Assertions.assertTrue(maxRows.isEmpty());
         Assertions.assertEquals(
             List.of(
-                "param:1=dbx_alpha",
-                "param:2=dbx_alpha",
-                "param:3=%o%r%d%",
-                "param:4=%o%r%d%"
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
             ),
-            JdbcMetadataSqlFake.statements.subList(1, 5)
+            statements
         );
     }
 
     @Test
-    void constrainedMetadataPagesDoNotRepeatOrSkipTables() {
-        List<TableInfo> metadata = List.of(
-            new TableInfo("meters", "STABLE", null),
-            new TableInfo("device_a", "TABLE", null, null, "meters"),
-            new TableInfo("device_b", "TABLE", null, null, "meters"),
-            new TableInfo("standalone", "TABLE", null),
-            new TableInfo("weather", "STABLE", null)
-        );
+    void showMetadataDoesNotLoadTableComments() {
         List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
         TDengineAgent agent = new TDengineAgent();
-        TestSupport.setPrivateConnection(agent, pagedMetadataConnection(metadata, statements));
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
 
-        List<TableInfo> combined = new ArrayList<>();
-        combined.addAll(agent.listTables("dbx_alpha", new MetadataListConstraints(null, 2, null, List.of("TABLE"))));
-        combined.addAll(agent.listTables("dbx_alpha", new MetadataListConstraints(null, 2, 2, List.of("TABLE"))));
-        combined.addAll(agent.listTables("dbx_alpha", new MetadataListConstraints(null, 2, 4, List.of("TABLE"))));
+        List<TableInfo> tables = agent.listTables("dbx_alpha");
 
-        Assertions.assertEquals(metadata.stream().map(TableInfo::getName).toList(), combined.stream().map(TableInfo::getName).toList());
-        Set<String> distinctNames = new HashSet<>(combined.stream().map(TableInfo::getName).toList());
-        Assertions.assertEquals(metadata.size(), distinctNames.size());
-        Assertions.assertTrue(statements.get(0).endsWith("LIMIT 2"), statements.get(0));
-        Assertions.assertTrue(statements.get(1).endsWith("LIMIT 2 OFFSET 2"), statements.get(1));
-        Assertions.assertTrue(statements.get(2).endsWith("LIMIT 2 OFFSET 4"), statements.get(2));
+        Assertions.assertNull(tables.get(0).getComment());
+        Assertions.assertEquals(
+            List.of(
+                "SHOW `dbx_alpha`.STABLES",
+                "SHOW `dbx_alpha`.TABLES"
+            ),
+            statements
+        );
+    }
+
+    @Test
+    void showMetadataFiltersByNameWithoutInformationSchema() {
+        List<String> statements = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        TDengineAgent agent = new TDengineAgent();
+        TestSupport.setPrivateConnection(agent, showMetadataConnection(statements, maxRows));
+
+        List<TableInfo> tables = agent.listTables(
+            "dbx_alpha",
+            new MetadataListConstraints("device_b", 1, null, List.of("TABLE"))
+        );
+
+        Assertions.assertEquals(List.of("device_b"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertTrue(maxRows.isEmpty());
     }
 
     @Test
@@ -198,13 +246,11 @@ class TDengineAgentMetadataTest {
         Assertions.assertTrue(JdbcMetadataSqlFake.statements.isEmpty());
     }
 
-    private static Connection pagedMetadataConnection(List<TableInfo> metadata, List<String> statements) {
+    private static Connection showMetadataConnection(List<String> statements, List<Integer> maxRows) {
         return proxy(Connection.class, (proxy, method, args) -> {
             String name = method.getName();
-            if ("prepareStatement".equals(name)) {
-                String sql = (String) args[0];
-                statements.add(sql);
-                return pagedMetadataStatement(sql, metadata);
+            if ("createStatement".equals(name)) {
+                return showMetadataStatement(statements, maxRows);
             }
             if ("isClosed".equals(name)) return false;
             if ("close".equals(name)) return null;
@@ -212,45 +258,55 @@ class TDengineAgentMetadataTest {
         });
     }
 
-    private static PreparedStatement pagedMetadataStatement(String sql, List<TableInfo> metadata) {
-        return proxy(PreparedStatement.class, (proxy, method, args) -> {
+    private static java.sql.Statement showMetadataStatement(List<String> statements, List<Integer> maxRows) {
+        int[] activeMaxRows = {0};
+        return proxy(java.sql.Statement.class, (proxy, method, args) -> {
             String name = method.getName();
+            if ("setMaxRows".equals(name)) {
+                activeMaxRows[0] = (Integer) args[0];
+                maxRows.add(activeMaxRows[0]);
+                return null;
+            }
             if ("executeQuery".equals(name)) {
-                int limit = sqlClauseValue(sql, "LIMIT", metadata.size());
-                int offset = sqlClauseValue(sql, "OFFSET", 0);
-                int from = Math.min(offset, metadata.size());
-                int to = Math.min(from + limit, metadata.size());
-                return tableInfoResultSet(metadata.subList(from, to));
-            }
-            if ("setString".equals(name) || "setInt".equals(name) || "setObject".equals(name) || "close".equals(name)) return null;
-            return defaultValue(method.getReturnType());
-        });
-    }
-
-    private static ResultSet tableInfoResultSet(List<TableInfo> tables) {
-        int[] index = {-1};
-        return proxy(ResultSet.class, (proxy, method, args) -> {
-            String name = method.getName();
-            if ("next".equals(name)) {
-                index[0] += 1;
-                return index[0] < tables.size();
-            }
-            if ("getString".equals(name)) {
-                TableInfo table = tables.get(index[0]);
-                int column = (Integer) args[0];
-                if (column == 1) return table.getName();
-                if (column == 2) return table.getTable_type();
-                if (column == 3) return table.getComment();
-                if (column == 4) return table.getParent_name();
+                String sql = (String) args[0];
+                statements.add(sql);
+                if (sql.endsWith("STABLES")) {
+                    return showTableResultSet(List.of(new String[] {"meters"}, new String[] {"weather"}), activeMaxRows[0]);
+                }
+                if (sql.endsWith("TABLES")) {
+                    return showTableResultSet(
+                        List.of(
+                            new String[] {"device_a", "", "", "meters"},
+                            new String[] {"device_b", "", "", "meters"},
+                            new String[] {"standalone", "", "", ""}
+                        ),
+                        activeMaxRows[0]
+                    );
+                }
             }
             if ("close".equals(name)) return null;
             return defaultValue(method.getReturnType());
         });
     }
 
-    private static int sqlClauseValue(String sql, String clause, int fallback) {
-        Matcher matcher = Pattern.compile("\\b" + clause + "\\s+(\\d+)").matcher(sql);
-        return matcher.find() ? Integer.parseInt(matcher.group(1)) : fallback;
+    private static ResultSet showTableResultSet(List<String[]> rows, int maxRows) {
+        List<String[]> limitedRows = maxRows > 0 ? rows.subList(0, Math.min(rows.size(), maxRows)) : rows;
+        int[] index = {-1};
+        return proxy(ResultSet.class, (proxy, method, args) -> {
+            String name = method.getName();
+            if ("next".equals(name)) {
+                index[0] += 1;
+                return index[0] < limitedRows.size();
+            }
+            if ("getString".equals(name)) {
+                int column = (Integer) args[0];
+                String[] row = limitedRows.get(index[0]);
+                return column <= row.length ? row[column - 1] : null;
+            }
+            if ("isClosed".equals(name)) return false;
+            if ("close".equals(name)) return null;
+            return defaultValue(method.getReturnType());
+        });
     }
 
     private static <T> T proxy(Class<T> type, InvocationHandler handler) {

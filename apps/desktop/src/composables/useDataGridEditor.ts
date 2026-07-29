@@ -13,6 +13,7 @@ import { assessProductionSql, productionContextForDatabase } from "@/lib/databas
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import { DBX_NEO4J_ELEMENT_ID_COLUMN, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import i18n from "@/i18n";
 
 interface RowItem {
   id: number;
@@ -1273,7 +1274,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (!confirmed) return;
     }
     if (customHandler && snapshot.newRows.length > 0 && customHandler.supportsInsert !== true && customHandler.canInsert !== true) {
-      saveError.value = "当前保存目标不支持新增行。";
+      saveError.value = i18n.global.t("grid.insertRowsNotSupported");
       return;
     }
     saveError.value = "";

@@ -543,6 +543,64 @@ describe("connectionStore metadata loading", () => {
     expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions"]);
   });
 
+  it.each(["opengauss", "kingbase"] as const)("reloads %s sidebar schemas when system visibility changes", async (dbType) => {
+    const listSchemaInfos = vi.fn().mockResolvedValue([
+      { name: "information_schema", comment: null },
+      { name: "pg_catalog", comment: null },
+      { name: "public", comment: null },
+    ]);
+    const loadSchemaCache = vi.fn().mockResolvedValue(null);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listSchemaInfos,
+      loadSchemaCache,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = { ...postgresConnection(), id: `${dbType}-1`, db_type: dbType, show_system_schemas: false } as ConnectionConfig;
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: `${connection.id}:app`,
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: false,
+            children: [],
+          },
+        ],
+      },
+    ];
+    const databaseNode = store.treeNodes[0]!.children![0]!;
+
+    await store.loadSchemas(connection.id, "app");
+    expect(databaseNode.children?.map((node) => node.label).filter((label) => label !== "tree.extensions")).toEqual(["public"]);
+
+    store.connections[0]!.show_system_schemas = true;
+    databaseNode.children = [];
+    databaseNode.isExpanded = false;
+    await store.loadSchemas(connection.id, "app");
+
+    expect(loadSchemaCache.mock.calls.map(([key]) => key)).toEqual([`${connection.id}:app:schemas-v3:hide-system`, `${connection.id}:app:schemas-v3:show-system`]);
+    expect(databaseNode.children?.map((node) => node.label).filter((label) => label !== "tree.extensions")).toEqual(["information_schema", "pg_catalog", "public"]);
+  });
+
   it("clears a failed metadata warning when the driver hint finishes during retry", async () => {
     let resolveAgents!: (drivers: Array<{ db_type: string; installed: boolean; update_available: boolean }>) => void;
     let resolveSchemas!: (schemas: Array<{ name: string; comment: null }>) => void;

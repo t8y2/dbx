@@ -15,7 +15,7 @@ env:
 
 jobs:
   release-ready:
-    name: Verify Agent-created draft release
+    name: Verify draft release
     runs-on: ubuntu-latest
     steps:
       - name: Wait for the draft release

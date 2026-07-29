@@ -15,6 +15,7 @@ import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { encodeHBaseTextInput, hbaseCellInput } from "@/lib/hbase/hbaseValues";
+import { loadHBaseRowLimit, saveHBaseRowLimit } from "@/lib/hbase/hbaseBrowserPreferences";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import type { QueryResult } from "@/types/database";
@@ -40,7 +41,7 @@ const loading = ref(false);
 const error = ref("");
 const lookupMode = ref<LookupMode>("prefix");
 const rowKeyInput = ref("");
-const rowLimit = ref("100");
+const rowLimit = ref(loadHBaseRowLimit());
 const truncated = ref(false);
 const elapsedMs = ref(0);
 const schema = ref<HBaseTableSchema>();
@@ -122,6 +123,10 @@ watch(
   },
   { immediate: true },
 );
+
+watch(rowLimit, (value) => {
+  saveHBaseRowLimit(value);
+});
 
 async function refreshRows() {
   if (loading.value || !hasTable.value) return;
@@ -229,7 +234,7 @@ async function createTable() {
     await api.hbaseCreateTable(props.connectionId, props.namespace, createdTable, families);
     createTableDialogOpen.value = false;
     toast(t("hbase.tableCreated", { table: createdTable }));
-    await connectionStore.loadTables(props.connectionId, props.namespace);
+    await connectionStore.refreshObjectListTreeNode(props.connectionId, props.namespace);
     if (!hasTable.value) {
       const tab = queryStore.tabs.find((candidate) => candidate.id === props.tabId);
       if (tab) tab.title = createdTable;
@@ -249,7 +254,7 @@ async function deleteTable() {
   try {
     await api.hbaseDeleteTable(props.connectionId, props.namespace, props.table);
     deleteTableDialogOpen.value = false;
-    await connectionStore.loadTables(props.connectionId, props.namespace);
+    await connectionStore.refreshObjectListTreeNode(props.connectionId, props.namespace);
     queryStore.closeTab(props.tabId);
     toast(t("hbase.tableDeleted", { table: qualifiedTableLabel.value }));
   } catch (caught) {
@@ -418,6 +423,7 @@ function errorMessage(value: unknown): string {
       :allow-delete-rows="!readOnly"
       :loading="loading"
       :page-limit="Number(rowLimit)"
+      :pagination-enabled="false"
       :total-row-count="rows.length"
       :total-row-count-is-exact="!truncated"
       @reload="refreshRows"

@@ -192,4 +192,44 @@ describe("useNavigationTargets with the real query store", () => {
     expect(queryStore.createTab("connection-1", "app", "public.orders", "data", "public")).not.toBe(base);
     expect(queryStore.createTab("connection-1", "app", "public.users", "data", "public", undefined, undefined, { forceNew: true })).not.toBe(base);
   });
+
+  it("replaces the detached owner tab when table navigation is explicit", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.stubGlobal("window", {
+      location: { search: "?dbxDetachedTransfer=transfer-1" },
+      setTimeout,
+    });
+    const { navigation, queryStore } = await setupNavigation();
+    queryStore.adoptTransferredTab({
+      id: "detached-query",
+      title: "Query",
+      connectionId: "connection-1",
+      database: "app",
+      sql: "SELECT 1",
+      mode: "query",
+      isExecuting: false,
+    });
+
+    await navigation.openTableTarget(
+      {
+        connectionId: "connection-1",
+        database: "app",
+        schema: "public",
+        tableName: "orders",
+      },
+      { replaceActiveInDetached: true },
+    );
+
+    expect(queryStore.tabs).toHaveLength(1);
+    expect(queryStore.tabs[0]).toMatchObject({
+      connectionId: "connection-1",
+      database: "app",
+      schema: "public",
+      mode: "data",
+      title: "public.orders",
+      sql: "SELECT * FROM orders",
+    });
+    expect(queryStore.tabs[0].id).not.toBe("detached-query");
+    expect(queryStore.tabs[0].result?.rows).toEqual([[1]]);
+  });
 });

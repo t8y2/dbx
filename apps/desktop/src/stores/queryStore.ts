@@ -1833,6 +1833,15 @@ export const useQueryStore = defineStore("query", () => {
     return true;
   }
 
+  async function replaceActiveTabForDetachedNavigation() {
+    if (!isDetachedTabRuntime()) return false;
+    const currentId = activeTabId.value || tabs.value[0]?.id;
+    if (!currentId) return true;
+    // Navigation waits for tab-scoped sessions to close before the replacement
+    // starts using the same connection in this WebView.
+    return closeTabAndWait(currentId, { force: true });
+  }
+
   function takeTabForTransfer(id: string) {
     const index = tabs.value.findIndex((tab) => tab.id === id);
     if (index < 0) return null;
@@ -4975,6 +4984,7 @@ export const useQueryStore = defineStore("query", () => {
     switchTab,
     closeTab,
     closeTabAndWait,
+    replaceActiveTabForDetachedNavigation,
     takeTabForTransfer,
     restoreTabFromTransfer,
     adoptTransferredTab,

@@ -91,8 +91,8 @@ defineExpose({
         v-bind="$attrs"
       />
     </div>
-    <div v-else class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-      {{ t("tabs.openTabUnavailable") }}
+    <div v-else class="flex flex-1 items-center justify-center" role="status" aria-label="Loading detached tab">
+      <span class="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" />
     </div>
   </div>
 </template>

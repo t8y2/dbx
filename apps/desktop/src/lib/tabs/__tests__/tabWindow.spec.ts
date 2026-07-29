@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => {
   const unlisten = vi.fn();
   const mainWindow = {
     label: "main",
+    show: vi.fn(async () => {}),
+    setFocus: vi.fn(async () => {}),
     listen: vi.fn(async (_event: string, listener: typeof statusListener) => {
       statusListener = listener;
       return unlisten;
@@ -30,7 +32,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getAllWebviewWindows: vi.fn(async () => mocks.detachedWindows),
   getCurrentWebviewWindow: vi.fn(() => mocks.mainWindow),
-  WebviewWindow: class {},
+  WebviewWindow: class {
+    static getByLabel = vi.fn(async (label: string) => (label === "main" ? mocks.mainWindow : null));
+  },
 }));
 
 vi.mock("@/lib/backend/tauriRuntime", () => ({
@@ -47,6 +51,8 @@ describe("detached tab app close checks", () => {
     mocks.emitTo.mockClear();
     mocks.mainWindow.listen.mockClear();
     mocks.unlisten.mockClear();
+    mocks.mainWindow.show.mockClear();
+    mocks.mainWindow.setFocus.mockClear();
   });
 
   it("collects dirty detached windows before allowing app exit", async () => {
@@ -70,6 +76,20 @@ describe("detached tab app close checks", () => {
 
     expect(mocks.emitTo).toHaveBeenCalledWith("main", "dbx-detached-tab-shell-ready-transfer-1", {
       transferId: "transfer-1",
+    });
+  });
+
+  it("forwards main-only actions without loading their UI in the detached window", async () => {
+    vi.stubGlobal("window", { location: { search: "?dbxDetachedTransfer=transfer-1" } });
+    const { requestDetachedTabMainWindowAction } = await import("@/lib/tabs/tabWindow");
+
+    await requestDetachedTabMainWindowAction({ type: "open-settings", initialTab: "editor" });
+
+    expect(mocks.mainWindow.show).toHaveBeenCalledOnce();
+    expect(mocks.mainWindow.setFocus).toHaveBeenCalledOnce();
+    expect(mocks.emitTo).toHaveBeenCalledWith("main", "dbx-detached-tab-main-window-action", {
+      type: "open-settings",
+      initialTab: "editor",
     });
   });
 });

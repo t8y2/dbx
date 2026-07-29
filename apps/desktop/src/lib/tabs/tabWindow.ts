@@ -11,6 +11,7 @@ const APP_CLOSE_CHECK_TIMEOUT_MS = 2_000;
 const DETACHED_WINDOW_CLEANUP_TIMEOUT_MS = 3_000;
 const APP_CLOSE_CHECK_EVENT = "dbx-detached-tab-app-close-check";
 const APP_CLOSE_STATUS_EVENT = "dbx-detached-tab-app-close-status";
+const MAIN_WINDOW_ACTION_EVENT = "dbx-detached-tab-main-window-action";
 const openingWindows = new Map<string, Promise<PreparedTabWindow>>();
 
 interface TransferSignal {
@@ -45,6 +46,8 @@ export interface DetachedAppCloseCheckResult {
   dirtyWindowLabels: string[];
   unresponsiveWindowLabels: string[];
 }
+
+export type DetachedTabMainWindowAction = { type: "fix-with-ai"; errorMessage: string } | { type: "new-query" } | { type: "open-settings"; initialTab?: string; initialSection?: string } | { type: "send-selection-to-ai"; sql: string };
 
 interface EventWaiter<T> {
   promise: Promise<T>;
@@ -291,6 +294,20 @@ export async function listenForDetachedAppCloseChecks(hasDirtyTabs: () => boolea
       dirty: hasDirtyTabs(),
     } satisfies DetachedAppCloseStatus).catch(() => {});
   });
+}
+
+export async function requestDetachedTabMainWindowAction(action: DetachedTabMainWindowAction): Promise<void> {
+  if (!isDetachedTabWindow()) throw new Error("Detached tab transfer context is missing");
+  const mainWindow = await WebviewWindow.getByLabel("main");
+  if (!mainWindow) throw new Error("Main window is unavailable");
+  await mainWindow.show().catch(() => {});
+  await mainWindow.setFocus().catch(() => {});
+  await emitTo("main", MAIN_WINDOW_ACTION_EVENT, action);
+}
+
+export async function listenForDetachedTabMainWindowActions(onAction: (action: DetachedTabMainWindowAction) => void | Promise<void>): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return () => {};
+  return getCurrentWebviewWindow().listen<DetachedTabMainWindowAction>(MAIN_WINDOW_ACTION_EVENT, (event) => onAction(event.payload));
 }
 
 export async function checkDetachedWindowsBeforeAppClose(): Promise<DetachedAppCloseCheckResult> {

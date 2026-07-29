@@ -82,7 +82,7 @@ import {
   switchToTabIndexFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { isPreviewTab, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
-import { checkDetachedWindowsBeforeAppClose, destroyDetachedWindowAfterCleanup, focusDetachedTabWindow, isDetachedTabWindow, listenForDetachedAppCloseChecks, prepareTabWindow, receiveDetachedTab } from "@/lib/tabs/tabWindow";
+import { checkDetachedWindowsBeforeAppClose, destroyDetachedWindowAfterCleanup, focusDetachedTabWindow, isDetachedTabWindow, listenForDetachedAppCloseChecks, listenForDetachedTabMainWindowActions, prepareTabWindow, receiveDetachedTab, type DetachedTabMainWindowAction } from "@/lib/tabs/tabWindow";
 import type { TabWindowClientPlacement } from "@/lib/tabs/tabWindowPlacement";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
@@ -170,6 +170,7 @@ let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenDetachedTabTransfer: UnlistenFn | undefined;
 let unlistenDetachedWindowClose: UnlistenFn | undefined;
 let unlistenDetachedAppCloseCheck: UnlistenFn | undefined;
+let unlistenDetachedMainWindowAction: UnlistenFn | undefined;
 let detachedWindowClosing = false;
 let detachedAppCloseCheckPending = false;
 const needsAuth = ref(!isDesktop);
@@ -697,6 +698,24 @@ function fixWithAi(errorMessage: string) {
 function sendSelectionToAi(sql: string) {
   openRightSidebarPanel("ai");
   invokeWhenAiReady((handle) => handle.setPrompt(sql));
+}
+
+function handleDetachedMainWindowAction(action: DetachedTabMainWindowAction) {
+  // Main-only surfaces stay in the shared process without loading them into every child WebView.
+  switch (action.type) {
+    case "fix-with-ai":
+      fixWithAi(action.errorMessage);
+      break;
+    case "new-query":
+      void newQuery();
+      break;
+    case "open-settings":
+      openSettings(action.initialTab, action.initialSection);
+      break;
+    case "send-selection-to-ai":
+      sendSelectionToAi(action.sql);
+      break;
+  }
 }
 
 function openAiPanel() {
@@ -2347,6 +2366,7 @@ onMounted(async () => {
     .catch(() => {});
   setupTauriListeners();
   setupCloseActionPromptListener();
+  unlistenDetachedMainWindowAction = await listenForDetachedTabMainWindowActions(handleDetachedMainWindowAction);
   void openPendingSqlFiles();
   void openPendingDbFiles();
   void openPendingConnectionLinks();
@@ -2357,6 +2377,7 @@ onUnmounted(() => {
   unlistenDetachedTabTransfer?.();
   unlistenDetachedWindowClose?.();
   unlistenDetachedAppCloseCheck?.();
+  unlistenDetachedMainWindowAction?.();
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
   if (updateCheckTimer) {

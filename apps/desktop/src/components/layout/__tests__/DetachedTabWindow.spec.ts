@@ -85,6 +85,31 @@ afterEach(() => {
 });
 
 describe("DetachedTabWindow event forwarding", () => {
+  it("shows a loading state instead of an unavailable-tab error before transfer", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp(DetachedTabWindow, {
+      executableSql: "",
+      activeOutputView: "result",
+      formatSqlRequest: null,
+      compressSqlRequest: null,
+      selectedSql: "",
+      cursorPos: 0,
+      blockDangerousRedisCommands: true,
+      explainMode: "explain",
+      sqlKeywordCase: "preserve",
+      autoCommit: true,
+    });
+    app.use(i18n);
+    app.use(createPinia());
+    app.mount(container);
+    mountedApps.push(app);
+    await nextTick();
+
+    expect(container.querySelector('[role="status"]')?.getAttribute("aria-label")).toBe("Loading detached tab");
+    expect(container.textContent).not.toContain("This tab is no longer available");
+  });
+
   it("forwards content and toolbar actions to the owning App", async () => {
     const onExecute = vi.fn();
     const onReload = vi.fn();

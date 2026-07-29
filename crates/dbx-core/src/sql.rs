@@ -59,6 +59,10 @@ pub struct SqlFileRequest {
     pub database: String,
     pub file_path: String,
     pub continue_on_error: bool,
+    /// When true, multiple files execute concurrently (one DB connection per file).
+    /// When false (default), files execute sequentially in the given order.
+    #[serde(default)]
+    pub parallel: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

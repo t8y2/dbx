@@ -265,6 +265,7 @@ async fn main() {
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
+        sql_file_terminal_progress: std::sync::RwLock::new(HashMap::new()),
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
@@ -693,6 +694,7 @@ async fn main() {
         .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
+        .route("/sql-file/release-upload", post(routes::sql_file::release_sql_file_upload))
         // Table import
         .route("/import/preview", post(routes::table_import::preview_import))
         .route("/import/preview-source", post(routes::table_import::preview_uploaded_import))

@@ -106,6 +106,7 @@ fn sql_file_progress_is_immediate(status: SqlFileStatus) -> bool {
     )
 }
 
+#[derive(Clone)]
 struct SqlFileExecutionProgress {
     statement_index: usize,
     success_count: usize,
@@ -382,6 +383,49 @@ pub async fn execute_sql_file_paths(
     let options =
         import_target.as_ref().map(|target| SqlParsingOptions::for_database_type(target.db_type)).unwrap_or_default();
     let database_type = import_target.as_ref().map(|target| target.db_type);
+
+    if request.parallel && file_paths.len() > 1 {
+        execute_sql_file_paths_parallel(
+            state,
+            request,
+            file_paths,
+            token,
+            started_at,
+            import_target,
+            options,
+            database_type,
+            emit,
+        )
+        .await
+    } else {
+        execute_sql_file_paths_sequential(
+            state,
+            request,
+            file_paths,
+            token,
+            started_at,
+            import_target,
+            options,
+            database_type,
+            emit,
+        )
+        .await
+    }
+}
+
+/// Sequential execution: files run one after another in the given order, sharing
+/// a single `MySqlSqlFileExecutor` (one DB connection) and cumulative progress.
+async fn execute_sql_file_paths_sequential(
+    state: &AppState,
+    request: &SqlFileRequest,
+    file_paths: &[&Path],
+    token: CancellationToken,
+    started_at: Instant,
+    import_target: Option<SqlFileImportTarget>,
+    options: SqlParsingOptions,
+    database_type: Option<DatabaseType>,
+    mut emit: impl FnMut(SqlFileProgress),
+) -> Result<(), String> {
     let mut progress = SqlFileExecutionProgress::new();
     let mut mysql_executor = match MySqlSqlFileExecutor::build(state, request, import_target.as_ref()).await {
         Ok(executor) => executor,
@@ -391,74 +435,245 @@ pub async fn execute_sql_file_paths(
         }
     };
     for file_path in file_paths {
-        let mut splitter = StreamingSqlFileSplitter::new(database_type, options);
-        let mut pending_statements = Vec::with_capacity(SQL_FILE_STATEMENT_BATCH_SIZE);
-        let mut decoder = match SqlFileStreamDecoder::open(file_path).await {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                emit(sql_file_execution_error_progress(&request.execution_id, started_at, &progress, error.clone()));
-                return Err(error);
-            }
-        };
-
-        loop {
-            let chunk = match decoder.next_chunk().await {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    emit(sql_file_progress(
-                        &request.execution_id,
-                        SqlFileStatus::Error,
-                        progress.statement_index,
-                        progress.success_count,
-                        progress.failure_count,
-                        progress.affected_rows,
-                        started_at,
-                        "",
-                        Some(error.clone()),
-                    ));
-                    return Err(error);
-                }
-            };
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if token.is_cancelled() {
-                emit_sql_file_terminal_progress(request, &token, started_at, &progress, &mut emit);
-                return Ok(());
-            }
-            pending_statements.extend(splitter.push_chunk(&chunk));
-            if pending_statements.len() < SQL_FILE_STATEMENT_BATCH_SIZE {
-                continue;
-            }
-            execute_sql_file_statement_batch(
-                state,
-                request,
-                &token,
-                started_at,
-                &mut pending_statements,
-                import_target.as_ref(),
-                mysql_executor.as_mut(),
-                &mut progress,
-                &mut emit,
-            )
-            .await?;
+        if token.is_cancelled() {
+            break;
         }
-
-        pending_statements.extend(splitter.finish());
-        execute_sql_file_statement_batch(
+        run_single_sql_file(
             state,
             request,
+            file_path,
             &token,
             started_at,
-            &mut pending_statements,
             import_target.as_ref(),
-            mysql_executor.as_mut(),
+            options,
+            database_type,
             &mut progress,
             &mut emit,
+            &mut mysql_executor,
         )
         .await?;
     }
     emit_sql_file_terminal_progress(request, &token, started_at, &progress, &mut emit);
+    Ok(())
+}
+
+/// Parallel execution: each file runs concurrently with its own DB connection.
+/// Each file future sends its local progress through a channel; a collector on
+/// the main task aggregates per-file counts and emits cumulative events. Using
+/// `join_all` (instead of `JoinSet::spawn`) lets the file futures borrow
+/// `state: &AppState` without requiring `'static`.
+async fn execute_sql_file_paths_parallel(
+    state: &AppState,
+    request: &SqlFileRequest,
+    file_paths: &[&Path],
+    token: CancellationToken,
+    started_at: Instant,
+    import_target: Option<SqlFileImportTarget>,
+    options: SqlParsingOptions,
+    database_type: Option<DatabaseType>,
+    mut emit: impl FnMut(SqlFileProgress),
+) -> Result<(), String> {
+    use futures::future::join_all;
+    use tokio::sync::mpsc;
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<(usize, SqlFileProgress)>();
+    let file_count = file_paths.len();
+    let mut had_error = false;
+
+    let mut futures = Vec::with_capacity(file_count);
+    for (idx, file_path) in file_paths.iter().enumerate() {
+        // Give each parallel file a unique sub-execution_id so statement-level
+        // execution_ids (used for query cancellation registration) don't collide
+        // across files running concurrently. Without this, two files both
+        // registering "exec:statement:0" would cause the second registration to
+        // cancel the first file's statement token.
+        let mut file_request = request.clone();
+        file_request.execution_id = format!("{}:file:{}", request.execution_id, idx);
+        let path = (*file_path).to_path_buf();
+        let token = token.clone();
+        let import_target = import_target.clone();
+        let tx = tx.clone();
+        let exec_id = file_request.execution_id.clone();
+        futures.push(async move {
+            let mut local_progress = SqlFileExecutionProgress::new();
+            let mut mysql_executor = match MySqlSqlFileExecutor::build(state, &file_request, import_target.as_ref()).await {
+                Ok(executor) => executor,
+                Err(error) => {
+                    let p = sql_file_progress(
+                        &exec_id,
+                        SqlFileStatus::Error,
+                        0,
+                        0,
+                        1,
+                        0,
+                        started_at,
+                        "",
+                        Some(error.clone()),
+                    );
+                    let _ = tx.send((idx, p));
+                    return Err(error);
+                }
+            };
+            let tx_for_emit = tx.clone();
+            let mut emit_fn = move |progress: SqlFileProgress| {
+                let _ = tx_for_emit.send((idx, progress));
+            };
+            run_single_sql_file(
+                state,
+                &file_request,
+                &path,
+                &token,
+                started_at,
+                import_target.as_ref(),
+                options,
+                database_type,
+                &mut local_progress,
+                &mut emit_fn,
+                &mut mysql_executor,
+            )
+            .await
+        });
+    }
+    // Drop the last sender so `rx.recv()` returns None after all file futures finish.
+    drop(tx);
+
+    // Drive all file futures concurrently while the collector drains the channel.
+    // We interleave them with `select!` so progress events are emitted in real time.
+    let collect = async {
+        let mut per_file = vec![SqlFileExecutionProgress::new(); file_count];
+        while let Some((idx, p)) = rx.recv().await {
+            per_file[idx].statement_index = p.statement_index;
+            per_file[idx].success_count = p.success_count;
+            per_file[idx].failure_count = p.failure_count;
+            per_file[idx].affected_rows = p.affected_rows;
+            if matches!(p.status, SqlFileStatus::Error) && !request.continue_on_error {
+                had_error = true;
+                token.cancel();
+            }
+            let total = per_file.iter().fold(SqlFileExecutionProgress::new(), |mut acc, f| {
+                acc.statement_index += f.statement_index;
+                acc.success_count += f.success_count;
+                acc.failure_count += f.failure_count;
+                acc.affected_rows += f.affected_rows;
+                acc
+            });
+            emit(sql_file_progress(
+                &request.execution_id,
+                p.status,
+                total.statement_index,
+                total.success_count,
+                total.failure_count,
+                total.affected_rows,
+                started_at,
+                &p.statement_summary,
+                p.error,
+            ));
+        }
+        per_file
+    };
+    let (results, per_file) = tokio::join!(join_all(futures), collect);
+    for res in results {
+        if res.is_err() {
+            had_error = true;
+        }
+    }
+
+    let total = per_file.iter().fold(SqlFileExecutionProgress::new(), |mut acc, f| {
+        acc.statement_index += f.statement_index;
+        acc.success_count += f.success_count;
+        acc.failure_count += f.failure_count;
+        acc.affected_rows += f.affected_rows;
+        acc
+    });
+    emit_sql_file_terminal_progress(request, &token, started_at, &total, &mut emit);
+    if had_error && !request.continue_on_error {
+        return Err("One or more SQL files failed during parallel execution".to_string());
+    }
+    Ok(())
+}
+
+/// Execute a single SQL file: stream-decode, split into statement batches, and
+/// execute each batch, updating `progress` and calling `emit` along the way.
+/// `mysql_executor` is borrowed so both sequential (shared) and parallel (owned)
+/// callers can pass their executor.
+async fn run_single_sql_file(
+    state: &AppState,
+    request: &SqlFileRequest,
+    file_path: &Path,
+    token: &CancellationToken,
+    started_at: Instant,
+    import_target: Option<&SqlFileImportTarget>,
+    options: SqlParsingOptions,
+    database_type: Option<DatabaseType>,
+    progress: &mut SqlFileExecutionProgress,
+    emit: &mut impl FnMut(SqlFileProgress),
+    mysql_executor: &mut Option<MySqlSqlFileExecutor>,
+) -> Result<(), String> {
+    let mut splitter = StreamingSqlFileSplitter::new(database_type, options);
+    let mut pending_statements = Vec::with_capacity(SQL_FILE_STATEMENT_BATCH_SIZE);
+    let mut decoder = match SqlFileStreamDecoder::open(file_path).await {
+        Ok(decoder) => decoder,
+        Err(error) => {
+            emit(sql_file_execution_error_progress(&request.execution_id, started_at, progress, error.clone()));
+            return Err(error);
+        }
+    };
+
+    loop {
+        let chunk = match decoder.next_chunk().await {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                emit(sql_file_progress(
+                    &request.execution_id,
+                    SqlFileStatus::Error,
+                    progress.statement_index,
+                    progress.success_count,
+                    progress.failure_count,
+                    progress.affected_rows,
+                    started_at,
+                    "",
+                    Some(error.clone()),
+                ));
+                return Err(error);
+            }
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        if token.is_cancelled() {
+            return Ok(());
+        }
+        pending_statements.extend(splitter.push_chunk(&chunk));
+        if pending_statements.len() < SQL_FILE_STATEMENT_BATCH_SIZE {
+            continue;
+        }
+        execute_sql_file_statement_batch(
+            state,
+            request,
+            token,
+            started_at,
+            &mut pending_statements,
+            import_target,
+            mysql_executor.as_mut(),
+            progress,
+            emit,
+        )
+        .await?;
+    }
+
+    pending_statements.extend(splitter.finish());
+    execute_sql_file_statement_batch(
+        state,
+        request,
+        token,
+        started_at,
+        &mut pending_statements,
+        import_target,
+        mysql_executor.as_mut(),
+        progress,
+        emit,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1659,6 +1874,52 @@ mod tests {
     }
 
     #[test]
+    fn sql_file_request_defaults_to_sequential_when_parallel_omitted() {
+        let json = r#"{
+            "executionId": "exec-1",
+            "connectionId": "conn-1",
+            "database": "db1",
+            "filePath": "/tmp/a.sql",
+            "continueOnError": false
+        }"#;
+        let request: SqlFileRequest = serde_json::from_str(json).unwrap();
+        assert!(!request.parallel, "parallel must default to false (sequential)");
+    }
+
+    #[test]
+    fn sql_file_request_accepts_camel_case_parallel_field() {
+        let json = r#"{
+            "executionId": "exec-1",
+            "connectionId": "conn-1",
+            "database": "db1",
+            "filePath": "/tmp/a.sql",
+            "continueOnError": true,
+            "parallel": true
+        }"#;
+        let request: SqlFileRequest = serde_json::from_str(json).unwrap();
+        assert!(request.parallel);
+        assert!(request.continue_on_error);
+    }
+
+    #[test]
+    fn sql_file_request_serializes_parallel_camel_case() {
+        let request = SqlFileRequest {
+            execution_id: "exec-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "db1".to_string(),
+            file_path: "/tmp/a.sql".to_string(),
+            continue_on_error: true,
+            parallel: true,
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["executionId"], "exec-1");
+        assert_eq!(value["filePath"], "/tmp/a.sql");
+        assert_eq!(value["continueOnError"], true);
+        assert_eq!(value["parallel"], true);
+        assert!(value.get("execution_id").is_none());
+    }
+
+    #[test]
     fn supports_connection_level_database_bootstrap_for_mysql_like_targets() {
         assert!(crate::sql::supports_connection_level_database_bootstrap_target(&DatabaseType::Mysql, None));
         assert!(crate::sql::supports_connection_level_database_bootstrap_target(&DatabaseType::Doris, None));
@@ -1759,5 +2020,22 @@ mod tests {
         assert_eq!(mysql_use_database_target("SELECT 1"), None);
         assert_eq!(mysql_use_database_target("USE"), None);
         assert_eq!(mysql_use_database_target("USE app_db SELECT 1"), None);
+    }
+
+    #[test]
+    fn parallel_file_sub_execution_ids_produce_unique_statement_ids() {
+        // Reproduces the collision that caused parallel execution to fail:
+        // without per-file namespacing, two files both running statement 0
+        // would generate the same execution_id and cancel each other's tokens.
+        let parent_id = "exec-1";
+        let file0_id = format!("{parent_id}:file:0");
+        let file1_id = format!("{parent_id}:file:1");
+
+        let stmt_0_file_0 = sql_file_statement_execution_id(&file0_id, 0);
+        let stmt_0_file_1 = sql_file_statement_execution_id(&file1_id, 0);
+
+        assert_ne!(stmt_0_file_0, stmt_0_file_1, "statement ids must not collide across parallel files");
+        assert_eq!(stmt_0_file_0, "exec-1:file:0:statement:0");
+        assert_eq!(stmt_0_file_1, "exec-1:file:1:statement:0");
     }
 }

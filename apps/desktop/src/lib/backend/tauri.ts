@@ -2552,6 +2552,8 @@ export interface SqlFileRequest {
   database: string;
   filePath: string;
   continueOnError: boolean;
+  /** When true, multiple files execute concurrently. Default: false (sequential). */
+  parallel?: boolean;
 }
 
 export interface SqlFilePreview {
@@ -2589,6 +2591,11 @@ export async function executeSqlFiles(request: SqlFileRequest, filePaths: string
 
 export async function cancelSqlFileExecution(executionId: string): Promise<boolean> {
   return invoke("cancel_sql_file_execution", { executionId });
+}
+
+// Desktop mode uses local filesystem paths — no server temp files to release.
+export async function releaseSqlFileUploads(_filePaths: string[]): Promise<number> {
+  return 0;
 }
 
 export async function listenSqlFileProgress(handler: (progress: SqlFileProgress) => void): Promise<UnlistenFn> {

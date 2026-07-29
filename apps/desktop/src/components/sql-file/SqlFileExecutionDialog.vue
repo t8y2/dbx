@@ -18,10 +18,11 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
-import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
+import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, releaseSqlFileUploads, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
+import { canMoveDown, canMoveUp, moveFile, removeFile } from "./sqlFileListReorder";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -83,6 +84,7 @@ const database = ref("");
 const databaseOptions = ref<string[]>([]);
 const loadingDatabases = ref(false);
 const continueOnError = ref(false);
+const parallelExecution = ref(false);
 
 const running = ref(false);
 const cancelling = ref(false);
@@ -203,15 +205,25 @@ function resetExecution() {
   refreshedTarget.value = false;
 }
 
+// Generation token for loadPreviews: when the dialog closes or a new selection
+// starts, stale async preview loads can detect they're outdated and bail out
+// before overwriting state.
+let loadPreviewsGeneration = 0;
+
 function resetState() {
   previews.value = [];
   selectingFile.value = false;
   loadingPreview.value = false;
+  // Invalidate any in-flight loadPreviews so a stale async completion can't
+  // overwrite the freshly reset state (e.g. user closed and reopened the
+  // dialog while previews were still loading).
+  loadPreviewsGeneration++;
   connectionId.value = resolveInitialConnectionId();
   database.value = "";
   databaseOptions.value = [];
   loadingDatabases.value = false;
   continueOnError.value = false;
+  parallelExecution.value = false;
   resetExecution();
 }
 
@@ -259,21 +271,45 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
   return previewWebSqlFile(file);
 }
 
+// Generation token declared above resetState; used by loadPreviews below.
 async function loadPreviews(filesOrPaths: Array<string | File>) {
+  const generation = ++loadPreviewsGeneration;
   loadingPreview.value = true;
   previews.value = [];
   resetExecution();
   try {
     const nextPreviews: SqlFilePreview[] = [];
     for (const fileOrPath of filesOrPaths) {
+      if (generation !== loadPreviewsGeneration) return;
       nextPreviews.push(await previewSelectedSqlFile(fileOrPath));
     }
+    if (generation !== loadPreviewsGeneration) return;
     previews.value = nextPreviews;
   } catch (e: any) {
+    if (generation !== loadPreviewsGeneration) return;
     toast(e?.message || String(e), 5000);
   } finally {
-    loadingPreview.value = false;
+    if (generation === loadPreviewsGeneration) {
+      loadingPreview.value = false;
+    }
   }
+}
+
+async function collectSqlFilesFromDir(dirPath: string): Promise<string[]> {
+  const { readDir } = await import("@tauri-apps/plugin-fs");
+  const { join } = await import("@tauri-apps/api/path");
+  const entries = await readDir(dirPath);
+  const result: string[] = [];
+  for (const entry of entries) {
+    const entryPath = await join(dirPath, entry.name);
+    if (entry.isDirectory) {
+      const nested = await collectSqlFilesFromDir(entryPath);
+      result.push(...nested);
+    } else if (entry.name.toLowerCase().endsWith(".sql")) {
+      result.push(entryPath);
+    }
+  }
+  return result;
 }
 
 async function selectFile() {
@@ -300,6 +336,27 @@ async function selectFile() {
   }
 }
 
+async function selectFolder() {
+  if (running.value || !isTauriRuntime()) return;
+  selectingFile.value = true;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const dirPath = await open({ directory: true, multiple: false });
+    if (typeof dirPath === "string" && dirPath) {
+      const sqlFiles = await collectSqlFilesFromDir(dirPath);
+      if (sqlFiles.length === 0) {
+        toast(t("sqlFile.noSqlFilesInFolder"), 5000);
+      } else {
+        await loadPreviews(sqlFiles.sort());
+      }
+    }
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
+  } finally {
+    selectingFile.value = false;
+  }
+}
+
 async function handleFileInputChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files ?? []);
@@ -311,6 +368,26 @@ async function handleFileInputChange(event: Event) {
   } finally {
     selectingFile.value = false;
   }
+}
+
+// --- File list reordering (up/down buttons) ---
+// NOTE: We deliberately do NOT use HTML5 drag-to-reorder here. Tauri 2's
+// default `dragDropEnabled: true` intercepts native drag-drop events at the
+// webview level, which prevents HTML5 drag events from firing inside the
+// desktop app. Button-driven reordering works identically in web and desktop.
+function moveFileUp(index: number) {
+  if (running.value) return;
+  previews.value = moveFile(previews.value, index, -1);
+}
+
+function moveFileDown(index: number) {
+  if (running.value) return;
+  previews.value = moveFile(previews.value, index, 1);
+}
+
+function removeFileAt(index: number) {
+  if (running.value) return;
+  previews.value = removeFile(previews.value, index);
 }
 
 async function listenProgress(id: string, handler: (next: SqlFileProgress) => void, onError?: (error: Error) => void): Promise<() => void> {
@@ -378,7 +455,6 @@ async function startExecution() {
       resolveTerminalProgress = resolve;
       rejectTerminalProgress = reject;
     });
-    let completedSuccessfully = false;
     const unlisten = await listenProgress(
       batchId,
       (next) => {
@@ -403,6 +479,7 @@ async function startExecution() {
           database: database.value.trim(),
           filePath: previews.value[0]!.filePath,
           continueOnError: continueOnError.value,
+          parallel: parallelExecution.value,
         },
         previews.value.map((item) => item.filePath),
       );
@@ -413,13 +490,16 @@ async function startExecution() {
       if (terminal.status === "cancelled") {
         cancelRequested.value = true;
       }
-      completedSuccessfully = terminal.status === "done";
     } finally {
       executionStarted.value = false;
       unlisten();
     }
 
-    if (completedSuccessfully) await refreshTargetAfterImport();
+    // Refresh the database tree after the batch settles, regardless of
+    // success or failure. Even when some statements fail (continueOnError),
+    // earlier statements may have already created objects that should appear
+    // in the tree. Skip refresh only when the user explicitly cancelled.
+    if (!cancelRequested.value) await refreshTargetAfterImport();
   } catch (e: any) {
     terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
     terminalError.value = e?.message || String(e);
@@ -478,7 +558,20 @@ watch(sqlConnections, () => {
 watch(
   open,
   (value) => {
-    if (!value) return;
+    if (!value) {
+      // Dialog closed: release uploaded temp files in web mode that were never
+      // executed. If execution already ran, the backend deleted them in
+      // finalize_execution — calling release again is a harmless no-op.
+      // Skip while running so the executor doesn't lose files mid-batch.
+      if (!isDesktopRuntime && !running.value && previews.value.length > 0) {
+        const paths = previews.value.map((item) => item.filePath);
+        void releaseSqlFileUploads(paths).catch(() => {});
+      }
+      // Invalidate any in-flight preview loads so they don't overwrite state
+      // after the dialog has closed.
+      loadPreviewsGeneration++;
+      return;
+    }
     if (running.value) return;
     resetState();
     if (connectionId.value) {
@@ -504,16 +597,20 @@ watch(
         </DialogTitle>
       </DialogHeader>
 
-      <!-- Keep terminal actions reachable while long previews and errors scroll inside the viewport. -->
-      <div class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3">
-        <div class="min-w-0 space-y-3">
-          <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+      <!-- Outer layer does not scroll; the script preview viewer scrolls internally. -->
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-hidden py-3">
+        <div class="flex min-h-0 min-w-0 flex-col gap-3" :class="{ 'flex-1': previews.length, 'shrink-0': !previews.length }">
+          <div class="shrink-0 text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {{ t("sqlFile.file") }}
           </div>
 
-          <div class="flex items-center gap-2">
+          <div class="flex shrink-0 items-center gap-2">
             <input ref="fileInput" type="file" accept=".sql,text/sql" multiple class="hidden" @change="handleFileInputChange" />
-            <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
+            <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.browse')" />
+            <Button v-if="isDesktopRuntime" variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFolder">
+              <FolderOpen class="w-3.5 h-3.5 mr-1.5" />
+              {{ t("sqlFile.folder") }}
+            </Button>
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
               <FolderOpen v-else class="w-3.5 h-3.5 mr-1.5" />
@@ -521,29 +618,39 @@ watch(
             </Button>
           </div>
 
-          <div v-if="previews.length" class="flex min-w-0 gap-3">
-            <div v-if="previews.length > 1" class="flex w-48 shrink-0 flex-col rounded-md border bg-muted/20">
+          <div v-if="previews.length" class="flex min-h-0 min-w-0 flex-1 gap-3">
+            <div v-if="previews.length > 1" class="flex w-52 shrink-0 flex-col rounded-md border bg-muted/20">
               <div class="flex shrink-0 items-center gap-2 rounded-t-md border-b bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
                 <FileCode class="w-3.5 h-3.5 shrink-0" />
                 <span class="font-medium">{{ previews.length }}</span>
               </div>
-              <!-- Keep this max-height in sync with the preview viewer so the list
-                   matches the preview pane height and scrolls internally. -->
-              <div class="max-h-[min(46vh,420px)] min-h-0 overflow-y-auto p-1">
-                <Tooltip v-for="item in previews" :key="item.filePath">
+              <div class="min-h-0 flex-1 overflow-y-auto p-1">
+                <Tooltip v-for="(item, index) in previews" :key="item.filePath">
                   <TooltipTrigger as-child>
-                    <button type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs" :class="item.filePath === activePreviewPath ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:bg-muted'" @click="activePreviewPath = item.filePath">
+                    <div class="group flex w-full items-center gap-1 rounded px-1.5 py-1.5 text-left text-xs" :class="item.filePath === activePreviewPath ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:bg-muted'" @click="activePreviewPath = item.filePath">
+                      <span class="shrink-0 text-[10px] font-mono w-4 text-right text-muted-foreground/60">{{ index + 1 }}</span>
                       <FileCode class="w-3.5 h-3.5 shrink-0" />
                       <span class="min-w-0 flex-1 truncate">{{ displayFileNames.get(item.filePath) ?? item.fileName }}</span>
-                    </button>
+                      <div class="flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100">
+                        <button type="button" class="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent" :disabled="running || !canMoveUp(previews, index)" :title="t('sqlFile.moveUp')" @click.stop="moveFileUp(index)">
+                          <ArrowUp class="w-3 h-3" />
+                        </button>
+                        <button type="button" class="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent" :disabled="running || !canMoveDown(previews, index)" :title="t('sqlFile.moveDown')" @click.stop="moveFileDown(index)">
+                          <ArrowDown class="w-3 h-3" />
+                        </button>
+                        <button type="button" class="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-destructive" :disabled="running" :title="t('common.remove')" @click.stop="removeFileAt(index)">
+                          <X class="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
                   </TooltipTrigger>
                   <TooltipContent side="right" class="max-w-[360px] break-all">{{ tooltipText(item) }}</TooltipContent>
                 </Tooltip>
               </div>
             </div>
 
-            <div v-if="activePreview" class="min-w-0 flex-1 flex flex-col">
-              <div class="flex items-center justify-between gap-3 rounded-t-md border border-b-0 px-3 py-2 text-xs bg-muted/40">
+            <div v-if="activePreview" class="flex min-h-0 min-w-0 flex-1 flex-col">
+              <div class="flex shrink-0 items-center justify-between gap-3 rounded-t-md border border-b-0 px-3 py-2 text-xs bg-muted/40">
                 <div class="min-w-0 flex items-center gap-2">
                   <FileCode class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                   <span class="font-medium truncate">{{ displayFileNames.get(activePreview.filePath) ?? activePreview.fileName }}</span>
@@ -554,7 +661,7 @@ watch(
                   <span>{{ formatBytes(activePreview.sizeBytes) }}</span>
                 </div>
               </div>
-              <div class="sql-file-preview-viewer flex max-w-full overflow-auto bg-muted/15 text-xs rounded-b-md border border-t-0" :class="previews.length === 1 ? 'min-h-56 max-h-[min(46vh,420px)]' : 'min-h-0 max-h-[min(46vh,420px)]'">
+              <div class="sql-file-preview-viewer flex min-h-0 max-w-full flex-1 overflow-auto bg-muted/15 text-xs rounded-b-md border border-t-0">
                 <div class="sticky left-0 z-10 select-none border-r bg-background/95 px-2 py-3 text-right font-mono leading-5 text-muted-foreground/70">
                   <div v-for="n in previewLineCount(activePreview)" :key="n">{{ n }}</div>
                 </div>
@@ -564,7 +671,7 @@ watch(
           </div>
         </div>
 
-        <div class="min-w-0 space-y-3">
+        <div class="min-w-0 shrink-0 space-y-3">
           <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {{ t("sqlFile.target") }}
           </div>
@@ -610,9 +717,21 @@ watch(
           </div>
         </div>
 
-        <div class="min-w-0 space-y-2.5">
+        <div class="min-w-0 shrink-0 space-y-2.5">
           <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {{ t("sqlFile.options") }}
+          </div>
+
+          <div class="flex items-center gap-3 text-xs">
+            <span class="text-muted-foreground shrink-0">{{ t("sqlFile.executionMode") }}</span>
+            <div class="flex rounded-md border overflow-hidden">
+              <button type="button" class="px-3 py-1 transition-colors" :class="!parallelExecution ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted'" :disabled="running" @click="parallelExecution = false">
+                {{ t("sqlFile.sequential") }}
+              </button>
+              <button type="button" class="px-3 py-1 transition-colors border-l" :class="parallelExecution ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted'" :disabled="running" @click="parallelExecution = true">
+                {{ t("sqlFile.parallel") }}
+              </button>
+            </div>
           </div>
 
           <button type="button" class="flex items-center gap-2 text-xs text-left" :disabled="running" @click="continueOnError = !continueOnError">
@@ -622,7 +741,7 @@ watch(
           </button>
         </div>
 
-        <div v-if="running || terminalStatus !== 'idle' || progress" class="min-w-0 space-y-3">
+        <div v-if="running || terminalStatus !== 'idle' || progress" class="min-w-0 shrink-0 space-y-3">
           <div class="flex items-center justify-between gap-3 text-xs">
             <div class="flex items-center gap-1.5 min-w-0" :class="statusTone">
               <component :is="statusIcon" class="w-3.5 h-3.5 shrink-0" :class="{ 'animate-spin': running }" />

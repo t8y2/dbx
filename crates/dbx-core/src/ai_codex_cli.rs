@@ -1320,6 +1320,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn codex_process_env_uses_system_proxy_when_not_configured() {
         let config = codex_config("default");
         let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
@@ -1331,6 +1332,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn explicit_codex_proxy_env_overrides_system_proxy() {
         let mut config = codex_config("default");
         config.codex_cli_env.insert("http_proxy".to_string(), "http://manual-http:9800".to_string());
@@ -1345,6 +1347,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn inherited_proxy_env_overrides_system_proxy() {
         let config = codex_config("default");
         let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };

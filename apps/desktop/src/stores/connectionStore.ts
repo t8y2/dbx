@@ -5149,9 +5149,21 @@ export const useConnectionStore = defineStore("connection", () => {
     return 0;
   }
 
-  function completionAssistantColumns(candidates: CompletionAssistantCandidate[], table: string, schema?: string): SqlCompletionColumn[] {
+  function completionAssistantIdentifierMatches(candidate: string, requested: string, quoted?: boolean): boolean {
+    return quoted ? candidate === requested : candidate.toLowerCase() === requested.toLowerCase();
+  }
+
+  function completionAssistantColumns(candidates: CompletionAssistantCandidate[], table: string, schema?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): SqlCompletionColumn[] {
+    const requestedSchema = schema?.trim();
     return candidates
-      .filter((candidate) => candidate.kind === "column")
+      .filter((candidate) => {
+        if (candidate.kind !== "column") return false;
+        const parentName = candidate.parent_name?.trim();
+        if (parentName && !completionAssistantIdentifierMatches(parentName, table, context?.tableQuoted)) return false;
+        const parentSchema = candidate.parent_schema?.trim() || candidate.schema?.trim();
+        if (requestedSchema && parentSchema && !completionAssistantIdentifierMatches(parentSchema, requestedSchema, context?.schemaQuoted)) return false;
+        return true;
+      })
       .map((candidate) => ({
         name: candidate.name,
         table: candidate.parent_name ?? table,
@@ -5216,7 +5228,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return objects;
   }
 
-  async function listCompletionAssistantColumns(connectionId: string, database: string, table: string, schema?: string): Promise<SqlCompletionColumn[]> {
+  async function listCompletionAssistantColumns(connectionId: string, database: string, table: string, schema?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): Promise<SqlCompletionColumn[]> {
     const response = await completionAssistantSearch({
       connection_id: connectionId,
       database,
@@ -5228,7 +5240,7 @@ export const useConnectionStore = defineStore("connection", () => {
       parent_name: table,
       match_mode: "prefix",
     });
-    const columns = completionAssistantColumns(response.candidates, table, schema);
+    const columns = completionAssistantColumns(response.candidates, table, schema, context);
     if (columns.length > 0) indexCompletionColumns(connectionId, database, table, schema, columns);
     return columns;
   }
@@ -5769,7 +5781,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (!usesOracleCurrentSchema && !catalog) {
             try {
-              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema);
+              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema, context);
               if (assistantColumns.length > 0) {
                 completionColumnsCache.value[cacheKey] = assistantColumns.map((column) => ({
                   name: column.name,

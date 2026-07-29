@@ -230,6 +230,27 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "status"]);
   });
 
+  it("keeps a SELECT-list alias scoped when comma-separated sources follow the cursor", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["tb_kpi_set_score", ["id", "score_name"].map((name) => ({ name, table: "tb_kpi_set_score" }))],
+      ["tb_kpi_set_score_detail", ["id", "fk_kpi_set_score_id", "detail_score"].map((name) => ({ name, table: "tb_kpi_set_score_detail" }))],
+      ["tb_kpi_set_score_relationship", ["priority", "exclude_users_account"].map((name) => ({ name, table: "tb_kpi_set_score_relationship" }))],
+    ]);
+
+    const { context, items } = semanticCompletion(
+      `SELECT
+  b.|
+FROM tb_kpi_set_score a,
+  tb_kpi_set_score_detail b
+WHERE a.id = b.fk_kpi_set_score_id`,
+      { columnsByTable },
+      { databaseType: "mysql", dialect: "mysql" },
+    );
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "tb_kpi_set_score_detail", alias: "b" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "fk_kpi_set_score_id", "detail_score"]);
+  });
+
   it("completes correlation columns for generic PostgreSQL table functions", () => {
     const { context, items } = semanticCompletion("SELECT * FROM generate_series(1, 3) g(value) WHERE g.|", {}, { databaseType: "postgres", dialect: "postgres" });
 

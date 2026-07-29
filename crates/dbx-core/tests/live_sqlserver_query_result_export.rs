@@ -114,6 +114,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         date_time_format: None,
         export_table_name: None,
         export_column_types: None,
+        column_comments: None,
         numeric_column_right_align: false,
     };
     let rows_exported = AtomicU64::new(0);

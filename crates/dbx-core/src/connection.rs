@@ -998,12 +998,10 @@ impl AppState {
         pool: PoolKind,
         config: &ConnectionConfig,
     ) {
-        // mq_registry only exists in mq-admin builds; other builds reject MQ connects before a pool is created.
         #[cfg(feature = "mq-admin")]
         if matches!(pool, PoolKind::MessageQueue) {
             self.mq_registry.drop_connection(connection_id).await;
         }
-        if matches!(pool, PoolKind::Mqtt(_)) {}
         self.reset_connection_transport_for_config(connection_id, config).await;
         close_pool_kind_with_timeout(pool_key, pool).await;
     }
@@ -3612,9 +3610,9 @@ pub async fn close_pool_kind(pool: PoolKind) {
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
-        PoolKind::Mqtt(_client) => {
-            // MQTT client is dropped when the pool is shut down,
-            // which stops the background event loop.
+        PoolKind::Mqtt(client) => {
+            // 发送 DISCONNECT 并等待事件循环任务结束
+            client.disconnect().await;
         }
     }
 }

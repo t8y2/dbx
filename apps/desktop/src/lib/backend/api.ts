@@ -705,3 +705,4 @@ export const mqttPublish = forward("mqttPublish");
 export const mqttListTopics = forward("mqttListTopics");
 export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
+export const mqttClearMessages = forward("mqttClearMessages");

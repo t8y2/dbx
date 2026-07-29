@@ -1791,6 +1791,7 @@ pub fn run() {
             commands::mqtt_cmd::mqtt_list_topics,
             commands::mqtt_cmd::mqtt_get_topic_tree,
             commands::mqtt_cmd::mqtt_get_messages,
+            commands::mqtt_cmd::mqtt_clear_messages,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,

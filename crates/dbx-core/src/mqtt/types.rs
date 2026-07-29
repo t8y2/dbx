@@ -3,51 +3,36 @@
 use serde::{Deserialize, Serialize};
 
 /// MQTT 协议版本
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MqttProtocolVersion {
     V3,
     V4,
+    #[default]
     V5,
 }
 
-impl Default for MqttProtocolVersion {
-    fn default() -> Self {
-        Self::V5
-    }
-}
-
 /// 传输层协议
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MqttTransport {
+    #[default]
     Tcp,
     #[serde(rename = "websocket")]
     WebSocket,
 }
 
-impl Default for MqttTransport {
-    fn default() -> Self {
-        Self::Tcp
-    }
-}
-
 /// 认证方式
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum MqttAuth {
     #[serde(rename = "none")]
+    #[default]
     None,
     #[serde(rename = "password")]
     Password { username: String, password: String },
     #[serde(rename = "certificate")]
     Certificate { ca_cert_path: Option<String>, client_cert_path: Option<String>, client_key_path: Option<String> },
-}
-
-impl Default for MqttAuth {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl MqttAuth {
@@ -199,6 +184,15 @@ pub struct MqttPublishRequest {
     pub retain: bool,
 }
 
+/// MQTT 消息方向
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MqttMessageDirection {
+    Sent,
+    #[default]
+    Received,
+}
+
 /// 接收到的 MQTT 消息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,6 +209,9 @@ pub struct MqttMessage {
     pub retain: bool,
     /// 消息接收时间（毫秒时间戳）
     pub received_at_ms: u64,
+    /// 消息方向：sent（发出的）或 received（接收的）
+    #[serde(default)]
+    pub direction: MqttMessageDirection,
 }
 
 /// Topic 树节点

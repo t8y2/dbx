@@ -61,3 +61,9 @@ pub async fn get_messages(
 ) -> Result<Vec<MqttMessage>, String> {
     Ok(client.get_messages(topic_filter, limit).await)
 }
+
+/// 清空消息缓冲区
+pub async fn clear_messages(client: &Arc<MqttClient>) -> Result<(), String> {
+    client.clear_messages().await;
+    Ok(())
+}

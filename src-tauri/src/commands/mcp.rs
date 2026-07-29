@@ -419,6 +419,7 @@ fn user_shell_node_candidate() -> Option<NodeRuntimeCandidate> {
     Some(NodeRuntimeCandidate { node_path })
 }
 
+#[allow(dead_code)]
 fn prefixed_output_path(output: &str, prefix: &str) -> Option<PathBuf> {
     output
         .lines()
@@ -657,6 +658,7 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+#[allow(clippy::needless_return)]
 pub(crate) fn locate_command(command: &str) -> Option<String> {
     #[cfg(windows)]
     {
@@ -727,6 +729,7 @@ struct CommandOutput {
     stderr: String,
 }
 
+#[allow(clippy::needless_return)]
 fn command_output(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
     let direct = run_command(command, args);
     if direct.as_ref().is_ok_and(|output| output.success) {
@@ -812,6 +815,7 @@ fn windows_common_command_dirs() -> Vec<std::path::PathBuf> {
 #[cfg(windows)]
 fn run_command_through_user_shell(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
     let script = windows_command_script(command, args);
+    #[allow(clippy::needless_borrows_for_generic_args)]
     let mut output = run_command("powershell.exe", &["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])?;
     output.stdout = stdout_after_shell_marker(&output.stdout);
     Ok(output)

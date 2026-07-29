@@ -94,3 +94,10 @@ pub async fn mqtt_get_messages(
     let client = get_mqtt_client(&state, &connection_id).await?;
     service::get_messages(&client, topic_filter.as_deref(), limit.unwrap_or(50)).await
 }
+
+/// 清空消息历史记录
+#[tauri::command]
+pub async fn mqtt_clear_messages(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
+    let client = get_mqtt_client(&state, &connection_id).await?;
+    service::clear_messages(&client).await
+}

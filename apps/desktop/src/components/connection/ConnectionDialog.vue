@@ -18,7 +18,6 @@ import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, Da
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { MqttConnectionConfig } from "@/types/mqtt";
-import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
 import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";

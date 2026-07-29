@@ -2594,8 +2594,7 @@ pub async fn execute_statements_in_transaction_on_pool(
             | PoolKind::Turso(_)
             | PoolKind::SqlServer(_)
             | PoolKind::Agent(_) => TxPath::Explicit,
-            PoolKind::MessageQueue | PoolKind::Mqtt(_) | PoolKind::Nacos => TxPath::None,
-            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
+            PoolKind::MessageQueue | PoolKind::Mqtt(_) | PoolKind::Nacos | PoolKind::HBase(_) => TxPath::None,
             #[cfg(feature = "duckdb-bundled")]
             PoolKind::DuckDb(_)
             | PoolKind::DuckDbWorker(_)

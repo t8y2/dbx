@@ -77,7 +77,7 @@ prometheus-parse = "=0.2.5"
 futures = "0.3"
 iana-time-zone = "0.1"
 mongodb = "3.2.5"
-rumqttc = "0.24"
+rumqttc = { version = "0.24", features = ["websocket"] }
 russh = "0.60"
 pageant = "0.2"
 portpicker = "0.1.1"

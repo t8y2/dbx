@@ -35,6 +35,8 @@ export interface MqttBrokerInfo {
   subscriptionCount: number;
 }
 
+export type MqttMessageDirection = "sent" | "received";
+
 export interface MqttMessage {
   topic: string;
   payloadBase64: string;
@@ -42,6 +44,8 @@ export interface MqttMessage {
   qos: number;
   retain: boolean;
   receivedAtMs: number;
+  /** 消息方向：sent（发出的）或 received（接收的） */
+  direction?: MqttMessageDirection;
 }
 
 export interface MqttTopicNode {

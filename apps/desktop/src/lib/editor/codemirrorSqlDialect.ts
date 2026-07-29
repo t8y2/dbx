@@ -44,9 +44,7 @@ const DBX_COMMON_SQL_KEYWORDS = [
   "COPY",
   "EXPORT",
   "IMPORT",
-]
-  .join(" ")
-  .toLowerCase();
+].join(" ");
 
 const POSTGRES_PLPGSQL_KEYWORDS = "PERFORM";
 const POSTGRES_PLPGSQL_TYPES = "RECORD JSON JSONB";
@@ -152,6 +150,9 @@ export function postgresKeywordSyntaxTerms(keywords: string): string {
 }
 
 function standardSqlKeywordSyntaxTerms(langSql: CodeMirrorSqlLanguageModule): string {
+  // CodeMirror keeps StandardSQL's default vocabulary internal and exposes an
+  // empty StandardSQL.spec. SQLite is its smallest public standard-SQL
+  // superset, so remove SQLite-only terms to retain the standard vocabulary.
   return (langSql.SQLite.spec.keywords || "")
     .split(/\s+/)
     .filter((keyword) => keyword && !CODEMIRROR_SQLITE_EXTENSION_KEYWORDS.has(keyword))
@@ -181,10 +182,11 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   const isClickHouse = databaseType === "clickhouse" || dialectName === "clickhouse";
   const baseKeywords = isClickHouse ? standardSqlKeywordSyntaxTerms(langSql) : isPostgres ? postgresKeywordSyntaxTerms(baseDialect.spec.keywords || "") : baseDialect.spec.keywords || "";
   const baseTypes = isClickHouse ? STANDARD_SQL_TYPES : baseDialect.spec.types || "";
+  const commonKeywords = isClickHouse ? DBX_COMMON_SQL_KEYWORDS.toLowerCase() : DBX_COMMON_SQL_KEYWORDS;
 
   return langSql.SQLDialect.define({
     ...baseDialect.spec,
-    keywords: [baseKeywords, DBX_COMMON_SQL_KEYWORDS, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
+    keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
     builtin: [baseDialect.spec.builtin || "", isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? POSTGRES_PLPGSQL_BUILTIN : ""].filter(Boolean).join(" ") || undefined,
     ...(isClickHouse

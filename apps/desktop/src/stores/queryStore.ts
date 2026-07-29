@@ -1198,6 +1198,10 @@ export const useQueryStore = defineStore("query", () => {
       }
     }
 
+    if (isDetachedTabRuntime() && tabs.value.length > 0) {
+      throw new Error("Detached tab windows cannot create additional tabs");
+    }
+
     const id = uuid();
     const tab: QueryTab = {
       id,

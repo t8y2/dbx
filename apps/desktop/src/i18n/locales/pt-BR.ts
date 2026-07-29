@@ -896,6 +896,8 @@ export default withEnglishFallback({
     openTabs: "Abas abertas",
     fixedTabs: "Abas fixadas",
     openDataTabs: "Tabelas abertas",
+    detachedWindowSingleTab: "Esta janela contém uma única aba separada. Abra novas abas na janela principal.",
+    detachedWindowBlocksAppClose: "Salve ou feche a janela de aba separada destacada antes de sair do DBX.",
     moveTabWindowBusy: "Aguarde a operação atual terminar antes de mover a aba",
     moveTabWindowPersistFailed: "A aba foi movida, mas não foi possível salvar o estado da janela principal: {message}",
     closeTabWindowFailed: "Não foi possível fechar a janela da aba: {message}",

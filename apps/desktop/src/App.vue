@@ -82,7 +82,7 @@ import {
   switchToTabIndexFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { isPreviewTab, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
-import { isDetachedTabWindow, prepareTabWindow, receiveDetachedTab } from "@/lib/tabs/tabWindow";
+import { checkDetachedWindowsBeforeAppClose, focusDetachedTabWindow, isDetachedTabWindow, listenForDetachedAppCloseChecks, prepareTabWindow, receiveDetachedTab } from "@/lib/tabs/tabWindow";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
 import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
@@ -168,7 +168,9 @@ const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 let unlistenDetachedTabTransfer: UnlistenFn | undefined;
 let unlistenDetachedWindowClose: UnlistenFn | undefined;
+let unlistenDetachedAppCloseCheck: UnlistenFn | undefined;
 let detachedWindowClosing = false;
+let detachedAppCloseCheckPending = false;
 const needsAuth = ref(!isDesktop);
 const authenticated = ref(isDesktop);
 const setupRequired = ref(false);
@@ -345,8 +347,35 @@ function requestActiveEditorExecuteInNewResultTab() {
 
 const dialogs = useDialogSources();
 const { getDatabaseOptions } = useDatabaseOptions();
-const { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, onStructureEditorSaved, openTableTarget } = useNavigationTargets(dialogs);
+const { openLineageTarget: openLineageTargetInMainWindow, openDatabaseSearchTarget: openDatabaseSearchTargetInMainWindow, openDiagramTarget: openDiagramTargetInMainWindow, onStructureEditorSaved, openTableTarget: openTableTargetInMainWindow } = useNavigationTargets(dialogs);
 const { onExecuteSql, onReloadData, onPaginate, onSort } = useDataGridActions(activeTab);
+
+function rejectDetachedTabCreation(): boolean {
+  if (!isDetachedWindow) return false;
+  toast(t("tabs.detachedWindowSingleTab"), 3000);
+  return true;
+}
+
+async function openTableTarget(...args: Parameters<typeof openTableTargetInMainWindow>) {
+  if (rejectDetachedTabCreation()) return;
+  return openTableTargetInMainWindow(...args);
+}
+
+async function openLineageTarget(...args: Parameters<typeof openLineageTargetInMainWindow>) {
+  if (rejectDetachedTabCreation()) return;
+  return openLineageTargetInMainWindow(...args);
+}
+
+async function openDatabaseSearchTarget(...args: Parameters<typeof openDatabaseSearchTargetInMainWindow>) {
+  if (rejectDetachedTabCreation()) return;
+  return openDatabaseSearchTargetInMainWindow(...args);
+}
+
+async function openDiagramTarget(...args: Parameters<typeof openDiagramTargetInMainWindow>) {
+  if (rejectDetachedTabCreation()) return;
+  return openDiagramTargetInMainWindow(...args);
+}
+
 const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openTableTarget,
   openSqlFilePath,
@@ -783,6 +812,30 @@ function continuePendingAppCloseAfterSave() {
 }
 
 function requestAppClose(action: AppCloseAction, options: AppCloseRequestOptions = {}) {
+  void requestAppCloseAfterDetachedCheck(action, options);
+}
+
+async function requestAppCloseAfterDetachedCheck(action: AppCloseAction, options: AppCloseRequestOptions) {
+  if (action === "quit" && isDesktop && !isDetachedWindow) {
+    if (detachedAppCloseCheckPending) return;
+    detachedAppCloseCheckPending = true;
+    try {
+      const result = await checkDetachedWindowsBeforeAppClose();
+      const blockingWindowLabel = result.dirtyWindowLabels[0] ?? result.unresponsiveWindowLabels[0];
+      if (blockingWindowLabel) {
+        await focusDetachedTabWindow(blockingWindowLabel);
+        toast(t("tabs.detachedWindowBlocksAppClose"), 5000);
+        return;
+      }
+    } catch (error) {
+      console.warn("[DBX][detached-tab:app-close-check:error]", error);
+      toast(t("tabs.detachedWindowBlocksAppClose"), 5000);
+      return;
+    } finally {
+      detachedAppCloseCheckPending = false;
+    }
+  }
+
   pendingCloseActionChoice.value = !!options.requireCloseActionChoice;
   if (queryStore.hasDirtyTabs) {
     pendingAppCloseAction.value = action;
@@ -1264,6 +1317,7 @@ function openConnectionSettings(connectionId: string, initialTab: ConfigTab = "c
 }
 
 async function newQuery() {
+  if (rejectDetachedTabCreation()) return;
   const target = resolveNewQueryTarget({
     activeTab: activeTab.value,
     selectedTreeNode: findTreeNodeById(connectionStore.treeNodes, connectionStore.selectedTreeNodeId),
@@ -1464,6 +1518,7 @@ function onViewTableDdl(table: SqlObjectNavigationTarget) {
 }
 
 function onEditTableStructure(table: SqlObjectNavigationTarget) {
+  if (rejectDetachedTabCreation()) return;
   const target = tableTargetFromActiveTab(table);
   // Keep view-like objects out of the table editor even if a stale menu dispatches this event.
   if (!target || sqlObjectNavigationSourceKind(table)) return;
@@ -2022,7 +2077,8 @@ async function initApp({ restoreOpenTabs = true }: { restoreOpenTabs?: boolean }
 async function openTabWindow(tabId: string) {
   const tab = queryStore.tabs.find((item) => item.id === tabId);
   if (!tab) return;
-  if (tab.isExecuting || tab.isCancelling || tab.isExplaining || tab.resultTotalRowCountLoading) {
+  const isBusy = (item: QueryTab) => !!(item.isExecuting || item.isCancelling || item.isExplaining || item.resultTotalRowCountLoading);
+  if (isBusy(tab)) {
     toast(t("tabs.moveTabWindowBusy"), 5000);
     return;
   }
@@ -2031,12 +2087,18 @@ async function openTabWindow(tabId: string) {
   let persistSuspended = false;
   try {
     preparedWindow = await prepareTabWindow(tab.id, tabDisplayTitle(tab, t));
-    const dataGridSnapshots = captureDataGridPendingSnapshotsForTab(tab.id);
-    const selection = tab.editorSelection;
+    const currentTab = queryStore.tabs.find((item) => item.id === tab.id);
+    if (!currentTab || isBusy(currentTab)) {
+      await preparedWindow.abort();
+      if (currentTab) toast(t("tabs.moveTabWindowBusy"), 5000);
+      return;
+    }
+    const dataGridSnapshots = captureDataGridPendingSnapshotsForTab(currentTab.id);
+    const selection = currentTab.editorSelection;
     const selectionFrom = Math.min(selection?.anchor ?? 0, selection?.head ?? 0);
     const selectionTo = Math.max(selection?.anchor ?? 0, selection?.head ?? 0);
     const tabRuntimeState =
-      tab.id === queryStore.activeTabId
+      currentTab.id === queryStore.activeTabId
         ? {
             activeOutputView: activeOutputView.value,
             selectedSql: selectedSql.value,
@@ -2046,12 +2108,12 @@ async function openTabWindow(tabId: string) {
             // 非活动标签没有 App 级运行态；按主窗口重新激活该标签时的
             // 既有语义恢复默认结果视图，并从标签自身的编辑器选区派生状态。
             activeOutputView: "result" as const,
-            selectedSql: tab.sql.slice(selectionFrom, selectionTo),
+            selectedSql: currentTab.sql.slice(selectionFrom, selectionTo),
             cursorPos: selection?.head ?? 0,
           };
     queryStore.suspendOpenTabsPersist();
     persistSuspended = true;
-    const transferState = queryStore.takeTabForTransfer(tab.id);
+    const transferState = queryStore.takeTabForTransfer(currentTab.id);
     if (!transferState) {
       await queryStore.resumeOpenTabsPersist({ flush: false });
       persistSuspended = false;
@@ -2063,6 +2125,8 @@ async function openTabWindow(tabId: string) {
       await preparedWindow.transfer({
         tab: transferState.tab,
         ...tabRuntimeState,
+        explainMode: explainMode.value,
+        blockDangerousRedisCommands: blockDangerousRedisCommands.value,
         dataGridSnapshots,
       });
     } catch (error) {
@@ -2072,7 +2136,7 @@ async function openTabWindow(tabId: string) {
       await preparedWindow.abort();
       throw error;
     }
-    clearDataGridPendingSnapshotsForTab(tab.id);
+    clearDataGridPendingSnapshotsForTab(currentTab.id);
     const resumePersist = queryStore.resumeOpenTabsPersist();
     persistSuspended = false;
     let persistError: unknown;
@@ -2210,12 +2274,15 @@ onMounted(async () => {
       await closeDetachedTab();
     });
     await initApp({ restoreOpenTabs: false });
+    unlistenDetachedAppCloseCheck = await listenForDetachedAppCloseChecks(() => queryStore.hasDirtyTabs);
     unlistenDetachedTabTransfer = await receiveDetachedTab((payload) => {
       restoreDataGridPendingSnapshotsForTab(payload.tab.id, payload.dataGridSnapshots);
       queryStore.adoptTransferredTab(payload.tab);
       activeOutputView.value = payload.activeOutputView;
       selectedSql.value = payload.selectedSql;
       cursorPos.value = payload.cursorPos;
+      explainMode.value = payload.explainMode;
+      blockDangerousRedisCommands.value = payload.blockDangerousRedisCommands;
       restoreActiveConnectionContext();
       return () => {
         queryStore.takeTabForTransfer(payload.tab.id);
@@ -2286,6 +2353,7 @@ onMounted(async () => {
 onUnmounted(() => {
   unlistenDetachedTabTransfer?.();
   unlistenDetachedWindowClose?.();
+  unlistenDetachedAppCloseCheck?.();
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
   if (updateCheckTimer) {

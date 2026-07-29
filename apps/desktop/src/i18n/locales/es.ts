@@ -896,6 +896,8 @@ export default withEnglishFallback({
     openTabs: "Pestañas abiertas",
     fixedTabs: "Pestañas fijadas",
     openDataTabs: "Tablas abiertas",
+    detachedWindowSingleTab: "Esta ventana contiene una sola pestaña separada. Abra pestañas nuevas desde la ventana principal.",
+    detachedWindowBlocksAppClose: "Guarde o cierre la ventana de pestaña separada resaltada antes de salir de DBX.",
     moveTabWindowBusy: "Espere a que finalice la operación actual antes de mover la pestaña",
     moveTabWindowPersistFailed: "La pestaña se movió, pero no se pudo guardar el estado de la ventana principal: {message}",
     closeTabWindowFailed: "No se pudo cerrar la ventana de la pestaña: {message}",

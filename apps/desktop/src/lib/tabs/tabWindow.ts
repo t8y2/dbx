@@ -1,11 +1,14 @@
 import { emitTo, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getAllWebviewWindows, getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { DataGridPendingSnapshotTransfer } from "@/composables/useDataGridEditor";
 import type { QueryTab } from "@/types/database";
 
 const DETACHED_TRANSFER_PARAM = "dbxDetachedTransfer";
 const TRANSFER_TIMEOUT_MS = 15_000;
+const APP_CLOSE_CHECK_TIMEOUT_MS = 2_000;
+const APP_CLOSE_CHECK_EVENT = "dbx-detached-tab-app-close-check";
+const APP_CLOSE_STATUS_EVENT = "dbx-detached-tab-app-close-status";
 const openingWindows = new Map<string, Promise<PreparedTabWindow>>();
 
 interface TransferSignal {
@@ -17,12 +20,28 @@ export interface DetachedTabTransferPayload extends TransferSignal {
   activeOutputView: "result" | "summary" | "explain" | "chart";
   selectedSql: string;
   cursorPos: number;
+  explainMode: "explain" | "autotrace";
+  blockDangerousRedisCommands: boolean;
   dataGridSnapshots: DataGridPendingSnapshotTransfer[];
 }
 
 interface TransferAcknowledgement extends TransferSignal {
   ok: boolean;
   message?: string;
+}
+
+interface DetachedAppCloseCheck {
+  requestId: string;
+}
+
+interface DetachedAppCloseStatus extends DetachedAppCloseCheck {
+  windowLabel: string;
+  dirty: boolean;
+}
+
+export interface DetachedAppCloseCheckResult {
+  dirtyWindowLabels: string[];
+  unresponsiveWindowLabels: string[];
 }
 
 interface EventWaiter<T> {
@@ -208,4 +227,66 @@ export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransfe
     unlisten();
     throw error;
   }
+}
+
+export async function listenForDetachedAppCloseChecks(hasDirtyTabs: () => boolean): Promise<UnlistenFn> {
+  if (!isDetachedTabWindow()) throw new Error("Detached tab transfer context is missing");
+  const currentWindow = getCurrentWebviewWindow();
+  return currentWindow.listen<DetachedAppCloseCheck>(APP_CLOSE_CHECK_EVENT, async (event) => {
+    await emitTo("main", APP_CLOSE_STATUS_EVENT, {
+      requestId: event.payload.requestId,
+      windowLabel: currentWindow.label,
+      dirty: hasDirtyTabs(),
+    } satisfies DetachedAppCloseStatus).catch(() => {});
+  });
+}
+
+export async function checkDetachedWindowsBeforeAppClose(): Promise<DetachedAppCloseCheckResult> {
+  if (!isTauriRuntime()) return { dirtyWindowLabels: [], unresponsiveWindowLabels: [] };
+  const detachedWindows = (await getAllWebviewWindows()).filter((window) => window.label.startsWith("detached-tab-"));
+  if (detachedWindows.length === 0) return { dirtyWindowLabels: [], unresponsiveWindowLabels: [] };
+
+  const requestId = crypto.randomUUID();
+  const pendingLabels = new Set(detachedWindows.map((window) => window.label));
+  const dirtyWindowLabels = new Set<string>();
+  const unresponsiveWindowLabels = new Set<string>();
+  const mainWindow = getCurrentWebviewWindow();
+  let settleStatuses: () => void = () => {};
+  const statusesSettled = new Promise<void>((resolve) => {
+    settleStatuses = resolve;
+  });
+  const timer = setTimeout(settleStatuses, APP_CLOSE_CHECK_TIMEOUT_MS);
+  const unlisten = await mainWindow.listen<DetachedAppCloseStatus>(APP_CLOSE_STATUS_EVENT, (event) => {
+    if (event.payload.requestId !== requestId || !pendingLabels.has(event.payload.windowLabel)) return;
+    pendingLabels.delete(event.payload.windowLabel);
+    if (event.payload.dirty) dirtyWindowLabels.add(event.payload.windowLabel);
+    if (pendingLabels.size === 0) settleStatuses();
+  });
+
+  await Promise.all(
+    detachedWindows.map(async (window) => {
+      try {
+        await emitTo(window.label, APP_CLOSE_CHECK_EVENT, { requestId } satisfies DetachedAppCloseCheck);
+      } catch {
+        unresponsiveWindowLabels.add(window.label);
+        pendingLabels.delete(window.label);
+      }
+    }),
+  );
+  if (pendingLabels.size > 0) await statusesSettled;
+  clearTimeout(timer);
+  unlisten();
+  pendingLabels.forEach((label) => unresponsiveWindowLabels.add(label));
+
+  return {
+    dirtyWindowLabels: [...dirtyWindowLabels],
+    unresponsiveWindowLabels: [...unresponsiveWindowLabels],
+  };
+}
+
+export async function focusDetachedTabWindow(windowLabel: string): Promise<void> {
+  const detachedWindow = await WebviewWindow.getByLabel(windowLabel);
+  if (!detachedWindow) return;
+  await detachedWindow.show().catch(() => {});
+  await detachedWindow.setFocus().catch(() => {});
 }

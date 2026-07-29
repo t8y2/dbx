@@ -895,6 +895,8 @@ export default withEnglishFallback({
     openTabs: "已開啟的分頁",
     fixedTabs: "固定分頁",
     openDataTabs: "已開啟的資料表",
+    detachedWindowSingleTab: "此視窗僅承載一個分離分頁，請在主視窗中開啟新分頁",
+    detachedWindowBlocksAppClose: "請先儲存或關閉已聚焦的分離分頁視窗，再退出 DBX",
     moveTabWindowBusy: "請等待目前分頁操作完成後再移動",
     moveTabWindowPersistFailed: "分頁已移動，但儲存主視窗狀態失敗：{message}",
     closeTabWindowFailed: "關閉分頁視窗失敗：{message}",

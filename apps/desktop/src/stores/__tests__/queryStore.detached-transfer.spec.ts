@@ -79,4 +79,24 @@ describe("queryStore detached tab transfer", () => {
     expect(closed).toBe(true);
     expect(store.tabs.some((tab) => tab.id === tabId)).toBe(false);
   });
+
+  it("rejects additional tabs after a detached window adopts its owner tab", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.stubGlobal("window", { location: { search: "?dbxDetachedTransfer=transfer-1" } });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    store.adoptTransferredTab({
+      id: "detached-owner",
+      title: "Query",
+      connectionId: "pg-1",
+      database: "app",
+      sql: "select 1",
+      mode: "query",
+      isExecuting: false,
+    });
+
+    expect(() => store.createTab("pg-1", "app", "Another query", "query")).toThrow("Detached tab windows cannot create additional tabs");
+    expect(store.tabs.map((tab) => tab.id)).toEqual(["detached-owner"]);
+  });
 });

@@ -917,6 +917,8 @@ export default {
     openTabs: "Open tabs",
     fixedTabs: "Fixed tabs",
     openDataTabs: "Open tables",
+    detachedWindowSingleTab: "This window contains one detached tab. Open new tabs from the main window.",
+    detachedWindowBlocksAppClose: "Save or close the highlighted detached tab window before quitting DBX.",
     moveTabWindowBusy: "Wait for the current tab operation to finish before moving it",
     moveTabWindowPersistFailed: "Tab moved, but failed to save the main window state: {message}",
     closeTabWindowFailed: "Failed to close the tab window: {message}",

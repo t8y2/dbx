@@ -894,6 +894,8 @@ export default withEnglishFallback({
     openTabs: "Schede aperte",
     fixedTabs: "Schede bloccate",
     openDataTabs: "Tabelle aperte",
+    detachedWindowSingleTab: "Questa finestra contiene una sola scheda separata. Apri nuove schede dalla finestra principale.",
+    detachedWindowBlocksAppClose: "Salva o chiudi la finestra della scheda separata evidenziata prima di uscire da DBX.",
     moveTabWindowBusy: "Attendi il completamento dell'operazione corrente prima di spostare la scheda",
     moveTabWindowPersistFailed: "La scheda è stata spostata, ma non è stato possibile salvare lo stato della finestra principale: {message}",
     closeTabWindowFailed: "Impossibile chiudere la finestra della scheda: {message}",

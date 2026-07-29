@@ -5,6 +5,7 @@
   "windows": ["main", "detached-*"],
   "permissions": [
     "core:default",
+    "core:webview:allow-create-webview-window",
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-set-theme",

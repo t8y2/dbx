@@ -918,6 +918,8 @@ export default withEnglishFallback({
     openTabs: "已打开的标签页",
     fixedTabs: "固定标签页",
     openDataTabs: "已打开的数据表",
+    detachedWindowSingleTab: "此窗口仅承载一个分离标签页，请在主窗口中打开新标签页",
+    detachedWindowBlocksAppClose: "请先保存或关闭已聚焦的分离标签页窗口，再退出 DBX",
     moveTabWindowBusy: "请等待当前标签页操作完成后再移动",
     moveTabWindowPersistFailed: "标签页已移动，但保存主窗口状态失败：{message}",
     closeTabWindowFailed: "关闭标签页窗口失败：{message}",

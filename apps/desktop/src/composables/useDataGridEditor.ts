@@ -115,13 +115,25 @@ interface PendingChangesSnapshot {
   scroll?: { top: number; left: number };
   columnCount: number;
   rowCount: number;
+  undoStack?: PendingChangesHistorySnapshot[];
+  redoStack?: PendingChangesHistorySnapshot[];
+}
+
+interface PendingChangesHistorySnapshotTransfer {
+  newRows: CellValue[][];
+  quickEntryDraftRow?: CellValue[];
+  dirtyRows: Array<[number, Array<[number, CellValue]>]>;
+  deletedRows: number[];
+  transactionActive?: boolean;
 }
 
 export interface DataGridPendingSnapshotTransfer {
   key: string;
-  snapshot: Omit<PendingChangesSnapshot, "dirtyRows" | "deletedRows"> & {
+  snapshot: Omit<PendingChangesSnapshot, "dirtyRows" | "deletedRows" | "undoStack" | "redoStack"> & {
     dirtyRows: Array<[number, Array<[number, CellValue]>]>;
     deletedRows: number[];
+    undoStack?: PendingChangesHistorySnapshotTransfer[];
+    redoStack?: PendingChangesHistorySnapshotTransfer[];
   };
 }
 
@@ -148,6 +160,36 @@ const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
 const MAX_PENDING_CHANGES_HISTORY = 100;
+
+function clonePendingChangesHistorySnapshot(snapshot: PendingChangesHistorySnapshot): PendingChangesHistorySnapshot {
+  return {
+    newRows: snapshot.newRows.map((row) => [...row]),
+    quickEntryDraftRow: snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : undefined,
+    dirtyRows: new Map([...snapshot.dirtyRows].map(([row, columns]) => [row, new Map(columns)])),
+    deletedRows: new Set(snapshot.deletedRows),
+    transactionActive: snapshot.transactionActive,
+  };
+}
+
+function serializePendingChangesHistorySnapshot(snapshot: PendingChangesHistorySnapshot): PendingChangesHistorySnapshotTransfer {
+  return {
+    newRows: snapshot.newRows.map((row) => [...row]),
+    quickEntryDraftRow: snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : undefined,
+    dirtyRows: [...snapshot.dirtyRows].map(([row, columns]) => [row, [...columns]]),
+    deletedRows: [...snapshot.deletedRows],
+    transactionActive: snapshot.transactionActive,
+  };
+}
+
+function deserializePendingChangesHistorySnapshot(snapshot: PendingChangesHistorySnapshotTransfer): PendingChangesHistorySnapshot {
+  return {
+    newRows: snapshot.newRows.map((row) => [...row]),
+    quickEntryDraftRow: snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : undefined,
+    dirtyRows: new Map(snapshot.dirtyRows.map(([row, columns]) => [row, new Map(columns)])),
+    deletedRows: new Set(snapshot.deletedRows),
+    transactionActive: snapshot.transactionActive,
+  };
+}
 
 function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][], appendedFromRowCount?: number): boolean {
   if (!previousRows) return true;
@@ -201,6 +243,8 @@ export function captureDataGridPendingSnapshotsForTab(tabId: string): DataGridPe
         quickEntryDraftRow: snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : undefined,
         dirtyRows: [...snapshot.dirtyRows].map(([row, columns]) => [row, [...columns]]),
         deletedRows: [...snapshot.deletedRows],
+        undoStack: snapshot.undoStack?.map(serializePendingChangesHistorySnapshot),
+        redoStack: snapshot.redoStack?.map(serializePendingChangesHistorySnapshot),
       },
     });
   }
@@ -216,6 +260,8 @@ export function restoreDataGridPendingSnapshotsForTab(tabId: string, transfers: 
       quickEntryDraftRow: transfer.snapshot.quickEntryDraftRow ? [...transfer.snapshot.quickEntryDraftRow] : undefined,
       dirtyRows: new Map(transfer.snapshot.dirtyRows.map(([row, columns]) => [row, new Map(columns)])),
       deletedRows: new Set(transfer.snapshot.deletedRows),
+      undoStack: transfer.snapshot.undoStack?.map(deserializePendingChangesHistorySnapshot),
+      redoStack: transfer.snapshot.redoStack?.map(deserializePendingChangesHistorySnapshot),
     });
   }
 }
@@ -283,6 +329,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       restoredEditingCell = !!cached.editingCell;
       restoredTransactionActive = cached.transactionActive === true;
       pendingScrollRestore = cached.scroll;
+      undoStack.value = cached.undoStack?.map(clonePendingChangesHistorySnapshot) ?? [];
+      redoStack.value = cached.redoStack?.map(clonePendingChangesHistorySnapshot) ?? [];
       pendingChangesCache.delete(key);
     } else {
       pendingChangesCache.delete(key);
@@ -1502,6 +1550,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       scroll,
       columnCount: result.value.columns.length,
       rowCount: result.value.rows.length,
+      undoStack: undoStack.value.map(clonePendingChangesHistorySnapshot),
+      redoStack: redoStack.value.map(clonePendingChangesHistorySnapshot),
     });
   }
 

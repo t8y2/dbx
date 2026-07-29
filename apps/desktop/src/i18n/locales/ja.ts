@@ -893,6 +893,8 @@ export default withEnglishFallback({
     openTabs: "開いているタブ",
     fixedTabs: "固定タブ",
     openDataTabs: "開いているテーブル",
+    detachedWindowSingleTab: "このウィンドウには分離したタブを1つだけ表示できます。新しいタブはメインウィンドウで開いてください。",
+    detachedWindowBlocksAppClose: "DBXを終了する前に、フォーカスされた分離タブウィンドウを保存または閉じてください。",
     moveTabWindowBusy: "現在の操作が完了してからタブを移動してください",
     moveTabWindowPersistFailed: "タブは移動しましたが、メインウィンドウの状態を保存できませんでした：{message}",
     closeTabWindowFailed: "タブウィンドウを閉じられませんでした：{message}",

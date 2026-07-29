@@ -19,14 +19,26 @@ pub async fn ai_test_connection(
 }
 
 #[tauri::command]
-pub async fn ai_list_models(config: AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    let config = resolve_cli_provider_config(config);
+pub async fn ai_list_models(state: State<'_, Arc<AppState>>, config: AiConfig) -> Result<Vec<AiModelInfo>, String> {
+    let mut config = resolve_cli_provider_config(config);
+    merge_global_max_retries(
+        &mut config,
+        state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
     dbx_core::ai::list_models_core(&config).await
 }
 
 #[tauri::command]
-pub async fn ai_resolve_model_effort(config: AiConfig, model_id: String) -> Result<AiEffortCapability, String> {
-    let config = resolve_cli_provider_config(config);
+pub async fn ai_resolve_model_effort(
+    state: State<'_, Arc<AppState>>,
+    config: AiConfig,
+    model_id: String,
+) -> Result<AiEffortCapability, String> {
+    let mut config = resolve_cli_provider_config(config);
+    merge_global_max_retries(
+        &mut config,
+        state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
     dbx_core::ai::resolve_model_effort_core(&config, &model_id).await
 }
 

@@ -301,17 +301,31 @@ pub async fn ai_test_connection(
     Ok(Json(result))
 }
 
-pub async fn ai_list_models(Json(body): Json<AiListModelsRequest>) -> Result<Json<Vec<AiModelInfo>>, AppError> {
-    reject_web_unsupported_ai_provider(&body.config)?;
-    let result = dbx_core::ai::list_models_core(&body.config).await.map_err(AppError::from)?;
+pub async fn ai_list_models(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<AiListModelsRequest>,
+) -> Result<Json<Vec<AiModelInfo>>, AppError> {
+    let mut config = body.config;
+    reject_web_unsupported_ai_provider(&config)?;
+    dbx_core::ai::merge_global_max_retries(
+        &mut config,
+        state.app.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
+    let result = dbx_core::ai::list_models_core(&config).await.map_err(AppError::from)?;
     Ok(Json(result))
 }
 
 pub async fn ai_resolve_model_effort(
+    State(state): State<Arc<WebState>>,
     Json(body): Json<AiResolveModelEffortRequest>,
 ) -> Result<Json<AiEffortCapability>, AppError> {
-    reject_web_unsupported_ai_provider(&body.config)?;
-    let result = dbx_core::ai::resolve_model_effort_core(&body.config, &body.model_id).await.map_err(AppError::from)?;
+    let mut config = body.config;
+    reject_web_unsupported_ai_provider(&config)?;
+    dbx_core::ai::merge_global_max_retries(
+        &mut config,
+        state.app.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES),
+    );
+    let result = dbx_core::ai::resolve_model_effort_core(&config, &body.model_id).await.map_err(AppError::from)?;
     Ok(Json(result))
 }
 

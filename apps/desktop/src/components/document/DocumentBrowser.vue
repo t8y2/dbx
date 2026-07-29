@@ -255,18 +255,15 @@ const gridResult = computed<QueryResult>(() => {
 
   return { columns, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
-const documentFilterFieldOptions = computed(() => {
-  if (documentStoreProvider.value.kind === "elasticsearch") {
-    const names = [...elasticsearchMappingFields.value.map((field) => field.name), ...gridResult.value.columns, "_id", "_routing"];
-    return [...new Set(names.filter(Boolean))];
-  }
-  const nestedFields = documentFieldPathOptionsFromDocuments(documents.value);
-  return nestedFields.length > 0 ? nestedFields : gridResult.value.columns;
-});
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
+const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
+const elasticsearchFilterFieldNames = computed(() => {
+  const names = [...elasticsearchMappingFields.value.map((field) => field.name), ...gridResult.value.columns, "_id", "_routing"];
+  return [...new Set(names.filter(Boolean))];
+});
 const documentFilterFieldTree = computed<DocumentFieldPathNode[]>(() => {
   if (documentStoreProvider.value.kind === "elasticsearch") {
-    return elasticsearchFieldPathTreeFromFieldNames(documentFilterFieldOptions.value);
+    return elasticsearchFieldPathTreeFromFieldNames(elasticsearchFilterFieldNames.value, elasticsearchFieldTypes.value);
   }
   const tree = documentFieldPathTreeFromDocuments(documents.value);
   if (tree.length > 0) return tree;
@@ -280,9 +277,17 @@ const documentFilterFieldTree = computed<DocumentFieldPathNode[]>(() => {
     children: [],
   }));
 });
+const documentFilterFieldOptions = computed(() => {
+  if (documentStoreProvider.value.kind === "elasticsearch") {
+    return flattenDocumentFieldPathTree(documentFilterFieldTree.value)
+      .filter((field) => field.selectable)
+      .map((field) => field.path);
+  }
+  const nestedFields = documentFieldPathOptionsFromDocuments(documents.value);
+  return nestedFields.length > 0 ? nestedFields : gridResult.value.columns;
+});
 const documentFilterFieldRows = computed<DocumentFilterFieldTreeRow[]>(() => visibleDocumentFilterFieldRows(documentFilterFieldTree.value));
 const documentFilterFieldByPath = computed(() => new Map(flattenDocumentFieldPathTree(documentFilterFieldTree.value).map((node) => [node.path, node])));
-const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
 const documentStructuredFilterCount = computed(() => {
   if (!appliedDocumentFilter.value) return 0;
   if (documentStoreProvider.value.kind !== "elasticsearch") return 1;
@@ -341,11 +346,18 @@ function setDocumentFilterFieldPopoverOpen(ruleId: string, open: boolean) {
   if (open) next[ruleId] = true;
   else delete next[ruleId];
   documentFilterFieldPopoverOpen.value = next;
+  if (open) {
+    void nextTick(() => document.getElementById(documentFilterFieldSearchInputId(ruleId))?.focus());
+  }
   if (!open) {
     const search = { ...documentFilterFieldSearch.value };
     delete search[ruleId];
     documentFilterFieldSearch.value = search;
   }
+}
+
+function documentFilterFieldSearchInputId(ruleId: string): string {
+  return `document-filter-field-search-${ruleId}`;
 }
 
 function documentFilterFieldSearchActive(ruleId: string): boolean {
@@ -1705,7 +1717,7 @@ defineExpose({ focusSearch });
                           <div class="border-b bg-muted/40 px-2 py-1.5 text-xs font-medium text-foreground">{{ t("grid.filterBuilderColumn") }}</div>
                           <div class="relative border-b p-2">
                             <Search class="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                            <Input v-model="documentFilterFieldSearch[rule.id]" autofocus class="h-7 pl-7 text-xs" :placeholder="t('grid.filterBuilderSearchColumns')" />
+                            <Input :id="documentFilterFieldSearchInputId(rule.id)" v-model="documentFilterFieldSearch[rule.id]" autofocus class="h-7 pl-7 text-xs" :placeholder="t('grid.filterBuilderSearchColumns')" />
                           </div>
                           <div class="max-h-72 overflow-auto py-1">
                             <div v-for="field in documentFilterFieldRowsForRule(rule.id)" :key="field.path" class="flex items-center gap-1 px-1.5">

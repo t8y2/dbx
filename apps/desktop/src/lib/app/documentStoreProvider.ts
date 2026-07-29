@@ -154,17 +154,17 @@ export function documentFieldPathOptionsFromDocuments(documents: readonly Record
   return flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(documents)).map((node) => node.path);
 }
 
-export function elasticsearchFieldPathTreeFromFieldNames(fieldNames: readonly string[]): DocumentFieldPathNode[] {
+export function elasticsearchFieldPathTreeFromFieldNames(fieldNames: readonly string[], fieldTypes: ReadonlyMap<string, string> = new Map()): DocumentFieldPathNode[] {
   const rootNodes: ElasticsearchFieldPathAccumulatorNode[] = [];
   const rootByKey = new Map<string, ElasticsearchFieldPathAccumulatorNode>();
 
   for (const fieldName of fieldNames) {
-    appendElasticsearchFieldPath(rootNodes, rootByKey, fieldName);
+    appendElasticsearchFieldPath(rootNodes, rootByKey, fieldName, fieldTypes.get(fieldName));
   }
   return finalizeElasticsearchFieldPathNodes(rootNodes);
 }
 
-function appendElasticsearchFieldPath(nodes: ElasticsearchFieldPathAccumulatorNode[], byKey: Map<string, ElasticsearchFieldPathAccumulatorNode>, fieldName: string): void {
+function appendElasticsearchFieldPath(nodes: ElasticsearchFieldPathAccumulatorNode[], byKey: Map<string, ElasticsearchFieldPathAccumulatorNode>, fieldName: string, fieldType?: string): void {
   const segments = fieldName.split(".");
   if (segments.some((segment) => !segment)) return;
   let siblingNodes = nodes;
@@ -174,10 +174,15 @@ function appendElasticsearchFieldPath(nodes: ElasticsearchFieldPathAccumulatorNo
   segments.forEach((segment, segmentIndex) => {
     currentPath = currentPath ? `${currentPath}.${segment}` : segment;
     const node = ensureElasticsearchFieldPathNode(siblingNodes, siblingByKey, segment, currentPath);
-    if (segmentIndex === segments.length - 1) node.selectable = true;
+    if (segmentIndex === segments.length - 1) node.selectable = !isElasticsearchContainerFieldType(fieldType);
     siblingNodes = node.children;
     siblingByKey = node.childByKey;
   });
+}
+
+function isElasticsearchContainerFieldType(fieldType?: string): boolean {
+  const normalizedType = fieldType?.trim().toLowerCase();
+  return normalizedType === "object" || normalizedType === "nested";
 }
 
 function ensureElasticsearchFieldPathNode(nodes: ElasticsearchFieldPathAccumulatorNode[], byKey: Map<string, ElasticsearchFieldPathAccumulatorNode>, key: string, path: string): ElasticsearchFieldPathAccumulatorNode {

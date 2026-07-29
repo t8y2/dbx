@@ -197,17 +197,7 @@ test("searches nested document field paths", () => {
 test("builds searchable Elasticsearch mapping field paths", () => {
   const deepValuePath = "deep_nested_example.level_1.level_2.level_3.level_4.level_5.level_6.value";
   const deepKeywordPath = `${deepValuePath}.keyword`;
-  const fieldNames = [
-    "amount",
-    "buyer.contact.email",
-    "buyer.contact.email.keyword",
-    "deep_nested_example.level_1.level_2.level_3.level_4.level_5.level_6.sequence",
-    deepValuePath,
-    deepKeywordPath,
-    "is_priority",
-    "_id",
-    "_routing",
-  ];
+  const fieldNames = ["amount", "buyer.contact.email", "buyer.contact.email.keyword", "deep_nested_example.level_1.level_2.level_3.level_4.level_5.level_6.sequence", deepValuePath, deepKeywordPath, "is_priority", "_id", "_routing"];
   const originalFieldNames = [...fieldNames];
   const tree = elasticsearchFieldPathTreeFromFieldNames(fieldNames);
   const buyer = tree.find((node) => node.path === "buyer");
@@ -241,6 +231,31 @@ test("builds searchable Elasticsearch mapping field paths", () => {
   );
   assert.deepEqual(searchElasticsearchFieldPathTree(tree, "text"), []);
   assert.deepEqual(fieldNames, originalFieldNames);
+});
+
+test("keeps Elasticsearch object and nested mapping fields expandable but not selectable", () => {
+  const mappingFields = [
+    { name: "buyers", type: "nested" },
+    { name: "buyers.email", type: "keyword" },
+    { name: "profile", type: "object" },
+    { name: "profile.city", type: "text" },
+    { name: "title", type: "text" },
+    { name: "title.keyword", type: "keyword" },
+  ];
+  const fieldTypes = new Map(mappingFields.map((field) => [field.name, field.type]));
+  const tree = elasticsearchFieldPathTreeFromFieldNames(
+    mappingFields.map((field) => field.name),
+    fieldTypes,
+  );
+  const fieldsByPath = new Map(flattenDocumentFieldPathTree(tree).map((field) => [field.path, field]));
+
+  assert.equal(fieldsByPath.get("buyers")?.selectable, false);
+  assert.equal(fieldsByPath.get("buyers")?.children.length, 1);
+  assert.equal(fieldsByPath.get("buyers.email")?.selectable, true);
+  assert.equal(fieldsByPath.get("profile")?.selectable, false);
+  assert.equal(fieldsByPath.get("profile.city")?.selectable, true);
+  assert.equal(fieldsByPath.get("title")?.selectable, true);
+  assert.equal(fieldsByPath.get("title.keyword")?.selectable, true);
 });
 
 test("uses elemMatch only for AND conditions on the same array object", () => {

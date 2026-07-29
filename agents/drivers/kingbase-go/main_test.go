@@ -26,14 +26,21 @@ var registerMetadataDriver sync.Once
 var metadataState atomic.Pointer[metadataDriverState]
 
 type fakeDriverState struct {
-	queryArgs int
-	queryCtx  context.Context
-	rowCount  int
+	mu             sync.Mutex
+	nextConnID     int
+	queryArgs      int
+	queryCtx       context.Context
+	queryConnID    int
+	rowCount       int
+	execStatements []string
+	execConnIDs    []int
 }
 
 type fakeDriver struct{}
 
-type fakeConn struct{}
+type fakeConn struct {
+	id int
+}
 
 type fakeRows struct {
 	current int
@@ -103,7 +110,13 @@ type valueRows struct {
 	index   int
 }
 
-func (fakeDriver) Open(string) (driver.Conn, error) { return fakeConn{}, nil }
+func (fakeDriver) Open(string) (driver.Conn, error) {
+	state := testDriverState.Load()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.nextConnID++
+	return fakeConn{id: state.nextConnID}, nil
+}
 
 func (fakeConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
 
@@ -111,14 +124,22 @@ func (fakeConn) Close() error { return nil }
 
 func (fakeConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
 
-func (fakeConn) QueryContext(ctx context.Context, _ string, args []driver.NamedValue) (driver.Rows, error) {
+func (connection fakeConn) QueryContext(ctx context.Context, _ string, args []driver.NamedValue) (driver.Rows, error) {
 	state := testDriverState.Load()
+	state.mu.Lock()
+	defer state.mu.Unlock()
 	state.queryArgs = len(args)
 	state.queryCtx = ctx
+	state.queryConnID = connection.id
 	return &fakeRows{count: state.rowCount}, nil
 }
 
-func (fakeConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+func (connection fakeConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	state := testDriverState.Load()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.execStatements = append(state.execStatements, query)
+	state.execConnIDs = append(state.execConnIDs, connection.id)
 	return driver.RowsAffected(1), nil
 }
 
@@ -1235,6 +1256,69 @@ func TestExecuteQueryUsesSimpleProtocolAndReleasesContext(t *testing.T) {
 		t.Fatalf("unexpected result or bound arguments: rows=%v args=%d", result.Rows, state.queryArgs)
 	}
 	assertContextCanceled(t, state.queryCtx)
+}
+
+func TestExecuteQueryReappliesSchemaForRepeatedRequests(t *testing.T) {
+	db, state := openFakeDB(t, 1)
+	server := newServer()
+	server.db = db
+
+	for range 2 {
+		if _, err := server.executeQuery(queryOptions{SQL: "SELECT 1", Schema: "sdy_smartsite", MaxRows: 10}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	expected := []string{`SET search_path TO "sdy_smartsite"`, `SET search_path TO "sdy_smartsite"`}
+	if len(state.execStatements) != len(expected) {
+		t.Fatalf("expected repeated schema setup, got %v", state.execStatements)
+	}
+	for index, statement := range expected {
+		if state.execStatements[index] != statement {
+			t.Fatalf("unexpected schema statement at %d: %s", index, state.execStatements[index])
+		}
+	}
+}
+
+func TestExecuteQueryAppliesSchemaOnSamePoolConnection(t *testing.T) {
+	db, state := openFakeDB(t, 1)
+	db.SetMaxOpenConns(4)
+	server := newServer()
+	server.db = db
+
+	if _, err := server.executeQuery(queryOptions{SQL: "SELECT 1", Schema: "sdy_smartsite", MaxRows: 10}); err != nil {
+		t.Fatal(err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.execStatements) != 1 || state.execStatements[0] != `SET search_path TO "sdy_smartsite"` {
+		t.Fatalf("unexpected schema setup: %v", state.execStatements)
+	}
+	if len(state.execConnIDs) != 1 || state.execConnIDs[0] != state.queryConnID {
+		t.Fatalf("schema setup and query used different connections: exec=%v query=%d", state.execConnIDs, state.queryConnID)
+	}
+}
+
+func TestExecuteStatementAppliesSchemaOnSamePoolConnection(t *testing.T) {
+	db, state := openFakeDB(t, 0)
+	db.SetMaxOpenConns(4)
+	server := newServer()
+	server.db = db
+
+	if _, err := server.executeQuery(queryOptions{SQL: "UPDATE orders SET status = 1", Schema: "sdy_smartsite"}); err != nil {
+		t.Fatal(err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	expected := []string{`SET search_path TO "sdy_smartsite"`, "UPDATE orders SET status = 1"}
+	if strings.Join(state.execStatements, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("unexpected statements: %v", state.execStatements)
+	}
+	if len(state.execConnIDs) != 2 || state.execConnIDs[0] != state.execConnIDs[1] {
+		t.Fatalf("schema setup and statement used different connections: %v", state.execConnIDs)
+	}
 }
 
 func TestPagedQueryKeepsContextUntilSessionCloses(t *testing.T) {

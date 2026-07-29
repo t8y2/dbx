@@ -4381,6 +4381,7 @@ export default withEnglishFallback({
     shortcutEditSidebarConnection: "サイドバー接続を編集",
     shortcutOpenDataInNewTab: "新しいデータタブで開く（マウスクリック）",
     shortcutSendSelectionToAi: "選択範囲をAIに送信",
+    shortcutToggleFold: "折りたたみの切り替え",
     shortcutScopeGlobal: "グローバル",
     shortcutScopeEditor: "SQLエディタ",
     shortcutScopeGrid: "データグリッド",

@@ -4646,6 +4646,7 @@ export default withEnglishFallback({
     shortcutEditSidebarConnection: "编辑侧边栏连接",
     shortcutOpenDataInNewTab: "在新数据标签页中打开（鼠标点击）",
     shortcutSendSelectionToAi: "发送选中代码到 AI",
+    shortcutToggleFold: "切换折叠",
     shortcutScopeGlobal: "全局",
     shortcutScopeEditor: "SQL 编辑器",
     shortcutScopeGrid: "数据表格",

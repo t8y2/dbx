@@ -85,6 +85,10 @@ describe("query execution schema", () => {
     expect(connectionQueryExecutionSchema({ db_type: "postgres" }, "app", "reporting", false)).toBe("reporting");
   });
 
+  it("prefers an explicit schema for Kingbase query execution", () => {
+    expect(connectionQueryExecutionSchema({ db_type: "kingbase" }, "qinzhou", "sdy_smartsite", false)).toBe("sdy_smartsite");
+  });
+
   it("does not send a schema for MySQL database context", () => {
     expect(connectionQueryExecutionSchema({ db_type: "mysql" }, "app", undefined, false)).toBeUndefined();
   });

@@ -39,36 +39,7 @@ describe("data grid paint theme", () => {
     expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: true }).rowNumberActive).toBe(DATA_GRID_DARK_ACTIVE_ROW_BG);
   });
 
-  it("reads semantic success/warning tokens when present", () => {
-    const vars: Record<string, string> = {
-      "--background": "rgb(255, 255, 255)",
-      "--foreground": "rgb(10, 10, 10)",
-      "--muted-foreground": "rgb(115, 115, 115)",
-      "--primary": "rgb(23, 23, 23)",
-      "--destructive": "rgb(231, 0, 11)",
-      "--accent": "rgb(245, 245, 245)",
-      "--border": "rgb(229, 229, 229)",
-      "--muted": "rgb(245, 245, 245)",
-      "--success": "rgb(22, 163, 74)",
-      "--warning": "rgb(217, 119, 6)",
-      "--success-bg": "rgb(220, 252, 231)",
-      "--warning-bg": "rgb(254, 243, 199)",
-      "--color-error-bg": "rgb(254, 226, 226)",
-    };
-
-    const theme = resolveDataGridPaintTheme({
-      getVar: (name) => vars[name] ?? "",
-      isDark: false,
-    });
-
-    expect(theme.rowNumberTextNew).toBe("rgb(22, 163, 74)");
-    expect(theme.rowNumberTextEdited).toBe("rgb(217, 119, 6)");
-    expect(theme.rowNumberNew).toBe("rgb(220, 252, 231)");
-    expect(theme.cellDirty).toBe("rgb(254, 243, 199)");
-    expect(theme.rowDeleted).toBe("rgb(254, 226, 226)");
-  });
-
-  it("derives selection border from ring/primary instead of the low-contrast border token", () => {
+  it("keeps the classic blue selection palette instead of theme accent/ring mixing", () => {
     const vars: Record<string, string> = {
       "--background": "rgb(255, 255, 255)",
       "--foreground": "rgb(10, 10, 10)",
@@ -79,19 +50,32 @@ describe("data grid paint theme", () => {
       "--border": "rgb(229, 229, 229)",
       "--ring": "rgb(23, 23, 23)",
       "--muted": "rgb(245, 245, 245)",
+      "--success": "rgb(22, 163, 74)",
+      "--warning": "rgb(217, 119, 6)",
     };
 
-    const theme = resolveDataGridPaintTheme({
+    const light = resolveDataGridPaintTheme({
       getVar: (name) => vars[name] ?? "",
       isDark: false,
     });
+    const dark = resolveDataGridPaintTheme({
+      getVar: (name) => vars[name] ?? "",
+      isDark: true,
+    });
 
-    expect(theme.cellSelectedBorder).toBe("rgb(23, 23, 23)");
-    expect(theme.cellSelectedBorder).not.toBe(vars["--border"]);
-    expect(contrastRatio(theme.cellSelectedBorder, theme.cellSelected)).toBeGreaterThanOrEqual(3);
+    expect(light.cellSelected).toBe("rgb(239, 246, 255)");
+    expect(light.cellSelectedBorder).toBe("rgb(59, 130, 246)");
+    expect(light.cellSelectedSingle).toBe("rgb(191, 219, 254)");
+    expect(light.rowNumberTextNew).toBe("rgb(0, 122, 85)");
+    expect(light.rowNumberTextEdited).toBe("rgb(187, 77, 0)");
+    expect(contrastRatio(light.cellSelectedBorder, light.cellSelected)).toBeGreaterThanOrEqual(3);
+
+    expect(dark.cellSelected).toBe("rgb(20, 40, 60)");
+    expect(dark.cellSelectedBorder).toBe("rgb(96, 165, 250)");
+    expect(dark.cellSelectedSingle).toBe("rgb(30, 64, 96)");
   });
 
-  it("honors an explicit --data-grid-cell-selected-border token when provided", () => {
+  it("honors an explicit --data-grid-cell-selected-border token when provided in light mode", () => {
     const vars: Record<string, string> = {
       "--background": "rgb(255, 255, 255)",
       "--foreground": "rgb(10, 10, 10)",
@@ -100,7 +84,6 @@ describe("data grid paint theme", () => {
       "--destructive": "rgb(231, 0, 11)",
       "--accent": "rgb(226, 226, 226)",
       "--border": "rgb(229, 229, 229)",
-      "--ring": "rgb(161, 161, 161)",
       "--muted": "rgb(245, 245, 245)",
       "--data-grid-cell-selected-border": "rgb(37, 99, 235)",
     };

@@ -83,6 +83,22 @@ export const SQL_SEMANTIC_DIALECTS: Record<string, SqlSemanticDialectAdapter> = 
       return parts.length >= 1 ? "schema" : "unknown";
     },
   },
+  clickhouse: {
+    id: "clickhouse",
+    identifierQuotes: [
+      { open: "`", close: "`" },
+      { open: '"', close: '"' },
+    ],
+    supportsAsForTableAlias: true,
+    projectionAliasVisibility: { where: false, groupBy: true, having: true, orderBy: true },
+    normalizeIdentifier: defaultNormalize,
+    quoteIdentifier: (identifier) => quoteWith(identifier, "`"),
+    qualifierRole(parts, context) {
+      if (context === "column") return parts.length >= 2 ? "table" : "table";
+      if (context === "routine") return parts.length >= 2 ? "package" : "schema";
+      return parts.length >= 1 ? "schema" : "unknown";
+    },
+  },
   sqlserver: {
     id: "sqlserver",
     identifierQuotes: [
@@ -143,6 +159,7 @@ export function sqlReferenceAnalysisDialectFor(options: { databaseType?: Databas
 }
 
 export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" }): SqlSemanticDialectAdapter {
+  if (options.databaseType === "clickhouse") return SQL_SEMANTIC_DIALECTS.clickhouse;
   if (options.dialect && SQL_SEMANTIC_DIALECTS[options.dialect]) return SQL_SEMANTIC_DIALECTS[options.dialect];
   switch (options.databaseType) {
     case "postgres":

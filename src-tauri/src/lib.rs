@@ -548,6 +548,7 @@ enum LocaleFamily {
     SimplifiedChinese,
     TraditionalChinese,
     Japanese,
+    Korean,
     Spanish,
     Italian,
     Portuguese,
@@ -570,6 +571,8 @@ fn locale_family(locale: &str) -> LocaleFamily {
         }
     } else if is_language("ja") {
         LocaleFamily::Japanese
+    } else if is_language("ko") {
+        LocaleFamily::Korean
     } else if is_language("es") {
         LocaleFamily::Spanish
     } else if is_language("it") {
@@ -586,6 +589,7 @@ fn tray_menu_labels_for_locale(locale: &str) -> (&'static str, &'static str) {
         LocaleFamily::SimplifiedChinese => ("显示 DBX", "退出 DBX"),
         LocaleFamily::TraditionalChinese => ("顯示 DBX", "退出 DBX"),
         LocaleFamily::Japanese => ("DBXを表示", "DBXを終了"),
+        LocaleFamily::Korean => ("DBX 표시", "DBX 종료"),
         LocaleFamily::Spanish => ("Mostrar DBX", "Salir de DBX"),
         LocaleFamily::Italian => ("Mostra DBX", "Esci da DBX"),
         LocaleFamily::Portuguese => ("Mostrar DBX", "Sair do DBX"),
@@ -600,6 +604,7 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
         LocaleFamily::SimplifiedChinese => "复制支持信息",
         LocaleFamily::TraditionalChinese => "複製支援資訊",
         LocaleFamily::Japanese => "サポート情報をコピー",
+        LocaleFamily::Korean => "지원 정보 복사",
         LocaleFamily::Spanish => "Copiar información",
         LocaleFamily::Italian => "Copia informazioni",
         LocaleFamily::Portuguese => "Copiar informações",
@@ -612,6 +617,7 @@ fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese | LocaleFamily::TraditionalChinese => format!("退出 {app_name}"),
         LocaleFamily::Japanese => format!("{app_name}を終了"),
+        LocaleFamily::Korean => format!("{app_name} 종료"),
         LocaleFamily::Spanish => format!("Salir de {app_name}"),
         LocaleFamily::Italian => format!("Esci da {app_name}"),
         LocaleFamily::Portuguese => format!("Sair do {app_name}"),
@@ -817,12 +823,12 @@ mod tests {
         assert_eq!(tray_menu_labels_for_locale("zh-Hant-HK"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("zh-MO"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("ja-JP"), ("DBXを表示", "DBXを終了"));
+        assert_eq!(tray_menu_labels_for_locale("ko-KR"), ("DBX 표시", "DBX 종료"));
         assert_eq!(tray_menu_labels_for_locale("es-ES"), ("Mostrar DBX", "Salir de DBX"));
         assert_eq!(tray_menu_labels_for_locale("it-IT"), ("Mostra DBX", "Esci da DBX"));
         assert_eq!(tray_menu_labels_for_locale("pt-BR"), ("Mostrar DBX", "Sair do DBX"));
         assert_eq!(tray_menu_labels_for_locale("en-US"), ("Show DBX", "Quit DBX"));
         // Unknown and empty locales fall back to English; "ita" must not match "it".
-        assert_eq!(tray_menu_labels_for_locale("ko-KR"), ("Show DBX", "Quit DBX"));
         assert_eq!(tray_menu_labels_for_locale("ita"), ("Show DBX", "Quit DBX"));
         assert_eq!(tray_menu_labels_for_locale(""), ("Show DBX", "Quit DBX"));
     }
@@ -832,10 +838,12 @@ mod tests {
         assert_eq!(app_menu_quit_label("zh-CN", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("zh-TW", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("ja-JP", "DBX"), "DBXを終了");
+        assert_eq!(app_menu_quit_label("ko-KR", "DBX"), "DBX 종료");
         assert_eq!(app_menu_quit_label("en-US", "DBX"), "Quit DBX");
         assert_eq!(app_menu_quit_label("", "DBX"), "Quit DBX");
         assert_eq!(app_menu_copy_support_info_label("zh-CN"), "复制支持信息");
         assert_eq!(app_menu_copy_support_info_label("zh-TW"), "複製支援資訊");
+        assert_eq!(app_menu_copy_support_info_label("ko-KR"), "지원 정보 복사");
         assert_eq!(app_menu_copy_support_info_label("en-US"), "Copy Support Info");
     }
 

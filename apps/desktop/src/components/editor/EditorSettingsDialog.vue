@@ -5043,33 +5043,6 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
               </div>
 
-              <!-- Global Custom Instructions (list mode) -->
-              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
-                <Separator />
-                <div>
-                  <h3 class="text-sm font-medium">
-                    {{ t("ai.globalInstructions") }}
-                  </h3>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("ai.globalInstructionsDescription") }}
-                  </p>
-                </div>
-                <textarea v-model="editGlobalInstructions" class="w-full rounded-md border bg-background px-3 py-2 text-xs font-mono resize-y min-h-[80px]" rows="4" :placeholder="t('ai.globalInstructionsDescription')"></textarea>
-                <div class="flex items-center justify-between">
-                  <span class="text-xs" :class="globalInstructionsTooLong() ? 'text-destructive' : 'text-muted-foreground'">
-                    {{
-                      t("ai.globalInstructionsCharCount", {
-                        count: promptTemplateCharacterCount(editGlobalInstructions),
-                        max: GLOBAL_INSTRUCTIONS_MAX,
-                      })
-                    }}
-                  </span>
-                  <Button type="button" size="sm" :disabled="!promptTemplateStore.isLoaded || globalInstructionsTooLong() || globalInstructionsSaving" @click="saveGlobalInstructions">
-                    {{ globalInstructionsSaving ? t("common.processing") : t("ai.globalInstructionsSave") }}
-                  </Button>
-                </div>
-              </div>
-
               <!-- Agent Turn Limit (list mode, global) -->
               <div v-if="aiConfigListMode === 'list'" class="space-y-3">
                 <Separator />
@@ -5124,6 +5097,33 @@ onUnmounted(cleanupPreviewEditor);
                   </Button>
                   <Button type="button" size="sm" :disabled="!maxRetriesLoaded || maxRetriesSaving || maxRetriesOutOfRange(editMaxRetries)" @click="saveMaxRetriesSetting">
                     {{ maxRetriesSaving ? t("common.processing") : t("common.save") }}
+                  </Button>
+                </div>
+              </div>
+
+              <!-- Global Custom Instructions (list mode) -->
+              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
+                <Separator />
+                <div>
+                  <h3 class="text-sm font-medium">
+                    {{ t("ai.globalInstructions") }}
+                  </h3>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("ai.globalInstructionsDescription") }}
+                  </p>
+                </div>
+                <textarea v-model="editGlobalInstructions" class="w-full rounded-md border bg-background px-3 py-2 text-xs font-mono resize-y min-h-[80px]" rows="4" :placeholder="t('ai.globalInstructionsDescription')"></textarea>
+                <div class="flex items-center justify-between">
+                  <span class="text-xs" :class="globalInstructionsTooLong() ? 'text-destructive' : 'text-muted-foreground'">
+                    {{
+                      t("ai.globalInstructionsCharCount", {
+                        count: promptTemplateCharacterCount(editGlobalInstructions),
+                        max: GLOBAL_INSTRUCTIONS_MAX,
+                      })
+                    }}
+                  </span>
+                  <Button type="button" size="sm" :disabled="!promptTemplateStore.isLoaded || globalInstructionsTooLong() || globalInstructionsSaving" @click="saveGlobalInstructions">
+                    {{ globalInstructionsSaving ? t("common.processing") : t("ai.globalInstructionsSave") }}
                   </Button>
                 </div>
               </div>

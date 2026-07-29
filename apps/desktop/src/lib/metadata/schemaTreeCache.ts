@@ -56,9 +56,10 @@ export function decodeSchemaTreeCache<T>(payload: unknown, nowMs = Date.now(), t
   const cachedAtMs = Date.parse(envelope.cachedAt);
   if (!Number.isFinite(cachedAtMs)) return null;
 
+  const tableSearchIndex = decodeTableSearchIndex(envelope.tableSearchIndex);
   return {
     children: envelope.children as T,
     isStale: nowMs - cachedAtMs >= ttlMs,
-    tableSearchIndex: decodeTableSearchIndex(envelope.tableSearchIndex),
+    ...(tableSearchIndex ? { tableSearchIndex } : {}),
   };
 }

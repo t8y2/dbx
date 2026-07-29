@@ -336,6 +336,7 @@ describe("connectionStore metadata loading", () => {
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
       loadSchemaCache,
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -555,6 +556,7 @@ describe("connectionStore metadata loading", () => {
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listSchemaInfos,
       loadSchemaCache,
       saveConnections: vi.fn().mockResolvedValue(undefined),
@@ -597,7 +599,7 @@ describe("connectionStore metadata loading", () => {
     databaseNode.isExpanded = false;
     await store.loadSchemas(connection.id, "app");
 
-    expect(loadSchemaCache.mock.calls.map(([key]) => key)).toEqual([`${connection.id}:app:schemas-v3:hide-system`, `${connection.id}:app:schemas-v3:show-system`]);
+    expect(loadSchemaCache.mock.calls.map(([key]) => key)).toEqual([`${connection.id}:app:schemas-v3:hide-system`, `${connection.id}:app:schemas-v3:hide-system`, `${connection.id}:app:schemas-v3:show-system`, `${connection.id}:app:schemas-v3:show-system`]);
     expect(databaseNode.children?.map((node) => node.label).filter((label) => label !== "tree.extensions")).toEqual(["information_schema", "pg_catalog", "public"]);
   });
 
@@ -949,6 +951,7 @@ describe("connectionStore metadata loading", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
       listObjects,
       loadSchemaCache: vi.fn().mockResolvedValue(null),
@@ -1282,6 +1285,7 @@ describe("connectionStore metadata loading", () => {
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
       loadSchemaCache,
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -1351,6 +1355,7 @@ describe("connectionStore metadata loading", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),

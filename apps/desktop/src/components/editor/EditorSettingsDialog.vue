@@ -55,7 +55,6 @@ import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
-  aiListModels,
   aiTestConnection,
   checkMcpServerStatus,
   installMcpServer,
@@ -2338,6 +2337,7 @@ const aiTestErrorCategoryKeys: Record<string, string> = {
   tokenLimit: "ai.testErrorTokenLimit",
   safety: "ai.testErrorSafety",
   emptyResponse: "ai.testErrorEmptyResponse",
+  modelDiscoveryUnsupported: "ai.modelListUnsupported",
   network: "ai.testErrorNetwork",
   unknown: "ai.testErrorUnknown",
 };
@@ -2388,7 +2388,9 @@ watch(aiIsCliProvider, (isCliProvider) => {
   if (isCliProvider) void ensureCliMcpStatus();
 });
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
-const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiUsesConfigurableAnthropicAuth = computed(() => aiEditProvider.value === "claude" || aiEditProvider.value === "anthropic-compatible" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiUsesCompatibleAnthropicApi = computed(() => aiEditProvider.value === "anthropic-compatible" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiSupportsAuthMethod = computed(() => aiUsesConfigurableAnthropicAuth.value);
 const aiCredentialLabel = computed(() => (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer" ? "Auth Token" : "API Key"));
 const aiCredentialPlaceholder = computed(() => {
   if (!aiRequiresApiKey.value) return "Optional";
@@ -2396,7 +2398,7 @@ const aiCredentialPlaceholder = computed(() => {
   return "";
 });
 const aiEndpointPlaceholder = computed(() => {
-  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+  if (aiUsesCompatibleAnthropicApi.value) {
     return "https://api.example.com/v1/messages";
   }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
@@ -2405,7 +2407,7 @@ const aiEndpointPlaceholder = computed(() => {
   return "https://api.openai.com/v1";
 });
 const aiEndpointHint = computed(() => {
-  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+  if (aiUsesCompatibleAnthropicApi.value) {
     return t("ai.anthropicMessagesHint");
   }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
@@ -2668,14 +2670,12 @@ async function aiTestConn() {
   aiTestErrorCopied.value = false;
   try {
     const config = currentAiEditConfig();
-    if (aiIsCliProvider.value) {
-      const result = await aiTestConnection(config);
-      aiTestLatency.value = result.latencyMs ?? null;
-    } else {
-      const startedAt = performance.now();
-      await aiListModels(config);
-      aiTestLatency.value = Math.round(performance.now() - startedAt);
+    const activeModel = settingsStore.activeModel;
+    if (aiEditConfigId.value && activeModel?.configId === aiEditConfigId.value) {
+      config.model = activeModel.modelId;
     }
+    const result = await aiTestConnection(config);
+    aiTestLatency.value = result.latencyMs ?? null;
     aiTestResult.value = "success";
   } catch (e: any) {
     aiTestResult.value = "error";

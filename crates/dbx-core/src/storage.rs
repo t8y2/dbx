@@ -5152,6 +5152,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_compatible_ai_config_roundtrip() {
+        let db = temp_db_path("anthropic-compatible-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("anthropic-compatible", true);
+        cfg.config.provider = AiProvider::AnthropicCompatible;
+        cfg.config.api_key = String::new();
+        cfg.config.auth_method = AiAuthMethod::Bearer;
+        cfg.config.endpoint = "https://gateway.example.com/anthropic/v1/messages".to_string();
+        cfg.config.model = "vendor/future-model".to_string();
+        cfg.config.api_style = AiApiStyle::AnthropicMessages;
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::AnthropicCompatible));
+        assert_eq!(loaded[0].config.auth_method, AiAuthMethod::Bearer);
+        assert_eq!(loaded[0].config.api_style, AiApiStyle::AnthropicMessages);
+        assert_eq!(loaded[0].config.endpoint, "https://gateway.example.com/anthropic/v1/messages");
+        assert_eq!(loaded[0].config.model, "vendor/future-model");
+        assert!(loaded[0].config.api_key.is_empty());
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
     async fn ai_config_only_one_default() {
         let db = temp_db_path("ai-one-default");
         let storage = Storage::open(&db).await.unwrap();

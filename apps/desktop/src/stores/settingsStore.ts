@@ -180,6 +180,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "anthropic-compatible": {
+    label: "Anthropic Compatible",
+    iconSlug: "anthropic",
+    provider: "anthropic-compatible",
+    endpoint: "",
+    model: "",
+    apiStyle: "anthropic-messages",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "openai-compatible": {
     label: "OpenAI Compatible",
     iconSlug: "openai",

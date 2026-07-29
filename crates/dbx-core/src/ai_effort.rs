@@ -76,7 +76,7 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         AiProvider::Deepseek => deepseek_capability(&model, source),
         AiProvider::Qwen => qwen_capability(&model, source),
         AiProvider::Ollama => ollama_capability(&model, source),
-        AiProvider::OpenaiCompatible | AiProvider::Custom => {
+        AiProvider::AnthropicCompatible | AiProvider::OpenaiCompatible | AiProvider::Custom => {
             Some(AiEffortCapability::FreeText { placeholder: None, source: AiCapabilitySource::Custom })
         }
         AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => None,
@@ -178,6 +178,7 @@ pub fn registry_source_url(provider: &AiProvider) -> Option<&'static str> {
         AiProvider::Qwen => Some(QWEN_THINKING_DOCS),
         AiProvider::Ollama => Some(OLLAMA_THINKING_DOCS),
         AiProvider::Claude
+        | AiProvider::AnthropicCompatible
         | AiProvider::OpenaiCompatible
         | AiProvider::CodexCli
         | AiProvider::ClaudeCodeCli
@@ -235,7 +236,7 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
     };
 
     match config.provider {
-        AiProvider::Claude => apply_claude_effort(object, selection),
+        AiProvider::Claude | AiProvider::AnthropicCompatible => apply_claude_effort(object, selection),
         AiProvider::Gemini => apply_gemini_effort(object, &config.model, selection),
         AiProvider::Deepseek => apply_deepseek_effort(object, selection),
         AiProvider::Qwen => apply_qwen_effort(object, selection),
@@ -404,7 +405,7 @@ mod tests {
 
     #[test]
     fn free_text_effort_uses_the_translated_frontend_placeholder() {
-        for provider in [AiProvider::OpenaiCompatible, AiProvider::Custom] {
+        for provider in [AiProvider::AnthropicCompatible, AiProvider::OpenaiCompatible, AiProvider::Custom] {
             let capability = static_effort_capability(&config(provider, "custom-model"), "custom-model").unwrap();
             let AiEffortCapability::FreeText { placeholder, .. } = capability else {
                 panic!("expected free-text capability");
@@ -596,6 +597,19 @@ mod tests {
         apply_runtime_effort(&mut body, &config);
 
         assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_compatible_accepts_only_free_text_effort() {
+        let mut config = config(AiProvider::AnthropicCompatible, "gateway-model");
+        config.runtime_effort = Some(AiEffortSelection::Enum("provider-high".to_string()));
+        assert!(validate_runtime_effort(&config).is_err());
+
+        config.runtime_effort = Some(AiEffortSelection::Text("custom-level".to_string()));
+        assert!(validate_runtime_effort(&config).is_ok());
+        let mut body = json!({});
+        apply_runtime_effort(&mut body, &config);
+        assert_eq!(body["output_config"]["effort"], "custom-level");
     }
 
     #[test]

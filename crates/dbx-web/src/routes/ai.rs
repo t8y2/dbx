@@ -535,6 +535,7 @@ mod tests {
     fn allows_other_providers_single() {
         for provider in &[
             AiProvider::Claude,
+            AiProvider::AnthropicCompatible,
             AiProvider::Openai,
             AiProvider::OpenaiCompatible,
             AiProvider::Custom,

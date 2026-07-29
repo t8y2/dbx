@@ -618,7 +618,7 @@ function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType
 
 function aiDatabaseNamespace(tab: QueryTab, connection: ConnectionConfig): string {
   const database = tab.database || connection.database || "main";
-  return connection.db_type === "sqlite" ? normalizeSqliteNamespace(database) : database;
+  return connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database;
 }
 
 function prioritizeSchemas(schemas: string[]): string[] {

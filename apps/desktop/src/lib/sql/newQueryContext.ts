@@ -17,7 +17,7 @@ interface ResolveNewQueryTargetInput {
   activeTab?: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta">;
   selectedTreeNode?: Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | null;
   activeConnectionId?: string | null;
-  connections: Pick<ConnectionConfig, "id" | "database" | "db_type">[];
+  connections: Pick<ConnectionConfig, "id" | "host" | "database" | "db_type">[];
   preferredSource?: NewQueryContextSource;
 }
 
@@ -52,13 +52,13 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
 
 function targetFromContext(
   context: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta"> | Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | undefined,
-  connections: Pick<ConnectionConfig, "id" | "database" | "db_type">[],
+  connections: Pick<ConnectionConfig, "id" | "host" | "database" | "db_type">[],
 ): NewQueryTarget | null {
   if (!context?.connectionId) return null;
   const connection = connections.find((item) => item.id === context.connectionId);
   if (!connection) return null;
   const contextDatabase = context.database || resolveDefaultDatabase(connection, []);
-  const database = connection.db_type === "sqlite" ? normalizeSqliteNamespace(contextDatabase) : contextDatabase;
+  const database = connection.db_type === "sqlite" ? normalizeSqliteNamespace(contextDatabase, connection) : contextDatabase;
   const objectBrowser = "objectBrowser" in context ? context.objectBrowser : undefined;
   const tableMeta = "tableMeta" in context ? context.tableMeta : undefined;
   return {

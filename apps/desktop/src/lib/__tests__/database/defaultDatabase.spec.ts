@@ -23,10 +23,13 @@ describe("defaultDatabase selectable values", () => {
     expect(resolveDefaultDatabase({ db_type: "sqlite", database: "file:/tmp/stale.sqlite" }, [])).toBe("main");
     expect(resolveDefaultDatabase({ db_type: "sqlite", database: ":memory:" }, [])).toBe("main");
     expect(isDefaultDatabase({ db_type: "sqlite", database: "/tmp/stale.sqlite" }, "main")).toBe(true);
+    expect(resolveDefaultDatabase({ db_type: "sqlite", host: "relative.sqlite", database: undefined }, ["relative.sqlite"])).toBe("main");
+    expect(resolveDefaultDatabase({ db_type: "sqlite", host: "legacyfile", database: undefined }, ["legacyfile"])).toBe("main");
   });
 
   it("preserves a SQLite attached database alias", () => {
     expect(resolveDefaultDatabase({ db_type: "sqlite", database: "analytics" }, ["main", "analytics"])).toBe("analytics");
     expect(isDefaultDatabase({ db_type: "sqlite", database: "analytics" }, "analytics")).toBe(true);
+    expect(resolveDefaultDatabase({ db_type: "sqlite", host: "primary.db", database: undefined }, ["analytics.db"])).toBe("analytics.db");
   });
 });

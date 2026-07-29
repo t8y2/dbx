@@ -680,7 +680,7 @@ function analyzeHistoryWithAi(entry: HistoryEntry) {
 
   openAiPanel();
   const storedDatabase = entry.database || activeTab.value?.database || resolveDefaultDatabase(config, []);
-  const database = config.db_type === "sqlite" ? normalizeSqliteNamespace(storedDatabase) : storedDatabase;
+  const database = config.db_type === "sqlite" ? normalizeSqliteNamespace(storedDatabase, config) : storedDatabase;
   const title = t("history.aiAnalysisTab");
   const tabId = queryStore.createTab(connectionId, database || "", title, "query");
   queryStore.updateSql(tabId, entry.sql);

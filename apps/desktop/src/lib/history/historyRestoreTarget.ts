@@ -15,7 +15,7 @@ export function resolveHistorySqlRestoreTarget(options: { entry: HistoryEntry; a
   if (!connectionId) return null;
   const config = getConfig(connectionId);
   const storedDatabase = entry.database || activeTab?.database || (config ? resolveDefaultDatabase(config, []) : "");
-  const database = config?.db_type === "sqlite" ? normalizeSqliteNamespace(storedDatabase) : storedDatabase;
+  const database = config?.db_type === "sqlite" ? normalizeSqliteNamespace(storedDatabase, config) : storedDatabase;
   const schema = activeTab?.connectionId === connectionId && activeTab.database === database ? activeTab.schema : undefined;
   return { connectionId, database: database || "", schema };
 }

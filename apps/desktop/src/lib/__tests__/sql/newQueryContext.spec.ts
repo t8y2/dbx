@@ -28,7 +28,7 @@ describe("resolveNewQueryTarget", () => {
           database: "bi",
           objectBrowser: { catalog: "paimon_catalog" },
         },
-        connections: [{ id: "conn-1", database: "", db_type: "starrocks" }],
+        connections: [{ id: "conn-1", host: "localhost", database: "", db_type: "starrocks" }],
         preferredSource: "tab",
       }),
     ).toEqual({
@@ -53,7 +53,7 @@ describe("resolveNewQueryTarget", () => {
             primaryKeys: [],
           },
         },
-        connections: [{ id: "conn-1", database: "", db_type: "starrocks" }],
+        connections: [{ id: "conn-1", host: "localhost", database: "", db_type: "starrocks" }],
       })?.catalog,
     ).toBe("paimon_catalog");
   });
@@ -65,7 +65,7 @@ describe("resolveNewQueryTarget", () => {
           connectionId: "conn-sqlite",
           database: "/tmp/stale.sqlite",
         },
-        connections: [{ id: "conn-sqlite", database: "/tmp/stale.sqlite", db_type: "sqlite" }],
+        connections: [{ id: "conn-sqlite", host: "/tmp/stale.sqlite", database: "/tmp/stale.sqlite", db_type: "sqlite" }],
       }),
     ).toEqual({
       connectionId: "conn-sqlite",
@@ -81,11 +81,11 @@ describe("resolveNewQueryTarget", () => {
       resolveNewQueryTarget({
         activeTab: {
           connectionId: "conn-sqlite",
-          database: "analytics",
+          database: "analytics.db",
         },
-        connections: [{ id: "conn-sqlite", database: undefined, db_type: "sqlite" }],
+        connections: [{ id: "conn-sqlite", host: "primary.db", database: undefined, db_type: "sqlite" }],
       })?.database,
-    ).toBe("analytics");
+    ).toBe("analytics.db");
   });
 });
 

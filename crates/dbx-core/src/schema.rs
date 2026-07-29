@@ -5575,6 +5575,27 @@ pub fn sqlite_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
     )
 }
 
+async fn sqlite_object_source(
+    pool: &db::sqlite::SqliteHandle,
+    schema: &str,
+    name: &str,
+    kind: &db::ObjectSourceKind,
+) -> Result<String, String> {
+    let pool = pool.clone();
+    let schema = schema.to_string();
+    let name = sql_string(name);
+    let object_type = sql_string(sqlite_object_type(kind));
+    tokio::task::spawn_blocking(move || {
+        pool.with_connection(|conn| {
+            let schema = db::sqlite::sqlite_quote_schema_ident_for_connection(conn, &schema)?;
+            let sql = format!("SELECT sql FROM {schema}.sqlite_master WHERE type = {object_type} AND name = {name}");
+            conn.query_row(&sql, [], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
     let qualified_name = mysql_qualified_name(database, name);
     match kind {
@@ -5805,9 +5826,7 @@ async fn get_object_source_once(
                     )
                     .await?
                 }
-                PoolKind::Sqlite(pool) => first_string_cell(
-                    db::sqlite::execute_query(pool, &sqlite_object_source_sql(schema, name, &object_type)).await?,
-                )?,
+                PoolKind::Sqlite(pool) => sqlite_object_source(pool, schema, name, &object_type).await?,
                 #[cfg(feature = "duckdb-sidecar")]
                 PoolKind::DuckDbWorker(client) => {
                     let client = client.clone();
@@ -6261,6 +6280,21 @@ fn postgres_missing_relispopulated_error(err: &str) -> bool {
 mod object_source_tests {
     use super::*;
     use crate::types::ObjectSourceKind;
+
+    #[tokio::test]
+    async fn reads_sqlite_object_source_from_dotted_attached_schema() {
+        let pool = db::sqlite::connect_path(":memory:").await.expect("connect primary database");
+        db::sqlite::attach_database(&pool, "analytics.db", ":memory:").expect("attach database");
+        db::sqlite::execute_query(&pool, "CREATE VIEW \"analytics.db\".active_users AS SELECT 1 AS id")
+            .await
+            .expect("create attached view");
+
+        let source = sqlite_object_source(&pool, "analytics.db", "active_users", &ObjectSourceKind::View)
+            .await
+            .expect("read attached view source");
+
+        assert!(source.contains("CREATE VIEW active_users"));
+    }
 
     #[test]
     fn builds_sqlserver_object_source_sql_for_schema_scoped_routines() {
@@ -6930,10 +6964,11 @@ fn ensure_display_ddl_terminated(sql: String) -> String {
 
 pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &str) -> Result<String, String> {
     let pool = pool.clone();
-    let schema = db::sqlite::sqlite_quote_schema_ident(schema);
+    let schema = schema.to_string();
     let table = table.to_string();
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
+            let schema = db::sqlite::sqlite_quote_schema_ident_for_connection(conn, &schema)?;
             let sql = format!("SELECT sql FROM {}.sqlite_master WHERE type='table' AND name=?1", schema);
             conn.query_row(&sql, [table], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())
         })

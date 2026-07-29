@@ -1,9 +1,10 @@
-import { createApp } from "vue";
-import { createPinia } from "pinia";
-import VueVirtualScroller from "vue-virtual-scroller";
+import { createApp, nextTick } from "vue";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import "./styles/globals.css";
+import DetachedWindowShell from "@/components/layout/DetachedWindowShell.vue";
 import { installDebugLogCapture } from "@/lib/backend/debugLog";
+
+const DETACHED_TRANSFER_PARAM = "dbxDetachedTransfer";
 
 function startupErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -72,13 +73,22 @@ function installGlobalInputAttrs() {
   }).observe(document.body, { childList: true, subtree: true });
 }
 
-async function bootstrap() {
+function detachedTransferId(): string | null {
+  return new URLSearchParams(window.location.search).get(DETACHED_TRANSFER_PARAM);
+}
+
+async function loadFullApplication() {
   console.log("[STARTUP] frontend bootstrap begin");
-  const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), import("./App.vue")]);
+  const [{ createPinia }, { default: VueVirtualScroller }, { default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("pinia"), import("vue-virtual-scroller"), import("./i18n"), import("./App.vue")]);
   console.log("[STARTUP] frontend modules loaded");
   await loadSavedLocale();
   console.log("[STARTUP] locale ready");
 
+  return { App, createPinia, i18n, VueVirtualScroller };
+}
+
+function mountFullApplication(root: HTMLDivElement, { App, createPinia, i18n, VueVirtualScroller }: Awaited<ReturnType<typeof loadFullApplication>>) {
+  root.innerHTML = "";
   const app = createApp(App);
   app.use(createPinia());
   app.use(i18n);
@@ -87,6 +97,37 @@ async function bootstrap() {
   console.log("[STARTUP] vue mounted");
 
   installGlobalInputAttrs();
+}
+
+async function bootstrapDetachedWindow(root: HTMLDivElement) {
+  // Mount a dependency-light shell before parsing and initializing the full application.
+  const shellApp = createApp(DetachedWindowShell);
+  const shell = shellApp.mount(root) as InstanceType<typeof DetachedWindowShell>;
+  await nextTick();
+
+  let fullApplication: Awaited<ReturnType<typeof loadFullApplication>>;
+  try {
+    const { notifyDetachedWindowShellReady } = await import("@/lib/tabs/tabWindow");
+    await notifyDetachedWindowShellReady();
+    fullApplication = await loadFullApplication();
+  } catch (error) {
+    console.error("[STARTUP] detached bootstrap failed", error);
+    shell.showError(error);
+    return;
+  }
+
+  shellApp.unmount();
+  mountFullApplication(root, fullApplication);
+}
+
+async function bootstrap() {
+  const root = document.querySelector<HTMLDivElement>("#root");
+  if (!root) throw new Error("Application root element is missing");
+  if (detachedTransferId()) {
+    await bootstrapDetachedWindow(root);
+    return;
+  }
+  mountFullApplication(root, await loadFullApplication());
 }
 
 installDebugLogCapture();

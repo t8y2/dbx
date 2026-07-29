@@ -32,8 +32,8 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const attrs = useAttrs();
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
-// useAttrs() 已将监听器暴露为 onXxx 属性，必须通过 v-bind 原样转发，
-// 避免对象形式的 v-on 再次转换事件名。
+// useAttrs() exposes listeners as onXxx properties. Forward them through
+// v-bind so object-form v-on does not transform their event names again.
 const toolbarListeners = computed(() => Object.fromEntries(Object.entries(attrs).filter(([key]) => key.startsWith("on") && key !== "onExecute" && key !== "onExecuteInNewResultTab")));
 
 defineExpose({

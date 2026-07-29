@@ -69,7 +69,7 @@ const tabDrag = useTabDrag(
       if (!props.detachableTabs) return false;
       const rect = tabBarRef.value?.getBoundingClientRect();
       if (!rect) return false;
-      // 保留少量容差，避免鼠标刚好落在标签栏边缘时误触发窗口分离。
+      // Keep a small edge tolerance so minor pointer drift does not detach a tab.
       return pointOutsideRect({ x: event.clientX, y: event.clientY }, rect, 8);
     },
   },

@@ -82,7 +82,7 @@ import {
   switchToTabIndexFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { isPreviewTab, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
-import { checkDetachedWindowsBeforeAppClose, focusDetachedTabWindow, isDetachedTabWindow, listenForDetachedAppCloseChecks, prepareTabWindow, receiveDetachedTab } from "@/lib/tabs/tabWindow";
+import { checkDetachedWindowsBeforeAppClose, destroyDetachedWindowAfterCleanup, focusDetachedTabWindow, isDetachedTabWindow, listenForDetachedAppCloseChecks, prepareTabWindow, receiveDetachedTab } from "@/lib/tabs/tabWindow";
 import type { TabWindowClientPlacement } from "@/lib/tabs/tabWindowPlacement";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
@@ -385,7 +385,7 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
 });
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 if (!isDetachedWindow) {
-  // 全局后台任务只能由主窗口调度，否则每个分离窗口都会重复备份和上传。
+  // Only the main window schedules global jobs to avoid duplicate backups and uploads.
   useVisibilityChange();
   useWebDavAutoUpload();
   useScheduledDatabaseBackups({ scheduler: true });
@@ -2106,8 +2106,8 @@ async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement
             cursorPos: cursorPos.value,
           }
         : {
-            // 非活动标签没有 App 级运行态；按主窗口重新激活该标签时的
-            // 既有语义恢复默认结果视图，并从标签自身的编辑器选区派生状态。
+            // Inactive tabs have no App-level runtime state. Match normal main-window
+            // reactivation by restoring the default output and deriving the selection.
             activeOutputView: "result" as const,
             selectedSql: currentTab.sql.slice(selectionFrom, selectionTo),
             cursorPos: selection?.head ?? 0,
@@ -2122,7 +2122,7 @@ async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement
       return;
     }
     try {
-      // 子窗口确认接收后才提交迁移；失败时恢复原位置和活动标签页。
+      // Commit ownership only after the child accepts the transfer; otherwise restore it.
       await preparedWindow.transfer({
         tab: transferState.tab,
         ...tabRuntimeState,
@@ -2169,21 +2169,23 @@ async function closeDetachedTab() {
   if (!isDetachedWindow || detachedWindowClosing) return;
   detachedWindowClosing = true;
   const detachedWindow = isTauriRuntime() ? getCurrentWebviewWindow() : null;
-  // 先隐藏以提供即时关闭反馈，但保留 WebView 上下文直到资源清理完成。
+  // Hide immediately for feedback, then force-destroy the WebView on cleanup failure or timeout.
   if (detachedWindow) await detachedWindow.hide().catch(() => {});
   const tabId = queryStore.activeTabId;
-  try {
-    if (tabId) await queryStore.closeTabAndWait(tabId, { force: true });
-  } catch (error) {
-    // 关闭语义优先：清理失败需要记录，但不能留下不可见且无法再次关闭的窗口。
-    console.warn("[DBX][detached-tab:cleanup:error]", { tabId, error });
-  }
   if (!detachedWindow) {
+    if (tabId) await queryStore.closeTabAndWait(tabId, { force: true }).catch((error) => console.warn("[DBX][detached-tab:cleanup:error]", { tabId, error }));
     window.close();
     return;
   }
   try {
-    await detachedWindow.close();
+    const outcome = await destroyDetachedWindowAfterCleanup(detachedWindow, async () => {
+      if (tabId) await queryStore.closeTabAndWait(tabId, { force: true });
+    });
+    if (outcome.status === "failed") {
+      console.warn("[DBX][detached-tab:cleanup:error]", { tabId, error: outcome.error });
+    } else if (outcome.status === "timed-out") {
+      console.warn("[DBX][detached-tab:cleanup:timeout]", { tabId, timeoutMs: outcome.timeoutMs });
+    }
   } catch (error) {
     detachedWindowClosing = false;
     await detachedWindow.show().catch(() => {});

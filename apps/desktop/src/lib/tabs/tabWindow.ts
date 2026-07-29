@@ -8,6 +8,7 @@ import type { QueryTab } from "@/types/database";
 const DETACHED_TRANSFER_PARAM = "dbxDetachedTransfer";
 const TRANSFER_TIMEOUT_MS = 15_000;
 const APP_CLOSE_CHECK_TIMEOUT_MS = 2_000;
+const DETACHED_WINDOW_CLEANUP_TIMEOUT_MS = 3_000;
 const APP_CLOSE_CHECK_EVENT = "dbx-detached-tab-app-close-check";
 const APP_CLOSE_STATUS_EVENT = "dbx-detached-tab-app-close-status";
 const openingWindows = new Map<string, Promise<PreparedTabWindow>>();
@@ -55,11 +56,32 @@ export interface PreparedTabWindow {
   abort: () => Promise<void>;
 }
 
+export type DetachedWindowCleanupOutcome = { status: "completed" } | { status: "failed"; error: unknown } | { status: "timed-out"; timeoutMs: number };
+
+export async function destroyDetachedWindowAfterCleanup(target: Pick<WebviewWindow, "destroy">, cleanup: () => Promise<void>, timeoutMs = DETACHED_WINDOW_CLEANUP_TIMEOUT_MS): Promise<DetachedWindowCleanupOutcome> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cleanupOutcome: Promise<DetachedWindowCleanupOutcome> = Promise.resolve()
+    .then(cleanup)
+    .then(() => ({ status: "completed" }) as const)
+    .catch((error: unknown) => ({ status: "failed", error }));
+  const timeoutOutcome = new Promise<DetachedWindowCleanupOutcome>((resolve) => {
+    timer = setTimeout(() => resolve({ status: "timed-out", timeoutMs }), Math.max(0, timeoutMs));
+  });
+
+  try {
+    return await Promise.race([cleanupOutcome, timeoutOutcome]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    // close() emits CloseRequested again; destroy() guarantees that a hidden WebView is released.
+    await target.destroy();
+  }
+}
+
 function windowLabel(tabId: string): string {
   return `detached-tab-${tabId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-function transferEventName(kind: "ready" | "transfer" | "accepted", transferId: string): string {
+function transferEventName(kind: "shell-ready" | "transfer-ready" | "transfer" | "accepted", transferId: string): string {
   return `dbx-detached-tab-${kind}-${transferId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
@@ -129,10 +151,13 @@ async function prepareTauriTabWindow(tabId: string, title: string, placement?: T
       const [sourceInnerPosition, sourceScaleFactor] = await Promise.all([mainWindow.innerPosition(), mainWindow.scaleFactor()]);
       initialPosition = detachedTabWindowLogicalPosition(sourceInnerPosition, sourceScaleFactor, window.devicePixelRatio, placement);
     } catch {
-      // 坐标读取失败时仍允许按窗口管理器默认位置创建，不能阻断标签迁移。
+      // Fall back to the window manager position when source coordinates are unavailable.
     }
   }
-  const readyWaiter = await createEventWaiter<TransferSignal>(mainWindow, transferEventName("ready", transferId), "Detached tab window did not become ready");
+  const shellReadyWaiter = await createEventWaiter<TransferSignal>(mainWindow, transferEventName("shell-ready", transferId), "Detached tab window shell did not become ready");
+  const transferReadyWaiter = await createEventWaiter<TransferSignal>(mainWindow, transferEventName("transfer-ready", transferId), "Detached tab window did not become ready for transfer");
+  // Destruction can cancel this waiter before the sequential transfer-ready await begins.
+  void transferReadyWaiter.promise.catch(() => {});
   const detached = new WebviewWindow(label, {
     url: detachedUrl(transferId),
     title,
@@ -148,13 +173,20 @@ async function prepareTauriTabWindow(tabId: string, title: string, placement?: T
     focus: false,
     visible: false,
   });
+  void detached.once("tauri://destroyed", () => {
+    shellReadyWaiter.cancel();
+    transferReadyWaiter.cancel();
+  });
 
   try {
-    await Promise.all([waitForWindowCreation(detached), readyWaiter.promise]);
+    // Show the lightweight shell before the full application and tab workspace finish loading.
+    await Promise.all([waitForWindowCreation(detached), shellReadyWaiter.promise]);
     await detached.show();
+    await transferReadyWaiter.promise;
   } catch (error) {
-    readyWaiter.cancel();
-    await detached.close().catch(() => {});
+    shellReadyWaiter.cancel();
+    transferReadyWaiter.cancel();
+    await detached.destroy().catch(() => {});
     throw error;
   }
 
@@ -181,7 +213,8 @@ async function prepareTauriTabWindow(tabId: string, title: string, placement?: T
 }
 
 /**
- * 先等待隐藏子窗口准备完成，再交由调用方迁移标签页所有权，避免窗口创建失败时丢失主窗口标签页。
+ * Waits until the detached window can receive the transfer before ownership
+ * leaves the main window, so startup failures cannot lose the original tab.
  */
 export async function prepareTabWindow(tabId: string, title: string, placement?: TabWindowClientPlacement): Promise<PreparedTabWindow> {
   if (!isTauriRuntime()) throw new Error("Detached tabs are only supported in the desktop app");
@@ -197,8 +230,15 @@ export async function prepareTabWindow(tabId: string, title: string, placement?:
   }
 }
 
+export async function notifyDetachedWindowShellReady(): Promise<void> {
+  const transferId = detachedTransferId();
+  if (!transferId || !isTauriRuntime()) throw new Error("Detached tab transfer context is missing");
+  await emitTo("main", transferEventName("shell-ready", transferId), { transferId } satisfies TransferSignal);
+}
+
 /**
- * 子窗口只在完成应用基础初始化后发出 ready；接收成功的确认是主窗口移除原标签页的提交点。
+ * The detached window becomes transfer-ready only after its listener and core
+ * state exist. Acceptance remains the commit point for removing the main tab.
  */
 export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransferPayload) => (() => void | Promise<void>) | Promise<() => void | Promise<void>>): Promise<UnlistenFn> {
   const transferId = detachedTransferId();
@@ -233,7 +273,7 @@ export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransfe
   });
 
   try {
-    await emitTo("main", transferEventName("ready", transferId), { transferId } satisfies TransferSignal);
+    await emitTo("main", transferEventName("transfer-ready", transferId), { transferId } satisfies TransferSignal);
     return unlisten;
   } catch (error) {
     unlisten();

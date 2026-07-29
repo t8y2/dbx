@@ -126,7 +126,7 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
 /// Used by `resolve_transfer_target_table_name` and the source-DDL path
 /// to dispatch to the 3-part catalog-aware metadata functions instead of
 /// the default-catalog lookup.
-fn resolve_external_transfer_catalog<'a>(catalog: Option<&'a str>, db_type: &DatabaseType) -> Option<&'a str> {
+pub fn resolve_external_transfer_catalog<'a>(catalog: Option<&'a str>, db_type: &DatabaseType) -> Option<&'a str> {
     let catalog = catalog?;
     let catalog = catalog.trim();
     if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") {

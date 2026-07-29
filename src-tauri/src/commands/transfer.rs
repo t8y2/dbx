@@ -52,8 +52,6 @@ pub async fn start_transfer(
     // Reject transfer early if the target connection is read-only — writing to it is inherently required
     ensure_connection_writable(&state, &request.target_connection_id, "Transfer").await?;
 
-    use dbx_core::models::connection::DatabaseType;
-
     // Validate connections exist
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
@@ -75,19 +73,30 @@ pub async fn start_transfer(
 
     tokio::spawn(async move {
         // Sort tables by FK dependency so referenced tables are transferred first.
-        let sorted_tables = dbx_core::transfer::sort_tables_by_fk_dependency(
-            &state,
-            &request.source_connection_id,
-            &request.source_database,
-            &request.source_schema,
-            &request.tables,
-            true,
+        // Skip for external Doris/StarRocks catalogs — the database name does not
+        // exist in the default catalog and sorting is unnecessary (no FK constraints).
+        let sorted_tables = if dbx_core::transfer::resolve_external_transfer_catalog(
+            request.source_catalog.as_deref(),
+            &source_db_type,
         )
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
+        .is_some()
+        {
             request.tables.clone()
-        });
+        } else {
+            dbx_core::transfer::sort_tables_by_fk_dependency(
+                &state,
+                &request.source_connection_id,
+                &request.source_database,
+                &request.source_schema,
+                &request.tables,
+                true,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
+                request.tables.clone()
+            })
+        };
 
         let total_tables = sorted_tables.len();
         log::info!("[transfer] starting transfer_id={} tables={}", transfer_id, total_tables);

@@ -170,19 +170,26 @@ pub async fn start_transfer(
 
         let tables = req.tables.clone();
         // Sort by FK dependency so referenced tables are transferred first.
-        let tables = transfer::sort_tables_by_fk_dependency(
-            &app,
-            &req.source_connection_id,
-            &req.source_database,
-            &req.source_schema,
-            &tables,
-            true,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
-            tables
-        });
+        // Skip for external Doris/StarRocks catalogs — the database name does
+        // not exist in the default catalog and sorting is unnecessary.
+        let tables =
+            if transfer::resolve_external_transfer_catalog(req.source_catalog.as_deref(), &source_db_type).is_some() {
+                tables
+            } else {
+                transfer::sort_tables_by_fk_dependency(
+                    &app,
+                    &req.source_connection_id,
+                    &req.source_database,
+                    &req.source_schema,
+                    &tables,
+                    true,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
+                    tables
+                })
+            };
         let mut failed_tables: Vec<String> = Vec::new();
 
         if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)

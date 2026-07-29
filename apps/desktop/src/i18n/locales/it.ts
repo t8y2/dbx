@@ -1329,6 +1329,11 @@ export default withEnglishFallback({
     numericColumnAlign: "Allineamento colonna numerica",
     numericColumnAlignLeft: "Allineamento a sinistra",
     numericColumnAlignRight: "Allineamento a destra",
+    batchAppendPasteNotEditable: "Il risultato corrente non è modificabile.",
+    batchAppendPasteInvalidTarget: "Seleziona prima una cella vuota della riga nuova, poi incolla.",
+    batchAppendPasteTargetNotEmpty: "La riga nuova selezionata contiene già dati.",
+    batchAppendPasteEmpty: "Negli appunti non ci sono righe da aggiungere.",
+    batchAppendPasteReadonlyColumn: "I dati incollati contengono colonne non modificabili.",
   },
   exportProgress: {
     xlsxRowLimit: "XLSX supporta al massimo {limit} righe di dati. Usa l'esportazione CSV per il risultato completo.",

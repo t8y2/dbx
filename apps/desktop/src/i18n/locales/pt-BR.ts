@@ -1331,6 +1331,11 @@ export default withEnglishFallback({
     numericColumnAlign: "Alinhamento de colunas numéricas",
     numericColumnAlignLeft: "Alinhamento à esquerda",
     numericColumnAlignRight: "Alinhamento à direita",
+    batchAppendPasteNotEditable: "O resultado atual não é editável.",
+    batchAppendPasteInvalidTarget: "Selecione primeiro o número da linha de uma nova linha vazia e depois cole.",
+    batchAppendPasteTargetNotEmpty: "A nova linha selecionada já contém dados.",
+    batchAppendPasteEmpty: "Não há linhas para adicionar na área de transferência.",
+    batchAppendPasteReadonlyColumn: "Os dados colados contêm colunas não editáveis.",
   },
   exportProgress: {
     xlsxRowLimit: "O XLSX suporta no máximo {limit} linhas de dados. Use a exportação CSV para obter o resultado completo.",

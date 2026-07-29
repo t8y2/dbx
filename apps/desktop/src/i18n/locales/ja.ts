@@ -1330,6 +1330,11 @@ export default withEnglishFallback({
     numericColumnAlign: "数値列の配置",
     numericColumnAlignLeft: "左揃え",
     numericColumnAlignRight: "右揃え",
+    batchAppendPasteNotEditable: "現在の結果は編集できません。",
+    batchAppendPasteInvalidTarget: "空の新規行の行番号セルを選択してから貼り付けてください。",
+    batchAppendPasteTargetNotEmpty: "選択した新規行には既にデータが含まれています。",
+    batchAppendPasteEmpty: "クリップボードに追加可能な行がありません。",
+    batchAppendPasteReadonlyColumn: "貼り付けたデータに編集不可能な列が含まれています。",
   },
   exportProgress: {
     xlsxRowLimit: "XLSX は最大 {limit} 行のデータに対応しています。完全な結果を得るには CSV エクスポートを使用してください。",

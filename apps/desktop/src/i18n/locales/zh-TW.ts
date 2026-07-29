@@ -1330,6 +1330,11 @@ export default withEnglishFallback({
     numericColumnAlign: "數值列對齊",
     numericColumnAlignLeft: "左對齊",
     numericColumnAlignRight: "右對齊",
+    batchAppendPasteNotEditable: "目前結果不可編輯。",
+    batchAppendPasteInvalidTarget: "請先選取一個空白新增行的行號儲存格，再進行貼上。",
+    batchAppendPasteTargetNotEmpty: "選取的新增行已包含資料。",
+    batchAppendPasteEmpty: "剪貼簿中沒有可新增的行。",
+    batchAppendPasteReadonlyColumn: "貼上的資料包含不可編輯的列。",
   },
   exportProgress: {
     xlsxRowLimit: "XLSX 最多支援 {limit} 列資料，請改用 CSV 匯出完整結果。",

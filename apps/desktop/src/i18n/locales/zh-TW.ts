@@ -2494,6 +2494,13 @@ export default withEnglishFallback({
     noJoinSql: "沒有可複製的關係 SQL",
   },
   redis: {
+    setDatabaseAlias: "設定資料庫別名",
+    databaseAliasTitle: "設定 db{db} 的別名",
+    databaseAliasPlaceholder: "例如：訂單、快取、開發環境",
+    databaseAliasHint: "別名僅用於顯示和搜尋，Redis 命令仍使用數字資料庫編號。",
+    clearDatabaseAlias: "清除別名",
+    databaseAliasSaved: "已將 db{db} 的別名設定為「{alias}」",
+    databaseAliasCleared: "已清除 db{db} 的別名",
     createKeyTypeHelp: {
       string: "最大 512 MB 的單一值；適合快取與計數器。",
       hash: "扁平欄位值映射；完整讀取大型 Hash 為 O(N)。",

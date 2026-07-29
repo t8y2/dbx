@@ -2823,6 +2823,13 @@ export default withEnglishFallback({
     summarySize: "tamaño",
   },
   redis: {
+    setDatabaseAlias: "Establecer alias de base de datos",
+    databaseAliasTitle: "Alias para db{db}",
+    databaseAliasPlaceholder: "p. ej. pedidos, caché, desarrollo",
+    databaseAliasHint: "El alias solo se usa para mostrar y buscar. Los comandos de Redis siguen usando el índice numérico.",
+    clearDatabaseAlias: "Borrar alias",
+    databaseAliasSaved: "Alias de db{db} establecido en {alias}",
+    databaseAliasCleared: "Alias de db{db} eliminado",
     createKeyTypeHelp: {
       string: "Valor único de hasta 512 MB; útil para caché y contadores.",
       hash: "Mapa plano campo-valor; leer un Hash grande completo es O(N).",

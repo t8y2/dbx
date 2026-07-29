@@ -397,6 +397,12 @@ const {
   dropMongoIndex,
   dropAllMongoIndexes,
   flushRedisDb,
+  prepareRedisDatabaseAliasDialog,
+  confirmRedisDatabaseAlias,
+  clearRedisDatabaseAlias,
+  showRedisDatabaseAliasDialog,
+  redisDatabaseAliasInput,
+  redisDatabaseAliasSaving,
   confirmFlushRedisDb,
   confirmDropMongoDatabase,
   confirmDropMongoCollection,
@@ -575,7 +581,9 @@ async function toggle() {
       }
     } else if (node.type === "redis-db" && node.connectionId && node.database) {
       await connectionStore.ensureConnected(node.connectionId);
-      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:db${node.database}`;
+      const alias = connectionStore.getRedisDatabaseAlias(node.connectionId, node.database);
+      const databaseLabel = alias ? `db${node.database} · ${alias}` : `db${node.database}`;
+      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:${databaseLabel}`;
       queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
     } else if (node.type === "mq-tenant" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
@@ -914,6 +922,12 @@ function openRenameMongoCollectionDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
   prepareRenameMongoCollectionDialog();
+}
+
+function openRedisDatabaseAliasDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareRedisDatabaseAliasDialog();
 }
 
 function requestEditSelectedConnection(): boolean {
@@ -3521,6 +3535,11 @@ function databaseSpecificDialogCapabilities() {
     renameMongoCollectionPreview,
     renameMongoCollectionLoading,
     confirmRenameMongoCollection,
+    showRedisDatabaseAliasDialog,
+    redisDatabaseAliasInput,
+    redisDatabaseAliasSaving,
+    confirmRedisDatabaseAlias,
+    clearRedisDatabaseAlias,
     showCreateSchemaDialog,
     createSchemaName,
     confirmCreateSchema,
@@ -4017,6 +4036,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (node.type === "redis-db") {
       items.push({ label: "", separator: true });
+      items.push({ label: t("redis.setDatabaseAlias"), action: openRedisDatabaseAliasDialog, icon: Pencil });
       items.push({ label: t("redis.flushDb"), action: flushRedisDb, icon: Eraser, variant: "destructive" as const });
     }
     if (canDropMongoDatabase.value) {

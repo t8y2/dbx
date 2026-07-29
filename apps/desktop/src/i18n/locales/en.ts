@@ -2971,6 +2971,13 @@ export default {
     summarySize: "size",
   },
   redis: {
+    setDatabaseAlias: "Set Database Alias",
+    databaseAliasTitle: "Alias for db{db}",
+    databaseAliasPlaceholder: "e.g. orders, cache, development",
+    databaseAliasHint: "The alias is for display and search only. Redis commands continue to use the numeric database index.",
+    clearDatabaseAlias: "Clear Alias",
+    databaseAliasSaved: "Alias for db{db} set to {alias}",
+    databaseAliasCleared: "Alias for db{db} cleared",
     selectKey: "Select a key to view its value",
     noKeys: "No keys found",
     noKeysInScanHint: "No keys found in current scan range",

@@ -2822,6 +2822,13 @@ export default withEnglishFallback({
     },
   },
   redis: {
+    setDatabaseAlias: "データベースの別名を設定",
+    databaseAliasTitle: "db{db} の別名",
+    databaseAliasPlaceholder: "例：注文、キャッシュ、開発",
+    databaseAliasHint: "別名は表示と検索にのみ使用されます。Redis コマンドは引き続き数値のデータベース番号を使用します。",
+    clearDatabaseAlias: "別名をクリア",
+    databaseAliasSaved: "db{db} の別名を {alias} に設定しました",
+    databaseAliasCleared: "db{db} の別名をクリアしました",
     createKeyTypeHelp: {
       string: "最大 512 MB の単一値。キャッシュやカウンター向けです。",
       hash: "フラットなフィールド値マップ。大きな Hash 全読込は O(N) です。",

@@ -158,6 +158,7 @@ export interface ConnectionConfig {
   redis_cluster_nodes?: string;
   redis_key_separator?: string;
   redis_scan_page_size?: number;
+  redis_database_aliases?: Record<string, string>;
   etcd_endpoints?: string;
   gbase_server?: string;
   informix_server?: string;

@@ -2971,6 +2971,13 @@ export default withEnglishFallback({
     summarySize: "大小",
   },
   redis: {
+    setDatabaseAlias: "设置数据库别名",
+    databaseAliasTitle: "设置 db{db} 的别名",
+    databaseAliasPlaceholder: "例如：订单、缓存、开发环境",
+    databaseAliasHint: "别名仅用于显示和搜索，Redis 命令仍使用数字数据库编号。",
+    clearDatabaseAlias: "清除别名",
+    databaseAliasSaved: "已将 db{db} 的别名设置为「{alias}」",
+    databaseAliasCleared: "已清除 db{db} 的别名",
     selectKey: "选择一个 key 查看值",
     noKeys: "未找到 key",
     noKeysInScanHint: "当前扫描范围内未命中匹配的 key",

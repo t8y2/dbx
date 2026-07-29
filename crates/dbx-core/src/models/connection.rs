@@ -144,6 +144,8 @@ pub struct ConnectionConfig {
     pub redis_key_separator: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_scan_page_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub redis_database_aliases: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub etcd_endpoints: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -613,6 +615,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub redis_scan_page_size: Option<u64>,
     #[serde(default)]
+    pub redis_database_aliases: HashMap<String, String>,
+    #[serde(default)]
     pub etcd_endpoints: String,
     #[serde(default)]
     pub gbase_server: String,
@@ -679,6 +683,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_cluster_nodes: data.redis_cluster_nodes,
             redis_key_separator: data.redis_key_separator,
             redis_scan_page_size: data.redis_scan_page_size,
+            redis_database_aliases: data.redis_database_aliases,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
             informix_server: data.informix_server,
@@ -2227,6 +2232,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -2271,6 +2277,24 @@ mod tests {
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["note"], "Production reporting");
         assert_eq!(serde_json::from_value::<ConnectionConfig>(value).unwrap().note, config.note);
+    }
+
+    #[test]
+    fn redis_database_aliases_are_optional_and_round_trip() {
+        let config = mysql_config("default", "secret", None);
+        let value = serde_json::to_value(&config).unwrap();
+        assert!(value.get("redis_database_aliases").is_none());
+        assert!(serde_json::from_value::<ConnectionConfig>(value).unwrap().redis_database_aliases.is_empty());
+
+        let mut config = config;
+        config.db_type = DatabaseType::Redis;
+        config.redis_database_aliases.insert("3".to_string(), "orders".to_string());
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["redis_database_aliases"]["3"], "orders");
+        assert_eq!(
+            serde_json::from_value::<ConnectionConfig>(value).unwrap().redis_database_aliases,
+            config.redis_database_aliases
+        );
     }
 
     #[test]

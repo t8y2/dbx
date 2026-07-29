@@ -423,7 +423,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       i = newline === -1 ? len : newline + 1;
       continue;
     }
-    if (ch === "#") {
+    if (ch === "#" && next !== "{") {
       const newline = sql.indexOf("\n", i);
       i = newline === -1 ? len : newline + 1;
       continue;
@@ -850,7 +850,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
       i += 2;
       continue;
     }
-    if (ch === "#") {
+    if (ch === "#" && next !== "{") {
       state = "lineComment";
       i += 1;
       continue;
@@ -1044,7 +1044,7 @@ function topLevelWordsBefore(sql: string, from: number, to: number, limit: numbe
       i += 2;
       continue;
     }
-    if (ch === "#") {
+    if (ch === "#" && next !== "{") {
       state = "lineComment";
       i += 1;
       continue;
@@ -1268,7 +1268,7 @@ function skipBalancedParens(sql: string, pos: number): number | null {
 }
 
 function startsLineComment(sql: string, pos: number): boolean {
-  return (sql[pos] === "-" && sql[pos + 1] === "-") || sql[pos] === "#";
+  return (sql[pos] === "-" && sql[pos + 1] === "-") || (sql[pos] === "#" && sql[pos + 1] !== "{");
 }
 
 function startsBlockComment(sql: string, pos: number): boolean {
@@ -1384,7 +1384,7 @@ function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryF
       i += 2;
       continue;
     }
-    if (ch === "#") {
+    if (ch === "#" && next !== "{") {
       state = "lineComment";
       i += 1;
       continue;
@@ -1572,7 +1572,7 @@ function mysqlRoutineTokens(sql: string): Array<{ kind: "word" | "semicolon"; va
       i += 2;
       continue;
     }
-    if (ch === "#") {
+    if (ch === "#" && next !== "{") {
       state = "lineComment";
       i += 1;
       continue;

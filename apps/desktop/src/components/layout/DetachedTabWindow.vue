@@ -32,6 +32,8 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const attrs = useAttrs();
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
+// useAttrs() 已将监听器暴露为 onXxx 属性，必须通过 v-bind 原样转发，
+// 避免对象形式的 v-on 再次转换事件名。
 const toolbarListeners = computed(() => Object.fromEntries(Object.entries(attrs).filter(([key]) => key.startsWith("on") && key !== "onExecute" && key !== "onExecuteInNewResultTab")));
 
 defineExpose({
@@ -71,7 +73,7 @@ defineExpose({
         :auto-commit="autoCommit"
         :txn-session-id="txnSessionId"
         :txn-auto-rolled-back="txnAutoRolledBack"
-        v-on="toolbarListeners"
+        v-bind="toolbarListeners"
         @execute="contentAreaRef?.requestQueryEditorExecute()"
       />
       <ContentArea
@@ -86,7 +88,7 @@ defineExpose({
         :selected-sql="selectedSql"
         :cursor-pos="cursorPos"
         :block-dangerous-redis-commands="blockDangerousRedisCommands"
-        v-on="$attrs"
+        v-bind="$attrs"
       />
     </div>
     <div v-else class="flex flex-1 items-center justify-center text-sm text-muted-foreground">

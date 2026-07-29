@@ -134,6 +134,16 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, command);
         Err("MongoDB shell commands are not supported by this backend.".to_string())
     }
+    /// Release the connection pool pinned by an MCP session (`client_session_id`).
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        let _ = (connection_id, database, client_session_id);
+        Err("Session cleanup is not supported by this backend.".to_string())
+    }
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let _ = (path, body);
         Err("DBX is not running. Please start DBX first.".to_string())
@@ -598,6 +608,16 @@ impl DbxBackend for LocalBackend {
         }
     }
 
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        let database = if database.trim().is_empty() { None } else { Some(database) };
+        self.state.close_client_session_pool(connection_id, database, client_session_id).await
+    }
+
     async fn bridge_request(&self, path: &str, body: Value) -> Result<(), String> {
         let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
             .await
@@ -678,13 +698,12 @@ impl DbxBackend for WebBackend {
             }
 
             let max_rows = arguments.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
-            let response = self
-                .request(
-                    reqwest::Method::POST,
-                    "/api/query/execute",
-                    Some(json!({ "connectionId": connection.id, "database": database, "sql": sql })),
-                )
-                .await?;
+            let mut body = json!({ "connectionId": connection.id, "database": database, "sql": sql });
+            // Stateful MCP sessions pin every query to the same backend pool.
+            if let Some(client_session_id) = arguments.get("client_session_id").and_then(Value::as_str) {
+                body["clientSessionId"] = json!(client_session_id);
+            }
+            let response = self.request(reqwest::Method::POST, "/api/query/execute", Some(body)).await?;
             let query_result: dbx_core::db::QueryResult =
                 response.json().await.map_err(|error| format!("Invalid query response: {error}"))?;
             Ok(format_query_result(&query_result, max_rows))
@@ -720,6 +739,27 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid query response: {error}"))
+    }
+
+    async fn close_client_session(
+        &self,
+        connection_id: &str,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/query/close-client-session",
+            Some(json!({
+                "connectionId": connection_id,
+                "database": database,
+                "clientSessionId": client_session_id,
+            })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid close session response: {error}"))
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {

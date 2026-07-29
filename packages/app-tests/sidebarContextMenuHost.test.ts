@@ -60,6 +60,17 @@ test("tree host owns sidebar data-open generations", () => {
   assert.match(connectionTree, /createSidebarActionTarget\(node\)/);
 });
 
+test("query-tab object source opens clean isolated tabs and honors backend editability", () => {
+  const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
+  const openObjectSourceBody = functionBody(runtimeHost, "openObjectSourceDialog");
+
+  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, result\.source, node\.catalog, \{ forceNew: true \}\)/);
+  assert.match(openObjectSourceBody, /result\.editable !== false/);
+  assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"\]\.includes\(objectType\)/);
+  assert.match(openObjectSourceBody, /signature: node\.signature/);
+  assert.doesNotMatch(openObjectSourceBody, /queryStore\.updateSql/);
+});
+
 test("table copy menu uses the shared single and multi-selection clipboard path", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const copyNameBody = functionBody(runtimeHost, "copyName");

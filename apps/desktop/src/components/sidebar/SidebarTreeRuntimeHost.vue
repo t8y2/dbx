@@ -1500,13 +1500,14 @@ function openObjectSourceDialog(initialEditing: boolean) {
         connectionStore.activeConnectionId = connectionId;
         const schema = node.schema || database;
         const result = await api.getObjectSource(connectionId, database, schema, node.objectName || node.label, objectType as any, node.signature);
-        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`);
-        queryStore.updateSql(tabId, result.source);
-        if (objectType !== "SEQUENCE") {
+        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, result.source, node.catalog, { forceNew: true });
+        const sourceIsEditable = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(objectType);
+        if (sourceIsEditable) {
           queryStore.setObjectSource(tabId, {
             schema,
             name: node.objectName || node.label,
             objectType,
+            signature: node.signature,
           });
         }
       })

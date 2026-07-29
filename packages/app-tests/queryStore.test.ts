@@ -341,6 +341,17 @@ test("marked-clean object source tabs close without unsaved confirmation", () =>
   );
 });
 
+test("object source tabs can force distinct clean identities for overloaded routines", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstId = store.createTab("conn-1", "db", "Source - calculate", "query", "public", "CREATE FUNCTION calculate(integer)", undefined, { forceNew: true });
+  const secondId = store.createTab("conn-1", "db", "Source - calculate", "query", "public", "CREATE FUNCTION calculate(text)", undefined, { forceNew: true });
+
+  assert.notEqual(firstId, secondId);
+  assert.equal(store.isTabDirty(store.tabs.find((tab) => tab.id === firstId)!), false);
+  assert.equal(store.isTabDirty(store.tabs.find((tab) => tab.id === secondId)!), false);
+});
+
 test("close all tabs pauses on unsaved query tabs", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();

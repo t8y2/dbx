@@ -1877,11 +1877,10 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[]) {
-    const existing = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
-    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(children, Date.now(), existing?.tableSearchIndex)).catch(() => undefined);
+    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(children)).catch(() => undefined);
   }
 
-  function sidebarTableSearchCacheKey(parent: TreeNode): string | null {
+  function sidebarTableSearchTreeCacheKey(parent: TreeNode): string | null {
     if (!parent.connectionId || !parent.database) return null;
     if (parent.type === "group-tables") return objectGroupCacheKey(parent);
     if (parent.type !== "database" && parent.type !== "schema" && parent.type !== "linked-server-schema") return null;
@@ -1889,10 +1888,15 @@ export const useConnectionStore = defineStore("connection", () => {
     return schemaCacheKey(parent.connectionId, parent.database, parent.schema || "", simpleObjectDisplay ? "objects-simple-v6" : "objects-grouped-v7");
   }
 
+  function sidebarTableSearchIndexCacheKey(parent: TreeNode): string | null {
+    const treeCacheKey = sidebarTableSearchTreeCacheKey(parent);
+    return treeCacheKey ? `${treeCacheKey}:table-search-index-v1` : null;
+  }
+
   async function loadSidebarTableSearchIndex(parentNodeId: string): Promise<TableInfo[] | null> {
     const parent = findNode(treeNodes.value, parentNodeId);
     if (!parent) return null;
-    const cacheKey = sidebarTableSearchCacheKey(parent);
+    const cacheKey = sidebarTableSearchIndexCacheKey(parent);
     if (!cacheKey) return null;
     const decoded = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
     const index = decoded?.tableSearchIndex;
@@ -1903,7 +1907,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function refreshSidebarTableSearchIndex(parentNodeId: string): Promise<TableInfo[]> {
     const parent = findNode(treeNodes.value, parentNodeId);
     if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return [];
-    const cacheKey = sidebarTableSearchCacheKey(parent);
+    const cacheKey = sidebarTableSearchIndexCacheKey(parent);
     if (!cacheKey) return [];
     await ensureConnected(parent.connectionId);
     const config = getConfig(parent.connectionId);
@@ -1917,9 +1921,8 @@ export const useConnectionStore = defineStore("connection", () => {
       if (page.length < pageSize) break;
     }
     const deduped = [...new Map(entries.map((entry) => [`${entry.table_type}\0${entry.name}`, entry])).values()];
-    const existing = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
     const tableSearchIndex = { complete: true as const, indexedAt: new Date().toISOString(), entries: deduped.map((entry) => ({ name: entry.name, tableType: entry.table_type })) };
-    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(existing?.children ?? [], Date.now(), tableSearchIndex));
+    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache<TreeNode[]>([], Date.now(), tableSearchIndex));
     return deduped;
   }
 

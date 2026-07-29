@@ -1,0 +1,103 @@
+---
+source: crates/dbx-core/src/sql_dialect/descriptor_snapshots.rs
+assertion_line: 55
+expression: "&matrix.rules"
+---
+[
+  {
+    "source_type": "TINYINT(1)",
+    "target_type": "BOOLEAN",
+    "precision_loss": false,
+    "requires_cast": true
+  },
+  {
+    "source_type": "TINYINT",
+    "target_type": "SMALLINT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "MEDIUMINT",
+    "target_type": "INTEGER",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "INT",
+    "target_type": "INTEGER",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "BIGINT",
+    "target_type": "BIGINT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "FLOAT",
+    "target_type": "REAL",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "DOUBLE",
+    "target_type": "DOUBLE PRECISION",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "TINYTEXT",
+    "target_type": "TEXT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "TEXT",
+    "target_type": "TEXT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "MEDIUMTEXT",
+    "target_type": "TEXT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "LONGTEXT",
+    "target_type": "TEXT",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "BLOB",
+    "target_type": "BYTEA",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "TINYBLOB",
+    "target_type": "BYTEA",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "MEDIUMBLOB",
+    "target_type": "BYTEA",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "LONGBLOB",
+    "target_type": "BYTEA",
+    "precision_loss": false,
+    "requires_cast": false
+  },
+  {
+    "source_type": "DATETIME",
+    "target_type": "TIMESTAMP",
+    "precision_loss": false,
+    "requires_cast": false
+  }
+]

@@ -226,7 +226,7 @@ async fn ensure_no_agent_update_blockers(state: &AppState, db_types: &[String]) 
         return Ok(());
     }
     let labels = blockers.into_iter().map(|blocker| blocker.label).collect::<Vec<_>>().join(", ");
-    Err(format!("请先关闭以下数据库连接后再更新驱动: {labels}"))
+    Err(format!("Close these database connections before updating drivers: {labels}"))
 }
 
 async fn ensure_no_offline_import_blockers(state: &AppState, plan: &OfflineImportPlan) -> Result<(), String> {

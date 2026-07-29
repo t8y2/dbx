@@ -367,7 +367,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listDatabases()
 		return result, false, err
 	case "list_schemas":
-		result, err := s.listSchemas(stringSliceParam(params, "visible_schemas"))
+		result, err := s.listSchemas(stringSliceParam(params, "visible_schemas"), boolParam(params, "show_system_schemas"))
 		return result, false, err
 	case "list_tables":
 		result, err := s.listTables(stringParam(params, "schema"), metadataListConstraintsFromParams(params))
@@ -1135,6 +1135,14 @@ func stringParam(params map[string]json.RawMessage, key string) string {
 func intParam(params map[string]json.RawMessage, key string) int {
 	var value int
 	_ = json.Unmarshal(params[key], &value)
+	return value
+}
+
+func boolParam(params map[string]json.RawMessage, key string) bool {
+	var value bool
+	if raw, ok := params[key]; ok {
+		_ = json.Unmarshal(raw, &value)
+	}
 	return value
 }
 

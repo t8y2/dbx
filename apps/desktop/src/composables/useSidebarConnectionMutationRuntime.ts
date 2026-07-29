@@ -150,7 +150,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     try {
       await revealPathInFileManager(path);
     } catch (error: any) {
-      toast(typeof error === "string" ? error : error?.message || String(error), 5000);
+      toast(translateBackendError(t, typeof error === "string" ? error : error?.message || String(error)), 5000);
     }
   }
 

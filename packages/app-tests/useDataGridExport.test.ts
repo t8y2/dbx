@@ -25,13 +25,21 @@ const clipboardMock = vi.hoisted(() => ({
 }));
 const runtimeMock = vi.hoisted(() => ({ isTauri: false }));
 const dialogMock = vi.hoisted(() => ({ save: vi.fn() }));
+const toastMock = vi.hoisted(() => vi.fn());
+const translateMock = vi.hoisted(() =>
+  vi.fn((key: string, params?: Record<string, unknown>) => {
+    if (key === "exportProgress.xlsxRowLimit") return `XLSX 最多支持 ${params?.limit} 行数据，请使用 CSV 导出完整结果。`;
+    if (key === "grid.exportFailed") return `导出失败：${params?.message}`;
+    return key;
+  }),
+);
 
 vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/lib/common/clipboard", () => clipboardMock);
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtimeMock.isTauri }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMock.save }));
-vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: toastMock }) }));
+vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: translateMock }) }));
 
 const { defaultDataGridExportFileName, useDataGridExport } = await import("../../apps/desktop/src/composables/useDataGridExport.ts");
 
@@ -378,6 +386,20 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
   assert.equal(exportProgressState.value.filePath, apiMock.startQueryResultExport.mock.calls[0][0].filePath);
+});
+
+test("streaming query result export translates terminal backend errors before the toast", async () => {
+  const rawMessage = "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result.";
+  apiMock.startQueryResultExport.mockImplementationOnce(async (request, onProgress) => {
+    onProgress({ exportId: request.exportId, tableName: "", rowsExported: 0, totalRows: 1_048_576, status: "Error", errorMessage: rawMessage });
+    throw new Error(rawMessage);
+  });
+  const { composable, exportProgressState } = buildExportHarness();
+
+  await composable.exportXlsx();
+
+  assert.equal(exportProgressState.value.errorMessage, rawMessage);
+  assert.deepEqual(toastMock.mock.calls.at(-1), ["导出失败：XLSX 最多支持 1,048,575 行数据，请使用 CSV 导出完整结果。", 5000]);
 });
 
 test("complete local query result XLSX export does not re-execute the query", async () => {

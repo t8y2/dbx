@@ -1,0 +1,220 @@
+dialect:
+  name: "MySQL"
+  display_name: "MySQL"
+  versions:
+    - version: "8.0"
+      status: "RECOMMENDED"
+    - version: "5.7"
+      status: "COMPATIBLE"
+
+types:
+  - name: "TINYINT"
+    category: "INTEGER"
+    precision_range: [-128, 127]
+    aliases: ["BOOL", "BOOLEAN"]
+  - name: "SMALLINT"
+    category: "INTEGER"
+    precision_range: [-32768, 32767]
+  - name: "MEDIUMINT"
+    category: "INTEGER"
+  - name: "INT"
+    category: "INTEGER"
+    aliases: ["INTEGER"]
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "DOUBLE"
+    category: "FLOAT"
+    aliases: ["DOUBLE PRECISION", "REAL"]
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+  - name: "VARCHAR"
+    category: "STRING"
+    max_precision: 65535
+    has_length: true
+    aliases: ["CHARACTER VARYING"]
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+  - name: "TEXT"
+    category: "STRING"
+  - name: "TINYTEXT"
+    category: "STRING"
+  - name: "MEDIUMTEXT"
+    category: "STRING"
+  - name: "LONGTEXT"
+    category: "STRING"
+  - name: "BLOB"
+    category: "BINARY"
+  - name: "TINYBLOB"
+    category: "BINARY"
+  - name: "MEDIUMBLOB"
+    category: "BINARY"
+  - name: "LONGBLOB"
+    category: "BINARY"
+  - name: "DATE"
+    category: "DATE"
+  - name: "DATETIME"
+    category: "DATETIME"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+  - name: "TIME"
+    category: "TIME"
+  - name: "YEAR"
+    category: "INTEGER"
+  - name: "ENUM"
+    category: "ENUM"
+    has_length: true
+    semantic_fidelity_base: 0.8
+  - name: "SET"
+    category: "SET"
+    has_length: true
+    semantic_fidelity_base: 0.7
+  - name: "JSON"
+    category: "JSON"
+  - name: "GEOMETRY"
+    category: "SPATIAL"
+  - name: "POINT"
+    category: "SPATIAL"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  reorder_column: true
+  comment: true
+  create_index: true
+  drop_index: true
+  rebuild_index: true
+  index_type: true
+  index_comment: true
+  alter_primary_key: true
+  foreign_key: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_trigger: true
+  drop_trigger: true
+  create_function: true
+  drop_function: true
+  create_sequence: true
+  drop_sequence: true
+  alter_owner: true
+  grant_revoke: true
+  if_not_exists: true
+  temporary_table: true
+  auto_increment: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} MODIFY COLUMN {column} {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+    create_index: "CREATE INDEX {name} ON {table} ({columns})"
+    drop_index: "DROP INDEX {name} ON {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+  modify_column: "ALTER TABLE {table} MODIFY COLUMN {column} {original_type}"
+  create_table: "DROP TABLE IF EXISTS {table}"
+  drop_table: "-- Restore from backup: {table}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+  modify_column:
+    level: "BLOCKING_LONG"
+    cost: "MEDIUM"
+  drop_column:
+    level: "BLOCKING_LONG"
+    cost: "MEDIUM"
+  drop_table:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+  truncate:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+  create_index:
+    level: "BLOCKING_SHORT"
+    cost: "MEDIUM"
+  drop_index:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+  osc_template:
+    # Credentials via conf/defaults-file only — never interpolate {password} into argv/scripts/logs.
+    gh_ost: "gh-ost --alter='{ddl}' --conf={defaults_file} --database={database} --table={table} --execute"
+    pt_osc: "pt-online-schema-change --defaults-file={defaults_file} --alter='{ddl}' --execute D={database},t={table}"
+
+destruction_level:
+  drop_table: "FATAL"
+  drop_schema: "FATAL"
+  truncate: "DANGEROUS"
+  drop_column: "DANGEROUS"
+  alter_type: "MODIFY"
+  add_column: "SAFE"
+  create_table: "SAFE"
+
+structural_capabilities:
+  supports_schemas: false
+  max_columns_per_table: 4096
+  max_indexes_per_table: 64
+  max_query_size_bytes: 16777216
+  supports_full_text_index: true
+  supports_spatial_index: true
+  supports_partitioning: true
+  max_foreign_key_name_length: 64
+  supports_on_update_cascade: true
+  supports_on_delete_set_null: true
+  supports_json_type: true
+  supports_enum_type: true
+
+identifier_rules:
+  quote_char: "`"
+  case_sensitive: false
+  max_length: 64
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_TYPE = 'BASE TABLE'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_TYPE, EXTRA FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION"
+    performance_profile: "MEDIUM"
+  list_indexes:
+    sql: "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, INDEX_TYPE FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}'"
+    performance_profile: "MEDIUM"
+  list_foreign_keys:
+    sql: "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}' AND REFERENCED_TABLE_NAME IS NOT NULL"
+    performance_profile: "MEDIUM"
+  list_triggers:
+    sql: "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT FROM INFORMATION_SCHEMA.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = '{schema}' AND EVENT_OBJECT_TABLE = '{table}'"
+    performance_profile: "MEDIUM"
+  list_functions:
+    sql: "SELECT ROUTINE_NAME, ROUTINE_TYPE, DTD_IDENTIFIER, ROUTINE_DEFINITION FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = '{schema}' AND ROUTINE_TYPE = 'FUNCTION'"
+    performance_profile: "HEAVY"
+  dependencies:
+    sql: "SELECT TABLE_NAME, REFERENCED_TABLE_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = '{schema}' AND REFERENCED_TABLE_NAME IS NOT NULL"
+    depth_support: 2
+    performance_profile: "HEAVY"
+
+pre_execution_checks:
+  - name: "lock_wait_timeout"
+    sql: "SET SESSION lock_wait_timeout = 3"
+  - name: "foreign_key_checks"
+    sql: "SET FOREIGN_KEY_CHECKS = 0"
+  - name: "sql_mode"
+    sql: "SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'"
+
+version_conditions:
+  add_column_concurrent:
+    - min_version: "8.0"
+      template: "ALTER TABLE {table} ADD COLUMN {column} {type}, ALGORITHM=INPLACE, LOCK=NONE"
+    - max_version: "8.0"
+      template: "ALTER TABLE {table} ADD COLUMN {column} {type}"

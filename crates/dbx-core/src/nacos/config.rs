@@ -299,6 +299,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

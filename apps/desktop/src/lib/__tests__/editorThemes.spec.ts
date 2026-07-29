@@ -51,4 +51,11 @@ describe("SQL completion theme", () => {
     expect(rules[".cm-tooltip.cm-tooltip-autocomplete"]).toMatchObject({ borderRadius: "var(--dbx-radius-md)" });
     expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li"]).toMatchObject({ borderRadius: "var(--dbx-radius-sm)" });
   });
+
+  it("keeps completion labels ahead of long detail text", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    expect(rules[".cm-completionLabel"]).toMatchObject({ flex: "0 1 auto" });
+    expect(rules[".cm-completionDetail"]).toMatchObject({ flex: "1 1 0", minWidth: "0", textOverflow: "ellipsis" });
+  });
 });

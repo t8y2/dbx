@@ -30,7 +30,7 @@ function refresh() {
   <div class="space-y-3">
     <div class="rounded-md border bg-muted/10 p-3">
       <Label class="text-xs text-muted-foreground mb-1 block">{{ t("dataGenerate.values") }}</Label>
-      <textarea v-model="params.values" rows="6" class="w-full rounded border bg-background px-2 py-1 text-xs font-mono resize-y" placeholder="每行一个值&#10;first&#10;second&#10;third" />
+      <textarea v-model="params.values" rows="6" class="w-full rounded border bg-background px-2 py-1 text-xs font-mono resize-y" :placeholder="t('dataGenerate.placeholders.enumValues')" />
     </div>
 
     <div class="rounded-md border bg-muted/10 p-3">

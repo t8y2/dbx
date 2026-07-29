@@ -1,0 +1,165 @@
+dialect:
+  name: "OceanBase"
+  display_name: "OceanBase (Oracle Mode)"
+  versions:
+    - version: "4"
+      status: "RECOMMENDED"
+
+types:
+  - name: "NUMBER"
+    category: "DECIMAL"
+    has_precision: true
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "BINARY_FLOAT"
+    category: "FLOAT"
+  - name: "BINARY_DOUBLE"
+    category: "FLOAT"
+  - name: "VARCHAR2"
+    category: "STRING"
+    has_length: true
+    max_precision: 32767
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+    max_precision: 2000
+  - name: "CLOB"
+    category: "STRING"
+  - name: "BLOB"
+    category: "BINARY"
+  - name: "RAW"
+    category: "BINARY"
+    has_length: true
+  - name: "DATE"
+    category: "DATETIME"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+  - name: "TIMESTAMP WITH TIME ZONE"
+    category: "DATETIME"
+    semantic_fidelity_base: 0.9
+  - name: "INTERVAL YEAR TO MONTH"
+    category: "INTERVAL"
+    semantic_fidelity_base: 0.5
+  - name: "INTERVAL DAY TO SECOND"
+    category: "INTERVAL"
+    semantic_fidelity_base: 0.5
+  - name: "ROWID"
+    category: "SYSTEM"
+    semantic_fidelity_base: 0.1
+  - name: "BINARY"
+    category: "BINARY"
+  - name: "JSON"
+    category: "JSON"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  comment: true
+  create_index: true
+  drop_index: true
+  rebuild_index: true
+  index_type: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_trigger: true
+  drop_trigger: true
+  create_function: true
+  drop_function: true
+  create_sequence: true
+  drop_sequence: true
+  alter_owner: true
+  grant_revoke: true
+  if_not_exists: true
+  temporary_table: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD ({column} {type})"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} MODIFY ({column} {type})"
+    create_table: "CREATE TABLE {table} ({columns})"
+    drop_table: "DROP TABLE {table} CASCADE CONSTRAINTS"
+    create_index: "CREATE INDEX {name} ON {table} ({columns})"
+    drop_index: "DROP INDEX {name}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD ({column} {original_type})"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+  modify_column: "ALTER TABLE {table} MODIFY ({column} {original_type})"
+  create_table: "DROP TABLE {table} CASCADE CONSTRAINTS"
+  drop_table: "-- Restore from backup: {table}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+  modify_column:
+    level: "BLOCKING_LONG"
+    cost: "MEDIUM"
+  drop_column:
+    level: "BLOCKING_LONG"
+    cost: "MEDIUM"
+  drop_table:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+  truncate:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+  create_index:
+    level: "BLOCKING_SHORT"
+    cost: "MEDIUM"
+  drop_index:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  drop_schema: "FATAL"
+  truncate: "DANGEROUS"
+  drop_column: "DANGEROUS"
+  alter_type: "MODIFY"
+  add_column: "SAFE"
+  create_table: "SAFE"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 4096
+  max_indexes_per_table: 128
+  max_query_size_bytes: 268435456
+  max_foreign_key_name_length: 128
+  supports_full_text_index: true
+  supports_partitioning: true
+  supports_table_sampling: true
+  supports_on_update_cascade: true
+  supports_on_delete_set_null: true
+  supports_json_type: true
+  supports_sequences: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: true
+  max_length: 128
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER = '{schema}'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_DEFAULT FROM ALL_TAB_COLUMNS WHERE OWNER = '{schema}' AND TABLE_NAME = '{table}' ORDER BY COLUMN_ID"
+    performance_profile: "MEDIUM"
+  list_indexes:
+    sql: "SELECT INDEX_NAME, COLUMN_NAME FROM ALL_IND_COLUMNS WHERE TABLE_OWNER = '{schema}' AND TABLE_NAME = '{table}'"
+    performance_profile: "MEDIUM"
+  list_foreign_keys:
+    sql: "SELECT a.CONSTRAINT_NAME, a.COLUMN_NAME, c_pk.TABLE_NAME AS R_TABLE_NAME FROM ALL_CONS_COLUMNS a JOIN ALL_CONSTRAINTS c ON a.CONSTRAINT_NAME = c.CONSTRAINT_NAME JOIN ALL_CONSTRAINTS c_pk ON c.R_CONSTRAINT_NAME = c_pk.CONSTRAINT_NAME WHERE c.CONSTRAINT_TYPE = 'R' AND a.OWNER = '{schema}' AND c.TABLE_NAME = '{table}'"
+    performance_profile: "MEDIUM"
+  list_triggers:
+    sql: "SELECT TRIGGER_NAME, TRIGGER_TYPE, TRIGGERING_EVENT FROM ALL_TRIGGERS WHERE OWNER = '{schema}' AND TABLE_NAME = '{table}'"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT a.TABLE_NAME, c_pk.TABLE_NAME AS R_TABLE_NAME FROM ALL_CONS_COLUMNS a JOIN ALL_CONSTRAINTS c ON a.CONSTRAINT_NAME = c.CONSTRAINT_NAME JOIN ALL_CONSTRAINTS c_pk ON c.R_CONSTRAINT_NAME = c_pk.CONSTRAINT_NAME WHERE c.CONSTRAINT_TYPE = 'R' AND a.OWNER = '{schema}'"
+    depth_support: 2
+    performance_profile: "HEAVY"

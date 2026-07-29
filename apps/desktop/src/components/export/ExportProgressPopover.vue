@@ -5,6 +5,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, ChevronRight } from "@lucide/vue";
 import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
+import { translateBackendError } from "@/i18n/backend-errors";
 
 const { t } = useI18n();
 const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask } = useExportTracker();
@@ -185,8 +186,8 @@ function failureDetailCount(task: ExportTask) {
 
             <div class="min-w-0 text-muted-foreground">
               <span class="break-words tabular-nums">{{ rowsText(task) }}</span>
-              <span v-if="task.status === 'Error' && task.errorMessage" class="mt-1 block whitespace-normal break-words text-destructive" :title="task.errorMessage">
-                {{ task.errorMessage }}
+              <span v-if="task.status === 'Error' && task.errorMessage" class="mt-1 block whitespace-normal break-words text-destructive" :title="translateBackendError(t, task.errorMessage)">
+                {{ translateBackendError(t, task.errorMessage) }}
               </span>
               <template v-if="task.kind === 'data-transfer' && failureDetailCount(task) > 0">
                 <button class="mt-1.5 flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary" :aria-expanded="failureDetailsExpanded(task.exportId)" @click="toggleFailureDetails(task.exportId)">

@@ -514,6 +514,23 @@ pub async fn execute_in_transaction(
     Ok(Json(result))
 }
 
+pub async fn execute_script_with_2pc(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ExecuteBatchRequest>,
+) -> Result<Json<dbx_core::query::SchemaDiffDeployResult>, AppError> {
+    tracing::debug!(connection_id = %req.connection_id, "execute_script_with_2pc");
+    // Single-connection real transaction (not per-statement auto-commit 2PC).
+    let result = dbx_core::query::execute_schema_diff_deploy(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.statements,
+        req.schema.as_deref(),
+    )
+    .await;
+    Ok(Json(result))
+}
+
 pub async fn analyze_sql_references(
     Json(req): Json<AnalyzeSqlReferencesRequest>,
 ) -> Result<Json<dbx_core::sql_analysis::SqlReferenceAnalysis>, AppError> {
@@ -882,4 +899,87 @@ pub async fn build_database_sql_export(
         }
     }
     dbx_core::database_export::build_database_sql_export(options).map(Json).map_err(AppError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::WebState;
+    use axum::extract::State as AxumState;
+    use dbx_core::connection::AppState;
+    use dbx_core::storage::Storage;
+
+    async fn test_web_state() -> (Arc<WebState>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dbx-web-query-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+        let state = Arc::new(WebState::for_tests(app, dir.clone()));
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_returns_structured_result() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "conn-1".to_string(),
+            database: "testdb".to_string(),
+            statements: vec!["SELECT 1".to_string()],
+            schema: None,
+            timeout_secs: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req))
+            .await
+            .expect("execute_script_with_2pc should return Ok(Json(...))");
+        let log = result.0;
+        assert!(!log.transaction_id.is_empty());
+        assert!(!log.participants.is_empty());
+        assert_eq!(log.status, "rolled_back");
+        assert!(log.error.as_ref().is_some_and(|e| !e.is_empty()));
+        assert_eq!(log.statement_count, 1);
+        assert_eq!(log.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_empty_statements_succeeds() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "conn-empty".to_string(),
+            database: "testdb".to_string(),
+            statements: vec![],
+            schema: None,
+            timeout_secs: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req)).await.expect("empty deploy should succeed");
+        let log = result.0;
+        assert_eq!(log.status, "committed");
+        assert_eq!(log.statement_count, 0);
+        assert_eq!(log.executed_count, 0);
+        assert!(log.error.is_none());
+        assert_eq!(log.participants.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_propagates_structured_failure_fields() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "missing-conn".to_string(),
+            database: "testdb".to_string(),
+            statements: vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
+            schema: None,
+            timeout_secs: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req))
+            .await
+            .expect("deploy endpoint should return structured JSON even on failure");
+        let log = result.0;
+        assert!(log.status == "rolled_back" || log.status == "mixed", "status={}", log.status);
+        assert_eq!(log.statement_count, 2);
+        assert!(log.error.as_ref().is_some_and(|e| !e.is_empty()));
+        // Missing connection cannot have applied statements.
+        assert_eq!(log.executed_count, 0);
+    }
 }

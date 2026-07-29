@@ -107,6 +107,7 @@ export interface CompletionAssistantCandidate {
   parent_name?: string | null;
   comment?: string | null;
   data_type?: string | null;
+  signature?: string | null;
 }
 
 export interface CompletionAssistantResponse {
@@ -131,6 +132,7 @@ export interface ConnectionConfig {
   database?: string;
   visible_databases?: string[];
   visible_schemas?: Record<string, string[]>;
+  show_system_schemas?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
   init_script?: string;
   color?: string;
@@ -637,6 +639,26 @@ export interface QueryResultRun {
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
   tableMeta?: QueryTab["tableMeta"];
+}
+
+export interface ParticipantInfo {
+  id: string;
+  name: string;
+  role: string;
+}
+
+export interface TransactionLog {
+  transaction_id: string;
+  status: string;
+  participants: ParticipantInfo[];
+  created_at: string;
+  updated_at: string;
+  metadata: unknown;
+  /** camelCase fields from SchemaDiffDeployResult */
+  transactionId?: string;
+  executedCount?: number;
+  statementCount?: number;
+  error?: string;
 }
 
 export interface SqlTextSpan {

@@ -775,6 +775,71 @@ func TestXuguListObjectsQueryIncludesProgrammableObjects(t *testing.T) {
 	assertArgs(t, query.Args, wantArgs)
 }
 
+func TestXuguListObjectsQueryExcludesSystemSequences(t *testing.T) {
+	query := xuguListObjectsQuery("APP", metadataListConstraints{
+		ObjectTypes: []string{"sequence"},
+	})
+
+	if !strings.Contains(query.SQL, "q.IS_SYS = FALSE") {
+		t.Fatalf("sequence lookup must exclude system-managed identity sequences:\n%s", query.SQL)
+	}
+}
+
+func TestGetSequenceSourceReconstructsExecutableDDL(t *testing.T) {
+	db, err := sql.Open("xugu-test-sequence-source", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	source, err := s.getObjectSource("AppSchema", "seqOrderNo", "SEQUENCE")
+	if err != nil {
+		t.Fatalf("get sequence source: %v", err)
+	}
+	if source["editable"] != false {
+		t.Fatalf("sequence source must remain read-only: %#v", source)
+	}
+	if source["schema"] != "AppSchema" || source["name"] != "seqOrderNo" {
+		t.Fatalf("sequence source must preserve catalog spelling: %#v", source)
+	}
+
+	ddl, _ := source["source"].(string)
+	for _, want := range []string{
+		`CREATE SEQUENCE "AppSchema"."seqOrderNo"`,
+		"INCREMENT BY 10",
+		"START WITH 500",
+		"MINVALUE -100",
+		"MAXVALUE 10000",
+		"CACHE 20",
+		"CYCLE",
+		"COMMENT 'order''s next number'",
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Fatalf("sequence DDL is missing %q:\n%s", want, ddl)
+		}
+	}
+	if !strings.HasSuffix(strings.TrimSpace(ddl), ";") {
+		t.Fatalf("sequence DDL must end with a statement terminator:\n%s", ddl)
+	}
+}
+
+func TestRenderXuguSequenceDDLUsesNoCacheAndNoCycle(t *testing.T) {
+	ddl := renderXuguSequenceDDL(xuguSequenceMetadata{
+		Schema: "APP", Name: "SEQ_DEFAULTS", Current: int64(1), Minimum: int64(1),
+		Maximum: int64(9223372036854775807), Step: int64(1), Cache: int64(1), Cycle: false,
+	})
+	for _, want := range []string{"NOCACHE", "NOCYCLE"} {
+		if !strings.Contains(ddl, want) {
+			t.Fatalf("sequence DDL is missing %q:\n%s", want, ddl)
+		}
+	}
+	if strings.Contains(ddl, "NO CYCLE") {
+		t.Fatalf("sequence DDL must use Xugu's NOCYCLE spelling:\n%s", ddl)
+	}
+}
+
 func TestXuguObjectSourceQuerySupportsSharedObjectKinds(t *testing.T) {
 	for _, objectType := range []string{"TRIGGER", "PACKAGE_BODY", "TYPE", "TYPE_BODY"} {
 		query, _, err := objectSourceQuery("APP", "demo", objectType)
@@ -1313,6 +1378,27 @@ func TestSelectXuguCatalogTableNamePrefersExactCaseAndRejectsAmbiguity(t *testin
 	}
 }
 
+func TestSelectXuguCatalogSequenceNamePrefersExactCaseAndRejectsAmbiguity(t *testing.T) {
+	candidates := []xuguCatalogSequenceName{
+		{Schema: "AppSchema", Name: "seqOrderNo"},
+		{Schema: "AppSchema", Name: "SEQORDERNO"},
+	}
+
+	schema, name, err := selectXuguCatalogSequenceName("AppSchema", "seqOrderNo", candidates)
+	if err != nil || schema != "AppSchema" || name != "seqOrderNo" {
+		t.Fatalf("exact-case selection = (%q, %q, %v), want quoted catalog sequence", schema, name, err)
+	}
+
+	if _, _, err := selectXuguCatalogSequenceName("AppSchema", "SeqOrderNo", candidates); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("mixed-case ambiguous selection error = %v, want ambiguity error", err)
+	}
+
+	schema, name, err = selectXuguCatalogSequenceName("appschema", "seq_plain", []xuguCatalogSequenceName{{Schema: "APPSCHEMA", Name: "SEQ_PLAIN"}})
+	if err != nil || schema != "APPSCHEMA" || name != "SEQ_PLAIN" {
+		t.Fatalf("single-candidate fallback = (%q, %q, %v), want catalog spelling", schema, name, err)
+	}
+}
+
 func TestCatalogTableLookupQueriesAvoidCaseFoldingBoundParameters(t *testing.T) {
 	exact := xuguCatalogTableNameQuery("S'CHEMA", "MiX'ed", false)
 	if strings.Contains(strings.ToUpper(exact), "UPPER(") {
@@ -1329,6 +1415,28 @@ func TestCatalogTableLookupQueriesAvoidCaseFoldingBoundParameters(t *testing.T) 
 	for _, fragment := range []string{"UPPER(s.SCHEMA_NAME) = 'S''CHEMA'", "UPPER(t.TABLE_NAME) = 'MIX''ED'"} {
 		if !strings.Contains(folded, fragment) {
 			t.Fatalf("case-insensitive lookup missing %q:\n%s", fragment, folded)
+		}
+	}
+}
+
+func TestCatalogSequenceLookupQueriesPreferExactIdentifiers(t *testing.T) {
+	exact := xuguCatalogSequenceNameQuery("App'Schema", "seq'MixedCase", false)
+	if strings.Contains(strings.ToUpper(exact), "UPPER(") {
+		t.Fatalf("exact sequence lookup must not case-fold identifiers:\n%s", exact)
+	}
+	for _, fragment := range []string{"q.IS_SYS = FALSE", "s.SCHEMA_NAME = 'App''Schema'", "q.SEQ_NAME = 'seq''MixedCase'"} {
+		if !strings.Contains(exact, fragment) {
+			t.Fatalf("exact sequence lookup missing %q:\n%s", fragment, exact)
+		}
+	}
+
+	folded := xuguCatalogSequenceNameQuery("App'Schema", "seq'MixedCase", true)
+	if strings.Contains(folded, "UPPER(?)") {
+		t.Fatalf("case-insensitive sequence lookup must not call UPPER(?) on bound parameters:\n%s", folded)
+	}
+	for _, fragment := range []string{"q.IS_SYS = FALSE", "UPPER(s.SCHEMA_NAME) = 'APP''SCHEMA'", "UPPER(q.SEQ_NAME) = 'SEQ''MIXEDCASE'"} {
+		if !strings.Contains(folded, fragment) {
+			t.Fatalf("case-insensitive sequence lookup missing %q:\n%s", fragment, folded)
 		}
 	}
 }
@@ -1613,6 +1721,7 @@ func init() {
 	sql.Register("xugu-test-table-objects", &xuguTableObjectsDriver{})
 	sql.Register("xugu-test-table-ddl", &xuguTableDDLDriver{})
 	sql.Register("xugu-test-show-result", &xuguShowResultDriver{})
+	sql.Register("xugu-test-sequence-source", &xuguSequenceSourceDriver{})
 }
 
 type xuguShowResultDriver struct{}
@@ -1669,6 +1778,47 @@ func (c *xuguShowResultConn) ExecContext(_ context.Context, query string, _ []dr
 	xuguShowResultState.execs = append(xuguShowResultState.execs, query)
 	xuguShowResultState.Unlock()
 	return nil, fmt.Errorf("SHOW statement was incorrectly sent to ExecContext: %s", query)
+}
+
+type xuguSequenceSourceDriver struct{}
+
+func (d *xuguSequenceSourceDriver) Open(name string) (driver.Conn, error) {
+	return &xuguSequenceSourceConn{}, nil
+}
+
+type xuguSequenceSourceConn struct{}
+
+func (c *xuguSequenceSourceConn) Prepare(query string) (driver.Stmt, error) {
+	return nil, errors.New("not supported")
+}
+func (c *xuguSequenceSourceConn) Close() error              { return nil }
+func (c *xuguSequenceSourceConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+func (c *xuguSequenceSourceConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	upper := strings.ToUpper(query)
+	if !strings.Contains(upper, "FROM ALL_SEQUENCES") || !strings.Contains(upper, "Q.IS_SYS = FALSE") {
+		return nil, fmt.Errorf("unexpected sequence source query: %s", query)
+	}
+	if strings.Contains(upper, "Q.CURR_VAL") {
+		if strings.Contains(upper, "UPPER(") || !strings.Contains(query, "s.SCHEMA_NAME = 'AppSchema'") || !strings.Contains(query, "q.SEQ_NAME = 'seqOrderNo'") {
+			return nil, fmt.Errorf("sequence metadata must use exact catalog identifiers: %s", query)
+		}
+		return &xuguStaticRows{
+			columns: []string{"SCHEMA_NAME", "SEQ_NAME", "CURR_VAL", "MIN_VAL", "MAX_VAL", "STEP_VAL", "CACHE_VAL", "IS_CYCLE", "COMMENTS"},
+			values:  [][]driver.Value{{"AppSchema", "seqOrderNo", int64(500), int64(-100), int64(10000), int64(10), int64(20), true, "order's next number"}},
+		}, nil
+	}
+	if strings.Contains(upper, "SELECT S.SCHEMA_NAME, Q.SEQ_NAME") {
+		if strings.Contains(upper, "UPPER(") || !strings.Contains(query, "s.SCHEMA_NAME = 'AppSchema'") || !strings.Contains(query, "q.SEQ_NAME = 'seqOrderNo'") {
+			return nil, fmt.Errorf("sequence resolution must prioritize exact catalog identifiers: %s", query)
+		}
+		return &xuguStaticRows{
+			columns: []string{"SCHEMA_NAME", "SEQ_NAME"},
+			values:  [][]driver.Value{{"AppSchema", "seqOrderNo"}},
+		}, nil
+	}
+	return &xuguStaticRows{
+		columns: []string{"SCHEMA_NAME", "SEQ_NAME"},
+	}, nil
 }
 
 type xuguTableDDLDriver struct{}

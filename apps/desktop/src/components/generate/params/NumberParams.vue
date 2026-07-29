@@ -52,14 +52,14 @@ function refresh() {
 
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="flex items-center gap-3 text-xs">
-        <Label class="text-muted-foreground shrink-0">数字类型</Label>
+        <Label class="text-muted-foreground shrink-0">{{ t("dataGenerate.numberType") }}</Label>
         <div class="flex gap-2">
-          <button type="button" class="px-2 py-1 rounded text-xs border" :class="params.numberType !== 'decimal' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="handleTypeChange('integer')">整数</button>
-          <button type="button" class="px-2 py-1 rounded text-xs border" :class="params.numberType === 'decimal' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="handleTypeChange('decimal')">小数</button>
+          <button type="button" class="px-2 py-1 rounded text-xs border" :class="params.numberType !== 'decimal' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="handleTypeChange('integer')">{{ t("dataGenerate.integer") }}</button>
+          <button type="button" class="px-2 py-1 rounded text-xs border" :class="params.numberType === 'decimal' ? 'bg-primary text-primary-foreground border-primary' : 'bg-background'" @click="handleTypeChange('decimal')">{{ t("dataGenerate.decimal") }}</button>
         </div>
       </div>
       <div v-if="isDecimal" class="grid grid-cols-[80px_1fr] items-center gap-2 text-xs mt-2">
-        <Label class="text-muted-foreground">小数位数</Label>
+        <Label class="text-muted-foreground">{{ t("dataGenerate.decimalPlaces") }}</Label>
         <Input v-model.number="params.decimalPlaces" type="number" min="0" max="10" class="h-7 w-20 text-xs" />
       </div>
     </div>

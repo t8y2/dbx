@@ -1879,8 +1879,17 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :close-on-confirm="false"
       @confirm="confirmSidebarDangerDialog"
     >
-      <template v-if="sidebarDangerDialogRequest.option" #options>
-        <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+      <template #options>
+        <div v-if="sidebarDangerDialogConfirming && sidebarDangerDialogRequest.progress" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">
+          <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
+            <span>{{ sidebarDangerDialogRequest.progress.completed }} / {{ sidebarDangerDialogRequest.progress.total }}</span>
+            <span>{{ Math.round((sidebarDangerDialogRequest.progress.completed / sidebarDangerDialogRequest.progress.total) * 100) }}%</span>
+          </div>
+          <div class="h-2 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-valuemin="0" :aria-valuemax="sidebarDangerDialogRequest.progress.total" :aria-valuenow="sidebarDangerDialogRequest.progress.completed">
+            <div class="h-full bg-primary transition-[width] duration-200" :style="{ width: `${Math.round((sidebarDangerDialogRequest.progress.completed / sidebarDangerDialogRequest.progress.total) * 100)}%` }" />
+          </div>
+        </div>
+        <label v-if="sidebarDangerDialogRequest.option" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
           <input :checked="sidebarDangerDialogRequest.option.checked" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="updateSidebarDangerDialogOption" />
           <span class="grid gap-0.5">
             <span class="font-medium text-foreground">{{ sidebarDangerDialogRequest.option.label }}</span>

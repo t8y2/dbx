@@ -1,12 +1,21 @@
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::connection::AppState;
 use dbx_core::db;
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_cancel::RunningTaskMetadata;
 use dbx_core::sql::split_sql_statements;
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecuteMultiProgress {
+    execution_id: String,
+    completed: usize,
+    total: usize,
+    success: bool,
+}
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -59,6 +68,7 @@ pub async fn execute_query(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_multi(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
@@ -83,6 +93,16 @@ pub async fn execute_multi(
         )
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
+    let progress = execution_id.as_ref().map(|execution_id| {
+        let app = app.clone();
+        let execution_id = execution_id.clone();
+        Arc::new(move |completed, total, success| {
+            let _ = app.emit(
+                "query-batch-progress",
+                ExecuteMultiProgress { execution_id: execution_id.clone(), completed, total, success },
+            );
+        }) as dbx_core::query::ExecuteMultiProgressCallback
+    });
     let trace_id = execution_id.as_deref().unwrap_or("no-execution-id").to_string();
     let started_at = Instant::now();
     dbx_core::sql_diagnostics::debug_sql("query:execute_multi:start", &sql);
@@ -94,7 +114,7 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client(
+    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress(
         &state,
         &connection_id,
         &database,
@@ -113,6 +133,7 @@ pub async fn execute_multi(
             continue_on_error: continue_on_error.unwrap_or(false),
             execution_mode: execution_mode.unwrap_or_default(),
         },
+        progress,
     )
     .await;
     match &result {
@@ -218,6 +239,33 @@ pub async fn execute_in_transaction(
         schema.as_deref(),
     )
     .await
+}
+
+/// Schema Diff deploy entrypoint (legacy command name kept for API compatibility).
+///
+/// Executes as one single-connection transaction via [`execute_schema_diff_deploy`].
+/// On failure, status is `rolled_back` when DDL/DML atomicity is guaranteed for the
+/// target, otherwise `mixed` with a best-effort `executed_count` (e.g. MySQL/Oracle DDL).
+pub async fn execute_script_with_2pc_core(
+    app: Arc<AppState>,
+    connection_id: String,
+    database: String,
+    statements: Vec<String>,
+    schema: Option<String>,
+) -> dbx_core::query::SchemaDiffDeployResult {
+    dbx_core::query::execute_schema_diff_deploy(&app, &connection_id, &database, &statements, schema.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn execute_script_with_2pc(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    statements: Vec<String>,
+    schema: Option<String>,
+) -> Result<dbx_core::query::SchemaDiffDeployResult, String> {
+    let app: Arc<AppState> = (*state).clone();
+    Ok(execute_script_with_2pc_core(app, connection_id, database, statements, schema).await)
 }
 
 #[tauri::command]
@@ -654,4 +702,87 @@ pub async fn get_explain_info(
 #[tauri::command]
 pub fn build_create_user_sql(username: String, password: String, tablespace: String) -> Result<String, String> {
     Ok(dbx_core::db_admin_sql::build_create_user_sql(&username, &password, &tablespace))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbx_core::storage::Storage;
+    use std::sync::Arc;
+
+    async fn test_app_state() -> Arc<AppState> {
+        let dir = std::env::temp_dir().join(format!("dbx-query-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")))
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_returns_structured_result() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "conn-1".to_string(),
+            "testdb".to_string(),
+            vec!["SELECT 1".to_string()],
+            None,
+        )
+        .await;
+
+        assert!(!result.transaction_id.is_empty());
+        assert!(!result.participants.is_empty());
+        // No real connection: rolled_back with error, not silent auto-commit success.
+        assert_eq!(result.status, "rolled_back");
+        assert!(result.error.as_ref().is_some_and(|e| !e.is_empty()));
+        assert_eq!(result.statement_count, 1);
+        assert_eq!(result.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_empty_statements_succeeds() {
+        let state = test_app_state().await;
+        let result =
+            execute_script_with_2pc_core(state, "conn-empty".to_string(), "testdb".to_string(), vec![], None).await;
+
+        assert_eq!(result.status, "committed");
+        assert_eq!(result.statement_count, 0);
+        assert_eq!(result.executed_count, 0);
+        assert!(result.error.is_none());
+        assert_eq!(result.participants.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_comment_only_is_empty_success() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "conn-comment".to_string(),
+            "testdb".to_string(),
+            vec!["-- WARNING: incomplete\n-- manual only".to_string()],
+            None,
+        )
+        .await;
+
+        assert_eq!(result.status, "committed");
+        assert_eq!(result.statement_count, 0);
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_propagates_structured_failure_fields() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
+            None,
+        )
+        .await;
+
+        assert!(result.status == "rolled_back" || result.status == "mixed", "status={}", result.status);
+        assert_eq!(result.statement_count, 2);
+        assert!(result.error.as_ref().is_some_and(|e| !e.is_empty()));
+        assert_eq!(result.executed_count, 0);
+    }
 }

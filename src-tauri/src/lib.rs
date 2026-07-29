@@ -7,6 +7,8 @@ mod models;
 mod window_state_guard;
 
 use commands::connection::AppState;
+use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
+use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1218,6 +1220,29 @@ pub fn run() {
             apply_debug_log_level(desktop_settings.debug_logging_enabled);
             eprintln!("[STARTUP] storage ready in {:?}", t.elapsed());
 
+            // Initialize core dialect registry and load external plugin dialects
+            let dialect_init_start = Instant::now();
+            register_core_dialects();
+            let registry = DialectRegistry::global();
+            let plugin_dirs = vec![data_dir.join("plugins").join("dialects")];
+            let load_result = DialectPluginLoader::scan_and_load(registry, &plugin_dirs);
+            eprintln!(
+                "[STARTUP] dialect plugins loaded: {} success, {} errors, {} skipped in {:?}",
+                load_result.loaded.len(),
+                load_result.errors.len(),
+                load_result.skipped.len(),
+                dialect_init_start.elapsed()
+            );
+
+            // Start dialect YAML hot-reload watcher
+            let watch_dirs = plugin_dirs.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = DialectHotReload::run_forever(watch_dirs, DialectRegistry::global()).await {
+                    log::error!("[STARTUP] dialect hot-reload watcher exited: {e}");
+                }
+            });
+            eprintln!("[STARTUP] dialect hot-reload watcher started");
+
             let default_agent_dir = data_dir_resolution.uses_custom_data_dir().then(|| data_dir.join("agents"));
             let (plugin_dir, agent_dir) = commands::app_settings::resolve_driver_store_dirs_from_settings(
                 &desktop_settings,
@@ -1303,10 +1328,13 @@ pub fn run() {
             commands::ai::ai_cancel_stream,
             commands::ai::ai_test_connection,
             commands::ai::ai_list_models,
+            commands::ai::ai_resolve_model_effort,
             commands::ai::save_ai_config,
             commands::ai::load_ai_config,
             commands::ai::save_ai_provider_config,
             commands::ai::load_ai_provider_configs,
+            commands::ai::save_ai_chat_selection,
+            commands::ai::load_ai_chat_selection,
             commands::ai::save_ai_conversation,
             commands::ai::load_ai_conversations,
             commands::ai::delete_ai_conversation,
@@ -1424,6 +1452,7 @@ pub fn run() {
             commands::schema::list_available_extensions,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
+            commands::dialect_cmd::list_dialect_data_types,
             commands::schema_cache::save_schema_cache,
             commands::schema_cache::load_schema_cache,
             commands::schema_cache::delete_schema_cache_prefix,
@@ -1441,6 +1470,7 @@ pub fn run() {
             commands::query::execute_batch,
             commands::query::execute_script,
             commands::query::execute_in_transaction,
+            commands::query::execute_script_with_2pc,
             commands::query::begin_manual_transaction,
             commands::query::execute_in_manual_transaction,
             commands::query::commit_manual_transaction,
@@ -1521,6 +1551,9 @@ pub fn run() {
             commands::redis_cmd::redis_scan_keys_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
+            commands::redis_cmd::redis_get_stream_groups,
+            commands::redis_cmd::redis_get_stream_consumers,
+            commands::redis_cmd::redis_get_stream_pending,
             commands::redis_cmd::redis_set_string,
             commands::redis_cmd::redis_delete_key,
             commands::redis_cmd::redis_hash_set,

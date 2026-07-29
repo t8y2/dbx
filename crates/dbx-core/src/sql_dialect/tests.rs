@@ -8,8 +8,8 @@ fn transfer_identifier_policy_preserves_legacy_output() {
     assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::Doris), "`user``events`");
     assert_eq!(quote_transfer_identifier("user]events", &DatabaseType::SqlServer), "[user]]events]");
     assert_eq!(quote_transfer_identifier("user\"events", &DatabaseType::Postgres), "\"user\"\"events\"");
-    assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Hive), "`warehouse`.`events`");
-    assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Mysql), "`events`");
+    assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Hive, None), "`warehouse`.`events`");
+    assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Mysql, None), "`events`");
 }
 
 #[test]

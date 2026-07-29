@@ -348,6 +348,7 @@ pub async fn prepare_data_compare_missing_target(
             &target_database_type,
             &source_database_type,
             None,
+            None,
         )
     ));
     pre_sync_statements.extend(

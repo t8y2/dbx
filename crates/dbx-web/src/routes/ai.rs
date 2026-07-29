@@ -114,7 +114,7 @@ fn default_agent_mode() -> String {
 }
 
 fn reject_web_unsupported_ai_provider(config: &AiConfig) -> Result<(), AppError> {
-    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli) {
+    if dbx_core::ai::is_cli_provider(&config.provider) {
         return Err(AppError::bad_request("CLI providers are only supported in DBX Desktop."));
     }
     Ok(())

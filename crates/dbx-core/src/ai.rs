@@ -387,6 +387,12 @@ pub fn is_cli_provider(provider: &AiProvider) -> bool {
 /// Applied by all API-backed entry points at request time.  CLI providers are
 /// skipped because they use their own retry logic and never reach the
 /// `with_retry` / `with_stream_retry` paths.
+///
+/// Some API-backed entry points (model listing, effort resolution) do not
+/// currently call `with_retry` and so the merged value is a no-op for them.
+/// The merge is still applied uniformly so that every API-backed command
+/// follows the same entry-point pattern — if retry logic is added to those
+/// functions later, the global setting takes effect automatically.
 pub fn merge_global_max_retries(config: &mut AiConfig, max_retries: u32) {
     if !is_cli_provider(&config.provider) {
         config.max_retries = Some(max_retries);

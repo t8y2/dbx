@@ -1914,6 +1914,7 @@ dependencies = [
  "flate2",
  "font-kit",
  "futures",
+ "httpdate",
  "iana-time-zone",
  "insta",
  "json5",

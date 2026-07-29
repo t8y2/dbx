@@ -1,5 +1,4 @@
 use crate::token_usage::TokenUsage;
-use chrono::Utc;
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -2140,19 +2139,21 @@ fn is_retryable_error(error: &str) -> bool {
 ///
 /// Supports both integer seconds and HTTP-date (RFC 9110 §10.2.3) formats.
 /// Returns `None` for missing or unparseable values, and 0 for dates in the past.
-fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    // Integer seconds (most common in practice).
+fn parse_retry_after_secs(value: &str, now: std::time::SystemTime) -> Option<u64> {
     if let Ok(secs) = value.parse::<u64>() {
         return Some(secs);
     }
-    // HTTP-date (RFC 2822 / IMF-fixdate), e.g. "Wed, 21 Oct 2015 07:28:00 GMT".
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(value) {
-        let now = Utc::now();
-        let delay = dt.signed_duration_since(now).num_seconds().max(0);
-        return Some(delay as u64);
+
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    match retry_at.duration_since(now) {
+        Ok(delay) => Some(delay.as_secs().saturating_add(u64::from(delay.subsec_nanos() > 0))),
+        Err(_) => Some(0),
     }
-    None
+}
+
+fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after_secs(value, std::time::SystemTime::now())
 }
 
 /// Parse a Retry-After duration from an error string.
@@ -3688,18 +3689,19 @@ mod tests {
         apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
         build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt,
         drain_next_stream_line, emit_gemini_tool_call_part, emit_responses_function_call_item, format_transport_error,
-        gemini_text, is_cli_provider, is_kimi_model, is_retryable_error, maybe_bearer_headers, maybe_tag_retry_after,
+        gemini_text, is_kimi_model, is_retryable_error, maybe_bearer_headers, maybe_tag_retry_after,
         measure_first_stream_chunk, merge_global_max_retries, ollama_selected_model_tool_support, openai_response_text,
         openai_stream_reasoning, openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
-        parse_model_list_response, parse_retry_after, resolve_endpoint, resolve_gemini_stream_endpoint,
-        resolve_model_effort_core, resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
-        responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
-        retain_ollama_completion_models, retry_after_secs, set_chat_completion_token_limit, stream_claude,
-        stream_claude_with_tools, stream_data_payload, stream_error, stream_openai_with_tools, test_connection_core,
-        uses_anthropic_messages_api, validate_config, validate_model_list_config, with_retry, with_stream_retry,
-        AiApiStyle, AiAuthMethod, AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability,
-        AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent,
-        StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        parse_model_list_response, parse_retry_after, parse_retry_after_secs, resolve_endpoint,
+        resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
+        resolve_ollama_show_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
+        responses_text, responses_token_usage, retain_ollama_completion_models, retry_after_secs,
+        set_chat_completion_token_limit, stream_claude, stream_claude_with_tools, stream_data_payload, stream_error,
+        stream_openai_with_tools, test_connection_core, uses_anthropic_messages_api, validate_config,
+        validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAuthMethod, AiCapabilitySource,
+        AiCompletionRequest, AiConfig, AiEffortCapability, AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo,
+        AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
+        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     struct CapturedJsonRequest {
@@ -5681,27 +5683,18 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         assert_eq!(retry_after_secs(&headers), None);
 
-        // Integer seconds (most common).
         headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_static("42"));
         assert_eq!(retry_after_secs(&headers), Some(42));
 
-        // HTTP-date in the future → positive delay.
-        let future = Utc::now() + chrono::Duration::seconds(90);
-        let rfc2822 = future.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-        headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_str(&rfc2822).unwrap());
-        let delay = retry_after_secs(&headers).unwrap();
-        // Allow a small clock-drift window.
-        assert!(delay >= 88 && delay <= 92, "expected ~90, got {delay}");
+        let now = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_700_000_000)
+            + std::time::Duration::from_millis(250);
+        let future = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_001);
+        assert_eq!(parse_retry_after_secs(&httpdate::fmt_http_date(future), now), Some(1));
 
-        // HTTP-date in the past → 0.
-        let past = Utc::now() - chrono::Duration::seconds(60);
-        let past_rfc2822 = past.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-        headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_str(&past_rfc2822).unwrap());
-        assert_eq!(retry_after_secs(&headers), Some(0));
-
-        // Unparseable value → None.
-        headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_static("not-a-number"));
-        assert_eq!(retry_after_secs(&headers), None);
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_699_999_999);
+        assert_eq!(parse_retry_after_secs(&httpdate::fmt_http_date(past), now), Some(0));
+        assert_eq!(parse_retry_after_secs("not-a-number", now), None);
     }
 
     #[test]
@@ -5908,7 +5901,7 @@ mod tests {
     #[test]
     fn merge_global_max_retries_skips_cli_providers() {
         for provider in [AiProvider::CodexCli, AiProvider::ClaudeCodeCli, AiProvider::PiAgentCli] {
-            let mut config = test_config(provider);
+            let mut config = test_config(provider.clone());
             config.max_retries = None;
             merge_global_max_retries(&mut config, 0);
             assert_eq!(config.max_retries, None, "merge must not touch CLI provider {provider:?}");
@@ -5951,9 +5944,12 @@ mod tests {
     async fn test_connection_core_no_retry_when_max_retries_zero() {
         let (url, count, server) = spawn_counting_429_server().await;
 
-        let mut config: AiConfig = serde_json::from_value(
-            serde_json::json!({"provider": "claude", "model": "claude-sonnet-4", "endpoint": url}),
-        )
+        let mut config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "claude",
+            "apiKey": "sk-test",
+            "model": "claude-sonnet-4",
+            "endpoint": url,
+        }))
         .unwrap();
         config.max_retries = Some(0);
 

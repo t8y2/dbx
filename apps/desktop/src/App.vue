@@ -1976,7 +1976,9 @@ async function initApp() {
   try {
     await settingsStore.initEditorSettings();
     console.log(`[STARTUP]   settingsStore.initEditorSettings: ${(performance.now() - t0).toFixed(0)}ms`);
-    await queryStore.initOpenTabs();
+    await connectionStore.initFromDisk();
+    console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
+    await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
     await settingsStore.initDesktopSettings().catch(() => {});
 
@@ -1991,8 +1993,6 @@ async function initApp() {
         toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
       });
 
-    await connectionStore.initFromDisk();
-    console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     restoreActiveConnectionContext();
   } catch (e: any) {
     toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);

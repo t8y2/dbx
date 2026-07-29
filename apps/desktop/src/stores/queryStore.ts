@@ -448,20 +448,22 @@ function clearLegacySavedTabs() {
   safeLocalStorageRemove(ACTIVE_TAB_STORAGE_KEY);
 }
 
-function restoreSavedTabsFromPayload(payload: { tabs?: unknown; activeTabId?: unknown } | null | undefined): { tabs: QueryTab[]; activeTabId: string | null } {
+function restoreSavedTabsFromPayload(payload: { tabs?: unknown; activeTabId?: unknown } | null | undefined, options: { validConnectionIds?: Iterable<string> } = {}): { tabs: QueryTab[]; activeTabId: string | null } {
   const restoreMode = useSettingsStore().editorSettings.openTabsRestoreMode;
   if (restoreMode === "none") return { tabs: [], activeTabId: null };
   return restoreOpenTabsPayload(payload, {
     filter: restoreMode === "pinned" ? "pinned" : "all",
+    validConnectionIds: options.validConnectionIds,
   });
 }
 
-function restoreLegacySavedTabs(): { tabs: QueryTab[]; activeTabId: string | null } {
+function restoreLegacySavedTabs(options: { validConnectionIds?: Iterable<string> } = {}): { tabs: QueryTab[]; activeTabId: string | null } {
   const restoreMode = useSettingsStore().editorSettings.openTabsRestoreMode;
   if (restoreMode === "none") return { tabs: [], activeTabId: null };
   const legacy = loadLegacySavedTabs();
   return restoreOpenTabsState(legacy.rawTabs, legacy.rawActiveTabId, {
     filter: restoreMode === "pinned" ? "pinned" : "all",
+    validConnectionIds: options.validConnectionIds,
   });
 }
 
@@ -1043,11 +1045,11 @@ export const useQueryStore = defineStore("query", () => {
     else setTimeout(maintain, 0);
   }
 
-  async function initOpenTabs() {
+  async function initOpenTabs(options: { validConnectionIds?: Iterable<string> } = {}) {
     if (isOpenTabsLoaded.value) return;
     const saved = await api.loadOpenTabsState().catch(() => null);
     if (saved?.tabs && Array.isArray(saved.tabs)) {
-      const restored = restoreSavedTabsFromPayload(saved);
+      const restored = restoreSavedTabsFromPayload(saved, options);
       applyRestoredOpenTabs(restored);
       if (useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
         // Restore is explicitly disabled, so stale saved payloads should not
@@ -1062,7 +1064,7 @@ export const useQueryStore = defineStore("query", () => {
 
     const legacy = loadLegacySavedTabs();
     if (legacy.rawTabs || legacy.rawActiveTabId) {
-      const restored = restoreLegacySavedTabs();
+      const restored = restoreLegacySavedTabs(options);
       applyRestoredOpenTabs(restored);
       if (useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
         // Restore is explicitly disabled, so keeping the legacy startup payload

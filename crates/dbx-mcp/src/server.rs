@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
-use crate::session::McpSessionStore;
+use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
     models::connection::DatabaseType,
@@ -216,6 +216,15 @@ impl DbxMcpServer {
         }
         Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
     }
+
+    async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
+        for session in sessions {
+            let _ = self
+                .backend
+                .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
+                .await;
+        }
+    }
 }
 
 #[tool_router]
@@ -308,21 +317,27 @@ impl DbxMcpServer {
         // Resolve the session before the database so its connection/database
         // binding is enforced on every stateful query.
         let session = match request.session_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
-            Some(session_id) => match self.sessions.resolve(session_id).await {
-                Some(session) if session.connection_id == connection.id => Some(session),
-                Some(_) => {
-                    return tool_error(
-                        "SESSION_CONNECTION_MISMATCH",
-                        format!("Session \"{session_id}\" is bound to a different connection."),
-                    )
+            Some(session_id) => {
+                let (session, expired) = self.sessions.resolve(session_id).await.into_parts();
+                self.close_backend_sessions_best_effort(expired).await;
+                match session {
+                    Some(session) if session.connection_id == connection.id => Some(session),
+                    Some(_) => {
+                        return tool_error(
+                            "SESSION_CONNECTION_MISMATCH",
+                            format!("Session \"{session_id}\" is bound to a different connection."),
+                        )
+                    }
+                    None => {
+                        return tool_error(
+                            "SESSION_NOT_FOUND",
+                            format!(
+                                "Session \"{session_id}\" not found or expired. Open a new one with dbx_open_session."
+                            ),
+                        )
+                    }
                 }
-                None => {
-                    return tool_error(
-                        "SESSION_NOT_FOUND",
-                        format!("Session \"{session_id}\" not found or expired. Open a new one with dbx_open_session."),
-                    )
-                }
-            },
+            }
             None => None,
         };
         let database = match self.resolve_database(request.database, connection) {
@@ -388,7 +403,9 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        match self.sessions.open(&connection.id, &database).await {
+        let (session, expired) = self.sessions.open(&connection.id, &database).await.into_parts();
+        self.close_backend_sessions_best_effort(expired).await;
+        match session {
             Ok(session) => text(format!(
                 "Session opened.\nsession_id: {}\nconnection: {} (id: {})\ndatabase: {}\n\nPass session_id to dbx_execute_query to run every query on the same pinned connection. Close with dbx_close_session when done.",
                 session.id, connection.name, connection.id, database
@@ -402,7 +419,9 @@ impl DbxMcpServer {
         description = "Close a stateful query session and release its pinned backend connection"
     )]
     async fn close_session(&self, Parameters(request): Parameters<CloseSessionRequest>) -> CallToolResult {
-        let Some(session) = self.sessions.remove(&request.session_id).await else {
+        let (session, expired) = self.sessions.begin_close(&request.session_id).await.into_parts();
+        self.close_backend_sessions_best_effort(expired).await;
+        let Some(session) = session else {
             return tool_error(
                 "SESSION_NOT_FOUND",
                 format!("Session \"{}\" not found or already closed.", request.session_id),
@@ -413,8 +432,14 @@ impl DbxMcpServer {
             .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
             .await
         {
-            Ok(_) => text(format!("Session \"{}\" closed.", session.id)),
-            Err(error) => backend_tool_error("SESSION_CLOSE_ERROR", error),
+            Ok(_) => {
+                self.sessions.finish_close(&session.id).await;
+                text(format!("Session \"{}\" closed.", session.id))
+            }
+            Err(error) => {
+                self.sessions.restore_after_failed_close(session).await;
+                backend_tool_error("SESSION_CLOSE_ERROR", error)
+            }
         }
     }
 
@@ -1157,11 +1182,14 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use dbx_core::models::connection::ConnectionConfig;
+    use std::collections::HashSet;
 
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
         recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
         closed_sessions: std::sync::Mutex<Vec<String>>,
+        pinned_sessions: std::sync::Mutex<HashSet<String>>,
+        close_failures_remaining: std::sync::Mutex<usize>,
     }
 
     impl Default for FakeBackend {
@@ -1170,6 +1198,8 @@ mod tests {
                 connections: Vec::new(),
                 recorded_arguments: std::sync::Mutex::new(Vec::new()),
                 closed_sessions: std::sync::Mutex::new(Vec::new()),
+                pinned_sessions: std::sync::Mutex::new(HashSet::new()),
+                close_failures_remaining: std::sync::Mutex::new(0),
             }
         }
     }
@@ -1193,6 +1223,14 @@ mod tests {
         result.content[0].as_text().expect("text tool result").text.as_str()
     }
 
+    fn opened_session_id(result: &CallToolResult) -> String {
+        result_text(result)
+            .lines()
+            .find_map(|line| line.strip_prefix("session_id: "))
+            .expect("open_session returns a session_id")
+            .to_string()
+    }
+
     #[async_trait]
     impl DbxBackend for FakeBackend {
         async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
@@ -1211,6 +1249,11 @@ mod tests {
             arguments: serde_json::Value,
             _permissions: dbx_core::agent_tools::AgentSqlPermissions,
         ) -> dbx_core::agent_events::ToolResult {
+            if let Some(client_session_id) =
+                arguments.get("client_session_id").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty())
+            {
+                self.pinned_sessions.lock().unwrap().insert(client_session_id.to_string());
+            }
             self.recorded_arguments.lock().unwrap().push((tool_name.to_string(), arguments));
             dbx_core::agent_events::ToolResult {
                 tool_call_id: "test".to_string(),
@@ -1227,7 +1270,14 @@ mod tests {
             _database: &str,
             client_session_id: &str,
         ) -> Result<bool, String> {
+            let mut failures = self.close_failures_remaining.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err("temporary close failure".to_string());
+            }
+            drop(failures);
             self.closed_sessions.lock().unwrap().push(client_session_id.to_string());
+            self.pinned_sessions.lock().unwrap().remove(client_session_id);
             Ok(true)
         }
 
@@ -1494,11 +1544,7 @@ mod tests {
 
         let opened =
             server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
-        let session_id = result_text(&opened)
-            .lines()
-            .find_map(|line| line.strip_prefix("session_id: "))
-            .expect("open_session returns a session_id")
-            .to_string();
+        let session_id = opened_session_id(&opened);
 
         // A USE statement is allowed inside the session and runs with the
         // session's pinned client_session_id.
@@ -1547,6 +1593,82 @@ mod tests {
 
         let second_close = server.close_session(Parameters(CloseSessionRequest { session_id })).await;
         assert!(result_text(&second_close).contains("SESSION_NOT_FOUND"));
+    }
+
+    #[tokio::test]
+    async fn expired_sessions_close_backend_pools_without_accumulating() {
+        let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
+        let backend = Arc::new(FakeBackend { connections: vec![starrocks], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let mut expired_client_session_ids = Vec::new();
+
+        for _ in 0..3 {
+            let opened =
+                server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+            let session_id = opened_session_id(&opened);
+            let result = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sr"),
+                    database: None,
+                    sql: "SELECT 1".to_string(),
+                    session_id: Some(session_id.clone()),
+                }))
+                .await;
+            assert_eq!(result_text(&result), "ok");
+            assert_eq!(backend.pinned_sessions.lock().unwrap().len(), 1);
+
+            server.sessions.expire_for_test(&session_id).await;
+            expired_client_session_ids.push(format!("mcp:{session_id}"));
+        }
+
+        let opened =
+            server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+        let final_session_id = opened_session_id(&opened);
+        assert!(backend.pinned_sessions.lock().unwrap().is_empty());
+        assert_eq!(backend.closed_sessions.lock().unwrap().as_slice(), expired_client_session_ids.as_slice());
+
+        let closed = server.close_session(Parameters(CloseSessionRequest { session_id: final_session_id })).await;
+        assert!(result_text(&closed).contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn failed_session_close_can_be_retried() {
+        let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
+        let backend = Arc::new(FakeBackend { connections: vec![starrocks], ..Default::default() });
+        *backend.close_failures_remaining.lock().unwrap() = 1;
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let opened =
+            server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+        let session_id = opened_session_id(&opened);
+        let query = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sr"),
+                database: None,
+                sql: "SELECT 1".to_string(),
+                session_id: Some(session_id.clone()),
+            }))
+            .await;
+        assert_eq!(result_text(&query), "ok");
+
+        let failed = server.close_session(Parameters(CloseSessionRequest { session_id: session_id.clone() })).await;
+        assert!(result_text(&failed).contains("SESSION_CLOSE_ERROR"));
+        assert_eq!(backend.pinned_sessions.lock().unwrap().len(), 1);
+
+        let retry_query = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sr"),
+                database: None,
+                sql: "SELECT 1".to_string(),
+                session_id: Some(session_id.clone()),
+            }))
+            .await;
+        assert_eq!(result_text(&retry_query), "ok");
+
+        let closed = server.close_session(Parameters(CloseSessionRequest { session_id })).await;
+        assert!(result_text(&closed).contains("closed"));
+        assert!(backend.pinned_sessions.lock().unwrap().is_empty());
+        assert_eq!(backend.closed_sessions.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

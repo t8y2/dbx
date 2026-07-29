@@ -12,6 +12,7 @@ import AppSidebar from "@/components/layout/AppSidebar.vue";
 import EditorToolbar from "@/components/layout/EditorToolbar.vue";
 import ContentArea from "@/components/layout/ContentArea.vue";
 import DetachedTabWindow from "@/components/layout/DetachedTabWindow.vue";
+import DetachedWindowShell from "@/components/layout/DetachedWindowShell.vue";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
 import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
@@ -82,7 +83,18 @@ import {
   switchToTabIndexFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { isPreviewTab, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
-import { checkDetachedWindowsBeforeAppClose, destroyDetachedWindowAfterCleanup, focusDetachedTabWindow, isDetachedTabWindow, listenForDetachedAppCloseChecks, listenForDetachedTabMainWindowActions, prepareTabWindow, receiveDetachedTab, type DetachedTabMainWindowAction } from "@/lib/tabs/tabWindow";
+import {
+  checkDetachedWindowsBeforeAppClose,
+  destroyDetachedWindowAfterCleanup,
+  focusDetachedTabWindow,
+  isDetachedTabWindow,
+  listenForDetachedAppCloseChecks,
+  listenForDetachedTabMainWindowActions,
+  prepareTabWindow,
+  receiveDetachedTab,
+  requestDetachedTabMainWindowAction,
+  type DetachedTabMainWindowAction,
+} from "@/lib/tabs/tabWindow";
 import type { TabWindowClientPlacement } from "@/lib/tabs/tabWindowPlacement";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
@@ -359,7 +371,11 @@ function rejectDetachedTabCreation(): boolean {
 }
 
 async function openTableTarget(...args: Parameters<typeof openTableTargetInMainWindow>) {
-  if (rejectDetachedTabCreation()) return;
+  const [target, options] = args;
+  if (isDetachedWindow) {
+    // A detached window keeps one owner by replacing its current tab in place.
+    return openTableTargetInMainWindow(target, { ...options, replaceActiveInDetached: true });
+  }
   return openTableTargetInMainWindow(...args);
 }
 
@@ -716,6 +732,12 @@ function handleDetachedMainWindowAction(action: DetachedTabMainWindowAction) {
       sendSelectionToAi(action.sql);
       break;
   }
+}
+
+function forwardToMainWindow(action: DetachedTabMainWindowAction) {
+  void requestDetachedTabMainWindowAction(action).catch((error) => {
+    toast(t("tabs.openTabWindowFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  });
 }
 
 function openAiPanel() {
@@ -1537,11 +1559,14 @@ function onViewTableDdl(table: SqlObjectNavigationTarget) {
   showQueryEditorDdlDialog.value = true;
 }
 
-function onEditTableStructure(table: SqlObjectNavigationTarget) {
-  if (rejectDetachedTabCreation()) return;
+async function onEditTableStructure(table: SqlObjectNavigationTarget) {
   const target = tableTargetFromActiveTab(table);
   // Keep view-like objects out of the table editor even if a stale menu dispatches this event.
   if (!target || sqlObjectNavigationSourceKind(table)) return;
+  if (isDetachedWindow) {
+    await connectionStore.ensureConnected(target.connectionId);
+    await queryStore.replaceActiveTabForDetachedNavigation();
+  }
   queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
 }
 
@@ -2094,19 +2119,40 @@ async function initApp({ restoreOpenTabs = true }: { restoreOpenTabs?: boolean }
   }
 }
 
-async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement) {
-  const tab = queryStore.tabs.find((item) => item.id === tabId);
-  if (!tab) return;
-  const isBusy = (item: QueryTab) => !!(item.isExecuting || item.isCancelling || item.isExplaining || item.resultTotalRowCountLoading);
-  if (isBusy(tab)) {
-    toast(t("tabs.moveTabWindowBusy"), 5000);
-    return;
-  }
+async function initDetachedApp() {
+  const t0 = performance.now();
+  console.log("[STARTUP] initDetachedApp begin");
 
+  // Only state required to render and operate the transferred tab blocks
+  // acceptance. Main-window-only and optional services continue in parallel.
+  await Promise.all([settingsStore.initEditorSettings(), connectionStore.initFromDisk()]);
+  console.log(`[STARTUP]   detached core state: ${(performance.now() - t0).toFixed(0)}ms`);
+  restoreActiveConnectionContext();
+
+  void settingsStore.initAiConfigs().catch((error) => console.warn("[DBX][detached-tab:ai-config:init:error]", error));
+  void settingsStore.initDesktopSettings().catch((error) => console.warn("[DBX][detached-tab:desktop-settings:init:error]", error));
+  void promptTemplateStore.init().catch((error) => console.warn("[DBX][detached-tab:prompt-templates:init:error]", error));
+  void Promise.all([initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()])
+    .then(() => queryStore.hydrateSavedSqlTabs())
+    .catch((error) => console.warn("[DBX][detached-tab:saved-sql:init:error]", error));
+}
+
+async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement, releasePreview?: () => void) {
   let preparedWindow: Awaited<ReturnType<typeof prepareTabWindow>> | undefined;
   let persistSuspended = false;
   try {
-    preparedWindow = await prepareTabWindow(tab.id, tabDisplayTitle(tab, t), placement);
+    const tab = queryStore.tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const isBusy = (item: QueryTab) => !!(item.isExecuting || item.isCancelling || item.isExplaining || item.resultTotalRowCountLoading);
+    if (isBusy(tab)) {
+      toast(t("tabs.moveTabWindowBusy"), 5000);
+      return;
+    }
+
+    preparedWindow = await prepareTabWindow(tab.id, tabDisplayTitle(tab, t), {
+      placement,
+      onWindowShown: releasePreview,
+    });
     const currentTab = queryStore.tabs.find((item) => item.id === tab.id);
     if (!currentTab || isBusy(currentTab)) {
       await preparedWindow.abort();
@@ -2181,6 +2227,9 @@ async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement
   } catch (e: any) {
     if (persistSuspended) await queryStore.resumeOpenTabsPersist().catch(() => {});
     toast(t("tabs.openTabWindowFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    // Startup errors and early exits must also release the retained drag preview.
+    releasePreview?.();
   }
 }
 
@@ -2295,22 +2344,27 @@ onMounted(async () => {
       event.preventDefault();
       await closeDetachedTab();
     });
-    await initApp({ restoreOpenTabs: false });
+    // Register lifecycle listeners before optional startup work so a visible
+    // shell can always answer close checks and receive ownership immediately.
     unlistenDetachedAppCloseCheck = await listenForDetachedAppCloseChecks(() => queryStore.hasDirtyTabs);
-    unlistenDetachedTabTransfer = await receiveDetachedTab((payload) => {
-      restoreDataGridPendingSnapshotsForTab(payload.tab.id, payload.dataGridSnapshots);
-      queryStore.adoptTransferredTab(payload.tab);
-      activeOutputView.value = payload.activeOutputView;
-      selectedSql.value = payload.selectedSql;
-      cursorPos.value = payload.cursorPos;
-      explainMode.value = payload.explainMode;
-      blockDangerousRedisCommands.value = payload.blockDangerousRedisCommands;
-      restoreActiveConnectionContext();
-      return () => {
-        queryStore.takeTabForTransfer(payload.tab.id);
-        clearDataGridPendingSnapshotsForTab(payload.tab.id);
-      };
-    });
+    const detachedInitialization = initDetachedApp();
+    unlistenDetachedTabTransfer = await receiveDetachedTab(
+      (payload) => {
+        restoreDataGridPendingSnapshotsForTab(payload.tab.id, payload.dataGridSnapshots);
+        queryStore.adoptTransferredTab(payload.tab);
+        activeOutputView.value = payload.activeOutputView;
+        selectedSql.value = payload.selectedSql;
+        cursorPos.value = payload.cursorPos;
+        explainMode.value = payload.explainMode;
+        blockDangerousRedisCommands.value = payload.blockDangerousRedisCommands;
+        restoreActiveConnectionContext();
+        return () => {
+          queryStore.takeTabForTransfer(payload.tab.id);
+          clearDataGridPendingSnapshotsForTab(payload.tab.id);
+        };
+      },
+      { initialization: detachedInitialization },
+    );
     return;
   }
   window.addEventListener("keydown", handleKeydown);
@@ -2390,7 +2444,9 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <template v-if="isDetachedWindow && activeTab && !setupRequired && (!needsAuth || authenticated)">
+  <!-- Keep a visible shell while the full App runtime initializes and waits for tab ownership. -->
+  <DetachedWindowShell v-if="isDetachedWindow && !activeTab && !setupRequired && (!needsAuth || authenticated)" />
+  <template v-else-if="isDetachedWindow && activeTab && !setupRequired && (!needsAuth || authenticated)">
     <TooltipProvider :delay-duration="300">
       <DetachedTabWindow
         ref="contentAreaRef"
@@ -2409,8 +2465,8 @@ onUnmounted(() => {
         :txn-session-id="activeTab.txnSessionId"
         :txn-auto-rolled-back="activeTab.txnAutoRolledBack"
         @update:active-output-view="activeOutputView = $event"
-        @fix-with-ai="fixWithAi"
-        @send-selection-to-ai="sendSelectionToAi"
+        @fix-with-ai="(errorMessage: string) => forwardToMainWindow({ type: 'fix-with-ai', errorMessage })"
+        @send-selection-to-ai="(sql: string) => forwardToMainWindow({ type: 'send-selection-to-ai', sql })"
         @execute="tryExecute($event)"
         @execute-in-new-result-tab="tryExecuteInNewResultTab($event)"
         @cancel="cancelActiveExecution()"
@@ -2461,7 +2517,7 @@ onUnmounted(() => {
             )
         "
         @structure-editor-close="closeDetachedTab"
-        @open-settings="openSettings"
+        @open-settings="(initialTab?: string, initialSection?: string) => forwardToMainWindow({ type: 'open-settings', initialTab, initialSection })"
         @open-connection-settings="openConnectionSettings"
         @close="closeDetachedTab"
         @close-tab="closeDetachedTab"
@@ -2469,7 +2525,7 @@ onUnmounted(() => {
         @compress-sql="compressActiveSql"
         @toggle-sql-keyword-case="toggleSqlKeywordCase"
         @open-sql="openSqlFile"
-        @import-result-archive="importResultArchive"
+        @import-result-archive="rejectDetachedTabCreation"
         @paste-sql-in-condition="pasteClipboardAsSqlInCondition"
         @change-connection="changeActiveConnection"
         @change-database="changeActiveDatabase"

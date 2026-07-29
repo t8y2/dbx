@@ -59,6 +59,15 @@ export interface PreparedTabWindow {
   abort: () => Promise<void>;
 }
 
+export interface PrepareTabWindowOptions {
+  placement?: TabWindowClientPlacement;
+  onWindowShown?: () => void;
+}
+
+export interface ReceiveDetachedTabOptions {
+  initialization?: Promise<void>;
+}
+
 export type DetachedWindowCleanupOutcome = { status: "completed" } | { status: "failed"; error: unknown } | { status: "timed-out"; timeoutMs: number };
 
 export async function destroyDetachedWindowAfterCleanup(target: Pick<WebviewWindow, "destroy">, cleanup: () => Promise<void>, timeoutMs = DETACHED_WINDOW_CLEANUP_TIMEOUT_MS): Promise<DetachedWindowCleanupOutcome> {
@@ -84,7 +93,7 @@ function windowLabel(tabId: string): string {
   return `detached-tab-${tabId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-function transferEventName(kind: "shell-ready" | "transfer-ready" | "transfer" | "accepted", transferId: string): string {
+function transferEventName(kind: "visual-ready" | "transfer-ready" | "transfer" | "accepted", transferId: string): string {
   return `dbx-detached-tab-${kind}-${transferId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
@@ -139,7 +148,8 @@ async function waitForWindowCreation(window: WebviewWindow): Promise<void> {
   });
 }
 
-async function prepareTauriTabWindow(tabId: string, title: string, placement?: TabWindowClientPlacement): Promise<PreparedTabWindow> {
+async function prepareTauriTabWindow(tabId: string, title: string, options: PrepareTabWindowOptions): Promise<PreparedTabWindow> {
+  const { placement, onWindowShown } = options;
   const label = windowLabel(tabId);
   const existing = await WebviewWindow.getByLabel(label);
   if (existing) {
@@ -157,9 +167,12 @@ async function prepareTauriTabWindow(tabId: string, title: string, placement?: T
       // Fall back to the window manager position when source coordinates are unavailable.
     }
   }
-  const shellReadyWaiter = await createEventWaiter<TransferSignal>(mainWindow, transferEventName("shell-ready", transferId), "Detached tab window shell did not become ready");
-  const transferReadyWaiter = await createEventWaiter<TransferSignal>(mainWindow, transferEventName("transfer-ready", transferId), "Detached tab window did not become ready for transfer");
-  // Destruction can cancel this waiter before the sequential transfer-ready await begins.
+  const [visualReadyWaiter, transferReadyWaiter] = await Promise.all([
+    createEventWaiter<TransferSignal>(mainWindow, transferEventName("visual-ready", transferId), "Detached tab window shell did not become ready"),
+    createEventWaiter<TransferSignal>(mainWindow, transferEventName("transfer-ready", transferId), "Detached tab window did not become ready for transfer"),
+  ]);
+  // Destruction can cancel these waiters before their sequential awaits begin.
+  void visualReadyWaiter.promise.catch(() => {});
   void transferReadyWaiter.promise.catch(() => {});
   const detached = new WebviewWindow(label, {
     url: detachedUrl(transferId),
@@ -177,17 +190,23 @@ async function prepareTauriTabWindow(tabId: string, title: string, placement?: T
     visible: false,
   });
   void detached.once("tauri://destroyed", () => {
-    shellReadyWaiter.cancel();
+    visualReadyWaiter.cancel();
     transferReadyWaiter.cancel();
   });
 
   try {
-    // Show the lightweight shell before the full application and tab workspace finish loading.
-    await Promise.all([waitForWindowCreation(detached), shellReadyWaiter.promise]);
+    // Swap the retained drag preview for a renderable shell instead of exposing the WebView's blank first frame.
+    await Promise.all([waitForWindowCreation(detached), visualReadyWaiter.promise]);
     await detached.show();
+    try {
+      onWindowShown?.();
+    } catch {
+      // Preview cleanup is best-effort and must not invalidate a successfully shown window.
+    }
+    // Keep ownership in the main window until the child can receive the transfer.
     await transferReadyWaiter.promise;
   } catch (error) {
-    shellReadyWaiter.cancel();
+    visualReadyWaiter.cancel();
     transferReadyWaiter.cancel();
     await detached.destroy().catch(() => {});
     throw error;
@@ -219,12 +238,12 @@ async function prepareTauriTabWindow(tabId: string, title: string, placement?: T
  * Waits until the detached window can receive the transfer before ownership
  * leaves the main window, so startup failures cannot lose the original tab.
  */
-export async function prepareTabWindow(tabId: string, title: string, placement?: TabWindowClientPlacement): Promise<PreparedTabWindow> {
+export async function prepareTabWindow(tabId: string, title: string, options: PrepareTabWindowOptions = {}): Promise<PreparedTabWindow> {
   if (!isTauriRuntime()) throw new Error("Detached tabs are only supported in the desktop app");
   const pending = openingWindows.get(tabId);
   if (pending) return pending;
 
-  const task = prepareTauriTabWindow(tabId, title, placement);
+  const task = prepareTauriTabWindow(tabId, title, options);
   openingWindows.set(tabId, task);
   try {
     return await task;
@@ -233,17 +252,17 @@ export async function prepareTabWindow(tabId: string, title: string, placement?:
   }
 }
 
-export async function notifyDetachedWindowShellReady(): Promise<void> {
+export async function notifyDetachedWindowVisualReady(): Promise<void> {
   const transferId = detachedTransferId();
   if (!transferId || !isTauriRuntime()) throw new Error("Detached tab transfer context is missing");
-  await emitTo("main", transferEventName("shell-ready", transferId), { transferId } satisfies TransferSignal);
+  await emitTo("main", transferEventName("visual-ready", transferId), { transferId } satisfies TransferSignal);
 }
 
 /**
  * The detached window becomes transfer-ready only after its listener and core
  * state exist. Acceptance remains the commit point for removing the main tab.
  */
-export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransferPayload) => (() => void | Promise<void>) | Promise<() => void | Promise<void>>): Promise<UnlistenFn> {
+export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransferPayload) => (() => void | Promise<void>) | Promise<() => void | Promise<void>>, options: ReceiveDetachedTabOptions = {}): Promise<UnlistenFn> {
   const transferId = detachedTransferId();
   if (!transferId || !isTauriRuntime()) throw new Error("Detached tab transfer context is missing");
 
@@ -254,6 +273,10 @@ export async function receiveDetachedTab(onReceive: (payload: DetachedTabTransfe
     accepting = true;
     let rollbackReceive: (() => void | Promise<void>) | undefined;
     try {
+      // The listener becomes transfer-ready before core initialization settles.
+      // This lets the main window move ownership while adoption still waits for
+      // the settings and connection metadata required by the tab runtime.
+      await options.initialization;
       rollbackReceive = await onReceive(event.payload);
     } catch (error) {
       await emitTo("main", transferEventName("accepted", transferId), {

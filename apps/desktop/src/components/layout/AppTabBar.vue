@@ -35,7 +35,7 @@ const emit = defineEmits<{
   "activate-driver-store": [];
   "close-driver-store": [];
   "activate-settings-page": [];
-  "open-tab-window": [tabId: string, placement?: TabWindowClientPlacement];
+  "open-tab-window": [tabId: string, placement?: TabWindowClientPlacement, releasePreview?: () => void];
   "close-settings-page": [];
   "save-tab": [tabId: string];
   "discard-tab-close": [];
@@ -50,6 +50,29 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const tabBarRef = ref<HTMLElement | null>(null);
+const retainedDetachedWindowPreview = ref<ReturnType<typeof detachedTabWindowPreviewRect> | null>(null);
+const DETACHED_WINDOW_PREVIEW_TIMEOUT_MS = 20_000;
+let detachedWindowPreviewGeneration = 0;
+let detachedWindowPreviewTimer: ReturnType<typeof setTimeout> | null = null;
+
+function retainDetachedWindowPreview(preview: ReturnType<typeof detachedTabWindowPreviewRect>): () => void {
+  const generation = ++detachedWindowPreviewGeneration;
+  retainedDetachedWindowPreview.value = preview;
+  if (detachedWindowPreviewTimer) clearTimeout(detachedWindowPreviewTimer);
+
+  const release = () => {
+    if (generation !== detachedWindowPreviewGeneration) return;
+    retainedDetachedWindowPreview.value = null;
+    if (detachedWindowPreviewTimer) {
+      clearTimeout(detachedWindowPreviewTimer);
+      detachedWindowPreviewTimer = null;
+    }
+  };
+  // Never leave a stale overlay behind if window startup stops responding.
+  detachedWindowPreviewTimer = setTimeout(release, DETACHED_WINDOW_PREVIEW_TIMEOUT_MS);
+  return release;
+}
+
 const tabDrag = useTabDrag(
   (draggedId, targetId, position) => {
     queryStore.reorderTab(draggedId, targetId, position);
@@ -63,7 +86,9 @@ const tabDrag = useTabDrag(
           height: document.documentElement.clientHeight,
         },
       );
-      emit("open-tab-window", tabId, { left: preview.left, top: preview.top });
+      // Keep visual continuity until the hidden native window has a renderable shell.
+      const releasePreview = retainDetachedWindowPreview(preview);
+      emit("open-tab-window", tabId, { left: preview.left, top: preview.top }, releasePreview);
     },
     shouldDetach: (event) => {
       if (!props.detachableTabs) return false;
@@ -75,16 +100,19 @@ const tabDrag = useTabDrag(
   },
 );
 const detachedWindowPreview = computed(() => {
-  if (!props.detachableTabs || !tabDrag.state.active) return null;
-  const tabBarRect = tabBarRef.value?.getBoundingClientRect();
-  if (!tabBarRect || !pointOutsideRect({ x: tabDrag.state.currentX, y: tabDrag.state.currentY }, tabBarRect, 8)) return null;
-  return detachedTabWindowPreviewRect(
-    { x: tabDrag.state.currentX, y: tabDrag.state.currentY },
-    {
-      width: document.documentElement.clientWidth,
-      height: document.documentElement.clientHeight,
-    },
-  );
+  if (props.detachableTabs && tabDrag.state.active) {
+    const tabBarRect = tabBarRef.value?.getBoundingClientRect();
+    if (tabBarRect && pointOutsideRect({ x: tabDrag.state.currentX, y: tabDrag.state.currentY }, tabBarRect, 8)) {
+      return detachedTabWindowPreviewRect(
+        { x: tabDrag.state.currentX, y: tabDrag.state.currentY },
+        {
+          width: document.documentElement.clientWidth,
+          height: document.documentElement.clientHeight,
+        },
+      );
+    }
+  }
+  return retainedDetachedWindowPreview.value;
 });
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
@@ -142,6 +170,10 @@ onUnmounted(() => {
   if (closeConfirmListCloseTimer) {
     clearTimeout(closeConfirmListCloseTimer);
     closeConfirmListCloseTimer = null;
+  }
+  if (detachedWindowPreviewTimer) {
+    clearTimeout(detachedWindowPreviewTimer);
+    detachedWindowPreviewTimer = null;
   }
 });
 

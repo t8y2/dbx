@@ -77,9 +77,9 @@ function detachedTransferId(): string | null {
   return new URLSearchParams(window.location.search).get(DETACHED_TRANSFER_PARAM);
 }
 
-async function loadApplication(detached: boolean) {
+async function loadApplication() {
   console.log("[STARTUP] frontend bootstrap begin");
-  const [{ createPinia }, { default: VueVirtualScroller }, { default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("pinia"), import("vue-virtual-scroller"), import("./i18n"), detached ? import("./DetachedApp.vue") : import("./App.vue")]);
+  const [{ createPinia }, { default: VueVirtualScroller }, { default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("pinia"), import("vue-virtual-scroller"), import("./i18n"), import("./App.vue")]);
   console.log("[STARTUP] frontend modules loaded");
   await loadSavedLocale();
   console.log("[STARTUP] locale ready");
@@ -107,10 +107,11 @@ async function bootstrapDetachedWindow(root: HTMLDivElement) {
 
   let detachedApplication: Awaited<ReturnType<typeof loadApplication>>;
   try {
-    const { notifyDetachedWindowShellReady } = await import("@/lib/tabs/tabWindow");
-    await notifyDetachedWindowShellReady();
-    // Detached windows load only the tab workspace and skip main-window services.
-    detachedApplication = await loadApplication(true);
+    const { notifyDetachedWindowVisualReady } = await import("@/lib/tabs/tabWindow");
+    // nextTick above guarantees the hidden WebView has a renderable shell before the native window is shown.
+    await notifyDetachedWindowVisualReady();
+    // Use the full application runtime after the lightweight shell is visible.
+    detachedApplication = await loadApplication();
   } catch (error) {
     console.error("[STARTUP] detached bootstrap failed", error);
     shell.showError(error);
@@ -128,7 +129,7 @@ async function bootstrap() {
     await bootstrapDetachedWindow(root);
     return;
   }
-  mountApplication(root, await loadApplication(false));
+  mountApplication(root, await loadApplication());
 }
 
 installDebugLogCapture();

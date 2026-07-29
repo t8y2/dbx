@@ -55,6 +55,17 @@ describe("detached tab app close checks", () => {
     mocks.mainWindow.setFocus.mockClear();
   });
 
+  it("notifies the main window when the detached shell is renderable", async () => {
+    vi.stubGlobal("window", { location: { search: "?dbxDetachedTransfer=transfer-1" } });
+    const { notifyDetachedWindowVisualReady } = await import("@/lib/tabs/tabWindow");
+
+    await notifyDetachedWindowVisualReady();
+
+    expect(mocks.emitTo).toHaveBeenCalledWith("main", "dbx-detached-tab-visual-ready-transfer-1", {
+      transferId: "transfer-1",
+    });
+  });
+
   it("collects dirty detached windows before allowing app exit", async () => {
     const { checkDetachedWindowsBeforeAppClose } = await import("@/lib/tabs/tabWindow");
 
@@ -66,17 +77,6 @@ describe("detached tab app close checks", () => {
     });
     expect(mocks.emitTo).toHaveBeenCalledTimes(2);
     expect(mocks.unlisten).toHaveBeenCalledOnce();
-  });
-
-  it("notifies the main window as soon as the detached shell is mounted", async () => {
-    vi.stubGlobal("window", { location: { search: "?dbxDetachedTransfer=transfer-1" } });
-    const { notifyDetachedWindowShellReady } = await import("@/lib/tabs/tabWindow");
-
-    await notifyDetachedWindowShellReady();
-
-    expect(mocks.emitTo).toHaveBeenCalledWith("main", "dbx-detached-tab-shell-ready-transfer-1", {
-      transferId: "transfer-1",
-    });
   });
 
   it("forwards main-only actions without loading their UI in the detached window", async () => {

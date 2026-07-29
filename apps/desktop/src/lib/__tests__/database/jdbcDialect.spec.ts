@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
+import { connectionIdentifierQuoteForConnection, connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect } from "@/lib/database/jdbcDialect";
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -63,6 +63,12 @@ describe("jdbc dialect inference", () => {
     expect(connectionUsesDatabaseObjectTreeMode(gaussdbConnection)).toBe(false);
     expect(inferJdbcDialect(opengaussConnection)).toBe("opengauss");
     expect(connectionUsesDatabaseObjectTreeMode(opengaussConnection)).toBe(false);
+  });
+
+  it("disables identifier quoting only for GaussDB JDBC connections", () => {
+    expect(connectionIdentifierQuoteForConnection({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] }, '"')).toBe("");
+    expect(connectionIdentifierQuoteForConnection({ db_type: "gaussdb" }, undefined)).toBeUndefined();
+    expect(connectionIdentifierQuoteForConnection({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] }, '"')).toBe('"');
   });
 
   it("detects Dameng JDBC connections", () => {

@@ -1,6 +1,14 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { codeMirrorSqlDialectForConnection, connectionShouldDiscoverJdbcSchemas, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, inferJdbcDialect, sqlSnippetDatabaseTypeForConnection } from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
+import {
+  codeMirrorSqlDialectForConnection,
+  connectionIdentifierQuoteForConnection,
+  connectionShouldDiscoverJdbcSchemas,
+  connectionUsesDatabaseObjectTreeMode,
+  effectiveDatabaseTypeForConnection,
+  inferJdbcDialect,
+  sqlSnippetDatabaseTypeForConnection,
+} from "../../apps/desktop/src/lib/database/jdbcDialect.ts";
 
 test("infers GoldenDB for generic JDBC connections", () => {
   assert.equal(
@@ -45,6 +53,12 @@ test("infers GaussDB-compatible JDBC connections as schema-aware", () => {
   assert.equal(connectionUsesDatabaseObjectTreeMode(gaussdbConnection), false);
   assert.equal(inferJdbcDialect(opengaussConnection), "opengauss");
   assert.equal(connectionUsesDatabaseObjectTreeMode(opengaussConnection), false);
+});
+
+test("disables identifier quoting only for GaussDB JDBC connections", () => {
+  assert.equal(connectionIdentifierQuoteForConnection({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] }, '"'), "");
+  assert.equal(connectionIdentifierQuoteForConnection({ db_type: "gaussdb" }, undefined), undefined);
+  assert.equal(connectionIdentifierQuoteForConnection({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] }, '"'), '"');
 });
 
 test("infers Dameng JDBC connections", () => {

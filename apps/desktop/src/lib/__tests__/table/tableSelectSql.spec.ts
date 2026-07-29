@@ -54,6 +54,11 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableDataIdentifier("kingbase", "order detail", "`")).toBe("`order detail`");
   });
 
+  it("allows GaussDB JDBC table-data identifiers to remain unquoted", () => {
+    expect(quoteTableDataIdentifier("gaussdb", "MixedCase", "")).toBe("MixedCase");
+    expect(quoteTableDataIdentifier("gaussdb", "MixedCase")).toBe('"MixedCase"');
+  });
+
   it("escapes Kingbase identifiers without maintaining a reserved-word list", () => {
     expect(quoteTableDataIdentifier("kingbase", "ANALYZE", "`")).toBe("`ANALYZE`");
     expect(quoteTableDataIdentifier("kingbase", "AUTHORIZATION", '"')).toBe('"AUTHORIZATION"');

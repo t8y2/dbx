@@ -770,7 +770,9 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
 }
 
 pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
-    let table = if options.database_type == Some(DatabaseType::Kingbase) {
+    let table = if options.database_type == Some(DatabaseType::Kingbase)
+        || (options.database_type == Some(DatabaseType::Gaussdb) && options.identifier_quote.is_some())
+    {
         crate::sql_dialect::table_data_qualified_table_name(
             options.database_type,
             options.schema.as_deref(),
@@ -2691,7 +2693,9 @@ fn data_grid_qualified_table_name(
     table_name: &str,
     identifier_quote: Option<&str>,
 ) -> String {
-    if database_type == Some(DatabaseType::Kingbase) {
+    if database_type == Some(DatabaseType::Kingbase)
+        || (database_type == Some(DatabaseType::Gaussdb) && identifier_quote.is_some())
+    {
         crate::sql_dialect::table_data_qualified_table_name(database_type, schema, table_name, identifier_quote)
     } else {
         crate::sql_dialect::qualified_table_name_with_catalog(database_type, catalog, schema, database, table_name)
@@ -3191,6 +3195,20 @@ mod tests {
 
     #[test]
     fn builds_filter_conditions() {
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: Some(String::new()),
+                column_name: "MixedCase".to_string(),
+                mode: DataGridContextFilterMode::Equals,
+                value: json!(1),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("MixedCase", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("MixedCase = 1")
+        );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
                 database_type: Some(DatabaseType::Kingbase),
@@ -3828,6 +3846,18 @@ mod tests {
                 where_input: None,
             }),
             "SELECT COUNT(*) AS cnt FROM `cqbq_ls`.`ANALYZE`"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: Some(String::new()),
+                catalog: None,
+                database: None,
+                schema: Some("schema_01".to_string()),
+                table_name: "table_01".to_string(),
+                where_input: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM schema_01.table_01"
         );
     }
 
@@ -4476,6 +4506,31 @@ mod tests {
             .rollback_statements
             .iter()
             .all(|statement| statement.contains("`gc`.`docfileinfo`") && !statement.contains('"')));
+    }
+
+    #[test]
+    fn gaussdb_jdbc_save_uses_unquoted_identifiers() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            identifier_quote: Some(String::new()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("schema_01".to_string()),
+                table_name: "table_01".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "integer", false, None), column("name", "varchar", false, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("new"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE schema_01.table_01 SET name = 'new' WHERE id = 1;"]);
     }
 
     #[test]

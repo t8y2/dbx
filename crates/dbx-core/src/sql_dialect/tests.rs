@@ -344,6 +344,27 @@ fn builds_table_data_where_and_schema_queries() {
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            identifier_quote: Some(String::new()),
+            schema: Some("schema_01".to_string()),
+            table_name: "table_01".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM schema_01.table_01 LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            schema: Some("schema_01".to_string()),
+            table_name: "table_01".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM \"schema_01\".\"table_01\" LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Xugu),
             schema: Some("DBX_TEST".to_string()),
             table_name: "PRODUCTS".to_string(),

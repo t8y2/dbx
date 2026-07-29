@@ -56,6 +56,13 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   return inferJdbcDialect(connection) ?? "jdbc";
 }
 
+export function connectionIdentifierQuoteForConnection(connection: JdbcDialectConnection | undefined, identifierQuote: string | undefined): string | undefined {
+  // Some GaussDB JDBC-compatible servers reject quoted relation names even
+  // when DatabaseMetaData reports double quotes as the identifier quote.
+  if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "gaussdb") return "";
+  return identifierQuote;
+}
+
 export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   // ASE uses T-SQL snippets, but mapping it globally to SQL Server would also
   // enable incompatible SQL Server metadata and pagination behavior.

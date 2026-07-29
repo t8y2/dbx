@@ -356,6 +356,7 @@ const editingShortcutId = ref<ShortcutActionId | null>(null);
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
+const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
@@ -459,6 +460,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
@@ -713,6 +715,7 @@ function syncEditorSettingsDraftFromStore() {
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+  editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
@@ -914,6 +917,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -1002,6 +1006,7 @@ function resetAllDefaults() {
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -1224,6 +1229,10 @@ function onUpdateDownloadSourceChange(v: any) {
 
 function setSidebarObjectDisplay(value: "grouped" | "simple") {
   editSidebarObjectDisplay.value = value;
+}
+
+function setRoutineSourceOpenMode(value: "query-tab" | "dialog") {
+  editRoutineSourceOpenMode.value = value;
 }
 
 function setIconTheme(value: DesktopIconTheme) {
@@ -3861,6 +3870,32 @@ onUnmounted(cleanupPreviewEditor);
                             {{ t("settings.sidebarObjectDisplaySimpleDescription") }}
                           </TooltipContent>
                         </Tooltip>
+                      </div>
+                    </div>
+                  </Button>
+                </div>
+              </div>
+              <div class="space-y-2">
+                <div class="flex items-center gap-2">
+                  <Label>{{ t("settings.routineSourceOpenMode") }}</Label>
+                  <HelpTooltip :label="t('settings.routineSourceOpenMode')">
+                    {{ t("settings.routineSourceOpenModeQueryTabDescription") }}
+                  </HelpTooltip>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editRoutineSourceOpenMode === 'query-tab' ? 'dbx-choice-selected' : ''" @click="setRoutineSourceOpenMode('query-tab')">
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.routineSourceOpenModeQueryTab") }}</div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.routineSourceOpenModeQueryTabDescription") }}
+                      </div>
+                    </div>
+                  </Button>
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editRoutineSourceOpenMode === 'dialog' ? 'dbx-choice-selected' : ''" @click="setRoutineSourceOpenMode('dialog')">
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.routineSourceOpenModeDialog") }}</div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.routineSourceOpenModeDialogDescription") }}
                       </div>
                     </div>
                   </Button>

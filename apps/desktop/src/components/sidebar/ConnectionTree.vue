@@ -62,6 +62,10 @@ const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarHorizontalScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarContextMenuRef = ref<{ close: () => void } | null>(null);
 const sidebarContextMenuItems = ref<ContextMenuItem[]>([]);
+const emit = defineEmits<{
+  "open-settings": [initialTab: string];
+}>();
+
 const sidebarContextMenuTarget = ref<SidebarActionTarget | null>(null);
 const sidebarDangerDialogRequest = ref<SidebarDangerDialogRequest | null>(null);
 const sidebarDangerDialogOpen = ref(false);
@@ -1219,6 +1223,10 @@ function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
     });
 }
 
+function openSidebarSettings(initialTab: string) {
+  emit("open-settings", initialTab);
+}
+
 function openSidebarProcedure(node: TreeNode) {
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
   beginSidebarAction();
@@ -1605,6 +1613,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-ddl="openSidebarDdl"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"
+      @open-settings="openSidebarSettings"
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"
       @open-visible-schemas="openSidebarVisibleSchemas"

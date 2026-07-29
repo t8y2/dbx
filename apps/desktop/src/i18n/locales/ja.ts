@@ -2127,6 +2127,7 @@ export default withEnglishFallback({
     createProcedure: "新規ストアドプロシージャ",
     createFunction: "新規関数",
     createTrigger: "新規トリガー",
+    changeOpenMode: "開き方を変更",
   },
   visibleDatabases: {
     title: "表示するデータベース",
@@ -4592,6 +4593,11 @@ export default withEnglishFallback({
     dateTimeFormatAuto: "自動認識",
     dateTimeFormatSearchPlaceholder: "形式を選択または入力",
     dateTimeFormatEmpty: "カスタム日時形式を入力",
+    routineSourceOpenMode: "関数/プロシージャ/ビューの開き方",
+    routineSourceOpenModeQueryTab: "データタブ",
+    routineSourceOpenModeQueryTabDescription: "新しいデータタブでソースコードを開きます。SQLクエリの実行と同じ方法です。",
+    routineSourceOpenModeDialog: "ポップアップウィンドウ",
+    routineSourceOpenModeDialogDescription: "ポップアップダイアログでソースコードを開き、素早く表示・編集できます。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

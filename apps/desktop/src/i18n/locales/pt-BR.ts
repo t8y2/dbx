@@ -2128,6 +2128,7 @@ export default withEnglishFallback({
     createProcedure: "Novo procedimento armazenado",
     createFunction: "Nova função",
     createTrigger: "Novo gatilho",
+    changeOpenMode: "Alterar modo de abertura",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",
@@ -4594,6 +4595,11 @@ export default withEnglishFallback({
     dateTimeFormatAuto: "Detecção automática",
     dateTimeFormatSearchPlaceholder: "Selecione ou digite um formato",
     dateTimeFormatEmpty: "Insira um formato de data e hora personalizado",
+    routineSourceOpenMode: "Modo de abertura de funções/procedimentos/views",
+    routineSourceOpenModeQueryTab: "Aba de dados",
+    routineSourceOpenModeQueryTabDescription: "Abrir código-fonte em uma nova aba de dados, da mesma forma que executar uma consulta SQL.",
+    routineSourceOpenModeDialog: "Janela pop-up",
+    routineSourceOpenModeDialogDescription: "Abrir código-fonte em uma caixa de diálogo pop-up, facilitando a visualização e edição rápida.",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

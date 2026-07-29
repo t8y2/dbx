@@ -52,6 +52,7 @@ import {
   ListX,
   Info,
   X,
+  Settings2,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -316,6 +317,7 @@ const emit = defineEmits<{
   "open-ddl": [node: TreeNode];
   "open-object-source": [node: TreeNode, initialEditing: boolean];
   "open-procedure": [node: TreeNode];
+  "open-settings": [initialTab: string];
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
   "open-visible-schemas": [node: TreeNode];
@@ -1486,12 +1488,37 @@ async function refreshDropTableChildObjectPreviewSql() {
 function openObjectSourceDialog(initialEditing: boolean) {
   const node = activeNode.value;
   if (!node.connectionId || !node.database) return;
+  const connectionId = node.connectionId;
+  const database = node.database;
   const objectType = objectSourceKindForTreeNode(node.type);
   if (!objectType) return;
+  const openMode = settingsStore.editorSettings.routineSourceOpenMode;
+  if (openMode === "query-tab") {
+    void connectionStore
+      .ensureConnected(connectionId)
+      .then(async () => {
+        connectionStore.activeConnectionId = connectionId;
+        const schema = node.schema || database;
+        const result = await api.getObjectSource(connectionId, database, schema, node.objectName || node.label, objectType as any, node.signature);
+        const tabId = queryStore.createTab(connectionId, database, `Source - ${node.label}`);
+        queryStore.updateSql(tabId, result.source);
+        if (objectType !== "SEQUENCE") {
+          queryStore.setObjectSource(tabId, {
+            schema,
+            name: node.objectName || node.label,
+            objectType,
+          });
+        }
+      })
+      .catch((e: any) => {
+        toast(e?.message || String(e), 5000);
+      });
+    return;
+  }
   void connectionStore
-    .ensureConnected(node.connectionId)
+    .ensureConnected(connectionId)
     .then(() => {
-      connectionStore.activeConnectionId = node.connectionId!;
+      connectionStore.activeConnectionId = connectionId;
       emit("open-object-source", node, initialEditing);
     })
     .catch((e: any) => {
@@ -4122,6 +4149,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         action: () => emit("open-ddl", node),
         icon: FileCode,
       });
+      items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     }
     if (canOpenStructureEditor.value) {
       items.push({ label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
@@ -4286,6 +4314,8 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
     }
     items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+    items.push({ label: "", separator: true });
     items.push({
       label: deleteMenuLabel(node.type === "procedure" ? t("contextMenu.dropProcedure") : t("contextMenu.dropFunction")),
       action: deleteMenuAction(requestDropObject),
@@ -4298,15 +4328,15 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "sequence") {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
-    items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     return true;
   }
 
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body" || node.type === "type" || node.type === "type-body") {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
-    items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     return true;
   }
   return false;

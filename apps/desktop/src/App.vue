@@ -2181,7 +2181,17 @@ onUnmounted(() => {
         />
 
         <div :class="isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
-          <AppSidebar v-show="sidebarOpen" ref="appSidebarRef" :sidebar-width="sidebarWidth" :classic-layout="isClassicLayout" @import="dialogs.onImportClick" @export="dialogs.onExportClick" @start-resize="startSidebarResize" @collapse="setSidebarOpen(false)" />
+          <AppSidebar
+            v-show="sidebarOpen"
+            ref="appSidebarRef"
+            :sidebar-width="sidebarWidth"
+            :classic-layout="isClassicLayout"
+            @import="dialogs.onImportClick"
+            @export="dialogs.onExportClick"
+            @start-resize="startSidebarResize"
+            @collapse="setSidebarOpen(false)"
+            @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
+          />
           <div v-show="!sidebarOpen" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
             <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('sidebar.expand')" :aria-label="t('sidebar.expand')" @click="setSidebarOpen(true)">
               <ChevronsRight class="h-4 w-4" />

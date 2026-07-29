@@ -2127,6 +2127,7 @@ export default withEnglishFallback({
     createProcedure: "新增儲存程序",
     createFunction: "新增函數",
     createTrigger: "新增觸發器",
+    changeOpenMode: "修改開啟方式",
   },
   visibleDatabases: {
     title: "顯示資料庫",
@@ -4263,6 +4264,11 @@ export default withEnglishFallback({
     shortcutUppercaseSelection: "選取內容轉為大寫",
     shortcutLowercaseSelection: "選取內容轉為小寫",
     shortcutExPasteSqlInCondition: "ExPaste：貼上為 IN 條件",
+    routineSourceOpenMode: "函式/程序/檢視開啟方式",
+    routineSourceOpenModeQueryTab: "資料標籤頁",
+    routineSourceOpenModeQueryTabDescription: "在新的資料標籤頁中開啟原始碼，與執行 SQL 查詢方式相同。",
+    routineSourceOpenModeDialog: "彈出視窗",
+    routineSourceOpenModeDialogDescription: "在彈出對話方塊中開啟原始碼，方便快速檢視和編輯。",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

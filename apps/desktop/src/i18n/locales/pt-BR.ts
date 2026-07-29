@@ -1331,6 +1331,10 @@ export default withEnglishFallback({
     numericColumnAlign: "Alinhamento de colunas numéricas",
     numericColumnAlignLeft: "Alinhamento à esquerda",
     numericColumnAlignRight: "Alinhamento à direita",
+    xlsxHeaderTitle: "Formato do cabeçalho",
+    xlsxHeaderPrompt: "Selecione o formato do cabeçalho a ser usado ao exportar Excel:",
+    xlsxHeaderOriginal: "Cabeçalho usa nome do campo",
+    xlsxHeaderComment: "Cabeçalho usa comentário",
   },
   exportProgress: {
     xlsxRowLimit: "O XLSX suporta no máximo {limit} linhas de dados. Use a exportação CSV para obter o resultado completo.",

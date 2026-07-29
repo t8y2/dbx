@@ -1330,6 +1330,10 @@ export default withEnglishFallback({
     numericColumnAlign: "數值列對齊",
     numericColumnAlignLeft: "左對齊",
     numericColumnAlignRight: "右對齊",
+    xlsxHeaderTitle: "表頭格式",
+    xlsxHeaderPrompt: "請選擇匯出 Excel 時使用的表頭格式：",
+    xlsxHeaderOriginal: "表頭使用欄位名稱",
+    xlsxHeaderComment: "表頭使用註解",
   },
   exportProgress: {
     xlsxRowLimit: "XLSX 最多支援 {limit} 列資料，請改用 CSV 匯出完整結果。",

@@ -1329,6 +1329,10 @@ export default withEnglishFallback({
     numericColumnAlign: "Allineamento colonna numerica",
     numericColumnAlignLeft: "Allineamento a sinistra",
     numericColumnAlignRight: "Allineamento a destra",
+    xlsxHeaderTitle: "Formato intestazione",
+    xlsxHeaderPrompt: "Seleziona il formato dell'intestazione da utilizzare per l'esportazione in Excel:",
+    xlsxHeaderOriginal: "Intestazione con nome campo",
+    xlsxHeaderComment: "Intestazione con commento",
   },
   exportProgress: {
     xlsxRowLimit: "XLSX supporta al massimo {limit} righe di dati. Usa l'esportazione CSV per il risultato completo.",

@@ -1330,6 +1330,10 @@ export default withEnglishFallback({
     numericColumnAlign: "数値列の配置",
     numericColumnAlignLeft: "左揃え",
     numericColumnAlignRight: "右揃え",
+    xlsxHeaderTitle: "ヘッダー形式",
+    xlsxHeaderPrompt: "Excel エクスポート時に使用するヘッダー形式を選択してください：",
+    xlsxHeaderOriginal: "ヘッダーにフィールド名を使用",
+    xlsxHeaderComment: "ヘッダーにコメントを使用",
   },
   exportProgress: {
     xlsxRowLimit: "XLSX は最大 {limit} 行のデータに対応しています。完全な結果を得るには CSV エクスポートを使用してください。",

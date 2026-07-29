@@ -1331,6 +1331,10 @@ export default withEnglishFallback({
     numericColumnAlign: "Alineación de columna numérica",
     numericColumnAlignLeft: "Alineación izquierda",
     numericColumnAlignRight: "Alineación derecha",
+    xlsxHeaderTitle: "Formato de encabezado",
+    xlsxHeaderPrompt: "Seleccione el formato de encabezado al exportar a Excel:",
+    xlsxHeaderOriginal: "Encabezado usando nombres de campos",
+    xlsxHeaderComment: "Encabezado usando comentarios",
   },
   exportProgress: {
     xlsxRowLimit: "XLSX admite como máximo {limit} filas de datos. Use la exportación CSV para obtener el resultado completo.",

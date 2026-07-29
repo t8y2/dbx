@@ -63,7 +63,9 @@ import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
 import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
@@ -3715,23 +3717,15 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       icon: RefreshCw,
       shortcut: shortcutRefresh,
     });
-    if (canConfigureVisibleDatabases.value) {
+    const visibleFilterMenu = sidebarConnectionVisibleFilterMenu({
+      canConfigureVisibleDatabases: canConfigureVisibleDatabases.value,
+      canConfigureVisibleSchemas: canConfigureVisibleSchemas.value,
+      databaseFilterUsesSchemas: connectionUsesVisibleSchemaFilter(node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined),
+    });
+    for (const entry of visibleFilterMenu) {
       items.push({
-        label: t("contextMenu.configureVisibleObjects"),
-        action: openVisibleDatabasesDialog,
-        icon: ListFilter,
-      });
-    } else if (canConfigureVisibleSchemas.value) {
-      items.push({
-        label: t("visibleSchemas.title"),
-        action: openVisibleSchemasDialog,
-        icon: ListFilter,
-      });
-    }
-    if (canConfigureVisibleSchemas.value) {
-      items.push({
-        label: t("visibleSchemas.title"),
-        action: openVisibleSchemasDialog,
+        label: t(entry.label === "schemas" ? "visibleSchemas.title" : "contextMenu.configureVisibleObjects"),
+        action: entry.target === "visible-schemas" ? openVisibleSchemasDialog : openVisibleDatabasesDialog,
         icon: ListFilter,
       });
     }

@@ -115,4 +115,31 @@ describe("connectionStore Redis database aliases", () => {
       }),
     ]);
   });
+
+  it("keeps aliases for one-time Redis connections in memory without persisting secrets", async () => {
+    const saveConnections = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      saveConnections,
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.addEphemeralConnection({
+      ...redisConnection(),
+      one_time: true,
+      password: "one-time-secret",
+    });
+    seedRedisTree(store);
+
+    await store.setRedisDatabaseAlias("redis-1", 3, "orders");
+
+    expect(store.getRedisDatabaseAlias("redis-1", 3)).toBe("orders");
+    expect(store.connections[0]).toEqual(expect.objectContaining({ password: "one-time-secret", redis_database_aliases: { "3": "orders" } }));
+    expect(saveConnections).toHaveBeenLastCalledWith([]);
+  });
 });

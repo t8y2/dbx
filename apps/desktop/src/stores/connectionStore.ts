@@ -5918,7 +5918,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function persistConnections(nextConnections: ConnectionConfig[] = connections.value) {
-    await api.saveConnections(nextConnections);
+    await api.saveConnections(nextConnections.filter((connection) => connection.one_time !== true));
   }
 
   function persistSidebarLayoutDebounced() {

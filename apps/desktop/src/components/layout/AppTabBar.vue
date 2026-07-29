@@ -15,6 +15,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useTabDrag } from "@/composables/useTabDrag";
 import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { DETACHED_TAB_WINDOW_HEIGHT, DETACHED_TAB_WINDOW_WIDTH, detachedTabWindowPreviewRect, pointOutsideRect, type TabWindowClientPlacement } from "@/lib/tabs/tabWindowPlacement";
 import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
@@ -34,7 +35,7 @@ const emit = defineEmits<{
   "activate-driver-store": [];
   "close-driver-store": [];
   "activate-settings-page": [];
-  "open-tab-window": [tabId: string];
+  "open-tab-window": [tabId: string, placement?: TabWindowClientPlacement];
   "close-settings-page": [];
   "save-tab": [tabId: string];
   "discard-tab-close": [];
@@ -54,17 +55,37 @@ const tabDrag = useTabDrag(
     queryStore.reorderTab(draggedId, targetId, position);
   },
   {
-    onDetach: (tabId) => emit("open-tab-window", tabId),
+    onDetach: (tabId, event) => {
+      const preview = detachedTabWindowPreviewRect(
+        { x: event.clientX, y: event.clientY },
+        {
+          width: document.documentElement.clientWidth,
+          height: document.documentElement.clientHeight,
+        },
+      );
+      emit("open-tab-window", tabId, { left: preview.left, top: preview.top });
+    },
     shouldDetach: (event) => {
       if (!props.detachableTabs) return false;
       const rect = tabBarRef.value?.getBoundingClientRect();
       if (!rect) return false;
       // 保留少量容差，避免鼠标刚好落在标签栏边缘时误触发窗口分离。
-      const margin = 8;
-      return event.clientX < rect.left - margin || event.clientX > rect.right + margin || event.clientY < rect.top - margin || event.clientY > rect.bottom + margin;
+      return pointOutsideRect({ x: event.clientX, y: event.clientY }, rect, 8);
     },
   },
 );
+const detachedWindowPreview = computed(() => {
+  if (!props.detachableTabs || !tabDrag.state.active) return null;
+  const tabBarRect = tabBarRef.value?.getBoundingClientRect();
+  if (!tabBarRect || !pointOutsideRect({ x: tabDrag.state.currentX, y: tabDrag.state.currentY }, tabBarRect, 8)) return null;
+  return detachedTabWindowPreviewRect(
+    { x: tabDrag.state.currentX, y: tabDrag.state.currentY },
+    {
+      width: document.documentElement.clientWidth,
+      height: document.documentElement.clientHeight,
+    },
+  );
+});
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -601,6 +622,23 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </script>
 
 <template>
+  <Teleport to="body">
+    <div
+      v-if="detachedWindowPreview"
+      class="pointer-events-none fixed z-[9998] overflow-hidden rounded-xl border-2 border-primary/60 bg-primary/10 shadow-2xl backdrop-blur-[1px]"
+      :style="{
+        left: `${detachedWindowPreview.left}px`,
+        top: `${detachedWindowPreview.top}px`,
+        width: `${detachedWindowPreview.width}px`,
+        height: `${detachedWindowPreview.height}px`,
+      }"
+    >
+      <div class="flex h-9 items-center justify-between border-b border-primary/30 bg-background/80 px-3 text-xs font-medium text-foreground shadow-sm">
+        <span>{{ t("contextMenu.openInNewWindow") }}</span>
+        <span class="rounded bg-primary/10 px-2 py-0.5 font-mono text-[11px] text-muted-foreground"> {{ DETACHED_TAB_WINDOW_WIDTH }} × {{ DETACHED_TAB_WINDOW_HEIGHT }} </span>
+      </div>
+    </div>
+  </Teleport>
   <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" ref="tabBarRef" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
     <div class="flex w-full min-w-0 shrink-0 overflow-hidden" :class="regularTabRowClass">
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">

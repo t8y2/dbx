@@ -39,7 +39,7 @@ describe("useTabDrag detached window gesture", () => {
 
     document.dispatchEvent(mouse("mouseup", 30, 80));
 
-    expect(onDetach).toHaveBeenCalledWith("query-1");
+    expect(onDetach).toHaveBeenCalledWith("query-1", expect.any(MouseEvent));
     expect(onDrop).not.toHaveBeenCalled();
     expect(drag.state.active).toBe(false);
   });

@@ -2,6 +2,7 @@ import { emitTo, type UnlistenFn } from "@tauri-apps/api/event";
 import { getAllWebviewWindows, getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { DataGridPendingSnapshotTransfer } from "@/composables/useDataGridEditor";
+import { DETACHED_TAB_WINDOW_HEIGHT, DETACHED_TAB_WINDOW_WIDTH, detachedTabWindowLogicalPosition, type TabWindowClientPlacement } from "@/lib/tabs/tabWindowPlacement";
 import type { QueryTab } from "@/types/database";
 
 const DETACHED_TRANSFER_PARAM = "dbxDetachedTransfer";
@@ -113,7 +114,7 @@ async function waitForWindowCreation(window: WebviewWindow): Promise<void> {
   });
 }
 
-async function prepareTauriTabWindow(tabId: string, title: string): Promise<PreparedTabWindow> {
+async function prepareTauriTabWindow(tabId: string, title: string, placement?: TabWindowClientPlacement): Promise<PreparedTabWindow> {
   const label = windowLabel(tabId);
   const existing = await WebviewWindow.getByLabel(label);
   if (existing) {
@@ -122,14 +123,25 @@ async function prepareTauriTabWindow(tabId: string, title: string): Promise<Prep
 
   const transferId = crypto.randomUUID();
   const mainWindow = getCurrentWebviewWindow();
+  let initialPosition: { x: number; y: number } | undefined;
+  if (placement) {
+    try {
+      const [sourceInnerPosition, sourceScaleFactor] = await Promise.all([mainWindow.innerPosition(), mainWindow.scaleFactor()]);
+      initialPosition = detachedTabWindowLogicalPosition(sourceInnerPosition, sourceScaleFactor, window.devicePixelRatio, placement);
+    } catch {
+      // 坐标读取失败时仍允许按窗口管理器默认位置创建，不能阻断标签迁移。
+    }
+  }
   const readyWaiter = await createEventWaiter<TransferSignal>(mainWindow, transferEventName("ready", transferId), "Detached tab window did not become ready");
   const detached = new WebviewWindow(label, {
     url: detachedUrl(transferId),
     title,
-    width: 1200,
-    height: 800,
+    width: DETACHED_TAB_WINDOW_WIDTH,
+    height: DETACHED_TAB_WINDOW_HEIGHT,
+    ...initialPosition,
     minWidth: 760,
     minHeight: 520,
+    preventOverflow: true,
     resizable: true,
     decorations: false,
     hiddenTitle: true,
@@ -171,12 +183,12 @@ async function prepareTauriTabWindow(tabId: string, title: string): Promise<Prep
 /**
  * 先等待隐藏子窗口准备完成，再交由调用方迁移标签页所有权，避免窗口创建失败时丢失主窗口标签页。
  */
-export async function prepareTabWindow(tabId: string, title: string): Promise<PreparedTabWindow> {
+export async function prepareTabWindow(tabId: string, title: string, placement?: TabWindowClientPlacement): Promise<PreparedTabWindow> {
   if (!isTauriRuntime()) throw new Error("Detached tabs are only supported in the desktop app");
   const pending = openingWindows.get(tabId);
   if (pending) return pending;
 
-  const task = prepareTauriTabWindow(tabId, title);
+  const task = prepareTauriTabWindow(tabId, title, placement);
   openingWindows.set(tabId, task);
   try {
     return await task;

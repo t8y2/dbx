@@ -83,6 +83,7 @@ import {
 } from "@/lib/editor/keyboardShortcuts";
 import { isPreviewTab, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
 import { checkDetachedWindowsBeforeAppClose, focusDetachedTabWindow, isDetachedTabWindow, listenForDetachedAppCloseChecks, prepareTabWindow, receiveDetachedTab } from "@/lib/tabs/tabWindow";
+import type { TabWindowClientPlacement } from "@/lib/tabs/tabWindowPlacement";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
 import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
@@ -2074,7 +2075,7 @@ async function initApp({ restoreOpenTabs = true }: { restoreOpenTabs?: boolean }
   }
 }
 
-async function openTabWindow(tabId: string) {
+async function openTabWindow(tabId: string, placement?: TabWindowClientPlacement) {
   const tab = queryStore.tabs.find((item) => item.id === tabId);
   if (!tab) return;
   const isBusy = (item: QueryTab) => !!(item.isExecuting || item.isCancelling || item.isExplaining || item.resultTotalRowCountLoading);
@@ -2086,7 +2087,7 @@ async function openTabWindow(tabId: string) {
   let preparedWindow: Awaited<ReturnType<typeof prepareTabWindow>> | undefined;
   let persistSuspended = false;
   try {
-    preparedWindow = await prepareTabWindow(tab.id, tabDisplayTitle(tab, t));
+    preparedWindow = await prepareTabWindow(tab.id, tabDisplayTitle(tab, t), placement);
     const currentTab = queryStore.tabs.find((item) => item.id === tab.id);
     if (!currentTab || isBusy(currentTab)) {
       await preparedWindow.abort();

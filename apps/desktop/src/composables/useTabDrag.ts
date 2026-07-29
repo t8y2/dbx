@@ -3,7 +3,7 @@ import { reactive, readonly } from "vue";
 export type TabDropPosition = "before" | "after";
 
 export interface TabDragOptions {
-  onDetach?: (draggedId: string) => void;
+  onDetach?: (draggedId: string, event: MouseEvent) => void;
   shouldDetach?: (event: MouseEvent, draggedId: string) => boolean;
 }
 
@@ -15,6 +15,8 @@ interface TabDragState {
   wasDragged: boolean;
   startX: number;
   startY: number;
+  currentX: number;
+  currentY: number;
 }
 
 const DRAG_THRESHOLD = 5;
@@ -27,6 +29,8 @@ const state = reactive<TabDragState>({
   wasDragged: false,
   startX: 0,
   startY: 0,
+  currentX: 0,
+  currentY: 0,
 });
 
 let pending: {
@@ -36,7 +40,7 @@ let pending: {
   sourceEl: HTMLElement | null;
 } | null = null;
 let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => void) | null = null;
-let onDetachCallback: ((draggedId: string) => void) | null = null;
+let onDetachCallback: ((draggedId: string, event: MouseEvent) => void) | null = null;
 let shouldDetachCallback: ((event: MouseEvent, draggedId: string) => boolean) | null = null;
 let ghostEl: HTMLElement | null = null;
 
@@ -93,6 +97,8 @@ function onMouseMove(event: MouseEvent) {
     state.draggedId = pending.id;
     state.startX = pending.x;
     state.startY = pending.y;
+    state.currentX = event.clientX;
+    state.currentY = event.clientY;
     if (pending.sourceEl) {
       ghostEl = createGhost(pending.sourceEl, event.clientX, event.clientY);
     }
@@ -102,6 +108,8 @@ function onMouseMove(event: MouseEvent) {
   }
 
   if (state.active) {
+    state.currentX = event.clientX;
+    state.currentY = event.clientY;
     moveGhost(event.clientX, event.clientY);
   }
 }
@@ -109,7 +117,7 @@ function onMouseMove(event: MouseEvent) {
 function onMouseUp(event: MouseEvent) {
   if (state.active && state.draggedId) {
     if (onDetachCallback && shouldDetachCallback?.(event, state.draggedId)) {
-      onDetachCallback(state.draggedId);
+      onDetachCallback(state.draggedId, event);
     } else if (state.targetId && state.dropPosition && onDropCallback) {
       onDropCallback(state.draggedId, state.targetId, state.dropPosition);
     }
@@ -124,6 +132,8 @@ function reset() {
   state.dropPosition = null;
   state.startX = 0;
   state.startY = 0;
+  state.currentX = 0;
+  state.currentY = 0;
   pending = null;
   removeGhost();
   document.body.style.cursor = "";

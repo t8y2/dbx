@@ -1809,18 +1809,28 @@ fn format_transport_error(provider: &str, error: reqwest::Error) -> String {
 
 /// Extract an error string from a non-2xx streaming response, preserving any
 /// `Retry-After` header so the retry helpers can honour server-requested delays.
+///
+/// Mirrors [`categorized_http_error`]: always embeds `HTTP <status>` in the
+/// diagnostic so that [`classify_error`] works correctly on empty-body or
+/// non-JSON responses (e.g. a bare 429 from a proxy).
 async fn stream_error(response: reqwest::Response, fallback: &str) -> String {
+    let status = response.status();
     let headers = response.headers().clone();
-    match response.json::<serde_json::Value>().await {
-        Ok(data) => {
-            let error = extract_error(&data).unwrap_or_else(|| fallback.to_string());
-            maybe_tag_retry_after(&headers, error)
-        }
-        Err(e) => {
-            // JSON parse failure — still preserve Retry-After if the header was set.
-            maybe_tag_retry_after(&headers, format!("failed to parse error response: {}", e.without_url()))
-        }
-    }
+    // Read the body as text first so we still have it when JSON parsing fails.
+    let body_text = response.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|data| extract_error(&data))
+        .unwrap_or_else(|| {
+            let trimmed = body_text.trim();
+            if trimmed.is_empty() {
+                "empty response body".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        });
+    let diagnostic = format!("HTTP {}: {detail}", status.as_u16());
+    maybe_tag_retry_after(&headers, format!("[{}] {fallback} API error ({diagnostic})", classify_error(&diagnostic)))
 }
 
 async fn measure_first_stream_chunk(
@@ -5612,5 +5622,50 @@ mod tests {
         assert!(!is_retryable_error("model not found (404)"));
         assert!(!is_retryable_error("safety filter blocked"));
         assert!(!is_retryable_error("finishReason=MAX_TOKENS"));
+    }
+
+    /// `stream_error` embeds `HTTP <status>` in the diagnostic; verify that
+    /// classification works on the patterns it produces, including the
+    /// empty-body / non-JSON case that was previously classified as `unknown`.
+    #[test]
+    fn test_classify_error_from_stream_error_diagnostic() {
+        // JSON parse succeeded, server error text included.
+        assert_eq!(classify_error("HTTP 429: rate limit exceeded"), "rateLimit");
+        assert_eq!(classify_error("HTTP 504: gateway timeout"), "timeout");
+        assert_eq!(classify_error("HTTP 503: service unavailable"), "network");
+        assert_eq!(classify_error("HTTP 502: bad gateway"), "network");
+        // Empty body — the regression case: a bare 429 with no JSON payload.
+        assert_eq!(classify_error("HTTP 429: empty response body"), "rateLimit");
+        // Non-JSON body that still contains a rate-limit keyword.
+        assert_eq!(classify_error("HTTP 429: <html>Too Many Requests</html>"), "rateLimit");
+        // Auth failures must NOT be retryable.
+        assert_eq!(classify_error("HTTP 401: unauthorized"), "auth");
+        assert_eq!(classify_error("HTTP 403: forbidden"), "auth");
+        assert!(!is_retryable_error("[auth] Claude API error (HTTP 401: unauthorized)"));
+        assert!(!is_retryable_error("[auth] Claude API error (HTTP 403: forbidden)"));
+    }
+
+    /// Integration-path regression: verify that the exact error format produced
+    /// by `stream_error` for an empty-body 429 triggers a retry rather than
+    /// being classified as `unknown` and surfacing immediately.
+    #[tokio::test]
+    async fn retry_handles_empty_body_429_from_stream_error() {
+        let cfg = retry_config(Some(2));
+        let mut calls = 0;
+        // This is the exact format `stream_error` produces:
+        //   [{classify_error(diagnostic)}] {fallback} API error (HTTP {status}: {detail})
+        let result = with_retry(&cfg, || {
+            calls += 1;
+            async move {
+                if calls == 1 {
+                    Err("[rateLimit] Claude API error (HTTP 429: empty response body)".to_string())
+                } else {
+                    Ok::<&str, String>("recovered")
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, Ok("recovered"));
+        assert_eq!(calls, 2, "empty-body 429 should be classified as rateLimit and retried");
     }
 }

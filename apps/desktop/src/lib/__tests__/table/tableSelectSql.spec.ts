@@ -70,6 +70,17 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableDataIdentifier("gaussdb", "`AlreadyQuoted`", "`")).toBe("`AlreadyQuoted`");
   });
 
+  it("uses detected GaussDB compatibility quotes through PostgreSQL-compatible JDBC dialects", () => {
+    for (const databaseType of ["postgres", "opengauss"] as const) {
+      expect(quoteTableDataIdentifier(databaseType, "table_01", "`")).toBe("table_01");
+      expect(quoteTableDataIdentifier(databaseType, "MixedCase", "`")).toBe("`MixedCase`");
+      expect(quoteTableDataIdentifier(databaseType, "order", "`")).toBe("`order`");
+      expect(quoteTableDataIdentifier(databaseType, "order detail", "`")).toBe("`order detail`");
+      expect(quoteTableDataIdentifier(databaseType, "`AlreadyQuoted`", "`")).toBe("`AlreadyQuoted`");
+      expect(quoteTableDataIdentifier(databaseType, "MixedCase", '"')).toBe('"MixedCase"');
+    }
+  });
+
   it("preserves native GaussDB and openGauss quoting behavior", () => {
     expect(quoteTableDataIdentifier("gaussdb", "table_01")).toBe('"table_01"');
     expect(quoteTableDataIdentifier("gaussdb", "MixedCase")).toBe('"MixedCase"');

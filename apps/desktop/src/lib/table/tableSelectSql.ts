@@ -38,7 +38,7 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
 }
 
 export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): string {
-  if (databaseType === "gaussdb" && identifierQuote != null) return quoteGaussDbJdbcIdentifier(name, identifierQuote);
+  if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres") && identifierQuote != null) return quoteGaussDbJdbcIdentifier(name, identifierQuote);
   if (databaseType === "kingbase" && identifierQuote != null) {
     if (!identifierQuote) return name;
     return `${identifierQuote}${name.replaceAll(identifierQuote, identifierQuote + identifierQuote)}${identifierQuote}`;

@@ -2775,6 +2775,17 @@ impl AppState {
             .get(connection_id)
             .cloned()
             .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+        if config.db_type == DatabaseType::Gaussdb {
+            let pool_key = self.get_or_create_pool(connection_id, database).await?;
+            let pool = {
+                let connections = self.connections.read().await;
+                match connections.get(&pool_key) {
+                    Some(PoolKind::Postgres(pool)) => pool.clone(),
+                    _ => return Ok(None),
+                }
+            };
+            return Ok(db::postgres::gaussdb_identifier_quote(&pool).await);
+        }
         if !database_capabilities::is_agent_type(&config.db_type) {
             return Ok(None);
         }

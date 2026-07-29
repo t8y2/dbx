@@ -391,6 +391,30 @@ fn builds_table_data_where_and_schema_queries() {
         }),
         "SELECT * FROM `App Schema`.`order` LIMIT 100;"
     );
+    for database_type in [DatabaseType::Postgres, DatabaseType::OpenGauss] {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(database_type),
+                identifier_quote: Some("`".to_string()),
+                schema: Some("App Schema".to_string()),
+                table_name: "order".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM `App Schema`.`order` LIMIT 100;"
+        );
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(database_type),
+                identifier_quote: Some("\"".to_string()),
+                schema: Some("schema_01".to_string()),
+                table_name: "MixedCase".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM schema_01.\"MixedCase\" LIMIT 100;"
+        );
+    }
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Gaussdb),

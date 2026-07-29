@@ -78,9 +78,30 @@ describe("jdbc dialect inference", () => {
 
   it("loads driver-reported identifier quotes for compatible JDBC connections", () => {
     expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.opengauss.Driver" })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.postgresql.Driver" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" })).toBe(true);
-    expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(false);
-    expect(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] })).toBe(false);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(true);
+    expect(
+      connectionShouldLoadIdentifierQuote({
+        db_type: "jdbc",
+        jdbc_driver_class: "org.postgresql.Driver",
+        external_config: { gaussdbIdentifierQuoteStyle: "backtick" },
+      }),
+    ).toBe(false);
+  });
+
+  it("recognizes GaussDB reached through PostgreSQL-compatible JDBC drivers", () => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:postgresql://localhost:5432/postgres",
+      jdbc_driver_class: "org.postgresql.Driver",
+      database_info: { productName: "GaussDB Kernel", driverName: "PostgreSQL JDBC Driver" },
+    };
+
+    expect(inferJdbcDialect(connection)).toBe("gaussdb");
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("gaussdb");
+    expect(supportsGaussdbIdentifierQuoteStyle(connection)).toBe(true);
   });
 
   it("supports persisted GaussDB identifier quote overrides", () => {

@@ -37,7 +37,9 @@ const JDBC_ASE_PROFILE_PATTERNS = [/(?:^|[\s_-])ase(?:$|[\s_-])/i, /\bsap[\s_-]+
 
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
-  const haystack = [connection.driver_profile, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? [])].filter(Boolean).join("\n");
+  const haystack = [connection.driver_profile, connection.driver_label, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? []), connection.database_info?.productName, connection.database_info?.serverComment, connection.database_info?.driverName]
+    .filter(Boolean)
+    .join("\n");
   if (!haystack) return undefined;
   return JDBC_DIALECT_MATCHERS.find((matcher) => matcher.patterns.some((pattern) => pattern.test(haystack)))?.type;
 }
@@ -61,7 +63,12 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
 }
 
 export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConnection | undefined): boolean {
-  return connection?.db_type === "kingbase" || (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "gaussdb" && gaussdbIdentifierQuoteStyle(connection) === "auto");
+  if (!connection) return false;
+  if (connection.db_type === "kingbase") return true;
+  if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
+  if (connection.db_type === "gaussdb") return true;
+  if (connection.db_type !== "jdbc") return false;
+  return ["gaussdb", "opengauss", "postgres"].includes(inferJdbcDialect(connection) ?? "");
 }
 
 export function supportsGaussdbIdentifierQuoteStyle(connection: JdbcDialectConnection | undefined): boolean {
@@ -69,7 +76,6 @@ export function supportsGaussdbIdentifierQuoteStyle(connection: JdbcDialectConne
 }
 
 export function gaussdbIdentifierQuoteStyle(connection: JdbcDialectConnection | undefined): GaussdbIdentifierQuoteStyle {
-  if (!supportsGaussdbIdentifierQuoteStyle(connection)) return "auto";
   const external = externalConfigRecord(connection?.external_config);
   const style = external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY];
   return style === "double" || style === "backtick" ? style : "auto";

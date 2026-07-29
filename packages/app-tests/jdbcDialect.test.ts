@@ -61,9 +61,23 @@ test("infers GaussDB-compatible JDBC connections as schema-aware", () => {
 
 test("loads driver-reported identifier quotes for compatible JDBC connections", () => {
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/gaussdb.jar"] }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.opengauss.Driver" }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.postgresql.Driver" }), true);
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" }), true);
-  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" }), false);
-  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/opengauss.jar"] }), false);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" }), true);
+});
+
+test("GaussDB server metadata overrides PostgreSQL-compatible JDBC driver identity", () => {
+  const connection = {
+    db_type: "jdbc" as const,
+    connection_string: "jdbc:postgresql://localhost:5432/postgres",
+    jdbc_driver_class: "org.postgresql.Driver",
+    database_info: { productName: "GaussDB Kernel" },
+  };
+
+  assert.equal(inferJdbcDialect(connection), "gaussdb");
+  assert.equal(effectiveDatabaseTypeForConnection(connection), "gaussdb");
+  assert.equal(connectionShouldLoadIdentifierQuote(connection), true);
 });
 
 test("persists and resolves GaussDB identifier quote overrides", () => {

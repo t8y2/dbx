@@ -770,9 +770,10 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
 }
 
 pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
-    let table = if options.database_type == Some(DatabaseType::Kingbase)
-        || (options.database_type == Some(DatabaseType::Gaussdb) && options.identifier_quote.is_some())
-    {
+    let table = if crate::sql_dialect::uses_connection_identifier_quote(
+        options.database_type,
+        options.identifier_quote.as_deref(),
+    ) {
         crate::sql_dialect::table_data_qualified_table_name(
             options.database_type,
             options.schema.as_deref(),
@@ -2693,9 +2694,7 @@ fn data_grid_qualified_table_name(
     table_name: &str,
     identifier_quote: Option<&str>,
 ) -> String {
-    if database_type == Some(DatabaseType::Kingbase)
-        || (database_type == Some(DatabaseType::Gaussdb) && identifier_quote.is_some())
-    {
+    if crate::sql_dialect::uses_connection_identifier_quote(database_type, identifier_quote) {
         crate::sql_dialect::table_data_qualified_table_name(database_type, schema, table_name, identifier_quote)
     } else {
         crate::sql_dialect::qualified_table_name_with_catalog(database_type, catalog, schema, database, table_name)
@@ -3202,6 +3201,8 @@ mod tests {
             (DatabaseType::Gaussdb, Some("\""), "order detail", "\"order detail\" = 1"),
             (DatabaseType::Gaussdb, Some("\""), "\"AlreadyQuoted\"", "\"AlreadyQuoted\" = 1"),
             (DatabaseType::Gaussdb, Some("`"), "MixedCase", "`MixedCase` = 1"),
+            (DatabaseType::Postgres, Some("`"), "order", "`order` = 1"),
+            (DatabaseType::OpenGauss, Some("`"), "order detail", "`order detail` = 1"),
             (DatabaseType::Gaussdb, None, "column_01", "\"column_01\" = 1"),
             (DatabaseType::OpenGauss, None, "column_01", "\"column_01\" = 1"),
         ] {
@@ -3869,6 +3870,18 @@ mod tests {
                 where_input: None,
             }),
             "SELECT COUNT(*) AS cnt FROM schema_01.table_01"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: Some("`".to_string()),
+                catalog: None,
+                database: None,
+                schema: Some("App Schema".to_string()),
+                table_name: "order".to_string(),
+                where_input: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM `App Schema`.`order`"
         );
     }
 
@@ -4542,6 +4555,34 @@ mod tests {
 
         assert_eq!(result.validation_error, None);
         assert_eq!(result.statements, vec!["UPDATE schema_01.table_01 SET name = 'new' WHERE id = 1;"]);
+    }
+
+    #[test]
+    fn postgres_driver_to_gaussdb_m_mode_save_uses_backticks() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: Some("`".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("App Schema".to_string()),
+                table_name: "order".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "integer", false, None),
+                    column("display name", "varchar", false, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "display name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("new"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `App Schema`.`order` SET `display name` = 'new' WHERE `ID` = 1;"]);
     }
 
     #[test]

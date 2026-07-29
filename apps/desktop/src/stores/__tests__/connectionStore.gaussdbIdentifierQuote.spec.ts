@@ -43,4 +43,33 @@ describe("connectionStore GaussDB identifier quote override", () => {
     expect(store.connectionIdentifierQuote(double.id)).toBe('"');
     expect(store.connectionIdentifierQuote(backtick.id)).toBe("`");
   });
+
+  it("loads and caches auto compatibility quotes once per connection", async () => {
+    const config: ConnectionConfig = {
+      ...gaussdbConnection("double"),
+      id: "gaussdb-auto",
+      external_config: undefined,
+    };
+    const connectionIdentifierQuote = vi.fn().mockResolvedValue("`");
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn().mockRejectedValue(new Error("metadata unavailable")),
+      connectionIdentifierQuote,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await store.addConnection(config);
+    await store.connect(config);
+
+    expect(connectionIdentifierQuote).toHaveBeenCalledOnce();
+    expect(connectionIdentifierQuote).toHaveBeenCalledWith(config.id);
+    expect(store.connectionIdentifierQuote(config.id)).toBe("`");
+    expect(store.connectionIdentifierQuote(config.id)).toBe("`");
+    expect(connectionIdentifierQuote).toHaveBeenCalledOnce();
+  });
 });

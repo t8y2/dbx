@@ -189,7 +189,7 @@ pub(crate) fn quote_table_data_identifier(
     let Some(quote) = identifier_quote else {
         return quote_table_identifier(database_type, name);
     };
-    if database_type == Some(DatabaseType::Gaussdb) {
+    if matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres)) {
         return quote_gaussdb_jdbc_identifier(name, quote);
     }
     if quote.is_empty() {
@@ -198,9 +198,13 @@ pub(crate) fn quote_table_data_identifier(
     format!("{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))
 }
 
-fn uses_connection_identifier_quote(database_type: Option<DatabaseType>, identifier_quote: Option<&str>) -> bool {
+pub(crate) fn uses_connection_identifier_quote(
+    database_type: Option<DatabaseType>,
+    identifier_quote: Option<&str>,
+) -> bool {
     database_type == Some(DatabaseType::Kingbase)
-        || (database_type == Some(DatabaseType::Gaussdb) && identifier_quote.is_some())
+        || (matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
+            && identifier_quote.is_some())
 }
 
 fn is_view_table_type(table_type: Option<&str>) -> bool {

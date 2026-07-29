@@ -117,6 +117,14 @@ interface PendingChangesSnapshot {
   rowCount: number;
 }
 
+export interface DataGridPendingSnapshotTransfer {
+  key: string;
+  snapshot: Omit<PendingChangesSnapshot, "dirtyRows" | "deletedRows"> & {
+    dirtyRows: Array<[number, Array<[number, CellValue]>]>;
+    deletedRows: number[];
+  };
+}
+
 interface PendingSaveSnapshot {
   newRows: CellValue[][];
   newRowRefs: CellValue[][];
@@ -173,6 +181,42 @@ export function clearDataGridPendingSnapshotsForTab(tabId: string) {
   pendingChangesCache.delete(tabId);
   for (const key of pendingChangesCache.keys()) {
     if (cacheKeyBelongsToTab(key, tabId)) pendingChangesCache.delete(key);
+  }
+}
+
+export function captureDataGridPendingSnapshotsForTab(tabId: string): DataGridPendingSnapshotTransfer[] {
+  if (typeof window !== "undefined") {
+    // The active grid keeps its latest edit/focus state in component refs, so
+    // force a synchronous cache snapshot before serializing the transfer.
+    window.dispatchEvent(new CustomEvent(BEFORE_TAB_SWITCH_EVENT, { detail: { fromTabId: tabId } }));
+  }
+  const snapshots: DataGridPendingSnapshotTransfer[] = [];
+  for (const [key, snapshot] of pendingChangesCache) {
+    if (!cacheKeyBelongsToTab(key, tabId)) continue;
+    snapshots.push({
+      key,
+      snapshot: {
+        ...snapshot,
+        newRows: snapshot.newRows.map((row) => [...row]),
+        quickEntryDraftRow: snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : undefined,
+        dirtyRows: [...snapshot.dirtyRows].map(([row, columns]) => [row, [...columns]]),
+        deletedRows: [...snapshot.deletedRows],
+      },
+    });
+  }
+  return snapshots;
+}
+
+export function restoreDataGridPendingSnapshotsForTab(tabId: string, transfers: DataGridPendingSnapshotTransfer[]) {
+  for (const transfer of transfers) {
+    if (!cacheKeyBelongsToTab(transfer.key, tabId)) continue;
+    pendingChangesCache.set(transfer.key, {
+      ...transfer.snapshot,
+      newRows: transfer.snapshot.newRows.map((row) => [...row]),
+      quickEntryDraftRow: transfer.snapshot.quickEntryDraftRow ? [...transfer.snapshot.quickEntryDraftRow] : undefined,
+      dirtyRows: new Map(transfer.snapshot.dirtyRows.map(([row, columns]) => [row, new Map(columns)])),
+      deletedRows: new Set(transfer.snapshot.deletedRows),
+    });
   }
 }
 

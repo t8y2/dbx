@@ -107,6 +107,10 @@ fn should_hide_window_on_close(target_os: &str) -> bool {
     matches!(target_os, "macos" | "windows")
 }
 
+fn should_intercept_window_close(window_label: &str, target_os: &str) -> bool {
+    window_label == "main" && should_hide_window_on_close(target_os)
+}
+
 fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool, linux_appindicator_available: bool) -> bool {
     show_tray_icon
         && (matches!(target_os, "macos" | "windows") || (target_os == "linux" && linux_appindicator_available))
@@ -799,8 +803,8 @@ mod tests {
         linux_appimage_wayland_backend_override, linux_nvidia_driver_from_state, linux_selected_drm_render_device,
         linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
         should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, tray_menu_labels_for_locale,
-        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        should_intercept_window_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
@@ -848,6 +852,13 @@ mod tests {
     #[test]
     fn does_not_hide_window_on_close_for_other_platforms() {
         assert!(!should_hide_window_on_close("linux"));
+    }
+
+    #[test]
+    fn intercepts_close_only_for_the_main_window() {
+        assert!(should_intercept_window_close("main", "windows"));
+        assert!(!should_intercept_window_close("detached-tab-query-1", "windows"));
+        assert!(!should_intercept_window_close("main", "linux"));
     }
 
     #[test]
@@ -1308,7 +1319,9 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if !should_hide_window_on_close(std::env::consts::OS) {
+                // Only the main window participates in the app-level
+                // minimize/quit policy. Detached tab windows close normally.
+                if !should_intercept_window_close(window.label(), std::env::consts::OS) {
                     return;
                 }
                 let app = window.app_handle();

@@ -2,7 +2,7 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge } from "@lucide/vue";
+import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ExternalLink } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -26,6 +26,7 @@ const props = defineProps<{
   settingsPageOpen?: boolean;
   settingsPageActive?: boolean;
   agentDriverUpdateCount?: number;
+  detachableTabs?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -33,6 +34,7 @@ const emit = defineEmits<{
   "activate-driver-store": [];
   "close-driver-store": [];
   "activate-settings-page": [];
+  "open-tab-window": [tabId: string];
   "close-settings-page": [];
   "save-tab": [tabId: string];
   "discard-tab-close": [];
@@ -268,6 +270,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: () => queryStore.duplicateTab(tab.id),
       icon: Copy,
       visible: canRenameTab(tab),
+    },
+    {
+      label: t("contextMenu.openInNewWindow"),
+      action: () => emit("open-tab-window", tab.id),
+      icon: ExternalLink,
+      visible: props.detachableTabs,
     },
     {
       label: t("contextMenu.copyName"),

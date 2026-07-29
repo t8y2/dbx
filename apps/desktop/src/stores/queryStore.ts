@@ -65,6 +65,7 @@ import { formatError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { SavedSqlFile } from "@/types/database";
 import i18n from "@/i18n";
@@ -77,6 +78,10 @@ const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
 const SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS = 500;
 type CloseConfirmContext = "tab" | "batch" | "app";
+
+function isDetachedTabRuntime(): boolean {
+  return isTauriRuntime() && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("dbxDetachedTransfer");
+}
 
 function hasHiddenPhysicalRowKey(databaseType: DatabaseType | undefined, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[]): boolean {
   return hiddenPrimaryKeys.some((projection) => !usesSyntheticRowIdKey(databaseType, [projection.sourceName]));
@@ -1119,13 +1124,23 @@ export const useQueryStore = defineStore("query", () => {
     })),
   );
 
-  const storePersistGeneration = ++persistGeneration;
+  // Detached windows own exactly one transferred tab and must never overwrite
+  // the main window's global open-tabs document with their private store.
+  const shouldPersistOpenTabs = !isDetachedTabRuntime();
+  let openTabsPersistSuspendCount = 0;
+  const storePersistGeneration = shouldPersistOpenTabs ? ++persistGeneration : persistGeneration;
   watch(
     [_persistSnapshot, activeTabId],
     () => {
+      if (!shouldPersistOpenTabs) return;
+      if (openTabsPersistSuspendCount > 0) return;
       if (storePersistGeneration !== persistGeneration) return;
       if (persistTimer) clearTimeout(persistTimer);
       persistTimer = setTimeout(() => {
+        if (openTabsPersistSuspendCount > 0) {
+          persistTimer = null;
+          return;
+        }
         void saveTabs(tabs.value, activeTabId.value).catch(() => {});
         persistTimer = null;
       }, 300);
@@ -1134,6 +1149,7 @@ export const useQueryStore = defineStore("query", () => {
   );
 
   onScopeDispose(() => {
+    if (!shouldPersistOpenTabs) return;
     if (persistTimer) clearTimeout(persistTimer);
     persistTimer = null;
   });
@@ -1143,12 +1159,30 @@ export const useQueryStore = defineStore("query", () => {
   // Lets callers (e.g. tests that reload the store) read back persisted state
   // deterministically instead of racing the debounce timer.
   function flushPendingPersist(): Promise<void> {
+    if (!shouldPersistOpenTabs) return Promise.resolve();
+    if (openTabsPersistSuspendCount > 0) return Promise.resolve();
     if (storePersistGeneration !== persistGeneration) return Promise.resolve();
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;
     }
     return saveTabs(tabs.value, activeTabId.value);
+  }
+
+  function suspendOpenTabsPersist() {
+    if (!shouldPersistOpenTabs) return;
+    openTabsPersistSuspendCount += 1;
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+  }
+
+  function resumeOpenTabsPersist({ flush = true }: { flush?: boolean } = {}): Promise<void> {
+    if (!shouldPersistOpenTabs) return Promise.resolve();
+    openTabsPersistSuspendCount = Math.max(0, openTabsPersistSuspendCount - 1);
+    if (!flush || openTabsPersistSuspendCount > 0) return Promise.resolve();
+    return flushPendingPersist();
   }
 
   function findTabByIdentity(connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string) {
@@ -1764,6 +1798,76 @@ export const useQueryStore = defineStore("query", () => {
       activeTabId.value = fallbackActiveTabAfterClose(id, idx);
     }
     if (force) resumePendingBatchCloseAfter(id);
+  }
+
+  async function closeTabAndWait(id: string, { force = false }: { force?: boolean } = {}) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab) return false;
+    if (!force && shouldConfirmTabClose(tab)) {
+      showDirtyTabCloseConfirm(tab, "tab");
+      return false;
+    }
+
+    const index = tabs.value.findIndex((item) => item.id === id);
+    if (index < 0) return false;
+    persistSavedSqlEditorPosition(tab);
+    clearDataGridPendingSnapshotsForTab(id);
+    // Detached windows are about to destroy their JS context, so all remote
+    // resource cleanup must settle before the tab and its window disappear.
+    if (tab.isExecuting) await cancelTabExecution(id).catch((error) => console.warn("[DBX][detached-tab:cancel:error]", { tabId: id, error }));
+    if (tab.isExplaining) await cancelTabExplain(id).catch((error) => console.warn("[DBX][detached-tab:explain-cancel:error]", { tabId: id, error }));
+    if (tab.txnSessionId) await rollbackTransaction(id).catch((error) => console.warn("[DBX][detached-tab:rollback:error]", { tabId: id, error }));
+    await closeResultSession(tab);
+    await closeClientConnectionSession(tab);
+    await Promise.all((tab.resultRuns ?? []).map((run) => (run.resultCacheKey ? deleteTabResultSnapshot(run.resultCacheKey) : Promise.resolve())));
+    await deleteTabResultSnapshot(tabResultCacheKey(id));
+    clearResultPayload(tab);
+    tabs.value.splice(index, 1);
+    if (tab.externalSqlPath) refreshExternalSqlFileTitles();
+    if (activeTabId.value === id) activeTabId.value = fallbackActiveTabAfterClose(id, index);
+    if (force) resumePendingBatchCloseAfter(id);
+    return true;
+  }
+
+  function takeTabForTransfer(id: string) {
+    const index = tabs.value.findIndex((tab) => tab.id === id);
+    if (index < 0) return null;
+    const tab = tabs.value[index];
+    const transferState = {
+      tab,
+      index,
+      activeTabId: activeTabId.value,
+      activeTabHistory: [...activeTabHistory.value],
+    };
+
+    // Ownership is moving to another window, so unlike closeTab this path must
+    // not cancel queries, roll back transactions, or release tab-scoped sessions.
+    tabs.value.splice(index, 1);
+    if (activeTabId.value === id) activeTabId.value = fallbackActiveTabAfterClose(id, index);
+    else activeTabHistory.value = activeTabHistory.value.filter((tabId) => tabId !== id);
+    if (tab.externalSqlPath) refreshExternalSqlFileTitles();
+    return transferState;
+  }
+
+  function restoreTabFromTransfer(transferState: NonNullable<ReturnType<typeof takeTabForTransfer>>) {
+    if (tabs.value.some((tab) => tab.id === transferState.tab.id)) return;
+    const index = Math.min(Math.max(transferState.index, 0), tabs.value.length);
+    tabs.value.splice(index, 0, transferState.tab);
+    activeTabHistory.value = transferState.activeTabHistory.filter((id) => tabs.value.some((tab) => tab.id === id));
+    activeTabId.value = transferState.activeTabId && tabs.value.some((tab) => tab.id === transferState.activeTabId) ? transferState.activeTabId : transferState.tab.id;
+    if (transferState.tab.externalSqlPath) refreshExternalSqlFileTitles();
+  }
+
+  function adoptTransferredTab(tab: QueryTab) {
+    if (tabs.value.length > 0) throw new Error("Detached window already owns a tab");
+    if (tab.result) markQueryResultRowsRaw(tab.result);
+    if (tab.results) markQueryResultsRowsRaw(tab.results);
+    if (tab.resultRuns) markQueryResultRunsRowsRaw(tab.resultRuns);
+    tabs.value = [tab];
+    activeTabId.value = tab.id;
+    activeTabHistory.value = [tab.id];
+    isOpenTabsLoaded.value = true;
+    touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
   }
 
   function shouldConfirmTabClose(tab: QueryTab): boolean {
@@ -4866,10 +4970,16 @@ export const useQueryStore = defineStore("query", () => {
     showExecutedQueryResults,
     switchTab,
     closeTab,
+    closeTabAndWait,
+    takeTabForTransfer,
+    restoreTabFromTransfer,
+    adoptTransferredTab,
     forceClosePendingTab,
     forceCloseAllPendingTabs,
     cancelClosePendingTab,
     flushPendingPersist,
+    suspendOpenTabsPersist,
+    resumeOpenTabsPersist,
     saveAndClosePendingTab,
     suspendCloseConfirm,
     resumeCloseConfirm,

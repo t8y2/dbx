@@ -2,6 +2,8 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { ChevronsRight } from "@lucide/vue";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import AppToolbar from "@/components/layout/AppToolbar.vue";
@@ -9,6 +11,7 @@ import AppTabBar from "@/components/layout/AppTabBar.vue";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import EditorToolbar from "@/components/layout/EditorToolbar.vue";
 import ContentArea from "@/components/layout/ContentArea.vue";
+import DetachedTabWindow from "@/components/layout/DetachedTabWindow.vue";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
 import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
@@ -28,6 +31,7 @@ import { useSqlExecution } from "@/composables/useSqlExecution";
 import { useDialogSources } from "@/composables/useDialogSources";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridActions } from "@/composables/useDataGridActions";
+import { captureDataGridPendingSnapshotsForTab, clearDataGridPendingSnapshotsForTab, restoreDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
@@ -51,7 +55,8 @@ import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
-import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/database";
+import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
+import type { ConnectionConfig, ObjectBrowserViewport, ObjectSourceKind, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
@@ -76,7 +81,8 @@ import {
   isZoomOutShortcut,
   switchToTabIndexFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
-import { isPreviewTab } from "@/lib/tabs/tabPresentation";
+import { isPreviewTab, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
+import { isDetachedTabWindow, prepareTabWindow, receiveDetachedTab } from "@/lib/tabs/tabWindow";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
 import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
@@ -156,9 +162,13 @@ const {
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
+const isDetachedWindow = isDetachedTabWindow();
 const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop, isWindows());
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
+let unlistenDetachedTabTransfer: UnlistenFn | undefined;
+let unlistenDetachedWindowClose: UnlistenFn | undefined;
+let detachedWindowClosing = false;
 const needsAuth = ref(!isDesktop);
 const authenticated = ref(isDesktop);
 const setupRequired = ref(false);
@@ -344,9 +354,12 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openConnectionDeepLink,
 });
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
-useVisibilityChange();
-useWebDavAutoUpload();
-useScheduledDatabaseBackups({ scheduler: true });
+if (!isDetachedWindow) {
+  // 全局后台任务只能由主窗口调度，否则每个分离窗口都会重复备份和上传。
+  useVisibilityChange();
+  useWebDavAutoUpload();
+  useScheduledDatabaseBackups({ scheduler: true });
+}
 
 const appVersion = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -1894,6 +1907,11 @@ function handleKeydown(e: KeyboardEvent) {
   }
   if (isCloseTabShortcut(e, shortcuts)) {
     e.preventDefault();
+    if (isDetachedWindow) {
+      e.stopPropagation();
+      void closeDetachedTab();
+      return;
+    }
     if (showSettingsPage.value) {
       closeSettingsPage();
     } else if (showDriverStore.value) {
@@ -1969,15 +1987,17 @@ function onLoginSuccess() {
   void initApp();
 }
 
-async function initApp() {
+async function initApp({ restoreOpenTabs = true }: { restoreOpenTabs?: boolean } = {}) {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
   await settingsStore.initAiConfigs();
   try {
     await settingsStore.initEditorSettings();
     console.log(`[STARTUP]   settingsStore.initEditorSettings: ${(performance.now() - t0).toFixed(0)}ms`);
-    await queryStore.initOpenTabs();
-    console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
+    if (restoreOpenTabs) {
+      await queryStore.initOpenTabs();
+      console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
+    }
     await settingsStore.initDesktopSettings().catch(() => {});
 
     void promptTemplateStore.init();
@@ -1996,6 +2016,113 @@ async function initApp() {
     restoreActiveConnectionContext();
   } catch (e: any) {
     toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function openTabWindow(tabId: string) {
+  const tab = queryStore.tabs.find((item) => item.id === tabId);
+  if (!tab) return;
+  if (tab.isExecuting || tab.isCancelling || tab.isExplaining || tab.resultTotalRowCountLoading) {
+    toast(t("tabs.moveTabWindowBusy"), 5000);
+    return;
+  }
+
+  let preparedWindow: Awaited<ReturnType<typeof prepareTabWindow>> | undefined;
+  let persistSuspended = false;
+  try {
+    preparedWindow = await prepareTabWindow(tab.id, tabDisplayTitle(tab, t));
+    const dataGridSnapshots = captureDataGridPendingSnapshotsForTab(tab.id);
+    const selection = tab.editorSelection;
+    const selectionFrom = Math.min(selection?.anchor ?? 0, selection?.head ?? 0);
+    const selectionTo = Math.max(selection?.anchor ?? 0, selection?.head ?? 0);
+    const tabRuntimeState =
+      tab.id === queryStore.activeTabId
+        ? {
+            activeOutputView: activeOutputView.value,
+            selectedSql: selectedSql.value,
+            cursorPos: cursorPos.value,
+          }
+        : {
+            // 非活动标签没有 App 级运行态；按主窗口重新激活该标签时的
+            // 既有语义恢复默认结果视图，并从标签自身的编辑器选区派生状态。
+            activeOutputView: "result" as const,
+            selectedSql: tab.sql.slice(selectionFrom, selectionTo),
+            cursorPos: selection?.head ?? 0,
+          };
+    queryStore.suspendOpenTabsPersist();
+    persistSuspended = true;
+    const transferState = queryStore.takeTabForTransfer(tab.id);
+    if (!transferState) {
+      await queryStore.resumeOpenTabsPersist({ flush: false });
+      persistSuspended = false;
+      await preparedWindow.abort();
+      return;
+    }
+    try {
+      // 子窗口确认接收后才提交迁移；失败时恢复原位置和活动标签页。
+      await preparedWindow.transfer({
+        tab: transferState.tab,
+        ...tabRuntimeState,
+        dataGridSnapshots,
+      });
+    } catch (error) {
+      queryStore.restoreTabFromTransfer(transferState);
+      await queryStore.resumeOpenTabsPersist().catch(() => {});
+      persistSuspended = false;
+      await preparedWindow.abort();
+      throw error;
+    }
+    clearDataGridPendingSnapshotsForTab(tab.id);
+    const resumePersist = queryStore.resumeOpenTabsPersist();
+    persistSuspended = false;
+    let persistError: unknown;
+    try {
+      await resumePersist;
+    } catch (error) {
+      persistError = error;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+        try {
+          await queryStore.flushPendingPersist();
+          persistError = undefined;
+          break;
+        } catch (retryError) {
+          persistError = retryError;
+        }
+      }
+    }
+    if (persistError) {
+      toast(t("tabs.moveTabWindowPersistFailed", { message: persistError instanceof Error ? persistError.message : String(persistError) }), 5000);
+    }
+  } catch (e: any) {
+    if (persistSuspended) await queryStore.resumeOpenTabsPersist().catch(() => {});
+    toast(t("tabs.openTabWindowFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function closeDetachedTab() {
+  if (!isDetachedWindow || detachedWindowClosing) return;
+  detachedWindowClosing = true;
+  const detachedWindow = isTauriRuntime() ? getCurrentWebviewWindow() : null;
+  // 先隐藏以提供即时关闭反馈，但保留 WebView 上下文直到资源清理完成。
+  if (detachedWindow) await detachedWindow.hide().catch(() => {});
+  const tabId = queryStore.activeTabId;
+  try {
+    if (tabId) await queryStore.closeTabAndWait(tabId, { force: true });
+  } catch (error) {
+    // 关闭语义优先：清理失败需要记录，但不能留下不可见且无法再次关闭的窗口。
+    console.warn("[DBX][detached-tab:cleanup:error]", { tabId, error });
+  }
+  if (!detachedWindow) {
+    window.close();
+    return;
+  }
+  try {
+    await detachedWindow.close();
+  } catch (error) {
+    detachedWindowClosing = false;
+    await detachedWindow.show().catch(() => {});
+    toast(t("tabs.closeTabWindowFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
   }
 }
 
@@ -2073,6 +2200,30 @@ onMounted(async () => {
   });
   applyTheme();
   void applyUiScale(settingsStore.editorSettings.uiScale);
+  if (isDetachedWindow) {
+    window.addEventListener("keydown", handleKeydown);
+    if (isDesktop) document.addEventListener("contextmenu", handleContextMenu);
+    const detachedWindow = getCurrentWebviewWindow();
+    unlistenDetachedWindowClose = await detachedWindow.onCloseRequested(async (event) => {
+      if (detachedWindowClosing) return;
+      event.preventDefault();
+      await closeDetachedTab();
+    });
+    await initApp({ restoreOpenTabs: false });
+    unlistenDetachedTabTransfer = await receiveDetachedTab((payload) => {
+      restoreDataGridPendingSnapshotsForTab(payload.tab.id, payload.dataGridSnapshots);
+      queryStore.adoptTransferredTab(payload.tab);
+      activeOutputView.value = payload.activeOutputView;
+      selectedSql.value = payload.selectedSql;
+      cursorPos.value = payload.cursorPos;
+      restoreActiveConnectionContext();
+      return () => {
+        queryStore.takeTabForTransfer(payload.tab.id);
+        clearDataGridPendingSnapshotsForTab(payload.tab.id);
+      };
+    });
+    return;
+  }
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   if (isDesktop) {
@@ -2133,6 +2284,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  unlistenDetachedTabTransfer?.();
+  unlistenDetachedWindowClose?.();
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
   if (updateCheckTimer) {
@@ -2145,8 +2298,138 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <LoginPage v-if="setupRequired || (needsAuth && !authenticated)" :setup-mode="setupRequired" @authenticated="onLoginSuccess" />
-  <div v-show="!setupRequired && (!needsAuth || authenticated)" class="fixed inset-0 h-screen w-screen overflow-hidden">
+  <template v-if="isDetachedWindow && activeTab && !setupRequired && (!needsAuth || authenticated)">
+    <TooltipProvider :delay-duration="300">
+      <DetachedTabWindow
+        ref="contentAreaRef"
+        :active-tab="activeTab"
+        :active-connection="activeConnection"
+        :executable-sql="executableSql"
+        :active-output-view="activeOutputView"
+        :format-sql-request="formatSqlRequest"
+        :compress-sql-request="compressSqlRequest"
+        :selected-sql="selectedSql"
+        :cursor-pos="cursorPos"
+        :block-dangerous-redis-commands="blockDangerousRedisCommands"
+        :explain-mode="explainMode"
+        :sql-keyword-case="settingsStore.editorSettings.sqlFormatter.keywordCase"
+        :auto-commit="activeTab.autoCommit ?? true"
+        :txn-session-id="activeTab.txnSessionId"
+        :txn-auto-rolled-back="activeTab.txnAutoRolledBack"
+        @update:active-output-view="activeOutputView = $event"
+        @fix-with-ai="fixWithAi"
+        @send-selection-to-ai="sendSelectionToAi"
+        @execute="tryExecute($event)"
+        @execute-in-new-result-tab="tryExecuteInNewResultTab($event)"
+        @cancel="cancelActiveExecution()"
+        @explain="tryExplain()"
+        @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"
+        @editor-selection-change="(v: string) => (selectedSql = v)"
+        @editor-cursor-change="(p: number) => (cursorPos = p)"
+        @editor-viewport-change="(tabId: string, viewport: { scrollTop: number; scrollLeft: number }) => queryStore.updateEditorViewport(tabId, viewport)"
+        @editor-selection-state-change="(tabId: string, selection: { anchor: number; head: number }) => queryStore.updateEditorSelection(tabId, selection)"
+        @format-error="toast(t('toolbar.formatSqlFailed'))"
+        @save-sql="void openSaveSqlDialog()"
+        @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => onReloadData(sql, searchText, whereInput, orderBy, limit, offset, intent)"
+        @paginate="onPaginate"
+        @sort="onSort"
+        @execute-sql="onExecuteSql"
+        @click-table="onClickTable"
+        @view-table-data="onViewTableData"
+        @edit-table-structure="onEditTableStructure"
+        @view-table-ddl="onViewTableDdl"
+        @open-object-source="onOpenObjectSource"
+        @open-object-table="
+          (target: { schema?: string; catalog?: string; tableName: string; tableType?: string }) =>
+            activeTab &&
+            openTableTarget({
+              connectionId: activeTab.connectionId,
+              database: activeTab.database,
+              schema: target.schema,
+              catalog: target.catalog,
+              tableName: target.tableName,
+              tableType: target.tableType,
+            })
+        "
+        @object-schema-change="(schema: string | undefined) => activeTab && queryStore.updateSchema(activeTab.id, schema)"
+        @object-browser-viewport-change="(tabId: string, viewport: ObjectBrowserViewport) => queryStore.updateObjectBrowserViewport(tabId, viewport)"
+        @structure-editor-saved="
+          (commentChanged: boolean) =>
+            activeTab &&
+            onStructureEditorSaved(
+              onReloadData,
+              toast,
+              {
+                connectionId: activeTab.connectionId,
+                database: activeTab.database,
+                schema: activeTab.schema,
+                tableName: activeTab.structureTableName || '',
+              },
+              commentChanged,
+            )
+        "
+        @structure-editor-close="closeDetachedTab"
+        @open-settings="openSettings"
+        @open-connection-settings="openConnectionSettings"
+        @close="closeDetachedTab"
+        @close-tab="closeDetachedTab"
+        @format-sql="formatActiveSql"
+        @compress-sql="compressActiveSql"
+        @toggle-sql-keyword-case="toggleSqlKeywordCase"
+        @open-sql="openSqlFile"
+        @import-result-archive="importResultArchive"
+        @paste-sql-in-condition="pasteClipboardAsSqlInCondition"
+        @change-connection="changeActiveConnection"
+        @change-database="changeActiveDatabase"
+        @change-schema="changeActiveSchema"
+        @set-default-database="setActiveDatabaseAsDefault"
+        @clear-default-database="clearActiveDefaultDatabase"
+        @update:explain-mode="(mode: 'explain' | 'autotrace') => (explainMode = mode)"
+        @update:block-dangerous-redis-commands="(v: boolean) => (blockDangerousRedisCommands = v)"
+        @update:auto-commit="(v: boolean) => activeTab && queryStore.setAutoCommit(activeTab.id, v)"
+        @commit="activeTab && queryStore.commitTransaction(activeTab.id)"
+        @rollback="activeTab && queryStore.rollbackTransaction(activeTab.id)"
+        @dismiss-txn-rolled-back="activeTab && (activeTab.txnAutoRolledBack = false)"
+      />
+    </TooltipProvider>
+    <AppDialogs
+      :show-connection-dialog="showConnectionDialog"
+      :connection-prefill="connectionDialogPrefill"
+      :connection-initial-tab="connectionDialogInitialTab"
+      :show-danger-dialog="showDangerDialog"
+      :danger-sql="dangerSql"
+      :suppress-danger-confirm="suppressDangerConfirm"
+      :active-database-type="activeConnection?.db_type"
+      :show-sql-parameter-dialog="showSqlParameterDialog"
+      :sql-parameter-source-sql="sqlParameterSourceSql"
+      :sql-parameter-names="sqlParameterNames"
+      :sql-parameter-database-type="sqlParameterDatabaseType"
+      :sql-parameter-enabled-syntaxes="sqlParameterEnabledSyntaxes"
+      @update:show-connection-dialog="setConnectionDialogOpen"
+      @update:show-danger-dialog="showDangerDialog = $event"
+      @update:suppress-danger-confirm="suppressDangerConfirm = $event"
+      @update:show-sql-parameter-dialog="showSqlParameterDialog = $event"
+      @danger-confirm="onDangerConfirm"
+      @sql-parameters-confirm="onSqlParametersConfirm"
+      @connect-started="(name: string) => toast(t('connection.connecting', { name }), 30000)"
+      @connect-succeeded="(name: string) => toast(t('connection.connectSuccess', { name }), 2000)"
+      @connect-failed="(msg: string) => toast(t('connection.connectFailed', { message: translateBackendError(t, msg) }), 5000)"
+      @open-driver-store="setConnectionDialogOpen(false)"
+      @open-tunnel-profile-settings="setConnectionDialogOpen(false)"
+      @open-lineage-target="openLineageTarget"
+      @open-database-search-target="openDatabaseSearchTarget"
+      @open-diagram-target="openDiagramTarget"
+    />
+    <Teleport to="body">
+      <Transition name="toast">
+        <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 w-max max-w-[90vw] sm:max-w-3xl mx-auto z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text whitespace-pre-wrap break-words">
+          {{ toastMessage }}
+        </div>
+      </Transition>
+    </Teleport>
+  </template>
+  <LoginPage v-else-if="setupRequired || (needsAuth && !authenticated)" :setup-mode="setupRequired" @authenticated="onLoginSuccess" />
+  <div v-else-if="!isDetachedWindow" v-show="!setupRequired && (!needsAuth || authenticated)" class="fixed inset-0 h-screen w-screen overflow-hidden">
     <TooltipProvider :delay-duration="300">
       <div class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-desktop-window-frame': drawDesktopWindowFrame }" :style="appUiFontFamilyStyle">
         <AppToolbar
@@ -2197,8 +2480,10 @@ onUnmounted(() => {
                 :settings-page-open="settingsPageTabOpen"
                 :settings-page-active="settingsStore.settingsPageActive"
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
+                :detachable-tabs="isDesktop"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
+                @open-tab-window="openTabWindow"
                 @activate-tab="
                   driverStoreActive = false;
                   settingsStore.settingsPageActive = false;
@@ -2462,86 +2747,88 @@ onUnmounted(() => {
           </div>
         </Transition>
       </Teleport>
-
-      <Dialog
-        :open="showSaveSqlDialog"
-        @update:open="
-          (open: boolean) => {
-            showSaveSqlDialog = open;
-            if (!open) {
-              invalidateSaveSqlFolderSelection();
-              if (pendingSaveAndCloseTabId) cancelPendingSaveAndClose();
-            }
-          }
-        "
-      >
-        <DialogContent class="sm:max-w-[420px]">
-          <DialogHeader>
-            <DialogTitle>{{ t("savedSql.saveToLibrary") }}</DialogTitle>
-          </DialogHeader>
-          <div class="space-y-3">
-            <div class="space-y-1.5">
-              <label class="text-xs font-medium text-muted-foreground">{{ t("savedSql.fileName") }}</label>
-              <Input v-model="saveSqlName" @keydown.enter.prevent="confirmSaveSqlToLibrary" />
-            </div>
-            <div class="space-y-1.5">
-              <label class="text-xs font-medium text-muted-foreground">{{ t("savedSql.folder") }}</label>
-              <SearchableSelect
-                :model-value="saveSqlFolderId"
-                :options="[ROOT_SAVED_SQL_FOLDER, ...saveSqlFolders.map((f) => f.id)]"
-                :display-name="saveSqlFolderDisplayName"
-                :normalize-custom="saveSqlFolderNormalizeCustom"
-                :placeholder="t('savedSql.folderPlaceholder')"
-                :search-placeholder="t('savedSql.searchPlaceholder')"
-                :empty-text="t('common.noResults')"
-                :disabled="saveSqlFolderCreationPending"
-                allow-custom
-                trigger-variant="outline"
-                trigger-class="h-8 w-full max-w-none text-sm"
-                content-class="w-[var(--reka-popover-trigger-width)]"
-                @update:model-value="handleSaveSqlFolderSelect"
-              >
-                <template #custom-option-label="{ value }">
-                  <span class="truncate">{{ t("savedSql.createFolderOption", { name: value }) }}</span>
-                </template>
-              </SearchableSelect>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button v-if="isDesktop" variant="secondary" @click="saveActiveSqlAsLocalFile">{{ t("savedSql.saveToFile") }}</Button>
-            <Button variant="outline" @click="cancelPendingSaveAndClose()">{{ t("dangerDialog.cancel") }}</Button>
-            <Button :disabled="saveSqlFolderCreationPending || !saveSqlName.trim()" @click="confirmSaveSqlToLibrary">{{ t("savedSql.save") }}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <QueryEditorDdlViewDialog
-        v-if="queryEditorDdlTarget"
-        v-model:open="showQueryEditorDdlDialog"
-        :connection-id="queryEditorDdlTarget.connectionId"
-        :database="queryEditorDdlTarget.database"
-        :catalog="queryEditorDdlTarget.catalog"
-        :schema="queryEditorDdlTarget.schema"
-        :table-name="queryEditorDdlTarget.tableName"
-        :object-type="queryEditorDdlTarget.objectType"
-        :database-type="queryEditorDdlDatabaseType"
-        :dialect="queryEditorDdlDialect"
-      />
-      <QueryEditorObjectSourceDialog
-        v-if="queryEditorObjectSourceTarget"
-        v-model:open="showQueryEditorObjectSourceDialog"
-        :connection-id="queryEditorObjectSourceTarget.connectionId"
-        :database="queryEditorObjectSourceTarget.database"
-        :schema="queryEditorObjectSourceTarget.schema"
-        :name="queryEditorObjectSourceTarget.name"
-        :object-type="queryEditorObjectSourceTarget.objectType"
-        :initial-editing="queryEditorObjectSourceTarget.initialEditing"
-        :database-type="queryEditorObjectSourceDatabaseType"
-        :dialect="queryEditorObjectSourceDialect"
-        :format-dialect="queryEditorObjectSourceFormatDialect"
-        @saved="onQueryEditorObjectSourceSaved"
-      />
     </TooltipProvider>
   </div>
+  <div v-else class="flex h-screen w-screen items-center justify-center bg-background text-sm text-muted-foreground">
+    {{ t("tabs.openTabUnavailable") }}
+  </div>
+  <Dialog
+    :open="showSaveSqlDialog"
+    @update:open="
+      (open: boolean) => {
+        showSaveSqlDialog = open;
+        if (!open) {
+          invalidateSaveSqlFolderSelection();
+          if (pendingSaveAndCloseTabId) cancelPendingSaveAndClose();
+        }
+      }
+    "
+  >
+    <DialogContent class="sm:max-w-[420px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("savedSql.saveToLibrary") }}</DialogTitle>
+      </DialogHeader>
+      <div class="space-y-3">
+        <div class="space-y-1.5">
+          <label class="text-xs font-medium text-muted-foreground">{{ t("savedSql.fileName") }}</label>
+          <Input v-model="saveSqlName" @keydown.enter.prevent="confirmSaveSqlToLibrary" />
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-xs font-medium text-muted-foreground">{{ t("savedSql.folder") }}</label>
+          <SearchableSelect
+            :model-value="saveSqlFolderId"
+            :options="[ROOT_SAVED_SQL_FOLDER, ...saveSqlFolders.map((f) => f.id)]"
+            :display-name="saveSqlFolderDisplayName"
+            :normalize-custom="saveSqlFolderNormalizeCustom"
+            :placeholder="t('savedSql.folderPlaceholder')"
+            :search-placeholder="t('savedSql.searchPlaceholder')"
+            :empty-text="t('common.noResults')"
+            :disabled="saveSqlFolderCreationPending"
+            allow-custom
+            trigger-variant="outline"
+            trigger-class="h-8 w-full max-w-none text-sm"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+            @update:model-value="handleSaveSqlFolderSelect"
+          >
+            <template #custom-option-label="{ value }">
+              <span class="truncate">{{ t("savedSql.createFolderOption", { name: value }) }}</span>
+            </template>
+          </SearchableSelect>
+        </div>
+      </div>
+      <DialogFooter>
+        <Button v-if="isDesktop" variant="secondary" @click="saveActiveSqlAsLocalFile">{{ t("savedSql.saveToFile") }}</Button>
+        <Button variant="outline" @click="cancelPendingSaveAndClose()">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="saveSqlFolderCreationPending || !saveSqlName.trim()" @click="confirmSaveSqlToLibrary">{{ t("savedSql.save") }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+  <QueryEditorDdlViewDialog
+    v-if="queryEditorDdlTarget"
+    v-model:open="showQueryEditorDdlDialog"
+    :connection-id="queryEditorDdlTarget.connectionId"
+    :database="queryEditorDdlTarget.database"
+    :catalog="queryEditorDdlTarget.catalog"
+    :schema="queryEditorDdlTarget.schema"
+    :table-name="queryEditorDdlTarget.tableName"
+    :object-type="queryEditorDdlTarget.objectType"
+    :database-type="queryEditorDdlDatabaseType"
+    :dialect="queryEditorDdlDialect"
+  />
+  <QueryEditorObjectSourceDialog
+    v-if="queryEditorObjectSourceTarget"
+    v-model:open="showQueryEditorObjectSourceDialog"
+    :connection-id="queryEditorObjectSourceTarget.connectionId"
+    :database="queryEditorObjectSourceTarget.database"
+    :schema="queryEditorObjectSourceTarget.schema"
+    :name="queryEditorObjectSourceTarget.name"
+    :object-type="queryEditorObjectSourceTarget.objectType"
+    :initial-editing="queryEditorObjectSourceTarget.initialEditing"
+    :database-type="queryEditorObjectSourceDatabaseType"
+    :dialect="queryEditorObjectSourceDialect"
+    :format-dialect="queryEditorObjectSourceFormatDialect"
+    @saved="onQueryEditorObjectSourceSaved"
+  />
 </template>
 
 <style scoped>

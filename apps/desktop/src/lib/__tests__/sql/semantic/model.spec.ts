@@ -80,6 +80,17 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts: ["b"] }));
   });
 
+  it.each([
+    ["table name", "SELECT orders.| FROM orders", ["orders"]],
+    ["schema-qualified table name", "SELECT public.orders.| FROM public.orders", ["public", "orders"]],
+  ] as const)("resolves columns through a PostgreSQL %s qualifier before FROM", (_label, markedSql, qualifierParts) => {
+    const { sql, cursor } = sqlFixtureCursor(markedSql);
+    const model = buildSqlSemanticModel(sql, cursor, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(model.rowSources).toEqual(expect.arrayContaining([expect.objectContaining({ name: "orders", alias: undefined })]));
+    expect(model.cursorIntent).toEqual(expect.objectContaining({ kind: "alias_column", qualifierParts, targetSourceId: model.rowSources[0]?.id }));
+  });
+
   it("keeps nested EXISTS sources and outer correlated sources visible", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT * FROM aa.tb t WHERE EXISTS (SELECT 1 FROM aa.tb1 t1, aa.tb2 t2 WHERE t1.|)");
     const model = buildSqlSemanticModel(sql, cursor, { databaseType: "mysql", dialect: "mysql" });

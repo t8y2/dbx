@@ -205,6 +205,19 @@ describe("semantic SQL completion candidates", () => {
   });
 
   it.each([
+    ["table name", "SELECT orders.| FROM orders"],
+    ["schema-qualified table name", "SELECT public.orders.| FROM public.orders"],
+  ] as const)("completes PostgreSQL columns through a %s qualifier", (_label, markedSql) => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id", "customer_name", "total_amount"].map((name) => ({ name, table: "orders", schema: "public" }))]]);
+
+    const { context, items } = semanticCompletion(markedSql, { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(context.contextKind).toBe("alias_column");
+    expect(context.exclusiveColumnSuggestions).toBe(true);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "customer_name", "total_amount"]);
+  });
+
+  it.each([
     ["PostgreSQL", "postgres", "postgres"],
     ["SQL Server", "sqlserver", "sqlserver"],
   ] as const)("uses row-source aliases for %s self-join column collisions", (_label, databaseType, dialect) => {

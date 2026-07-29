@@ -18,6 +18,7 @@ import { currentStatementFrameRangeTo, visualSqlColumnsWithInlineHints } from "@
 import { expandToSqlStatementWindow, parseInsertValueHints } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { formatSqlText, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
@@ -163,6 +164,11 @@ let lastEmittedViewport: { scrollTop: number; scrollLeft: number } | undefined =
 let latestSelection: { anchor: number; head: number } | undefined = props.initialSelection;
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
+
+function sqlStatementParameterOptions() {
+  const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, props.databaseType);
+  return { databaseType: props.databaseType, enabledSyntaxes: enabledSqlParameterSyntaxes(toggles) };
+}
 const { isDark, themePalette } = useTheme();
 const { t } = useI18n();
 const { toast } = useToast();
@@ -615,11 +621,12 @@ function requestExecuteFromView(currentView: EditorViewType, cursorPos: number, 
   }
   // No selection → resolve the execution target, optionally via the picker.
   const doc = currentView.state.doc.toString();
-  const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType);
+  const parameterOptions = sqlStatementParameterOptions();
+  const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType, parameterOptions);
   if (candidates.length === 0) return false;
   // The execution shortcut keeps executing the configured target (cursor/all) directly:
   // it stays keyboard-driven and never pops the picker, which is reserved for click entry points.
-  if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType)) {
+  if (options.bypassPicker || !settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType, parameterOptions)) {
     const preferredKind = settingsStore.editorSettings.executeMode === "current" ? "cursor" : "all";
     const candidate = candidates.find((item) => item.kind === preferredKind) ?? candidates[0];
     emitExecutionRequest(candidate.sql, options.openInNewResultTab);
@@ -1226,13 +1233,13 @@ function contextObjectMenuItem(action: QueryContextObjectAction): ContextMenuIte
 }
 
 function executableStatementRangeStartingAt(currentView: EditorViewType, lineFrom: number) {
-  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType);
+  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
   return executableStatementRangeStartingAtLine(executableStatementRangeCache, lineFrom);
 }
 
 function currentExecutableStatementRange(currentView: EditorViewType): SqlTextRange | null {
   if (!supportsExecutionTargetPicker(props.databaseType)) return null;
-  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType);
+  executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
   return executableStatementRangeAtCursor(executableStatementRangeCache, currentView.state.selection.main.head);
 }
 

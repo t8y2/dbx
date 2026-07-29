@@ -35,6 +35,17 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeStartingAt(cache, doc.line(1).from)?.sql).toBe(sql.slice(0, -1));
   });
 
+  it("keeps a valid placeholder-only line executable and respects disabled MyBatis syntax", () => {
+    const sql = ["SELECT *", "FROM t", "#{where_clause};"].join("\n");
+    const doc = Text.of(sql.split("\n"));
+    const enabled = executableStatementRangeCacheForDoc(null, doc, "kingbase", { enabledSyntaxes: ["mybatis"] });
+    const disabled = executableStatementRangeCacheForDoc(enabled, doc, "kingbase", { enabledSyntaxes: ["shell"] });
+
+    expect(executableStatementRangeAtCursor(enabled, doc.line(3).from + 2)?.sql).toBe(sql.slice(0, -1));
+    expect(executableStatementRangeAtCursor(disabled, doc.line(3).from + 2)).toBeNull();
+    expect(disabled).not.toBe(enabled);
+  });
+
   it("resolves statements with leading whitespace for gutter run buttons", () => {
     const doc = Text.of([" SELECT 1;", "  SELECT 2;", "\t SELECT 3;", "", "    "]);
     const cache = executableStatementRangeCacheForDoc(null, doc, "mysql");

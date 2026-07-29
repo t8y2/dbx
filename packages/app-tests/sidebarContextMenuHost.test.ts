@@ -66,7 +66,7 @@ test("table copy menu uses the shared single and multi-selection clipboard path"
   const copySelectedNamesBody = functionBody(runtimeHost, "copySelectedNames");
   const clipboardMenuBody = functionBody(runtimeHost, "treeTableClipboardMenuItems");
 
-  assert.match(clipboardMenuBody, /tableClipboardMenuState\(normalizedTreeClipboardTableEntries\(\)/);
+  assert.match(clipboardMenuBody, /tableClipboardMenuState\(\s*normalizedTreeClipboardTableEntries\(\)/);
   assert.match(clipboardMenuBody, /state === "paste" \? \[pasteItem\] : \[copyItem, pasteItem\]/);
   assert.match(runtimeHost, /items\.push\(\.\.\.treeTableClipboardMenuItems\(node\)\)/);
   assert.doesNotMatch(runtimeHost, /function copyTableToClipboard\(/);

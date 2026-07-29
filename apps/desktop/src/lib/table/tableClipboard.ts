@@ -50,9 +50,9 @@ export function tableClipboardMatchesSingleSource(entries: TableClipboardTableCo
   return entries.length === 1 && tableClipboardEntryMatchesTarget(entries[0]!, source) && entries[0]!.tableName === source.tableName;
 }
 
-export function tableClipboardMenuState(entries: TableClipboardTableContext[], source: TableClipboardTableContext): TableClipboardMenuState {
-  if (!tableClipboardMatchesTarget(entries, source)) return "copy";
-  return tableClipboardMatchesSingleSource(entries, source) ? "paste" : "copy-and-paste";
+export function tableClipboardMenuState(entries: TableClipboardTableContext[], target: TableClipboardTableContext, canPasteAcrossContext = false): TableClipboardMenuState {
+  if (!tableClipboardMatchesTarget(entries, target)) return canPasteAcrossContext && entries.length > 0 ? "copy-and-paste" : "copy";
+  return tableClipboardMatchesSingleSource(entries, target) ? "paste" : "copy-and-paste";
 }
 
 export function supportsWholeRowTableDataCopy(databaseType: DatabaseType | undefined): boolean {

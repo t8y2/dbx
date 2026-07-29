@@ -4355,12 +4355,16 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
   const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy };
   if (!node.connectionId || !node.database) return [copyItem];
-  const state = tableClipboardMenuState(normalizedTreeClipboardTableEntries(), {
-    connectionId: node.connectionId,
-    database: node.database,
-    schema: normalizeTreeClipboardSchema(node.connectionId, node.database, node.schema),
-    tableName: node.label,
-  });
+  const state = tableClipboardMenuState(
+    normalizedTreeClipboardTableEntries(),
+    {
+      connectionId: node.connectionId,
+      database: node.database,
+      schema: normalizeTreeClipboardSchema(node.connectionId, node.database, node.schema),
+      tableName: node.label,
+    },
+    canTransferTreeClipboardToCurrentNode(),
+  );
   if (state === "copy") return [copyItem];
   const pasteItem: ContextMenuItem = { label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
   return state === "paste" ? [pasteItem] : [copyItem, pasteItem];

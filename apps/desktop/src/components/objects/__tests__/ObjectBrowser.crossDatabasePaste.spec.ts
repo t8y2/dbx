@@ -9,6 +9,7 @@ describe("ObjectBrowser cross-database table paste", () => {
     expect(objectBrowserSource).toContain("function openTransferFromTableClipboard()");
     expect(objectBrowserSource).toContain("targetConnectionId: target.connectionId");
     expect(objectBrowserSource).toContain("targetDatabase: target.database");
+    expect(objectBrowserSource).toMatch(/function objectBrowserTableClipboardMenuState[\s\S]*?tableClipboardMenuState\([\s\S]*?canTransferTableClipboard\(\),\s*\)/);
   });
 
   it("keeps the local duplicate-table paste path available", () => {

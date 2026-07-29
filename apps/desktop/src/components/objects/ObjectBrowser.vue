@@ -2499,12 +2499,16 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
 }
 
 function objectBrowserTableClipboardMenuState(item: ObjectBrowserRow) {
-  return tableClipboardMenuState(normalizedObjectBrowserTableClipboardEntries(), {
-    connectionId: props.connection.id,
-    database: props.database,
-    schema: normalizeObjectBrowserTableClipboardSchema(item.schema || selectedSchema.value),
-    tableName: item.name,
-  });
+  return tableClipboardMenuState(
+    normalizedObjectBrowserTableClipboardEntries(),
+    {
+      connectionId: props.connection.id,
+      database: props.database,
+      schema: normalizeObjectBrowserTableClipboardSchema(item.schema || selectedSchema.value),
+      tableName: item.name,
+    },
+    canTransferTableClipboard(),
+  );
 }
 
 function tableClipboardMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {

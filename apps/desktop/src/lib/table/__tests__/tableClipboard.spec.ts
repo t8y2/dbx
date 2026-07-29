@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tableClipboardMatchesTarget, tableClipboardSourceContext } from "@/lib/table/tableClipboard";
+import { tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext } from "@/lib/table/tableClipboard";
 
 describe("table clipboard contexts", () => {
   const source = { connectionId: "source", database: "app", schema: "public" };
@@ -14,5 +14,13 @@ describe("table clipboard contexts", () => {
 
   it("distinguishes a cross-schema target from the source", () => {
     expect(tableClipboardMatchesTarget([source], { ...source, schema: "archive" })).toBe(false);
+  });
+
+  it("shows paste for a transferable clipboard from another context", () => {
+    const sourceTable = { ...source, tableName: "users" };
+    const targetTable = { ...sourceTable, database: "archive" };
+
+    expect(tableClipboardMenuState([sourceTable], targetTable)).toBe("copy");
+    expect(tableClipboardMenuState([sourceTable], targetTable, true)).toBe("copy-and-paste");
   });
 });

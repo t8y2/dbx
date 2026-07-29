@@ -10,6 +10,7 @@ describe("cross-database table paste", () => {
     expect(runtimeSource).toContain("targetConnectionId: target.connectionId");
     expect(runtimeSource).toContain("targetDatabase: target.database");
     expect(runtimeSource).toContain("tables: clipboard.tables.map((entry) => entry.tableName)");
+    expect(runtimeSource).toMatch(/function treeTableClipboardMenuItems[\s\S]*?tableClipboardMenuState\([\s\S]*?canTransferTreeClipboardToCurrentNode\(\),\s*\)/);
   });
 
   it("retains the local duplicate-table paste path", () => {

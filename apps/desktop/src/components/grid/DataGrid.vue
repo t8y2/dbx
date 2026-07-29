@@ -2826,6 +2826,7 @@ const {
   cancelEdit,
   onEditKeydown,
   addRow: addEditorRow,
+  appendPastedRowsToNewRow,
   cloneRow,
   showDeleteRowConfirm,
   requestDeleteRow,
@@ -2854,6 +2855,7 @@ const {
   previewChanges,
 } = editor;
 const pendingQuickEntryDraftCellFocus = ref<{ rowId: number; col: number } | null>(null);
+const batchAppendPasteRowId = ref<number | null>(null);
 
 const showSqlPreview = ref(false);
 const previewSqlText = ref("");
@@ -4793,7 +4795,7 @@ function onCanvasMouseDown(event: MouseEvent) {
   commitHiddenCanvasEditBeforeCellInteraction();
   if (!item) return;
   if (hit.rowNumber) {
-    beginRowSelection(item.displayIndex, item.id, event);
+    onRowNumberMouseDown(item, event);
   } else {
     handleDataCellMousedown(item.displayIndex, hit.visibleColIdx, item.id, event);
   }
@@ -5518,7 +5520,51 @@ async function pasteClipboardIntoSelection() {
   const operation = dataGridResultLifecycle.beginOperation();
   const text = await readTextFromClipboard();
   if (!dataGridResultLifecycle.isCurrent(operation)) return;
-  pasteTextIntoSelection(text);
+  pasteTextIntoGrid(text);
+}
+
+function batchAppendPasteTargetRowId(): number | null {
+  const rowId = batchAppendPasteRowId.value;
+  if (rowId === null) return null;
+  const item = getRowItem(rowId);
+  if ((!item?.isNew && !item?.isDraft) || item.isDeleted || selectedRowIds.value.size !== 1 || !selectedRowIds.value.has(rowId)) {
+    batchAppendPasteRowId.value = null;
+    return null;
+  }
+  return rowId;
+}
+
+function canAppendPastedRows(): boolean {
+  return !!props.editable && batchAppendPasteTargetRowId() !== null;
+}
+
+function batchAppendPasteError(reason: string): string {
+  const messages: Record<string, string> = {
+    "not-editable": "grid.batchAppendPasteNotEditable",
+    "invalid-target": "grid.batchAppendPasteInvalidTarget",
+    "target-not-empty": "grid.batchAppendPasteTargetNotEmpty",
+    "empty-paste": "grid.batchAppendPasteEmpty",
+    "readonly-column": "grid.batchAppendPasteReadonlyColumn",
+  };
+  return t(messages[reason] ?? "grid.batchAppendPasteInvalidTarget");
+}
+
+function pasteTextIntoGrid(text: string): boolean {
+  const targetRowId = batchAppendPasteTargetRowId();
+  if (targetRowId !== null) {
+    const result = appendPastedRowsToNewRow(targetRowId, parseDataGridClipboard(text), visibleColumnIndexes.value);
+    if (!result.ok) {
+      if (result.reason === "invalid-target" || result.reason === "target-not-empty") {
+        batchAppendPasteRowId.value = null;
+      }
+      toast(batchAppendPasteError(result.reason), 5000);
+      return false;
+    }
+    batchAppendPasteRowId.value = null;
+    toast(t("grid.pasted"));
+    return true;
+  }
+  return pasteTextIntoSelection(text);
 }
 
 function pasteTextIntoSelection(text: string): boolean {
@@ -5544,12 +5590,12 @@ function pasteTextIntoSelection(text: string): boolean {
 }
 
 function onGridPaste(event: ClipboardEvent) {
-  const intent = claimDataGridPaste(event, props.editable, !!selectedRange.value || hasColumnSelection.value);
+  const intent = claimDataGridPaste(event, props.editable, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
   if (intent === "native") return;
   if (intent === "block") return;
   const text = event.clipboardData?.getData("text/plain");
   if (text === undefined) return;
-  pasteTextIntoSelection(text);
+  pasteTextIntoGrid(text);
 }
 
 function pasteStartCell() {
@@ -5958,7 +6004,13 @@ async function commitEditFromCellBlur() {
   await commitEditFromBlur();
 }
 
+function onRowNumberMouseDown(item: RowItem, event: MouseEvent) {
+  beginRowSelection(item.displayIndex, item.id, event);
+  batchAppendPasteRowId.value = item.isNew || item.isDraft ? item.id : null;
+}
+
 function prepareDataCellMouseDown(item: RowItem, actualColIdx: number) {
+  batchAppendPasteRowId.value = null;
   const editing = editingCell.value;
   if (editing?.rowId === quickEntryDraftRowId && item.isDraft && item.id === quickEntryDraftRowId && editing.col !== actualColIdx) {
     pendingQuickEntryDraftCellFocus.value = { rowId: item.id, col: actualColIdx };
@@ -6120,7 +6172,7 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (clipboardShortcut(event, "v")) {
-    const intent = claimDataGridPaste(event, props.editable, !!selectedRange.value || hasColumnSelection.value);
+    const intent = claimDataGridPaste(event, props.editable, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
     if (intent === "native") return;
     // A focused grid owns the shortcut even when read-only; otherwise the webview may paste into the previously focused SQL editor.
     if (intent === "block") return;
@@ -6834,6 +6886,7 @@ watch(editingCell, (cell) => {
 watch(editValue, scheduleActiveCellEditTextareaResize);
 
 function onRowContext(rowId: number, rowIndex: number) {
+  batchAppendPasteRowId.value = null;
   contextHeaderColumn.value = null;
   contextHeaderColumnIndex.value = null;
   contextHeaderVisibleColIdx.value = null;
@@ -8634,7 +8687,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <div
                       class="data-grid-row-number w-(--row-num-w) shrink-0 px-2 py-1 border-r text-center select-none cursor-default sticky left-0 z-10"
                       :class="[rowNumberStatusClass(item), { 'data-grid-row-number--selected': isRowSelected(item.id) }]"
-                      @mousedown="beginRowSelection(item.displayIndex, item.id, $event)"
+                      @mousedown="onRowNumberMouseDown(item, $event)"
                       @dblclick.stop="toggleTranspose(item.displayIndex)"
                       @contextmenu="onRowContext(item.id, item.displayIndex)"
                     >

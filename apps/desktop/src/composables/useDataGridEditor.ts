@@ -31,6 +31,8 @@ export const DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID = Number.MIN_SAFE_INTEGER;
 
 type RowKind = "none" | "existing" | "new" | "draft";
 
+export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" };
+
 type CommitEditResult =
   | {
       changed: false;
@@ -944,6 +946,67 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     });
   }
 
+  function isBlankNewRow(row: readonly CellValue[]): boolean {
+    return row.every((value) => value === null || (typeof value === "string" && value.trim() === ""));
+  }
+
+  function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[]): DataGridAppendPastedRowsResult {
+    if (!editable.value) return { ok: false, reason: "not-editable" };
+    if (pastedRows.every((row) => row.every((value) => value === ""))) {
+      return { ok: false, reason: "empty-paste" };
+    }
+
+    const target = getRowItem(targetRowId);
+    if ((!target?.isNew && !target?.isDraft) || target.isDeleted || isSavingNewRow(target)) {
+      return { ok: false, reason: "invalid-target" };
+    }
+
+    const targetIsDraft = target.isDraft === true;
+    if (targetIsDraft) ensureQuickEntryDraftRow();
+    const targetNewIndex = target.newIndex;
+    const targetRow = targetIsDraft ? quickEntryDraftRow.value : targetNewIndex === undefined ? undefined : newRows.value[targetNewIndex];
+    if (!targetRow || !isBlankNewRow(targetRow)) return { ok: false, reason: "target-not-empty" };
+
+    const pastedColumnCount = Math.max(...pastedRows.map((row) => row.length));
+    if (pastedColumnCount <= 0) return { ok: false, reason: "empty-paste" };
+
+    const targetColumns = columnIndexes.slice(0, pastedColumnCount);
+    if (targetColumns.some((columnIndex) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
+
+    const nextRows = newRows.value.map((row) => [...row]);
+    let reusableNewRowCount = 0;
+    if (!targetIsDraft) {
+      for (let rowIndex = targetNewIndex!; rowIndex < nextRows.length && reusableNewRowCount < pastedRows.length; rowIndex++) {
+        if (!isBlankNewRow(nextRows[rowIndex]!)) break;
+        reusableNewRowCount++;
+      }
+    }
+    const mappedRows = pastedRows.map((pastedRow, rowIndex) => {
+      const nextRow = rowIndex < reusableNewRowCount ? nextRows[targetNewIndex! + rowIndex]! : emptyDraftRow();
+      for (let columnOffset = 0; columnOffset < Math.min(pastedRow.length, targetColumns.length); columnOffset++) {
+        const columnIndex = targetColumns[columnOffset]!;
+        const value = pastedRow[columnOffset];
+        nextRow[columnIndex] = value === null ? null : coerceCellValue(value, nextRow[columnIndex], columnIndex);
+      }
+      return nextRow;
+    });
+
+    pushUndoSnapshot();
+    if (targetIsDraft) {
+      nextRows.push(...mappedRows);
+      quickEntryDraftRow.value = emptyDraftRow();
+    } else {
+      nextRows.splice(targetNewIndex!, reusableNewRowCount, ...mappedRows);
+    }
+    newRows.value = nextRows;
+    rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
+    touchPendingChanges();
+    if (useTransaction.value && !transactionActive.value) {
+      enterTransaction();
+    }
+    return { ok: true, rowCount: mappedRows.length };
+  }
+
   function clonedRowData(item: RowItem): CellValue[] {
     const columnInfoByName = new Map((tableMeta.value?.columns ?? []).map((column) => [column.name.toLowerCase(), column]));
     return item.data.map((val, i) => {
@@ -1566,6 +1629,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     cancelEdit,
     onEditKeydown,
     addRow,
+    appendPastedRowsToNewRow,
     cloneRow,
     cloneRows,
     applyDeleteRows,

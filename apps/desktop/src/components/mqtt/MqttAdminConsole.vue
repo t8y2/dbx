@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
-import { mqttGetBrokerInfo, mqttListTopics, mqttGetTopicTree, mqttGetMessages, mqttSubscribe, mqttUnsubscribe } from "@/lib/backend/api";
+import { mqttGetBrokerInfo, mqttListTopics, mqttGetTopicTree, mqttGetMessages, mqttSubscribe, mqttUnsubscribe, mqttClearMessages } from "@/lib/backend/api";
 import type { MqttBrokerInfo, MqttTopicNode, MqttMessage } from "@/types/mqtt";
 import { Button } from "@/components/ui/button";
 import TopicTreeNode from "./TopicTreeNode.vue";
@@ -77,6 +77,15 @@ function handleMessagePublished() {
   refreshData();
 }
 
+async function handleClearMessages() {
+  try {
+    await mqttClearMessages(props.connectionId);
+    messages.value = [];
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
 /* ========== 消息轮询 ========== */
 function startPolling() {
   stopPolling();
@@ -129,6 +138,7 @@ onUnmounted(() => {
       </div>
       <div class="flex items-center gap-2">
         <Button size="sm" variant="outline" @click="refreshData">刷新</Button>
+        <Button size="sm" variant="outline" @click="handleClearMessages">清空消息</Button>
       </div>
     </div>
 
@@ -187,8 +197,16 @@ onUnmounted(() => {
           </div>
           <div class="flex-1 overflow-auto">
             <div v-if="messages.length === 0" class="text-xs text-muted-foreground p-4 text-center">暂无消息。</div>
-            <div v-for="(msg, i) in messages" :key="i" class="px-3 py-2 border-b last:border-b-0 hover:bg-muted/50 cursor-pointer text-xs" @click="handleTopicClick(msg.topic)">
+            <div
+              v-for="(msg, i) in messages"
+              :key="i"
+              class="px-3 py-2 border-b last:border-b-0 cursor-pointer text-xs"
+              :class="msg.direction === 'sent' ? 'bg-emerald-50/60 dark:bg-emerald-950/20 hover:bg-emerald-100/60 dark:hover:bg-emerald-950/40' : 'hover:bg-muted/50'"
+              @click="handleTopicClick(msg.topic)"
+            >
               <div class="flex items-center gap-2 mb-0.5">
+                <span v-if="msg.direction === 'sent'" class="text-emerald-600 dark:text-emerald-400 text-[10px] font-bold shrink-0">发送</span>
+                <span v-else class="text-blue-600 dark:text-blue-400 text-[10px] font-bold shrink-0">接收</span>
                 <span class="font-mono text-blue-600 dark:text-blue-400 font-medium truncate">{{ msg.topic }}</span>
                 <span class="text-muted-foreground/60 shrink-0">QoS{{ msg.qos }}</span>
                 <span v-if="msg.retain" class="text-amber-600 dark:text-amber-400 text-[10px] font-medium shrink-0">保留</span>

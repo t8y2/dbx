@@ -375,6 +375,24 @@ fn default_enable_thinking() -> bool {
     true
 }
 
+/// Whether the provider is a CLI-based provider that goes through its own
+/// executable (claude-code, codex, pi) rather than through `with_retry` /
+/// `with_stream_retry`.
+pub fn is_cli_provider(provider: &AiProvider) -> bool {
+    matches!(provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli)
+}
+
+/// Merge the global `max_retries` setting into an `AiConfig`.
+///
+/// Applied by all API-backed entry points at request time.  CLI providers are
+/// skipped because they use their own retry logic and never reach the
+/// `with_retry` / `with_stream_retry` paths.
+pub fn merge_global_max_retries(config: &mut AiConfig, max_retries: u32) {
+    if !is_cli_provider(&config.provider) {
+        config.max_retries = Some(max_retries);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiMessage {
@@ -3664,14 +3682,14 @@ mod tests {
         apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
         build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt,
         drain_next_stream_line, emit_gemini_tool_call_part, emit_responses_function_call_item, format_transport_error,
-        gemini_text, is_kimi_model, is_retryable_error, maybe_bearer_headers, maybe_tag_retry_after,
-        measure_first_stream_chunk, ollama_selected_model_tool_support, openai_response_text, openai_stream_reasoning,
-        openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
+        gemini_text, is_cli_provider, is_kimi_model, is_retryable_error, maybe_bearer_headers, maybe_tag_retry_after,
+        measure_first_stream_chunk, merge_global_max_retries, ollama_selected_model_tool_support, openai_response_text,
+        openai_stream_reasoning, openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
         parse_model_list_response, parse_retry_after, resolve_endpoint, resolve_gemini_stream_endpoint,
         resolve_model_effort_core, resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
         responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
         retain_ollama_completion_models, retry_after_secs, set_chat_completion_token_limit, stream_claude,
-        stream_claude_with_tools, stream_data_payload, stream_error, stream_openai_with_tools,
+        stream_claude_with_tools, stream_data_payload, stream_error, stream_openai_with_tools, test_connection_core,
         uses_anthropic_messages_api, validate_config, validate_model_list_config, with_retry, with_stream_retry,
         AiApiStyle, AiAuthMethod, AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability,
         AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent,
@@ -5848,5 +5866,96 @@ mod tests {
         assert!(err.contains("[auth]"), "got: {err}");
         assert!(err.contains("HTTP 401"), "got: {err}");
         assert!(!is_retryable_error(&err), "401 must not be retryable");
+    }
+
+    // ------------------------------------------------------------------
+    // merge_global_max_retries unit tests
+    // ------------------------------------------------------------------
+
+    fn test_config(provider: AiProvider) -> AiConfig {
+        serde_json::from_value(serde_json::json!({
+            "provider": serde_json::to_string(&provider).unwrap().trim_matches('"'),
+            "model": "test-model",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_global_max_retries_sets_for_api_providers() {
+        for provider in &[
+            AiProvider::Claude,
+            AiProvider::Openai,
+            AiProvider::OpenaiCompatible,
+            AiProvider::Custom,
+            AiProvider::Gemini,
+            AiProvider::Deepseek,
+            AiProvider::Qwen,
+            AiProvider::Ollama,
+        ] {
+            let mut config = test_config(provider.clone());
+            config.max_retries = None;
+            merge_global_max_retries(&mut config, 3);
+            assert_eq!(config.max_retries, Some(3), "merge should set max_retries for {provider:?}");
+        }
+    }
+
+    #[test]
+    fn merge_global_max_retries_skips_cli_providers() {
+        for provider in [AiProvider::CodexCli, AiProvider::ClaudeCodeCli, AiProvider::PiAgentCli] {
+            let mut config = test_config(provider);
+            config.max_retries = None;
+            merge_global_max_retries(&mut config, 0);
+            assert_eq!(config.max_retries, None, "merge must not touch CLI provider {provider:?}");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // End-to-end: max_retries=0 prevents retry even against a real server
+    // ------------------------------------------------------------------
+
+    /// Spawn a TCP server that returns 429 for every connection and counts them.
+    /// Returns (url, count, handle).  Abort the handle after the test.
+    async fn spawn_counting_429_server(
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicU32>, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/v1/messages");
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count2 = count.clone();
+
+        let handle = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                count2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let resp = b"HTTP/1.1 429 Too Many Requests\r\n\
+                    Content-Type: application/json\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\r\n";
+                let _ = socket.write_all(resp).await;
+            }
+        });
+
+        (url, count, handle)
+    }
+
+    #[tokio::test]
+    async fn test_connection_core_no_retry_when_max_retries_zero() {
+        let (url, count, server) = spawn_counting_429_server().await;
+
+        let mut config: AiConfig = serde_json::from_value(
+            serde_json::json!({"provider": "claude", "model": "claude-sonnet-4", "endpoint": url}),
+        )
+        .unwrap();
+        config.max_retries = Some(0);
+
+        let result = test_connection_core(&config).await;
+        assert!(result.is_err(), "429 should fail, got: {result:?}");
+
+        server.abort();
+        let requests = count.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(requests, 1, "max_retries=0 should mean exactly 1 request, got {requests}");
     }
 }

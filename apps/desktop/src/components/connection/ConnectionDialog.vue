@@ -99,6 +99,7 @@ import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerbero
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
 import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
 import { gaussdbIdentifierQuoteStyle, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
+import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 
 type DbOption = { value: string; label: string };
 type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
@@ -1873,6 +1874,9 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     if (profile.type === "sqlite" || profile.type === "duckdb" || profile.type === "access") {
       form.value.host = "";
     }
+    if (profile.type === "sqlite") {
+      form.value.database = undefined;
+    }
     if (profile.type === "h2") {
       h2ConnectionMode.value = "file";
       form.value.host = "";
@@ -3083,6 +3087,7 @@ function generateConnectionName(): string {
 function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionConfig {
   const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   config.database_info = undefined;
+  config.database = normalizeStoredConnectionDatabase(config.db_type, config.database);
   config.note = config.note?.trim() || undefined;
   if (selectedType.value === "oceanbase" && (config.driver_profile === "oceanbase" || config.driver_profile === "oceanbase-oracle")) {
     Object.assign(config, oceanbaseModeConnectionPatch(oceanbaseSubMode.value));

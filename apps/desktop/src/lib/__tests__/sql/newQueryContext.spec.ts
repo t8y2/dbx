@@ -28,7 +28,7 @@ describe("resolveNewQueryTarget", () => {
           database: "bi",
           objectBrowser: { catalog: "paimon_catalog" },
         },
-        connections: [{ id: "conn-1", database: "" }],
+        connections: [{ id: "conn-1", database: "", db_type: "starrocks" }],
         preferredSource: "tab",
       }),
     ).toEqual({
@@ -53,9 +53,39 @@ describe("resolveNewQueryTarget", () => {
             primaryKeys: [],
           },
         },
-        connections: [{ id: "conn-1", database: "" }],
+        connections: [{ id: "conn-1", database: "", db_type: "starrocks" }],
       })?.catalog,
     ).toBe("paimon_catalog");
+  });
+
+  it("repairs a stale SQLite file path inherited from an active tab", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeTab: {
+          connectionId: "conn-sqlite",
+          database: "/tmp/stale.sqlite",
+        },
+        connections: [{ id: "conn-sqlite", database: "/tmp/stale.sqlite", db_type: "sqlite" }],
+      }),
+    ).toEqual({
+      connectionId: "conn-sqlite",
+      database: "main",
+      schema: undefined,
+      catalog: undefined,
+      shouldRefreshDefaultDatabase: false,
+    });
+  });
+
+  it("preserves an attached SQLite database alias inherited from an active tab", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeTab: {
+          connectionId: "conn-sqlite",
+          database: "analytics",
+        },
+        connections: [{ id: "conn-sqlite", database: undefined, db_type: "sqlite" }],
+      })?.database,
+    ).toBe("analytics");
   });
 });
 

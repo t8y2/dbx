@@ -536,6 +536,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sqlite_schema_name_repairs_file_paths_and_preserves_attached_aliases() {
+        for value in [
+            "",
+            ":memory:",
+            "/tmp/app.sqlite",
+            "./app.db",
+            "../app.db3",
+            "~/app.sqlite3",
+            "C:\\data\\app.db",
+            "file:/tmp/app.sqlite",
+            "sqlite:/tmp/app.sqlite",
+            "relative.sqlite?mode=ro",
+        ] {
+            assert_eq!(sqlite_schema_name(value), "main", "{value}");
+        }
+
+        assert_eq!(sqlite_schema_name("main"), "main");
+        assert_eq!(sqlite_schema_name("analytics"), "analytics");
+    }
+
+    #[test]
     fn persistent_attachments_require_a_file_backed_plaintext_main_database() {
         assert!(validate_persistent_attachments("/tmp/main.sqlite", "", false).is_ok());
         assert!(validate_persistent_attachments("/tmp/main.sqlite", "", true).is_ok());
@@ -1533,11 +1554,34 @@ pub(crate) fn sqlite_quote_schema_ident(value: &str) -> String {
 
 fn sqlite_schema_name(value: &str) -> &str {
     let value = value.trim();
-    if value.is_empty() {
+    if value.is_empty() || is_sqlite_file_namespace(value) {
         "main"
     } else {
         value
     }
+}
+
+fn is_sqlite_file_namespace(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let path = lower.split(['?', '#']).next().unwrap_or(&lower);
+    lower == ":memory:"
+        || lower.starts_with("file:")
+        || lower.starts_with("sqlite:")
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || value.starts_with("~/")
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.contains('/')
+        || value.contains('\\')
+        || path.ends_with(".db")
+        || path.ends_with(".db3")
+        || path.ends_with(".sqlite")
+        || path.ends_with(".sqlite3")
+        || (value.len() >= 3
+            && value.as_bytes()[0].is_ascii_alphabetic()
+            && value.as_bytes()[1] == b':'
+            && matches!(value.as_bytes()[2], b'/' | b'\\'))
 }
 
 fn sqlite_quote_string(value: &str) -> String {

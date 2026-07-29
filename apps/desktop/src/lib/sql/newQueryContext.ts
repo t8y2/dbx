@@ -1,4 +1,5 @@
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { qualifiedTableName } from "@/lib/table/tableSelectSql";
 import type { ConnectionConfig, DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
@@ -16,7 +17,7 @@ interface ResolveNewQueryTargetInput {
   activeTab?: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta">;
   selectedTreeNode?: Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | null;
   activeConnectionId?: string | null;
-  connections: Pick<ConnectionConfig, "id" | "database">[];
+  connections: Pick<ConnectionConfig, "id" | "database" | "db_type">[];
   preferredSource?: NewQueryContextSource;
 }
 
@@ -49,11 +50,15 @@ export function resolveNewQueryTarget(input: ResolveNewQueryTargetInput): NewQue
     : null;
 }
 
-function targetFromContext(context: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta"> | Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | undefined, connections: Pick<ConnectionConfig, "id" | "database">[]): NewQueryTarget | null {
+function targetFromContext(
+  context: Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog" | "objectBrowser" | "tableMeta"> | Pick<TreeNode, "connectionId" | "database" | "schema" | "catalog"> | undefined,
+  connections: Pick<ConnectionConfig, "id" | "database" | "db_type">[],
+): NewQueryTarget | null {
   if (!context?.connectionId) return null;
   const connection = connections.find((item) => item.id === context.connectionId);
   if (!connection) return null;
-  const database = context.database || resolveDefaultDatabase(connection, []);
+  const contextDatabase = context.database || resolveDefaultDatabase(connection, []);
+  const database = connection.db_type === "sqlite" ? normalizeSqliteNamespace(contextDatabase) : contextDatabase;
   const objectBrowser = "objectBrowser" in context ? context.objectBrowser : undefined;
   const tableMeta = "tableMeta" in context ? context.tableMeta : undefined;
   return {

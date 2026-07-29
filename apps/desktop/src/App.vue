@@ -41,6 +41,7 @@ import * as api from "@/lib/backend/api";
 import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } from "@/lib/sql/newQueryContext";
 import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
@@ -678,7 +679,8 @@ function analyzeHistoryWithAi(entry: HistoryEntry) {
   }
 
   openAiPanel();
-  const database = entry.database || activeTab.value?.database || resolveDefaultDatabase(config, []);
+  const storedDatabase = entry.database || activeTab.value?.database || resolveDefaultDatabase(config, []);
+  const database = config.db_type === "sqlite" ? normalizeSqliteNamespace(storedDatabase) : storedDatabase;
   const title = t("history.aiAnalysisTab");
   const tabId = queryStore.createTab(connectionId, database || "", title, "query");
   queryStore.updateSql(tabId, entry.sql);

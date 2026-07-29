@@ -5020,6 +5020,31 @@ test("Kingbase history restore inherits schema when the history entry keeps its 
   }
 });
 
+test("SQLite history restore repairs a stale file path without changing attached aliases", () => {
+  const sqlite = {
+    ...conn("sqlite-1"),
+    db_type: "sqlite" as const,
+    host: "/tmp/real.sqlite",
+    port: 0,
+    database: "/tmp/legacy.sqlite",
+  };
+  const getConfig = (connectionId: string) => (connectionId === sqlite.id ? sqlite : undefined);
+  const staleEntry: HistoryEntry = {
+    id: "history-sqlite-stale",
+    connection_id: sqlite.id,
+    connection_name: sqlite.name,
+    database: "/tmp/stale.sqlite",
+    sql: "select count(*) from agent_probe",
+    executed_at: "2026-07-29T08:00:00Z",
+    execution_time_ms: 1,
+    success: true,
+  };
+  const attachedEntry = { ...staleEntry, id: "history-sqlite-attached", database: "analytics" };
+
+  assert.equal(resolveHistorySqlRestoreTarget({ entry: staleEntry, getConfig })?.database, "main");
+  assert.equal(resolveHistorySqlRestoreTarget({ entry: attachedEntry, getConfig })?.database, "analytics");
+});
+
 test("data tab execution uses a tab-scoped client session", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

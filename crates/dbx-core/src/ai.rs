@@ -3644,11 +3644,11 @@ mod tests {
         resolve_model_effort_core, resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
         responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
         retain_ollama_completion_models, retry_after_secs, set_chat_completion_token_limit, stream_claude,
-        stream_claude_with_tools, stream_data_payload, stream_openai_with_tools, uses_anthropic_messages_api,
-        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAuthMethod,
-        AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability, AiEffortOption, AiEffortSelection,
-        AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
-        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        stream_claude_with_tools, stream_data_payload, stream_error, stream_openai_with_tools,
+        uses_anthropic_messages_api, validate_config, validate_model_list_config, with_retry, with_stream_retry,
+        AiApiStyle, AiAuthMethod, AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability,
+        AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent,
+        StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     struct CapturedJsonRequest {
@@ -3699,6 +3699,46 @@ mod tests {
         });
 
         (format!("http://{address}/v1/messages"), server)
+    }
+
+    /// Spawn an HTTP server that returns an error response with a specific
+    /// status code, optional `Retry-After` header, and body.
+    ///
+    /// Returns the URL and the join handle (await it to guarantee the request
+    /// was received before the test ends).
+    async fn spawn_error_server(status: u16, reason: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        spawn_error_server_with_body(status, reason, "", None).await
+    }
+
+    async fn spawn_error_server_with_body(
+        status: u16,
+        reason: &'static str,
+        body: &'static str,
+        retry_after_secs: Option<u64>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(n > 0, "server received no request");
+
+            let mut resp = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+                body.len()
+            );
+            if let Some(secs) = retry_after_secs {
+                resp.push_str(&format!("Retry-After: {secs}\r\n"));
+            }
+            resp.push_str("Connection: close\r\n\r\n");
+            resp.push_str(body);
+            socket.write_all(resp.as_bytes()).await.unwrap();
+        });
+
+        (format!("http://{address}/test"), server)
     }
 
     fn claude_http_test_request(endpoint: String) -> AiCompletionRequest {
@@ -5645,27 +5685,131 @@ mod tests {
         assert!(!is_retryable_error("[auth] Claude API error (HTTP 403: forbidden)"));
     }
 
-    /// Integration-path regression: verify that the exact error format produced
-    /// by `stream_error` for an empty-body 429 triggers a retry rather than
-    /// being classified as `unknown` and surfacing immediately.
+    // ------------------------------------------------------------------
+    // stream_error integration tests (real reqwest::Response)
+    // ------------------------------------------------------------------
+
+    /// Send a real HTTP request against a local server returning a specific
+    /// error status, then run the response through `stream_error` and verify
+    /// the output format, classification, and Retry-After encoding.
+    async fn call_stream_error(
+        status: u16,
+        reason: &'static str,
+        body: &'static str,
+        retry_after_secs: Option<u64>,
+    ) -> String {
+        let (url, _server) = spawn_error_server_with_body(status, reason, body, retry_after_secs).await;
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .json(&serde_json::json!({"model": "test"}))
+            .send()
+            .await
+            .expect("request to test server failed");
+        stream_error(resp, "TestProvider").await
+    }
+
     #[tokio::test]
-    async fn retry_handles_empty_body_429_from_stream_error() {
+    async fn stream_error_empty_body_429_is_retryable() {
+        let err = call_stream_error(429, "Too Many Requests", "", None).await;
+        // Expected format: [{classify}] {fallback} API error (HTTP {status}: {detail})
+        assert!(err.contains("[rateLimit]"), "429 with empty body should classify as rateLimit, got: {err}");
+        assert!(err.contains("HTTP 429: empty response body"), "got: {err}");
+        assert!(is_retryable_error(&err), "stream_error 429 must be retryable, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn stream_error_empty_body_429_triggers_retry() {
+        let (url, _server) = spawn_error_server_with_body(429, "Too Many Requests", "", None).await;
+
         let cfg = retry_config(Some(2));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut calls = 0;
-        // This is the exact format `stream_error` produces:
-        //   [{classify_error(diagnostic)}] {fallback} API error (HTTP {status}: {detail})
-        let result = with_retry(&cfg, || {
+
+        let result = with_stream_retry(&cfg, &emitted, None, || {
             calls += 1;
+            let url = url.clone();
             async move {
                 if calls == 1 {
-                    Err("[rateLimit] Claude API error (HTTP 429: empty response body)".to_string())
+                    let resp = reqwest::Client::new()
+                        .post(&url)
+                        .json(&serde_json::json!({"model": "test"}))
+                        .send()
+                        .await
+                        .expect("request failed");
+                    Err(stream_error(resp, "TestProvider").await)
                 } else {
-                    Ok::<&str, String>("recovered")
+                    Ok::<(), String>(())
                 }
             }
         })
         .await;
-        assert_eq!(result, Ok("recovered"));
-        assert_eq!(calls, 2, "empty-body 429 should be classified as rateLimit and retried");
+        assert!(result.is_ok(), "should retry after stream_error 429, got: {result:?}");
+        assert_eq!(calls, 2);
+    }
+
+    #[tokio::test]
+    async fn stream_error_preserves_retry_after_from_headers() {
+        let err = call_stream_error(429, "Too Many Requests", r#"{"error":{"message":"rate limit"}}"#, Some(5)).await;
+        // The Retry-After: 5 header should be encoded as [retry-after:5] prefix.
+        assert!(err.starts_with("[retry-after:5]"), "Retry-After should be prepended, got: {err}");
+        assert!(err.contains("[rateLimit]"), "got: {err}");
+        assert!(err.contains("rate limit"), "should include original error detail, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn stream_error_retry_after_extends_backoff() {
+        // If the response says Retry-After: 1, the first retry must wait ≥ 800ms
+        // (after jitter) rather than the default 500ms.
+        let (url, _server) =
+            spawn_error_server_with_body(429, "Too Many Requests", r#"{"error":{"message":"rate limit"}}"#, Some(1))
+                .await;
+
+        let cfg = retry_config(Some(2));
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start = std::time::Instant::now();
+        let mut calls = 0;
+
+        let result = with_stream_retry(&cfg, &emitted, None, || {
+            calls += 1;
+            let url = url.clone();
+            async move {
+                if calls == 1 {
+                    let resp = reqwest::Client::new()
+                        .post(&url)
+                        .json(&serde_json::json!({"model": "test"}))
+                        .send()
+                        .await
+                        .expect("request failed");
+                    Err(stream_error(resp, "TestProvider").await)
+                } else {
+                    Ok::<(), String>(())
+                }
+            }
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert!(result.is_ok());
+        assert_eq!(calls, 2);
+        assert!(elapsed.as_millis() >= 800, "Retry-After: 1 should force ≥1s delay, got {}ms", elapsed.as_millis());
+    }
+
+    #[tokio::test]
+    async fn stream_error_non_json_429_body_is_retryable() {
+        // Some proxies return HTML or plain text for 429.
+        let err = call_stream_error(429, "Too Many Requests", "<html>Too Many Requests</html>", None).await;
+        assert!(
+            err.contains("[rateLimit]"),
+            "non-JSON body containing 'rate' keyword should classify as rateLimit, got: {err}"
+        );
+        assert!(err.contains("<html>"), "raw body should be preserved in detail, got: {err}");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[tokio::test]
+    async fn stream_error_401_is_not_retryable() {
+        let err = call_stream_error(401, "Unauthorized", r#"{"error":{"message":"invalid api key"}}"#, None).await;
+        assert!(err.contains("[auth]"), "got: {err}");
+        assert!(err.contains("HTTP 401"), "got: {err}");
+        assert!(!is_retryable_error(&err), "401 must not be retryable");
     }
 }

@@ -221,6 +221,25 @@ async fn connection_mysql_query_dialect(state: &AppState, connection_id: &str) -
         .unwrap_or_default()
 }
 
+async fn connection_mysql_catalog_dialect(
+    state: &AppState,
+    connection_id: &str,
+) -> Option<db::mysql::MySqlCatalogDialect> {
+    let configs = state.configs.read().await;
+    configs
+        .get(connection_id)
+        .and_then(|config| db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()))
+}
+
+async fn connection_mysql_catalog_dialect_for_pool_key(
+    state: &AppState,
+    pool_key: &str,
+) -> Option<db::mysql::MySqlCatalogDialect> {
+    let configs = state.configs.read().await;
+    crate::connection::config_for_pool_key(pool_key, &configs)
+        .and_then(|config| db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()))
+}
+
 async fn connection_database_type_for_pool_key(state: &AppState, pool_key: &str) -> Option<DatabaseType> {
     let configs = state.configs.read().await;
     configs
@@ -1327,6 +1346,7 @@ pub async fn do_execute(
         crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
     }
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
+    let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
@@ -1439,6 +1459,7 @@ pub async fn do_execute(
                 query_timeout,
                 db::mysql::apply_catalog_database_context(
                     &mut conn,
+                    mysql_catalog_dialect,
                     options.catalog.as_deref(),
                     database.unwrap_or_default(),
                 ),
@@ -2156,6 +2177,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
         // Read-only check for MySQL batch path
         check_read_only_for_connection_multi(state, &pool_key, &statements).await?;
         let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+        let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
         return execute_multi_mysql(
             state,
             &pool_key,
@@ -2163,6 +2185,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
             &pool,
             mode,
             mysql_dialect,
+            mysql_catalog_dialect,
             database,
             &statements,
             cancel_token,
@@ -2292,6 +2315,7 @@ async fn execute_multi_mysql(
     pool: &db::mysql::MySqlPool,
     mode: crate::connection::MysqlMode,
     dialect: db::mysql::MySqlQueryDialect,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
     database: &str,
     statements: &[String],
     cancel_token: Option<CancellationToken>,
@@ -2324,7 +2348,7 @@ async fn execute_multi_mysql(
     wait_for_result_opt(
         cancel_token.clone(),
         query_timeout,
-        db::mysql::apply_catalog_database_context(&mut conn, options.catalog.as_deref(), database),
+        db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, options.catalog.as_deref(), database),
     )
     .await?;
 
@@ -2906,6 +2930,7 @@ pub async fn execute_statements_in_transaction_on_pool(
 
     let start = std::time::Instant::now();
     let db_type = connection_database_type(state, connection_id).await;
+    let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
 
     // Clone the pool handle within the lock, then drop it before any async work.
@@ -2951,8 +2976,18 @@ pub async fn execute_statements_in_transaction_on_pool(
             exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
         Some(TxPath::Mysql(pool, _bare)) => {
-            exec_tx_mysql_inner(state, pool_key, pool, statements, start, operation_budget.clone(), catalog, database)
-                .await
+            exec_tx_mysql_inner(
+                state,
+                pool_key,
+                pool,
+                statements,
+                start,
+                operation_budget.clone(),
+                mysql_catalog_dialect,
+                catalog,
+                database,
+            )
+            .await
         }
         Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
         Some(TxPath::CloudflareD1(client)) => {
@@ -3094,12 +3129,13 @@ async fn exec_tx_mysql_inner(
     statements: &[String],
     start: std::time::Instant,
     budget: DbOperationBudget,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
     catalog: Option<&str>,
     database: &str,
 ) -> Result<db::QueryResult, String> {
     let mut conn = db::mysql::get_conn_with_health_check_with_timeout(&pool, budget.checkout_timeout).await?;
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, None).await?;
-    db::mysql::apply_catalog_database_context(&mut conn, catalog, database).await?;
+    db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, catalog, database).await?;
     mysql_query_drop_with_timeout(
         &mut conn,
         "START TRANSACTION",
@@ -3387,6 +3423,7 @@ async fn begin_transaction_session(
     catalog: Option<&str>,
     consistent_snapshot: bool,
 ) -> Result<String, String> {
+    let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let pool_database = query_pool_database(database, catalog);
     let pool_key = state.get_or_create_pool(connection_id, pool_database).await?;
 
@@ -3425,7 +3462,7 @@ async fn begin_transaction_session(
         }
         TxnPoolHandle::Mysql(mysql_pool) => {
             let mut conn = mysql_pool.get_conn().await.map_err(|e| format!("Failed to get MySQL connection: {e}"))?;
-            db::mysql::apply_catalog_database_context(&mut conn, catalog, database).await?;
+            db::mysql::apply_catalog_database_context(&mut conn, mysql_catalog_dialect, catalog, database).await?;
             if let Some(isolation_sql) = mysql_transaction_isolation_sql(consistent_snapshot) {
                 conn.query_drop(isolation_sql).await.map_err(|e| format!("SET TRANSACTION failed: {e}"))?;
             }
@@ -3923,6 +3960,36 @@ mod tests {
         assert_eq!(query_pool_database("bi", Some("paimon_catalog")), None);
         assert_eq!(query_pool_database("bi", None), Some("bi"));
         assert_eq!(query_pool_database("", None), None);
+    }
+
+    #[tokio::test]
+    async fn query_and_transaction_paths_resolve_catalog_dialect_from_connection() {
+        let dir = std::env::temp_dir().join(format!("dbx-catalog-dialect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+
+        let mut doris = test_connection_config(DatabaseType::Doris);
+        doris.id = "doris".to_string();
+        let mut starrocks = test_connection_config(DatabaseType::StarRocks);
+        starrocks.id = "starrocks".to_string();
+        {
+            let mut configs = state.configs.write().await;
+            configs.insert(doris.id.clone(), doris);
+            configs.insert(starrocks.id.clone(), starrocks);
+        }
+
+        assert_eq!(
+            connection_mysql_catalog_dialect_for_pool_key(&state, "doris:bi").await,
+            Some(db::mysql::MySqlCatalogDialect::Doris)
+        );
+        assert_eq!(
+            connection_mysql_catalog_dialect(&state, "starrocks").await,
+            Some(db::mysql::MySqlCatalogDialect::StarRocks)
+        );
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

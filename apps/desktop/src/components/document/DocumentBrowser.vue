@@ -63,6 +63,7 @@ import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/com
 import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentDisplayValue, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
+import { documentGridColumnVisibilityScopeKey, loadDocumentGridHiddenColumnKeys, saveDocumentGridHiddenColumnKeys } from "@/lib/document/documentGridColumnVisibilityStorage";
 import { useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
@@ -137,6 +138,23 @@ let elasticsearchPaginationLowerBound: number | undefined;
 let elasticsearchCountExecutionId = "";
 let elasticsearchCountGeneration = 0;
 const documentStoreProvider = computed(() => documentStoreProviderFor(props.databaseType));
+const documentColumnVisibilityScopeKey = computed(() =>
+  documentGridColumnVisibilityScopeKey({
+    databaseType: props.databaseType,
+    connectionId: props.connectionId,
+    database: props.database,
+    collection: props.collection,
+  }),
+);
+const hiddenDocumentColumnKeys = ref<string[]>([]);
+
+watch(
+  documentColumnVisibilityScopeKey,
+  (scopeKey) => {
+    hiddenDocumentColumnKeys.value = loadDocumentGridHiddenColumnKeys(scopeKey);
+  },
+  { immediate: true },
+);
 
 const pageTotal = computed(() => paginationTotal.value);
 const documentPageCount = computed(() => (pageTotal.value === undefined ? undefined : Math.max(1, Math.ceil(pageTotal.value / pageSize.value))));
@@ -224,12 +242,19 @@ const deleteDetails = computed(() => {
   return t("dangerDialog.mongoFieldDetails", { field: pending.name || t("mongo.field") });
 });
 
+function onHiddenDocumentColumnKeysChange(keys: string[]) {
+  const normalizedKeys = [...new Set(keys)];
+  hiddenDocumentColumnKeys.value = normalizedKeys;
+  saveDocumentGridHiddenColumnKeys(documentColumnVisibilityScopeKey.value, normalizedKeys);
+}
+
 const gridResult = computed<QueryResult>(() => {
   const docs = documents.value;
   if (!docs.length) {
     return {
       columns: lastGridColumns.value,
       rows: [],
+      local_hidden_column_keys: hiddenDocumentColumnKeys.value,
       affected_rows: 0,
       execution_time_ms: 0,
       truncated: false,
@@ -256,7 +281,7 @@ const gridResult = computed<QueryResult>(() => {
     }),
   );
 
-  return { columns, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
+  return { columns, rows, local_hidden_column_keys: hiddenDocumentColumnKeys.value, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
 const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
@@ -1608,6 +1633,8 @@ defineExpose({ focusSearch });
       ref="dataGridRef"
       class="flex-1 min-h-0"
       :result="gridResult"
+      :connection-id="props.connectionId"
+      :database="props.database"
       context="results"
       :database-type="props.databaseType"
       :mongo-update-target="mongoUpdateTarget"
@@ -1620,6 +1647,7 @@ defineExpose({ focusSearch });
       :total-row-count="total"
       :total-row-count-is-exact="totalIsExact"
       :pagination-total-row-count="pageTotal"
+      @hidden-column-keys-change="onHiddenDocumentColumnKeysChange"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"

@@ -43,7 +43,13 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
     default: defineComponent({
       name: "DataGridStub",
       inheritAttrs: false,
-      setup(_, { expose, slots }) {
+      props: {
+        result: { type: Object, required: true },
+        connectionId: { type: String, default: "" },
+        database: { type: String, default: "" },
+      },
+      emits: ["hidden-column-keys-change"],
+      setup(props, { emit, expose, slots }) {
         expose({
           nullColumnsHidden: false,
           canToggleAllNullColumns: false,
@@ -53,13 +59,21 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         return () =>
           h(
             "div",
-            { "data-testid": "data-grid" },
-            slots["search-bar"]?.({
-              localFilterCount: 0,
-              hasLocalColumnFilters: false,
-              localFilterSummaries: [],
-              clearLocalFilter: vi.fn(),
-            }),
+            {
+              "data-testid": "data-grid",
+              "data-connection-id": props.connectionId,
+              "data-database": props.database,
+              "data-hidden-column-keys": JSON.stringify((props.result as { local_hidden_column_keys?: string[] }).local_hidden_column_keys ?? []),
+            },
+            [
+              slots["search-bar"]?.({
+                localFilterCount: 0,
+                hasLocalColumnFilters: false,
+                localFilterSummaries: [],
+                clearLocalFilter: vi.fn(),
+              }),
+              h("button", { "data-testid": "change-hidden-columns", onClick: () => emit("hidden-column-keys-change", ["_id", "_id"]) }),
+            ],
           );
       },
     }),
@@ -145,9 +159,11 @@ vi.mock("@/components/ui/select", async () => {
 });
 
 import DocumentBrowser from "@/components/document/DocumentBrowser.vue";
+import { documentGridColumnVisibilityScopeKey } from "@/lib/document/documentGridColumnVisibilityStorage";
 
 let app: App<Element> | null = null;
 let root: HTMLDivElement | null = null;
+let storedValues: Map<string, string>;
 
 async function flushUi() {
   for (let index = 0; index < 4; index++) {
@@ -182,6 +198,12 @@ async function setSearchInput(value: string) {
 }
 
 beforeEach(async () => {
+  storedValues = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => storedValues.get(key) ?? null,
+    setItem: (key: string, value: string) => storedValues.set(key, value),
+    removeItem: (key: string) => storedValues.delete(key),
+  });
   backend.getColumns.mockReset();
   backend.documentFindDocuments.mockReset();
   backend.cancelQuery.mockReset();
@@ -219,9 +241,43 @@ afterEach(() => {
   root?.remove();
   root = null;
   document.body.innerHTML = "";
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("DocumentBrowser Elasticsearch field search", () => {
+  it("restores and persists hidden columns for the current index", async () => {
+    app?.unmount();
+    const scopeKey = documentGridColumnVisibilityScopeKey({
+      databaseType: "elasticsearch",
+      connectionId: "connection-1",
+      database: "",
+      collection: "orders",
+    });
+    const storageKey = `dbx-document-grid-column-visibility:v1:${scopeKey}`;
+    storedValues.set(storageKey, JSON.stringify(["title"]));
+
+    app = createApp(DocumentBrowser, {
+      connectionId: "connection-1",
+      database: "",
+      collection: "orders",
+      databaseType: "elasticsearch",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const dataGrid = root!.querySelector<HTMLElement>('[data-testid="data-grid"]')!;
+    expect(dataGrid.dataset.connectionId).toBe("connection-1");
+    expect(dataGrid.dataset.database).toBe("");
+    expect(dataGrid.dataset.hiddenColumnKeys).toBe(JSON.stringify(["title"]));
+
+    dataGrid.querySelector<HTMLButtonElement>('[data-testid="change-hidden-columns"]')!.click();
+    await flushUi();
+
+    expect(dataGrid.dataset.hiddenColumnKeys).toBe(JSON.stringify(["_id"]));
+    expect(storedValues.get(storageKey)).toBe(JSON.stringify(["_id"]));
+  });
+
   it("searches, selects, updates the query type, and clears the search when closed", async () => {
     root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
     await flushUi();

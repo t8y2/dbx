@@ -98,7 +98,7 @@ function createTextProbe(input: HTMLTextAreaElement, wrap: boolean) {
   const probe = document.createElement(wrap ? "div" : "span");
   const style = window.getComputedStyle(input);
   probe.textContent = input.value || input.placeholder || "";
-  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${input.clientWidth}px;white-space:pre-wrap;overflow-wrap:anywhere;padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
+  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${input.clientWidth}px;white-space:pre-wrap;overflow-wrap:normal;padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
   document.body.appendChild(probe);
   return probe;
 }
@@ -142,7 +142,15 @@ function updateSuggestionPosition() {
   void nextTick(() => {
     const target = activeEditor.value;
     if (!target) return;
-    suggestionPosition.value = getDataGridConditionSuggestionPosition(target.getBoundingClientRect(), {
+    const targetRect = target.getBoundingClientRect();
+    const suggestionAnchor = expanded.value
+      ? {
+          left: targetRect.left,
+          bottom: expandedRect.value.top + expandedHeight.value,
+          width: targetRect.width,
+        }
+      : targetRect;
+    suggestionPosition.value = getDataGridConditionSuggestionPosition(suggestionAnchor, {
       viewportWidth: window.innerWidth,
       preferredWidth: suggestionPreferredWidth.value,
       maxWidth: suggestionPreferredWidth.value === undefined ? undefined : 520,
@@ -160,7 +168,8 @@ function resizeEditor(forceExpand = false) {
       expandAfterComposition = true;
       return;
     }
-    const focused = document.activeElement === input || document.activeElement === overlayRef.value;
+    const overlayFocused = document.activeElement === overlayRef.value;
+    const focused = document.activeElement === input || overlayFocused;
     const nextExpanded = focused && shouldExpand(input) && (forceExpand || expanded.value);
     if (nextExpanded) {
       expandedRect.value = measureExpandedRect(input);
@@ -175,6 +184,12 @@ function resizeEditor(forceExpand = false) {
         syncSelection(input);
         overlay.focus();
         overlay.setSelectionRange(selectionStart.value, selectionEnd.value);
+      });
+    }
+    if (!nextExpanded && overlayFocused && !composing.value) {
+      void nextTick(() => {
+        input.focus();
+        input.setSelectionRange(selectionStart.value, selectionEnd.value);
       });
     }
   });
@@ -201,6 +216,36 @@ function focus(select = false) {
     target?.setSelectionRange(selectionStart.value, selectionEnd.value);
   }
   resizeEditor(true);
+}
+
+function scrollCaretIntoView() {
+  const target = activeEditor.value;
+  if (!target || target.scrollHeight <= target.clientHeight) return;
+  const style = window.getComputedStyle(target);
+  const probe = document.createElement("div");
+  const caretMarker = document.createElement("span");
+  const caret = Math.min(Math.max(selectionStart.value, 0), target.value.length);
+  probe.textContent = target.value.slice(0, caret) || " ";
+  caretMarker.textContent = "\u200b";
+  probe.appendChild(caretMarker);
+  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;width:${target.clientWidth}px;white-space:${style.whiteSpace};overflow-wrap:${style.overflowWrap};padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};text-indent:${style.textIndent};`;
+  document.body.appendChild(probe);
+  const lineHeight = Number.parseFloat(style.lineHeight) || 24;
+  const caretTop = caretMarker.offsetTop;
+  const topPadding = Number.parseFloat(style.paddingTop) || 0;
+  const bottomPadding = Number.parseFloat(style.paddingBottom) || 0;
+  const visibleTop = target.scrollTop + topPadding;
+  const visibleBottom = target.scrollTop + target.clientHeight - bottomPadding;
+  if (caretTop < visibleTop) target.scrollTop = Math.max(0, caretTop - topPadding);
+  else if (caretTop + lineHeight > visibleBottom) target.scrollTop = caretTop + lineHeight + bottomPadding - target.clientHeight;
+  probe.remove();
+}
+
+function focusAfterAccept() {
+  void nextTick(() => {
+    focus();
+    void nextTick(scrollCaretIntoView);
+  });
 }
 
 function syncSelection(target: HTMLTextAreaElement) {
@@ -255,7 +300,7 @@ function onKeydown(event: KeyboardEvent) {
   if (completeQuote(event)) return;
   const action = editor.handleKeydown(event);
   if (action === "apply") void applyCondition();
-  if (action === "accept") void nextTick(() => focus());
+  if (action === "accept") focusAfterAccept();
 }
 
 function completeQuote(event: KeyboardEvent) {
@@ -283,7 +328,7 @@ function openHistory() {
 
 function acceptSuggestion(index: number) {
   editor.accept(index);
-  void nextTick(() => focus());
+  focusAfterAccept();
 }
 
 function eventInside(event: Event, element?: HTMLElement) {
@@ -433,8 +478,8 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           @input="onInput"
           @keydown="onKeydown"
         />
-        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[1] flex h-6 min-w-0 items-center gap-1">
-          <span class="data-grid-topbar-condition-label" :class="[props.kind === 'where' ? 'data-grid-topbar-condition-label--where' : 'data-grid-topbar-condition-label--order', { 'data-grid-topbar-condition-label--compact': props.compact }]">
+        <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[2] flex h-6 min-w-0 items-center gap-1">
+          <span class="data-grid-topbar-condition-label data-grid-topbar-condition-label--floating" :class="[props.kind === 'where' ? 'data-grid-topbar-condition-label--where' : 'data-grid-topbar-condition-label--order', { 'data-grid-topbar-condition-label--compact': props.compact }]">
             {{ props.kind === "where" ? "WHERE" : "ORDER BY" }}
           </span>
           <div class="min-w-0 flex-1" />
@@ -515,12 +560,30 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   color: rgb(234 88 12);
 }
 
+.data-grid-topbar-condition-label--floating {
+  position: relative;
+  z-index: 1;
+  text-shadow:
+    -1px 0 color-mix(in oklab, var(--background) 96%, var(--muted) 4%),
+    1px 0 color-mix(in oklab, var(--background) 96%, var(--muted) 4%),
+    0 -1px color-mix(in oklab, var(--background) 96%, var(--muted) 4%),
+    0 1px color-mix(in oklab, var(--background) 96%, var(--muted) 4%);
+}
+
 :global(.dark) .data-grid-topbar-condition-label--where {
   color: rgb(96 165 250);
 }
 
 :global(.dark) .data-grid-topbar-condition-label--order {
   color: rgb(251 146 60);
+}
+
+:global(.dark) .data-grid-topbar-condition-label--floating {
+  text-shadow:
+    -1px 0 rgb(24, 24, 27),
+    1px 0 rgb(24, 24, 27),
+    0 -1px rgb(24, 24, 27),
+    0 1px rgb(24, 24, 27);
 }
 
 .data-grid-topbar-condition-label--compact {
@@ -586,9 +649,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   box-shadow:
     inset 0 -1px 0 var(--border),
     0 8px 16px rgb(15 23 42 / 8%);
-  transition:
-    height 150ms ease,
-    box-shadow 150ms ease;
+  transition: box-shadow 150ms ease;
   --data-grid-expanded-scrollbar-offset: 8px;
   --data-grid-condition-controls-top: 0.125rem;
   --data-grid-condition-input-top: 0.125rem;
@@ -620,7 +681,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   overflow-x: hidden;
   overflow-y: auto;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
   border: 0;
   border-radius: 0;
   background: transparent;

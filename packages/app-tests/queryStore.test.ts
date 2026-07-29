@@ -7,10 +7,12 @@ import { analyzeEditableQueryEditability } from "../../apps/desktop/src/lib/sql/
 import { resultSqlForGrid } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
 import { parseMongoCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 import { useExportTracker } from "../../apps/desktop/src/composables/useExportTracker.ts";
+import { resolveHistorySqlRestoreTarget } from "../../apps/desktop/src/lib/history/historyRestoreTarget.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
+import type { HistoryEntry } from "../../apps/desktop/src/lib/backend/tauri.ts";
 import type { QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 afterEach(() => {
@@ -85,6 +87,14 @@ function sparkConn(id: string): ConnectionConfig {
     ...conn(id),
     db_type: "spark",
     port: 10000,
+  };
+}
+
+function kingbaseConn(id: string): ConnectionConfig {
+  return {
+    ...conn(id),
+    db_type: "kingbase",
+    port: 54321,
   };
 }
 
@@ -339,6 +349,17 @@ test("marked-clean object source tabs close without unsaved confirmation", () =>
     store.tabs.some((item) => item.id === tabId),
     false,
   );
+});
+
+test("object source tabs can force distinct clean identities for overloaded routines", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstId = store.createTab("conn-1", "db", "Source - calculate", "query", "public", "CREATE FUNCTION calculate(integer)", undefined, { forceNew: true });
+  const secondId = store.createTab("conn-1", "db", "Source - calculate", "query", "public", "CREATE FUNCTION calculate(text)", undefined, { forceNew: true });
+
+  assert.notEqual(firstId, secondId);
+  assert.equal(store.isTabDirty(store.tabs.find((tab) => tab.id === firstId)!), false);
+  assert.equal(store.isTabDirty(store.tabs.find((tab) => tab.id === secondId)!), false);
 });
 
 test("close all tabs pauses on unsaved query tabs", () => {
@@ -4879,6 +4900,120 @@ test("Spark query execution applies the selected database as schema context", as
 
     assert.equal(executeBody.database, "ai_test");
     assert.equal(executeBody.schema, "ai_test");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("Kingbase query execution sends the selected schema context", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(kingbaseConn("kingbase-1"));
+  const tabId = store.createTab("kingbase-1", "qinzhou", "Query", "query", "sdy_smartsite");
+  let executeBody: any;
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      return new Response(JSON.stringify({ sqlToExecute: "select * from busi_sea_trip_records", useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify([{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "select * from busi_sea_trip_records");
+
+    assert.equal(executeBody.database, "qinzhou");
+    assert.equal(executeBody.schema, "sdy_smartsite");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("Kingbase history restore inherits schema when the history entry keeps its database", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(kingbaseConn("kingbase-1"));
+  const currentTabId = store.createTab("kingbase-1", "qinzhou", "Current", "query", "sdy_smartsite");
+  const currentTab = store.tabs.find((tab) => tab.id === currentTabId);
+  assert.ok(currentTab);
+  const entry: HistoryEntry = {
+    id: "history-1",
+    connection_id: "kingbase-1",
+    connection_name: "Kingbase",
+    database: "qinzhou",
+    sql: "select * from busi_sea_trip_records",
+    executed_at: "2026-07-29T08:00:00Z",
+    execution_time_ms: 12,
+    success: true,
+  };
+  const target = resolveHistorySqlRestoreTarget({
+    entry,
+    activeTab: currentTab,
+    firstConnectionId: connectionStore.connections[0]?.id,
+    getConfig: (connectionId) => connectionStore.getConfig(connectionId),
+  });
+  assert.ok(target);
+  assert.deepEqual(target, { connectionId: "kingbase-1", database: "qinzhou", schema: "sdy_smartsite" });
+  const restoredTabId = store.createTab(target.connectionId, target.database, "SQL", "query", target.schema);
+  store.updateSql(restoredTabId, entry.sql);
+  let executeBody: any;
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      return new Response(JSON.stringify({ sqlToExecute: entry.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify([{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(restoredTabId, entry.sql);
+
+    assert.equal(executeBody.database, "qinzhou");
+    assert.equal(executeBody.schema, "sdy_smartsite");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

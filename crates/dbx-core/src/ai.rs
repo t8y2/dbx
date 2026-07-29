@@ -63,6 +63,8 @@ pub const AGENT_CANCELLED_ERROR: &str = "Agent loop cancelled";
 pub enum AiProvider {
     #[serde(alias = "anthropic")]
     Claude,
+    #[serde(rename = "anthropic-compatible")]
+    AnthropicCompatible,
     Openai,
     Gemini,
     Deepseek,
@@ -83,6 +85,7 @@ impl AiProvider {
     pub fn as_str(&self) -> &'static str {
         match self {
             AiProvider::Claude => "claude",
+            AiProvider::AnthropicCompatible => "anthropic-compatible",
             AiProvider::Openai => "openai",
             AiProvider::Gemini => "gemini",
             AiProvider::Deepseek => "deepseek",
@@ -602,6 +605,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
             }
         }
         AiProvider::Claude
+        | AiProvider::AnthropicCompatible
         | AiProvider::CodexCli
         | AiProvider::ClaudeCodeCli
         | AiProvider::PiAgentCli
@@ -610,7 +614,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
 }
 
 pub fn uses_anthropic_messages_api(config: &AiConfig) -> bool {
-    matches!(config.provider, AiProvider::Claude)
+    matches!(config.provider, AiProvider::Claude | AiProvider::AnthropicCompatible)
         || matches!(config.provider, AiProvider::Custom) && config.api_style == AiApiStyle::AnthropicMessages
 }
 
@@ -670,6 +674,29 @@ pub fn stream_data_payload(line: &str) -> Option<&str> {
         return Some(line);
     }
     None
+}
+
+fn stream_event_name(line: &str) -> Option<&str> {
+    line.trim().strip_prefix("event:").map(str::trim).filter(|event| !event.is_empty())
+}
+
+fn anthropic_stream_error(event_name: Option<&str>, event: &serde_json::Value) -> Option<String> {
+    if event_name != Some("error") && event["type"].as_str() != Some("error") {
+        return None;
+    }
+
+    let error = event.get("error").unwrap_or(event);
+    let error_type = error["type"].as_str().filter(|value| !value.trim().is_empty());
+    let message =
+        error["message"].as_str().or_else(|| event["message"].as_str()).filter(|value| !value.trim().is_empty());
+    let detail = match (error_type, message) {
+        (Some(error_type), Some(message)) => format!("{error_type}: {message}"),
+        (Some(error_type), None) => error_type.to_string(),
+        (None, Some(message)) => message.to_string(),
+        (None, None) => truncate_diagnostic(&event.to_string(), 500),
+    };
+    let category = classify_error(&detail);
+    Some(format!("[{category}] Anthropic stream error ({detail})"))
 }
 
 fn drain_next_stream_line(buffer: &mut Vec<u8>) -> Result<Option<String>, String> {
@@ -1195,7 +1222,7 @@ fn parse_dynamic_effort_capability(
 
 fn decorate_model_capabilities(config: &AiConfig, models: &mut [AiModelInfo]) {
     for model in models {
-        if model.effort_capability.is_none() {
+        if matches!(config.provider, AiProvider::AnthropicCompatible) || model.effort_capability.is_none() {
             model.effort_capability = crate::ai_effort::static_effort_capability(config, &model.id);
         }
     }
@@ -1223,20 +1250,54 @@ fn parse_gemini_model_list_response(data: &serde_json::Value) -> Result<Vec<AiMo
 }
 
 async fn list_claude_models(client: &reqwest::Client, config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
-    let res = client
-        .get(resolve_model_list_endpoint(config)?)
-        .headers(claude_headers(config)?)
-        .send()
-        .await
-        .map_err(|e| format!("Claude model list request failed: {e}"))?;
+    let endpoint = resolve_model_list_endpoint(config)?;
+    let headers = claude_headers(config)?;
+    let mut after_id: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut seen_models = HashSet::new();
+    let mut models = Vec::new();
 
-    let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(extract_error(&data).unwrap_or_else(|| format!("Claude model list API error: {status}")));
+    loop {
+        let mut request = client.get(&endpoint).headers(headers.clone());
+        if let Some(after_id) = after_id.as_deref() {
+            request = request.query(&[("after_id", after_id)]);
+        }
+        let res = request.send().await.map_err(|e| format!("Claude model list request failed: {e}"))?;
+
+        let status = res.status();
+        if !status.is_success() {
+            if matches!(config.provider, AiProvider::AnthropicCompatible | AiProvider::Custom)
+                && matches!(status, reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED)
+            {
+                return Err(format!(
+                    "[modelDiscoveryUnsupported] The provider does not expose a model list at {endpoint}. Save the provider and enter a model ID manually."
+                ));
+            }
+            return Err(categorized_http_error(res, "Claude model list", &config.api_key).await);
+        }
+
+        let data: serde_json::Value =
+            res.json().await.map_err(|e| format!("Claude model list returned invalid JSON (HTTP {status}): {e}"))?;
+        for model in parse_model_list_response(&data)? {
+            if seen_models.insert(model.id.clone()) {
+                models.push(model);
+            }
+        }
+
+        if data["has_more"].as_bool() != Some(true) {
+            break;
+        }
+        let next_cursor = data["last_id"]
+            .as_str()
+            .filter(|cursor| !cursor.trim().is_empty())
+            .ok_or_else(|| "Claude model list response has_more=true but last_id is missing".to_string())?;
+        if !seen_cursors.insert(next_cursor.to_string()) {
+            return Err(format!("Claude model list returned repeated last_id cursor: {next_cursor}"));
+        }
+        after_id = Some(next_cursor.to_string());
     }
 
-    parse_model_list_response(&data)
+    Ok(models)
 }
 
 async fn list_gemini_models(client: &reqwest::Client, config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
@@ -1392,7 +1453,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
             validate_model_list_config(config)?;
             let client = build_ai_http_client(config, 30)?;
             match config.provider {
-                AiProvider::Claude => list_claude_models(&client, config).await?,
+                AiProvider::Claude | AiProvider::AnthropicCompatible => list_claude_models(&client, config).await?,
                 AiProvider::Gemini => list_gemini_models(&client, config).await?,
                 AiProvider::Ollama => {
                     let models = list_openai_compatible_models(&client, config).await?;
@@ -1774,6 +1835,7 @@ fn collect_gemini_safety_ratings(ratings: Option<&[serde_json::Value]>, output: 
 
 fn probe_stream_payload(
     data: &str,
+    event_name: Option<&str>,
     is_claude: bool,
     is_gemini: bool,
     diagnostics: &mut StreamProbeDiagnostics,
@@ -1786,6 +1848,11 @@ fn probe_stream_payload(
     let parsed: serde_json::Value = serde_json::from_str(data)
         .map_err(|e| format!("AI stream JSON parse error: {e}; payload={}", truncate_diagnostic(data, 240)))?;
     diagnostics.json_events += 1;
+    if is_claude {
+        if let Some(error) = anthropic_stream_error(event_name, &parsed) {
+            return Err(error);
+        }
+    }
     if is_gemini {
         diagnostics.observe_gemini(&parsed);
     }
@@ -1876,18 +1943,29 @@ async fn measure_first_stream_chunk(
 ) -> Result<(u64, String), String> {
     let mut buf = Vec::new();
     let mut diagnostics = StreamProbeDiagnostics::default();
+    let mut event_name: Option<String> = None;
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream read error: {}", e.without_url()))?;
         diagnostics.bytes_received += chunk.len();
         buf.extend_from_slice(&chunk);
 
         while let Some(line) = drain_next_stream_line(&mut buf)? {
+            if line.trim().is_empty() {
+                event_name = None;
+                continue;
+            }
+            if let Some(name) = stream_event_name(&line) {
+                event_name = Some(name.to_string());
+                continue;
+            }
             let Some(data) = stream_data_payload(&line) else { continue };
             if data == "[DONE]" {
                 diagnostics.data_events += 1;
                 return Err(diagnostics.empty_stream_error(is_gemini));
             }
-            if let Some(text) = probe_stream_payload(data, is_claude, is_gemini, &mut diagnostics)? {
+            if let Some(text) =
+                probe_stream_payload(data, event_name.as_deref(), is_claude, is_gemini, &mut diagnostics)?
+            {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
             }
@@ -1897,7 +1975,9 @@ async fn measure_first_stream_chunk(
     if !buf.is_empty() {
         let line = String::from_utf8(buf).map_err(|e| format!("AI stream returned invalid UTF-8: {e}"))?;
         if let Some(data) = stream_data_payload(&line) {
-            if let Some(text) = probe_stream_payload(data, is_claude, is_gemini, &mut diagnostics)? {
+            if let Some(text) =
+                probe_stream_payload(data, event_name.as_deref(), is_claude, is_gemini, &mut diagnostics)?
+            {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
             }
@@ -1936,6 +2016,19 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     if matches!(config.provider, AiProvider::PiAgentCli) {
         return crate::ai_pi_agent_cli::test_pi_agent_connection(config).await;
     }
+    let mut resolved_config = config.clone();
+    if resolved_config.model.trim().is_empty() {
+        let model = list_models_core(&resolved_config)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                "[modelDiscoveryUnsupported] Model discovery returned no models. Save the provider and enter a model ID manually."
+                    .to_string()
+            })?;
+        resolved_config.model = model.id;
+    }
+    let config = &resolved_config;
     validate_config(config)?;
 
     let client = build_ai_http_client(config, 15)?;
@@ -1962,99 +2055,80 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
         async move {
             let start = std::time::Instant::now();
 
-            let byte_stream = match provider {
-                AiProvider::Claude => {
-                    let body = json!({
-                        "model": claude_http_model(&model),
-                        "max_tokens": 16,
-                        "system": CLAUDE_DEFAULT_SYSTEM,
-                        "messages": [{ "role": "user", "content": TEST_PROMPT }],
-                        "stream": true,
-                    });
-                    let headers = claude_headers(&config_inner)?;
-                    let res = client
-                        .post(&endpoint)
-                        .headers(headers)
-                        .json(&body)
-                        .send()
-                        .await
-                        .map_err(|e| format!("Claude request failed: {e}"))?;
-                    if !res.status().is_success() {
-                        return Err(categorized_http_error(res, "Claude", &api_key).await);
-                    }
-                    res.bytes_stream()
+            let byte_stream = if is_claude {
+                let body = json!({
+                    "model": claude_http_model(&model),
+                    "max_tokens": 16,
+                    "system": CLAUDE_DEFAULT_SYSTEM,
+                    "messages": [{ "role": "user", "content": TEST_PROMPT }],
+                    "stream": true,
+                });
+                let headers = claude_headers(&config_inner)?;
+                let res = client
+                    .post(&endpoint)
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Claude request failed: {e}"))?;
+                if !res.status().is_success() {
+                    return Err(categorized_http_error(res, "Claude", &api_key).await);
                 }
-                AiProvider::Gemini => {
-                    let res = client
-                        .post(&gemini_ep)
-                        .header(CONTENT_TYPE, "application/json")
-                        .query(&[("key", api_key.as_str()), ("alt", "sse")])
-                        .json(&json!({
-                            "contents": [{ "parts": [{ "text": TEST_PROMPT }], "role": "user" }],
-                            "generationConfig": { "maxOutputTokens": 256 },
-                        }))
-                        .send()
-                        .await
-                        .map_err(|e| format_transport_error("Gemini", e))?;
-                    if !res.status().is_success() {
-                        return Err(categorized_http_error(res, "Gemini", &api_key).await);
+                res.bytes_stream()
+            } else {
+                match provider {
+                    AiProvider::Gemini => {
+                        let res = client
+                            .post(&gemini_ep)
+                            .header(CONTENT_TYPE, "application/json")
+                            .query(&[("key", api_key.as_str()), ("alt", "sse")])
+                            .json(&json!({
+                                "contents": [{ "parts": [{ "text": TEST_PROMPT }], "role": "user" }],
+                                "generationConfig": { "maxOutputTokens": 256 },
+                            }))
+                            .send()
+                            .await
+                            .map_err(|e| format_transport_error("Gemini", e))?;
+                        if !res.status().is_success() {
+                            return Err(categorized_http_error(res, "Gemini", &api_key).await);
+                        }
+                        res.bytes_stream()
                     }
-                    res.bytes_stream()
-                }
-                AiProvider::Custom if is_claude => {
-                    let body = json!({
-                        "model": claude_http_model(&model),
-                        "max_tokens": 16,
-                        "system": CLAUDE_DEFAULT_SYSTEM,
-                        "messages": [{ "role": "user", "content": TEST_PROMPT }],
-                        "stream": true,
-                    });
-                    let headers = claude_headers(&config_inner)?;
-                    let res = client
-                        .post(&endpoint)
-                        .headers(headers)
-                        .json(&body)
-                        .send()
-                        .await
-                        .map_err(|e| format!("Claude request failed: {e}"))?;
-                    if !res.status().is_success() {
-                        return Err(categorized_http_error(res, "Claude", &api_key).await);
+                    AiProvider::Claude | AiProvider::AnthropicCompatible => unreachable!(),
+                    _ => {
+                        let mut body_obj = if api_style == AiApiStyle::Responses {
+                            json!({
+                                "model": &model,
+                                "input": [{ "role": "user", "content": TEST_PROMPT }],
+                                "max_output_tokens": 16,
+                                "stream": true,
+                            })
+                        } else {
+                            let messages = vec![json!({ "role": "user", "content": TEST_PROMPT })];
+                            let mut body = json!({
+                                "model": &model,
+                                "messages": messages,
+                                "stream": true,
+                            });
+                            set_chat_completion_token_limit(&mut body, &config_inner, 16);
+                            body
+                        };
+                        if api_style != AiApiStyle::Responses {
+                            apply_chat_completion_thinking_toggle(&mut body_obj, &config_inner);
+                        }
+                        let headers = maybe_bearer_headers(&config_inner)?;
+                        let res = client
+                            .post(&endpoint)
+                            .headers(headers)
+                            .json(&body_obj)
+                            .send()
+                            .await
+                            .map_err(|e| format!("AI request failed: {e}"))?;
+                        if !res.status().is_success() {
+                            return Err(categorized_http_error(res, "AI", &api_key).await);
+                        }
+                        res.bytes_stream()
                     }
-                    res.bytes_stream()
-                }
-                _ => {
-                    let mut body_obj = if api_style == AiApiStyle::Responses {
-                        json!({
-                            "model": &model,
-                            "input": [{ "role": "user", "content": TEST_PROMPT }],
-                            "max_output_tokens": 16,
-                            "stream": true,
-                        })
-                    } else {
-                        let messages = vec![json!({ "role": "user", "content": TEST_PROMPT })];
-                        let mut body = json!({
-                            "model": &model,
-                            "messages": messages,
-                            "stream": true,
-                        });
-                        set_chat_completion_token_limit(&mut body, &config_inner, 16);
-                        body
-                    };
-                    if api_style != AiApiStyle::Responses {
-                        apply_chat_completion_thinking_toggle(&mut body_obj, &config_inner);
-                    }
-                    let headers = maybe_bearer_headers(&config_inner)?;
-                    let res = client
-                        .post(&endpoint)
-                        .headers(headers)
-                        .json(&body_obj)
-                        .send()
-                        .await
-                        .map_err(|e| format!("AI request failed: {e}"))?;
-                    if !res.status().is_success() {
-                        return Err(categorized_http_error(res, "AI", &api_key).await);
-                    }
-                    res.bytes_stream()
                 }
             };
 
@@ -2068,7 +2142,12 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 }),
                 Err(e) => {
                     let category = classify_error(&e);
-                    Err(format!("[{category}] {e}"))
+                    let category_prefix = format!("[{category}]");
+                    if e.starts_with(&category_prefix) {
+                        Err(e)
+                    } else {
+                        Err(format!("{category_prefix} {e}"))
+                    }
                 }
             }
         }
@@ -2088,6 +2167,8 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("incorrect api key")
         || lower.contains("api key not valid")
         || lower.contains("api_key_invalid")
+        || lower.contains("authentication_error")
+        || lower.contains("permission_error")
     {
         "auth"
     } else if lower.contains("404")
@@ -2095,6 +2176,7 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("model not found")
         || lower.contains("model does not exist")
         || lower.contains("not supported for generatecontent")
+        || lower.contains("not_found_error")
     {
         "modelNotFound"
     } else if lower.contains("429")
@@ -2102,11 +2184,15 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("too many requests")
         || lower.contains("resource_exhausted")
         || lower.contains("quota exceeded")
+        || lower.contains("rate_limit_error")
     {
         "rateLimit"
     } else if lower.contains("timeout") || lower.contains("timed out") || lower.contains("504") {
         "timeout"
-    } else if lower.contains("finishreason=max_tokens") || lower.contains("thinking tokens") {
+    } else if lower.contains("finishreason=max_tokens")
+        || lower.contains("thinking tokens")
+        || lower.contains("request_too_large")
+    {
         "tokenLimit"
     } else if lower.contains("safety filter") || lower.contains("prompt was blocked") {
         "safety"
@@ -2121,6 +2207,8 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("resolve")
         || lower.contains("502")
         || lower.contains("503")
+        || lower.contains("api_error")
+        || lower.contains("overloaded_error")
     {
         "network"
     } else {
@@ -2294,8 +2382,11 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
         let client = client.clone();
         let request = request.clone();
         async move {
+            if uses_anthropic_messages_api(&request.config) {
+                return call_claude(&client, request).await;
+            }
+
             match request.config.provider {
-                AiProvider::Claude => call_claude(&client, request).await,
                 AiProvider::Gemini => call_gemini(&client, request).await,
                 AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
                 AiProvider::Openai
@@ -2310,14 +2401,13 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
                     }
                 }
                 AiProvider::Custom => {
-                    if uses_anthropic_messages_api(&request.config) {
-                        call_claude(&client, request).await
-                    } else if request.config.api_style == AiApiStyle::Responses {
+                    if request.config.api_style == AiApiStyle::Responses {
                         call_responses_api(&client, request).await
                     } else {
                         call_openai_compatible(&client, request).await
                     }
                 }
+                AiProvider::Claude | AiProvider::AnthropicCompatible => unreachable!(),
             }
         }
     })
@@ -2343,8 +2433,11 @@ pub async fn stream(
     let stream_timeout = if runtime_thinking_enabled(&request.config) { 600 } else { 120 };
     let client = build_ai_http_client(&request.config, stream_timeout)?;
 
+    if uses_anthropic_messages_api(&request.config) {
+        return stream_claude(&client, session_id, request, cancelled, &on_chunk).await;
+    }
+
     match request.config.provider {
-        AiProvider::Claude => stream_claude(&client, session_id, request, cancelled, &on_chunk).await,
         AiProvider::Gemini => stream_gemini(&client, session_id, request, cancelled, &on_chunk).await,
         AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::PiAgentCli => unreachable!(),
         AiProvider::Openai
@@ -2359,14 +2452,13 @@ pub async fn stream(
             }
         }
         AiProvider::Custom => {
-            if uses_anthropic_messages_api(&request.config) {
-                stream_claude(&client, session_id, request, cancelled, &on_chunk).await
-            } else if request.config.api_style == AiApiStyle::Responses {
+            if request.config.api_style == AiApiStyle::Responses {
                 stream_responses_api(&client, session_id, request, cancelled, &on_chunk).await
             } else {
                 stream_openai(&client, session_id, request, cancelled, &on_chunk).await
             }
         }
+        AiProvider::Claude | AiProvider::AnthropicCompatible => unreachable!(),
     }
 }
 
@@ -2411,6 +2503,7 @@ async fn stream_claude(
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
+            let mut event_name: Option<String> = None;
 
             loop {
                 tokio::select! {
@@ -2421,6 +2514,14 @@ async fn stream_claude(
 
                         let mut finished = false;
                         while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            if line.trim().is_empty() {
+                                event_name = None;
+                                continue;
+                            }
+                            if let Some(name) = stream_event_name(&line) {
+                                event_name = Some(name.to_string());
+                                continue;
+                            }
                             let Some(data) = stream_data_payload(&line) else { continue };
                             if data == "[DONE]" {
                                 finished = true;
@@ -2428,6 +2529,9 @@ async fn stream_claude(
                             }
 
                             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event) {
+                                    return Err(error);
+                                }
                                 if let Some(text) = claude_stream_text(&event) {
                                     emitted.store(true, std::sync::atomic::Ordering::Relaxed);
                                     on_chunk(AiStreamChunk {
@@ -2948,6 +3052,7 @@ async fn stream_claude_with_tools(
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
+            let mut event_name: Option<String> = None;
             // Track the current content block index and type for tool_use blocks
             let mut current_block_index: Option<u32> = None;
             let mut current_block_type: Option<String> = None;
@@ -2962,6 +3067,14 @@ async fn stream_claude_with_tools(
 
                         let mut finished = false;
                         while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            if line.trim().is_empty() {
+                                event_name = None;
+                                continue;
+                            }
+                            if let Some(name) = stream_event_name(&line) {
+                                event_name = Some(name.to_string());
+                                continue;
+                            }
                             let Some(data) = stream_data_payload(&line) else { continue };
                             if data == "[DONE]" {
                                 finished = true;
@@ -2969,6 +3082,9 @@ async fn stream_claude_with_tools(
                             }
 
                             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event) {
+                                    return Err(error);
+                                }
                                 let event_type = event["type"].as_str().unwrap_or("");
 
                                 match event_type {
@@ -3585,36 +3701,31 @@ pub async fn stream_with_tools(
 
     let accumulator = Arc::new(std::sync::Mutex::new(StreamingToolCallAccumulator::new()));
 
-    let token_usage = match config.provider {
-        AiProvider::Claude => {
-            stream_claude_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
-        }
-        AiProvider::Gemini => {
-            stream_gemini_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
-        }
-        AiProvider::Custom if uses_anthropic_messages_api(config) => {
-            stream_claude_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
-        }
-        _ if config.api_style == AiApiStyle::Responses => {
-            stream_responses_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
-        }
-        _ => {
-            stream_openai_with_tools(&client, session_id, request, tools, cancelled, &|event| {
-                accumulator.lock().unwrap().process(event, &on_chunk);
-            })
-            .await?
+    let token_usage = if uses_anthropic_messages_api(config) {
+        stream_claude_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+            accumulator.lock().unwrap().process(event, &on_chunk);
+        })
+        .await?
+    } else {
+        match config.provider {
+            AiProvider::Gemini => {
+                stream_gemini_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+                    accumulator.lock().unwrap().process(event, &on_chunk);
+                })
+                .await?
+            }
+            _ if config.api_style == AiApiStyle::Responses => {
+                stream_responses_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+                    accumulator.lock().unwrap().process(event, &on_chunk);
+                })
+                .await?
+            }
+            _ => {
+                stream_openai_with_tools(&client, session_id, request, tools, cancelled, &|event| {
+                    accumulator.lock().unwrap().process(event, &on_chunk);
+                })
+                .await?
+            }
         }
     };
 
@@ -3687,21 +3798,21 @@ mod tests {
 
     use super::{
         apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
-        build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt,
+        build_responses_input_with_tools, call_claude, classify_error, claude_headers, claude_system_prompt, complete,
         drain_next_stream_line, emit_gemini_tool_call_part, emit_responses_function_call_item, format_transport_error,
-        gemini_text, is_kimi_model, is_retryable_error, maybe_bearer_headers, maybe_tag_retry_after,
+        gemini_text, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers, maybe_tag_retry_after,
         measure_first_stream_chunk, merge_global_max_retries, ollama_selected_model_tool_support, openai_response_text,
         openai_stream_reasoning, openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
         parse_model_list_response, parse_retry_after, parse_retry_after_secs, resolve_endpoint,
         resolve_gemini_stream_endpoint, resolve_model_effort_core, resolve_model_list_endpoint,
         resolve_ollama_show_endpoint, responses_function_tool, responses_max_output_tokens, responses_stream_text,
         responses_text, responses_token_usage, retain_ollama_completion_models, retry_after_secs,
-        set_chat_completion_token_limit, stream_claude, stream_claude_with_tools, stream_data_payload, stream_error,
-        stream_openai_with_tools, test_connection_core, uses_anthropic_messages_api, validate_config,
-        validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAuthMethod, AiCapabilitySource,
-        AiCompletionRequest, AiConfig, AiEffortCapability, AiEffortOption, AiEffortSelection, AiMessage, AiModelInfo,
-        AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION,
-        CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        set_chat_completion_token_limit, stream, stream_claude, stream_claude_with_tools, stream_data_payload,
+        stream_error, stream_openai_with_tools, stream_with_tools, test_connection_core, uses_anthropic_messages_api,
+        validate_config, validate_model_list_config, with_retry, with_stream_retry, AiApiStyle, AiAuthMethod,
+        AiCapabilitySource, AiCompletionRequest, AiConfig, AiEffortCapability, AiEffortOption, AiEffortSelection,
+        AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator,
+        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
 
     struct CapturedJsonRequest {
@@ -3785,6 +3896,131 @@ mod tests {
         (format!("http://{address}/test"), server)
     }
 
+    async fn spawn_get_response_server(
+        status: &'static str,
+        response_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+
+        (format!("http://{address}"), server)
+    }
+
+    async fn spawn_paginated_model_server() -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let responses = [
+                r#"{"data":[{"id":"vendor/first"},{"id":"vendor/shared"}],"has_more":true,"last_id":"cursor-1"}"#,
+                r#"{"data":[{"id":"vendor/shared"},{"id":"vendor/second"}],"has_more":false,"last_id":"vendor/second"}"#,
+            ];
+            let mut requests = Vec::new();
+
+            for response_body in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let bytes_read = socket.read(&mut chunk).await.unwrap();
+                    assert!(bytes_read > 0, "request ended before headers were complete");
+                    request.extend_from_slice(&chunk[..bytes_read]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+
+            requests
+        });
+
+        (format!("http://{address}"), server)
+    }
+
+    async fn spawn_model_discovery_and_stream_server() -> (String, tokio::task::JoinHandle<CapturedJsonRequest>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or_default();
+            while request.len() < header_end + content_length {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before body was complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            (headers, request[header_end..header_end + content_length].to_vec())
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut model_socket, _) = listener.accept().await.unwrap();
+            let (model_headers, _) = read_request(&mut model_socket).await;
+            assert!(model_headers.starts_with("GET /v1/models "));
+            let model_body = r#"{"data":[{"id":"discovered-model"}]}"#;
+            let model_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{model_body}",
+                model_body.len()
+            );
+            model_socket.write_all(model_response.as_bytes()).await.unwrap();
+
+            let (mut stream_socket, _) = listener.accept().await.unwrap();
+            let (stream_headers, stream_body) = read_request(&mut stream_socket).await;
+            assert!(stream_headers.starts_with("POST /v1/messages "));
+            let stream_response_body =
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n";
+            let stream_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{stream_response_body}",
+                stream_response_body.len()
+            );
+            stream_socket.write_all(stream_response.as_bytes()).await.unwrap();
+
+            CapturedJsonRequest { headers: stream_headers, body: serde_json::from_slice(&stream_body).unwrap() }
+        });
+
+        (format!("http://{address}"), server)
+    }
+
     fn claude_http_test_request(endpoint: String) -> AiCompletionRequest {
         AiCompletionRequest {
             config: AiConfig {
@@ -3821,6 +4057,15 @@ mod tests {
         }
     }
 
+    fn anthropic_compatible_test_request(endpoint: String) -> AiCompletionRequest {
+        let mut request = claude_http_test_request(endpoint);
+        request.config.provider = AiProvider::AnthropicCompatible;
+        request.config.auth_method = AiAuthMethod::Bearer;
+        request.config.api_style = AiApiStyle::AnthropicMessages;
+        request.config.model = "gateway-model".to_string();
+        request
+    }
+
     fn assert_claude_http_request(captured: CapturedJsonRequest) {
         assert_eq!(captured.body["model"], "claude-sonnet-4-6");
         assert!(!captured.headers.to_ascii_lowercase().contains("anthropic-beta:"));
@@ -3835,6 +4080,170 @@ mod tests {
 
         assert_eq!(call_claude(&client, request).await.unwrap(), "ok");
         assert_claude_http_request(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_completion_uses_messages_runtime_and_bearer_auth() {
+        let (endpoint, server) =
+            spawn_json_capture_server("application/json", r#"{"content":[{"type":"text","text":"compatible"}]}"#).await;
+        let request = anthropic_compatible_test_request(endpoint);
+
+        assert_eq!(complete(&request).await.unwrap(), "compatible");
+
+        let captured = server.await.unwrap();
+        let headers = captured.headers.to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer secret"));
+        assert!(headers.contains("anthropic-version: 2023-06-01"));
+        assert!(!headers.contains("x-api-key:"));
+        assert_eq!(captured.body["model"], "gateway-model");
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_connection_test_uses_anthropic_sse_and_api_key_auth() {
+        let response = concat!(
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut config = anthropic_compatible_test_request(endpoint).config;
+        config.auth_method = AiAuthMethod::ApiKey;
+
+        let result = test_connection_core(&config).await.unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.model_used, "gateway-model");
+        let captured = server.await.unwrap();
+        let headers = captured.headers.to_ascii_lowercase();
+        assert!(headers.contains("x-api-key: secret"));
+        assert!(!headers.contains("authorization: bearer"));
+        assert_eq!(captured.body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_connection_test_surfaces_stream_error_once() {
+        let response = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut config = anthropic_compatible_test_request(endpoint).config;
+        config.max_retries = Some(0);
+
+        let error = test_connection_core(&config).await.unwrap_err();
+
+        assert!(error.starts_with("[network] Anthropic stream error"));
+        assert_eq!(error.matches("[network]").count(), 1);
+        assert!(error.contains("overloaded_error: Overloaded"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_connection_test_discovers_a_model_before_messages() {
+        let (endpoint, server) = spawn_model_discovery_and_stream_server().await;
+        let mut config = anthropic_compatible_test_request(endpoint).config;
+        config.model.clear();
+
+        let result = test_connection_core(&config).await.unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.model_used, "discovered-model");
+        let captured = server.await.unwrap();
+        assert_eq!(captured.body["model"], "discovered-model");
+        assert_eq!(captured.body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_stream_reuses_anthropic_event_parsing() {
+        let response = concat!(
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"compatible stream\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let request = anthropic_compatible_test_request(endpoint);
+        let chunks = RefCell::new(Vec::new());
+
+        stream("compatible-session", &request, &Notify::new(), |chunk| chunks.borrow_mut().push(chunk)).await.unwrap();
+
+        let chunks = chunks.into_inner();
+        assert_eq!(chunks[0].delta, "compatible stream");
+        assert!(!chunks[0].done);
+        assert!(chunks.last().unwrap().done);
+        let captured = server.await.unwrap();
+        assert_eq!(captured.body["model"], "gateway-model");
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_stream_surfaces_sse_error_event() {
+        let response = concat!(
+            "event: error\n",
+            "data: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Too many requests\"}}\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut request = anthropic_compatible_test_request(endpoint);
+        request.config.max_retries = Some(0);
+        let chunks = RefCell::new(Vec::new());
+
+        let error = stream("compatible-session", &request, &Notify::new(), |chunk| chunks.borrow_mut().push(chunk))
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with("[rateLimit]"));
+        assert!(error.contains("rate_limit_error: Too many requests"));
+        assert!(chunks.into_inner().is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_tool_stream_reuses_anthropic_tool_events() {
+        let response = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":4}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"get_tables\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"schema\\\":\\\"public\\\"}\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":6}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let request = anthropic_compatible_test_request(endpoint);
+        let tools = [crate::agent_events::ToolDefinition {
+            name: "get_tables",
+            description: "List tables",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "schema": { "type": "string" } }
+            }),
+            read_only: true,
+            parallel_ok: true,
+        }];
+
+        let (calls, usage) =
+            stream_with_tools(&request.config, &request, "compatible-session", &tools, &Notify::new(), |_| {})
+                .await
+                .unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "tool-1");
+        assert_eq!(calls[0].name, "get_tables");
+        assert_eq!(calls[0].arguments["schema"], "public");
+        assert_eq!(usage.unwrap().input_tokens, 4);
+        assert_eq!(server.await.unwrap().body["tools"][0]["name"], "get_tables");
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_tool_stream_surfaces_json_error_event() {
+        let response =
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}\n\n";
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut request = anthropic_compatible_test_request(endpoint);
+        request.config.max_retries = Some(0);
+
+        let error = stream_with_tools(&request.config, &request, "compatible-session", &[], &Notify::new(), |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with("[auth]"));
+        assert!(error.contains("authentication_error: invalid x-api-key"));
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -4276,7 +4685,9 @@ mod tests {
             pi_agent_cli_env: Default::default(),
         };
 
-        for provider in [AiProvider::Ollama, AiProvider::OpenaiCompatible, AiProvider::Custom] {
+        for provider in
+            [AiProvider::Ollama, AiProvider::AnthropicCompatible, AiProvider::OpenaiCompatible, AiProvider::Custom]
+        {
             let config = AiConfig { provider, ..base.clone() };
             assert!(validate_config(&config).is_ok());
             assert!(validate_model_list_config(&config).is_ok());
@@ -4391,6 +4802,35 @@ mod tests {
         };
         assert_eq!(resolve_endpoint(&kimi_coding), "https://api.kimi.com/coding/v1/messages");
         assert_eq!(resolve_model_list_endpoint(&kimi_coding).unwrap(), "https://api.kimi.com/coding/v1/models");
+    }
+
+    #[test]
+    fn anthropic_compatible_provider_uses_fixed_messages_endpoints_and_round_trips() {
+        let config = anthropic_compatible_test_request("https://gateway.example.com".to_string()).config;
+
+        assert!(uses_anthropic_messages_api(&config));
+        assert_eq!(resolve_endpoint(&config), "https://gateway.example.com/v1/messages");
+        assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://gateway.example.com/v1/models");
+
+        let v1 = AiConfig { endpoint: "https://gateway.example.com/v1".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&v1), "https://gateway.example.com/v1/messages");
+
+        let nested =
+            AiConfig { endpoint: "https://gateway.example.com/anthropic/v1/messages".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&nested), "https://gateway.example.com/anthropic/v1/messages");
+        assert_eq!(resolve_model_list_endpoint(&nested).unwrap(), "https://gateway.example.com/anthropic/v1/models");
+
+        let dashscope =
+            AiConfig { endpoint: "https://dashscope-intl.aliyuncs.com/apps/anthropic".to_string(), ..config.clone() };
+        assert_eq!(resolve_endpoint(&dashscope), "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/messages");
+        assert_eq!(
+            resolve_model_list_endpoint(&dashscope).unwrap(),
+            "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/models"
+        );
+
+        let provider_json = serde_json::to_string(&AiProvider::AnthropicCompatible).unwrap();
+        assert_eq!(provider_json, r#""anthropic-compatible""#);
+        assert!(matches!(serde_json::from_str::<AiProvider>(&provider_json).unwrap(), AiProvider::AnthropicCompatible));
     }
 
     #[test]
@@ -5112,6 +5552,84 @@ mod tests {
 
         assert_eq!(error, "invalid x-api-key");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_lists_unknown_models_without_filtering() {
+        let response_body = r#"{"data":[{"id":"vendor/future-model","display_name":"Future Model","capabilities":{"effort":{"low":{"supported":true},"high":{"supported":true}}}}]}"#;
+        let (origin, server) = spawn_get_response_server("200 OK", response_body).await;
+        let config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+
+        let models = list_models_core(&config).await.unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "vendor/future-model");
+        assert_eq!(models[0].display_name.as_deref(), Some("Future Model"));
+        assert!(matches!(
+            models[0].effort_capability,
+            Some(AiEffortCapability::FreeText { source: AiCapabilitySource::Custom, .. })
+        ));
+        let request = server.await.unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("get /v1/models "));
+        assert!(request.contains("authorization: bearer secret"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_model_list_paginates_and_deduplicates() {
+        let (origin, server) = spawn_paginated_model_server().await;
+        let config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+
+        let models = list_models_core(&config).await.unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["vendor/first", "vendor/shared", "vendor/second",]
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /v1/models "));
+        assert!(requests[1].starts_with("GET /v1/models?after_id=cursor-1 "));
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_model_list_uses_free_text_effort() {
+        let response_body = r#"{"data":[{"id":"vendor/future-model","display_name":"Future Model"}]}"#;
+        let (origin, server) = spawn_get_response_server("200 OK", response_body).await;
+        let config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+
+        let models = list_models_core(&config).await.unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "vendor/future-model");
+        assert!(matches!(
+            models[0].effort_capability,
+            Some(AiEffortCapability::FreeText { source: AiCapabilitySource::Custom, .. })
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_reports_optional_model_discovery_as_unsupported() {
+        let (origin, server) = spawn_get_response_server("404 Not Found", "<html>not found</html>").await;
+        let mut config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+        config.model.clear();
+
+        let error = test_connection_core(&config).await.unwrap_err();
+
+        assert!(error.starts_with("[modelDiscoveryUnsupported]"));
+        assert!(error.contains("/v1/models"));
+        assert!(error.contains("enter a model ID manually"));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("GET /v1/models "));
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_effort_is_free_text_without_model_detail_request() {
+        let config = anthropic_compatible_test_request("http://127.0.0.1:1/v1/messages".to_string()).config;
+
+        let capability = resolve_model_effort_core(&config, "vendor/model").await.unwrap();
+
+        assert!(matches!(capability, AiEffortCapability::FreeText { source: AiCapabilitySource::Custom, .. }));
     }
 
     #[test]
@@ -5883,6 +6401,7 @@ mod tests {
     fn merge_global_max_retries_sets_for_api_providers() {
         for provider in &[
             AiProvider::Claude,
+            AiProvider::AnthropicCompatible,
             AiProvider::Openai,
             AiProvider::OpenaiCompatible,
             AiProvider::Custom,

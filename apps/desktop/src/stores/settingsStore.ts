@@ -180,6 +180,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "anthropic-compatible": {
+    label: "Anthropic Compatible",
+    iconSlug: "anthropic",
+    provider: "anthropic-compatible",
+    endpoint: "",
+    model: "",
+    apiStyle: "anthropic-messages",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "openai-compatible": {
     label: "OpenAI Compatible",
     iconSlug: "openai",
@@ -465,7 +475,10 @@ export interface EditorSettings {
   sidebarActivation: SidebarActivation;
   sidebarConnectionSortMode: ConnectionListSortMode;
   sidebarObjectDisplay: "grouped" | "simple";
+  routineSourceOpenMode: "query-tab" | "dialog";
   sidebarTableSearchEnabled: boolean;
+  sidebarTableSearchLocal: boolean;
+  sidebarGlobalSearchLocal: boolean;
   autoSelectActiveSidebarNode: boolean;
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
@@ -637,7 +650,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarActivation: "single",
   sidebarConnectionSortMode: "manual",
   sidebarObjectDisplay: "grouped",
+  routineSourceOpenMode: "query-tab",
   sidebarTableSearchEnabled: false,
+  sidebarTableSearchLocal: true,
+  sidebarGlobalSearchLocal: false,
   autoSelectActiveSidebarNode: false,
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
@@ -936,7 +952,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
+    routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
+    sidebarTableSearchLocal: typeof settings.sidebarTableSearchLocal === "boolean" ? settings.sidebarTableSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal,
+    sidebarGlobalSearchLocal: typeof settings.sidebarGlobalSearchLocal === "boolean" ? settings.sidebarGlobalSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
     openTabsRestoreMode: normalizeOpenTabsRestoreMode(
       (settings as Partial<EditorSettings>).openTabsRestoreMode,
@@ -1414,7 +1433,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
+    if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
+    if (partial.sidebarTableSearchLocal !== undefined) editorSettings.value.sidebarTableSearchLocal = partial.sidebarTableSearchLocal;
+    if (partial.sidebarGlobalSearchLocal !== undefined) editorSettings.value.sidebarGlobalSearchLocal = partial.sidebarGlobalSearchLocal;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);

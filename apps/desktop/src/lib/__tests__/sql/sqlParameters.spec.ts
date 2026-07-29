@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { extractSqlParameterDescriptors, extractSqlParameters, sqlParameterLiteral, substituteSqlParameters } from "@/lib/sql/sqlParameters";
+import { extractSqlParameterDescriptors, extractSqlParameters, readSqlBracedParameterAt, sqlParameterLiteral, substituteSqlParameters } from "@/lib/sql/sqlParameters";
 
 describe("extractSqlParameters", () => {
+  it("shares strict braced-placeholder validation", () => {
+    expect(readSqlBracedParameterAt("#{month}", 0)?.name).toBe("month");
+    expect(readSqlBracedParameterAt("#{1month}", 0)).toBeNull();
+    expect(readSqlBracedParameterAt("#{month", 0)).toBeNull();
+    expect(readSqlBracedParameterAt("#{month}", 0, { enabledSyntaxes: ["shell"] })).toBeNull();
+  });
+
   it("extracts unique template parameters in order", () => {
     const sql = "select * from t where pt_dt between ${start_date} and ${end_date} or pt_dt = ${start_date}";
     expect(extractSqlParameters(sql)).toEqual(["start_date", "end_date"]);

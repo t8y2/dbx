@@ -8,11 +8,14 @@ use futures::{FutureExt, TryStreamExt};
 use sqlparser::ast::{Expr, Ident, SelectItem, SetExpr, Statement};
 use sqlparser::dialect::MsSqlDialect;
 use sqlparser::parser::Parser;
+use std::borrow::Cow;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tiberius::{AuthMethod, Client, ColumnData, ColumnType, Config, FromSql, QueryItem, QueryStream, Row, SqlBrowser};
+use tiberius::{
+    AuthMethod, Client, ColumnData, ColumnType, Config, FromSql, QueryItem, QueryStream, Row, SqlBrowser, TokenRow,
+};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
@@ -2084,6 +2087,57 @@ pub async fn execute_query(client: &mut SqlServerClient, sql: &str) -> Result<Qu
     execute_query_with_max_rows(client, sql, None).await
 }
 
+fn sqlserver_bulk_token_row(values: Vec<Option<String>>) -> TokenRow<'static> {
+    let mut row = TokenRow::with_capacity(values.len());
+    for value in values {
+        row.push(ColumnData::String(value.map(Cow::Owned)));
+    }
+    row
+}
+
+pub async fn bulk_insert_text_rows<T, F>(
+    client: &mut SqlServerClient,
+    staging_table: &str,
+    rows: &[T],
+    column_count: usize,
+    mut convert_row: F,
+) -> Result<u64, String>
+where
+    F: FnMut(usize, &T) -> Result<Vec<Option<String>>, String>,
+{
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    if column_count == 0 {
+        return Err("SQL Server bulk load requires at least one mapped column".to_string());
+    }
+
+    let mut request = client
+        .bulk_insert(staging_table)
+        .await
+        .map_err(|error| format!("SQL Server bulk load initialization failed: {error}"))?;
+    for (row_index, source_row) in rows.iter().enumerate() {
+        let row = convert_row(row_index, source_row)?;
+        if row.len() != column_count {
+            return Err(format!(
+                "SQL Server bulk row {} has {} columns; expected {}",
+                row_index + 1,
+                row.len(),
+                column_count
+            ));
+        }
+        request
+            .send(sqlserver_bulk_token_row(row))
+            .await
+            .map_err(|error| format!("SQL Server bulk load send failed: {error}"))?;
+    }
+    request
+        .finalize()
+        .await
+        .map(|result| result.total())
+        .map_err(|error| format!("SQL Server bulk load finalize failed: {error}"))
+}
+
 pub async fn execute_query_with_max_rows(
     client: &mut SqlServerClient,
     sql: &str,
@@ -2336,6 +2390,10 @@ fn contains_transaction_control(sql: &str) -> bool {
 }
 
 fn requires_simple_query_batch(sql: &str) -> bool {
+    if creates_local_temp_table(sql) {
+        return true;
+    }
+
     let tokens = first_sql_tokens(sql, 4);
     if tokens.len() >= 2 && tokens[0].eq_ignore_ascii_case("SET") && tokens[1].eq_ignore_ascii_case("SHOWPLAN_XML") {
         return true;
@@ -2357,6 +2415,22 @@ fn requires_simple_query_batch(sql: &str) -> bool {
     }
 
     false
+}
+
+fn creates_local_temp_table(sql: &str) -> bool {
+    if !sql.as_bytes().contains(&b'#') {
+        return false;
+    }
+
+    let Ok(statements) = Parser::parse_sql(&MsSqlDialect {}, sql) else {
+        return false;
+    };
+    statements.iter().any(|statement| {
+        let Statement::CreateTable(table) = statement else {
+            return false;
+        };
+        table.name.0.last().and_then(|part| part.as_ident()).is_some_and(|identifier| identifier.value.starts_with('#'))
+    })
 }
 
 fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
@@ -2407,7 +2481,7 @@ mod tests {
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, format_sqlserver_numeric,
         is_blocking_sqlserver_unsafe_probe_error, is_sqlserver_spatial_column, is_sqlserver_variant_column,
         query_result_with_server_messages, requires_simple_query_batch, restore_sqlserver_legacy_probe_output_names,
-        sqlserver_batch_can_use_execute, sqlserver_cell_to_json, sqlserver_columns_sql,
+        sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
         sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error,
         sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
         sqlserver_legacy_probe_with_nonce, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
@@ -2422,6 +2496,15 @@ mod tests {
     use chrono::NaiveDate;
     use std::{borrow::Cow, time::Instant};
     use tiberius::{Column, ColumnData, ColumnType, IntoSql};
+
+    #[test]
+    fn sqlserver_bulk_token_row_owns_text_and_preserves_nulls() {
+        let row = sqlserver_bulk_token_row(vec![Some("Tieng Viet".to_string()), None]);
+        let values = row.iter().collect::<Vec<_>>();
+
+        assert!(matches!(&values[0], ColumnData::String(Some(value)) if value.as_ref() == "Tieng Viet"));
+        assert!(matches!(&values[1], ColumnData::String(None)));
+    }
 
     #[tokio::test]
     async fn sqlserver_ignores_non_info_tiberius_events() {
@@ -2586,6 +2669,16 @@ mod tests {
         assert!(!requires_simple_query_batch("ALTER TABLE dbo.t ADD name NVARCHAR(20);"));
         assert!(!requires_simple_query_batch("CREATE TABLE dbo.t(id INT);"));
         assert!(!requires_simple_query_batch("UPDATE dbo.t SET id = 1;"));
+    }
+
+    #[test]
+    fn sqlserver_local_temp_table_creation_keeps_session_scoped_query_path() {
+        assert!(requires_simple_query_batch("CREATE TABLE #stage (id INT);"));
+        assert!(requires_simple_query_batch("CREATE TABLE [#stage] ([id] INT);"));
+        assert!(requires_simple_query_batch(
+            "DECLARE @id INT = 1; CREATE TABLE #stage (id INT); INSERT INTO #stage VALUES (@id);"
+        ));
+        assert!(!requires_simple_query_batch("CREATE TABLE dbo.stage (id INT);"));
     }
 
     #[test]

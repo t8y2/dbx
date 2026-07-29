@@ -98,6 +98,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
 import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
+import { gaussdbIdentifierQuoteStyle, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
 
 type DbOption = { value: string; label: string };
 type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
@@ -450,6 +451,14 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 
 const form = ref(defaultForm());
 const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const showGaussdbIdentifierQuoteStyle = computed(() => supportsGaussdbIdentifierQuoteStyle(form.value));
+const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
+  get: () => gaussdbIdentifierQuoteStyle(form.value),
+  set: (style) => {
+    setGaussdbIdentifierQuoteStyle(form.value, style);
+    resetTestState();
+  },
+});
 
 function resizeNoteTextarea() {
   const textarea = noteTextareaRef.value;
@@ -3220,6 +3229,10 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value);
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
+  } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
+    const style = gaussdbIdentifierQuoteStyle(config);
+    config.external_config = undefined;
+    setGaussdbIdentifierQuoteStyle(config, style);
   } else {
     config.external_config = undefined;
   }
@@ -3254,6 +3267,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.redis_cluster_nodes = undefined;
     config.redis_key_separator = undefined;
     config.redis_scan_page_size = undefined;
+    config.redis_database_aliases = undefined;
   } else if (config.redis_connection_mode === "sentinel") {
     config.redis_sentinel_master = config.redis_sentinel_master?.trim() || "";
     config.redis_sentinel_nodes = normalizeRedisSentinelNodes(config.redis_sentinel_nodes || "");
@@ -6534,6 +6548,22 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="advanced" class="m-0 min-h-0 flex-1 overflow-hidden">
               <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2">
+                <div v-if="showGaussdbIdentifierQuoteStyle" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbIdentifierQuoteStyle") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbQuoteStyle">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">{{ t("connection.gaussdbIdentifierQuoteAuto") }}</SelectItem>
+                        <SelectItem value="double">{{ t("connection.gaussdbIdentifierQuoteDouble") }}</SelectItem>
+                        <SelectItem value="backtick">{{ t("connection.gaussdbIdentifierQuoteBacktick") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbIdentifierQuoteHint") }}</p>
+                  </div>
+                </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
                   <Input v-model.number="form.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" />

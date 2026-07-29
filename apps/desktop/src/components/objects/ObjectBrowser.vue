@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch, type Component } from "vue";
+import { computed, createApp, nextTick, onActivated, onBeforeUnmount, ref, watch, type Component } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -46,6 +46,7 @@ import {
   X,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
+import i18n from "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,10 +54,11 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
+import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
-import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
@@ -79,7 +81,7 @@ import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRe
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
@@ -1142,13 +1144,16 @@ async function openSource(row: ObjectBrowserRow) {
 }
 
 async function openNewQuery(row: ObjectBrowserRow) {
-  const tabId = queryStore.createTab(props.connection.id, props.database, row.name);
+  const schema = row.schema || selectedSchema.value;
+  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
   queryStore.updateSql(
     tabId,
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
-      schema: row.schema || selectedSchema.value,
+      catalog: props.catalog,
+      database: props.database,
+      schema,
       tableName: row.name,
       limit: 100,
     }),
@@ -1165,7 +1170,7 @@ function openProcedureExecutionSql(sql: string) {
   const row = procedureExecutionTarget.value;
   if (!row || !sql) return;
   const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema);
+  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema, undefined, props.catalog);
   queryStore.updateSql(tabId, sql);
 }
 
@@ -1173,7 +1178,7 @@ async function executeProcedureSql(sql: string) {
   const row = procedureExecutionTarget.value;
   if (!row || !sql) return;
   const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema);
+  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema, undefined, props.catalog);
   queryStore.updateSql(tabId, sql);
   await queryStore.executeTabSql(tabId, sql);
 }
@@ -1779,11 +1784,50 @@ async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql")
   await exportDataLegacy(row, format);
 }
 
-async function exportDataXlsx(row: ObjectBrowserRow) {
-  await exportTableData(row, "xlsx");
+function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<boolean | null> {
+  if (!hasComments) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(XlsxHeaderDialog, {
+      open: true,
+      onConfirm: (useCommentHeader: boolean) => {
+        resolve(useCommentHeader);
+        app.unmount();
+        document.body.removeChild(container);
+      },
+      onCancel: () => {
+        resolve(null);
+        app.unmount();
+        document.body.removeChild(container);
+      },
+    });
+    app.use(i18n);
+    app.mount(container);
+  });
 }
 
-async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
+async function exportDataXlsx(row: ObjectBrowserRow) {
+  const schema = row.schema || selectedSchema.value;
+  let useCommentHeader = false;
+  let columnInfos: ColumnInfo[] | undefined;
+
+  try {
+    columnInfos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);
+    const hasComments = columnInfos.some((col) => col.comment && col.comment.trim().length > 0);
+    const result = await showObjectBrowserXlsxHeaderDialog(hasComments);
+    if (result === null) return;
+    useCommentHeader = result;
+  } catch {
+    // Column fetch failed, fallback to export without comments
+    columnInfos = undefined;
+  }
+
+  await exportTableData(row, "xlsx", columnInfos, useCommentHeader);
+}
+
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx", columnInfos?: ColumnInfo[], useCommentHeader = false) {
   const schema = row.schema || selectedSchema.value;
 
   // Save dialog first
@@ -1811,7 +1855,18 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
 
   let task: ExportTask | null = null;
   try {
-    const queryColumns = props.connection.db_type === "neo4j" ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog)).map((column) => column.name) : undefined;
+    let columns: string[] | undefined;
+    let columnComments: (string | null)[] | undefined;
+
+    if (columnInfos) {
+      columns = columnInfos.map((c) => c.name);
+      if (format === "xlsx" && useCommentHeader) {
+        columnComments = columnInfos.map((c) => c.comment ?? null);
+      }
+    } else if (props.connection.db_type === "neo4j") {
+      const infos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);
+      columns = infos.map((c) => c.name);
+    }
 
     task = addExportTask(row.name, format, filePath);
     const currentTask = task;
@@ -1824,7 +1879,8 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx") {
       tableName: row.name,
       filePath,
       format,
-      columns: queryColumns,
+      columns,
+      columnComments: format === "xlsx" ? columnComments : undefined,
       batchSize: settingsStore.editorSettings.exportBatchSize,
       rowLimit,
     };
@@ -1919,8 +1975,17 @@ function normalizedObjectBrowserTableClipboardEntries() {
   if (clipboard?.kind !== "table-copy") return [];
   return clipboard.tables.map((entry) => ({
     ...entry,
-    schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database),
+    schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database, entry.connectionId),
   }));
+}
+
+function canTransferTableClipboard(): boolean {
+  const entries = normalizedObjectBrowserTableClipboardEntries();
+  const target = pasteTableTargetContext();
+  if (entries.length === 0 || props.connection.read_only) return false;
+  const source = tableClipboardSourceContext(entries);
+  const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
+  return !!source && !!sourceConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(props.connection.db_type) && !tableClipboardMatchesTarget(entries, target);
 }
 
 function pasteTableTargetContext(): TableClipboardContext {
@@ -1931,9 +1996,29 @@ function pasteTableTargetContext(): TableClipboardContext {
   };
 }
 
-function normalizeObjectBrowserTableClipboardSchema(schema?: string, database = props.database): string | undefined {
-  if (!isSchemaAware(effectiveDatabaseType.value) && effectiveDatabaseType.value !== "sqlite") return undefined;
-  return connectionObjectTreeNodeSchema(props.connection, database, schema);
+function normalizeObjectBrowserTableClipboardSchema(schema?: string, database = props.database, connectionId = props.connection.id): string | undefined {
+  const connection = connectionStore.getConfig(connectionId) ?? props.connection;
+  if (!isSchemaAware(connection.db_type) && connection.db_type !== "sqlite") return undefined;
+  return connectionObjectTreeNodeSchema(connection, database, schema);
+}
+
+function openTransferFromTableClipboard(): boolean {
+  const clipboard = connectionStore.treeClipboard;
+  const entries = normalizedObjectBrowserTableClipboardEntries();
+  const target = pasteTableTargetContext();
+  if (clipboard?.kind !== "table-copy") return false;
+  const source = tableClipboardSourceContext(entries);
+  if (!source || tableClipboardMatchesTarget(entries, target)) return false;
+  connectionStore.transferSource = {
+    connectionId: source.connectionId,
+    database: source.database,
+    schema: source.schema ?? undefined,
+    tables: clipboard.tables.map((entry) => entry.tableName),
+    targetConnectionId: target.connectionId,
+    targetDatabase: target.database,
+    targetSchema: target.schema ?? undefined,
+  };
+  return true;
 }
 
 function copySingleTableToClipboard(row: ObjectBrowserRow) {
@@ -1953,6 +2038,10 @@ function copySingleTableToClipboard(row: ObjectBrowserRow) {
 
 function openPasteTableDialog() {
   const clipboard = connectionStore.treeClipboard;
+  if (canTransferTableClipboard()) {
+    openTransferFromTableClipboard();
+    return;
+  }
   if (!canPasteTableClipboard() || clipboard?.kind !== "table-copy") {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
@@ -1961,7 +2050,7 @@ function openPasteTableDialog() {
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
     targetName: `${entry.tableName}_copy`,
-    schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database),
+    schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database, entry.connectionId),
   }));
   showPasteDialog.value = true;
 }
@@ -1976,7 +2065,7 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
     return;
   }
   if (eventTargetAllowsAppClipboardShortcut(event, "v")) {
-    if (!canPasteTableClipboard()) return;
+    if (!canPasteTableClipboard() && !canTransferTableClipboard()) return;
     event.preventDefault();
     event.stopPropagation();
     openPasteTableDialog();
@@ -2466,12 +2555,16 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
 }
 
 function objectBrowserTableClipboardMenuState(item: ObjectBrowserRow) {
-  return tableClipboardMenuState(normalizedObjectBrowserTableClipboardEntries(), {
-    connectionId: props.connection.id,
-    database: props.database,
-    schema: normalizeObjectBrowserTableClipboardSchema(item.schema || selectedSchema.value),
-    tableName: item.name,
-  });
+  return tableClipboardMenuState(
+    normalizedObjectBrowserTableClipboardEntries(),
+    {
+      connectionId: props.connection.id,
+      database: props.database,
+      schema: normalizeObjectBrowserTableClipboardSchema(item.schema || selectedSchema.value),
+      tableName: item.name,
+    },
+    canTransferTableClipboard(),
+  );
 }
 
 function tableClipboardMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {

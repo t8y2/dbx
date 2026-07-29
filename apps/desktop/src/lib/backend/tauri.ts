@@ -1021,6 +1021,7 @@ export async function executeQuery(
   executionId?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -1047,6 +1048,7 @@ export async function executeMulti(
   executionId?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -1082,6 +1084,7 @@ export async function executeMultiWithProgress(
   schema?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -1118,20 +1121,22 @@ export async function cancelQuery(executionId: string): Promise<boolean> {
   return invoke("cancel_query", { executionId });
 }
 
-export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string): Promise<boolean> {
+export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
   return invoke("close_query_session", {
     connectionId,
     database,
     sessionId,
     clientSessionId,
+    catalog,
   });
 }
 
-export async function closeClientConnectionSession(connectionId: string, database: string, clientSessionId: string): Promise<boolean> {
+export async function closeClientConnectionSession(connectionId: string, database: string, clientSessionId: string, catalog?: string): Promise<boolean> {
   return invoke("close_client_connection_session", {
     connectionId,
     database,
     clientSessionId,
+    catalog,
   });
 }
 
@@ -1158,17 +1163,18 @@ export async function executeScriptWith2pc(connectionId: string, database: strin
   });
 }
 
-export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
+export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string): Promise<QueryResult> {
   return invoke("execute_in_transaction", {
     connectionId,
     database,
     statements,
     schema,
+    catalog,
   });
 }
 
-export async function beginManualTransaction(connectionId: string, database: string, schema?: string): Promise<string> {
-  return invoke("begin_manual_transaction", { connectionId, database, schema });
+export async function beginManualTransaction(connectionId: string, database: string, schema?: string, catalog?: string): Promise<string> {
+  return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
 export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number): Promise<QueryResult[]> {
@@ -3421,6 +3427,7 @@ export interface TableExportRequest {
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   columns?: string[];
   columnTypes?: Array<string | null | undefined>;
+  columnComments?: Array<string | null> | null;
   primaryKeys?: string[];
   whereInput?: string;
   orderBy?: string;
@@ -3475,6 +3482,7 @@ export interface QueryResultExportRequest {
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
   numericColumnRightAlign?: boolean;
+  columnComments?: Array<string | null> | null;
 }
 
 export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {
@@ -3609,13 +3617,14 @@ export async function exportTableDataCsv(options: TableCsvExportOptions): Promis
   return invoke("export_table_data_csv", { request: options });
 }
 
-export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], rows: readonly (readonly XlsxCellValue[])[], numericColumnRightAlign?: boolean): Promise<void> {
+export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], columnComments: readonly (string | null)[] | undefined, rows: readonly (readonly XlsxCellValue[])[], numericColumnRightAlign?: boolean): Promise<void> {
   return invoke("export_query_result_xlsx", {
     request: {
       filePath,
       sheetName,
       columns,
       columnTypes,
+      columnComments,
       rows,
       numericColumnRightAlign,
     },
@@ -3628,6 +3637,7 @@ export async function exportQueryResultsXlsx(
     sheetName?: string;
     columns: readonly string[];
     columnTypes?: readonly string[];
+    columnComments?: readonly (string | null)[];
     rows: readonly (readonly XlsxCellValue[])[];
     numericColumnRightAlign?: boolean;
   }[],

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const globalsCss = readFileSync(new URL("../globals.css", import.meta.url), "utf8");
 const dialogContentSource = readFileSync(new URL("../../components/ui/dialog/DialogContent.vue", import.meta.url), "utf8");
 const dialogScrollContentSource = readFileSync(new URL("../../components/ui/dialog/DialogScrollContent.vue", import.meta.url), "utf8");
+const dialogOverlaySource = readFileSync(new URL("../../components/ui/dialog/DialogOverlay.vue", import.meta.url), "utf8");
 const connectionDialogSource = readFileSync(new URL("../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 const desktopIndexSource = readFileSync(new URL("../../../index.html", import.meta.url), "utf8");
 const connectionDialogLegacyCss = readFileSync(new URL("../../../public/connection-dialog-legacy.css", import.meta.url), "utf8");
@@ -41,6 +42,11 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(dialogContentSource).toContain("max-h-[calc(var(--dbx-viewport-height)-2rem)]");
     expect(dialogScrollContentSource).toContain("max-h-[calc(var(--dbx-viewport-height)-6rem)]");
     expect(connectionDialogSource).toContain("max-height: calc(var(--dbx-viewport-height) - 2rem);");
+  });
+
+  it("avoids full-window backdrop filters that can blank WebKit after a dialog closes", () => {
+    expect(dialogOverlaySource).not.toContain("backdrop-filter");
+    expect(dialogOverlaySource).toContain("bg-black/10");
   });
 
   it("keeps legacy tab triggers connected to the configured corner style", () => {

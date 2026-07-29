@@ -1,7 +1,12 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
-type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info">>;
+type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
+
+export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
+
+const GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY = "gaussdbIdentifierQuoteStyle";
 
 const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
 
@@ -33,7 +38,9 @@ const JDBC_ASE_PROFILE_PATTERNS = [/(?:^|[\s_-])ase(?:$|[\s_-])/i, /\bsap[\s_-]+
 
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
-  const haystack = [connection.driver_profile, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? [])].filter(Boolean).join("\n");
+  const haystack = [connection.driver_profile, connection.driver_label, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? []), connection.database_info?.productName, connection.database_info?.serverComment, connection.database_info?.driverName]
+    .filter(Boolean)
+    .join("\n");
   if (!haystack) return undefined;
   return JDBC_DIALECT_MATCHERS.find((matcher) => matcher.patterns.some((pattern) => pattern.test(haystack)))?.type;
 }
@@ -54,6 +61,45 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   }
   if (connection.db_type !== "jdbc") return connection.db_type;
   return inferJdbcDialect(connection) ?? "jdbc";
+}
+
+export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConnection | undefined): boolean {
+  if (!connection) return false;
+  if (connection.db_type === "kingbase") return true;
+  if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
+  if (connection.db_type === "gaussdb") return true;
+  if (connection.db_type !== "jdbc") return false;
+  return ["gaussdb", "opengauss", "postgres"].includes(inferJdbcDialect(connection) ?? "");
+}
+
+export function supportsGaussdbIdentifierQuoteStyle(connection: JdbcDialectConnection | undefined): boolean {
+  return effectiveDatabaseTypeForConnection(connection) === "gaussdb";
+}
+
+export function gaussdbIdentifierQuoteStyle(connection: JdbcDialectConnection | undefined): GaussdbIdentifierQuoteStyle {
+  const external = externalConfigRecord(connection?.external_config);
+  const style = external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY];
+  return style === "double" || style === "backtick" ? style : "auto";
+}
+
+export function gaussdbIdentifierQuoteOverride(connection: JdbcDialectConnection | undefined): string | undefined {
+  const style = gaussdbIdentifierQuoteStyle(connection);
+  if (style === "double") return '"';
+  if (style === "backtick") return "`";
+  return undefined;
+}
+
+export function setGaussdbIdentifierQuoteStyle(
+  connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>,
+  style: GaussdbIdentifierQuoteStyle,
+) {
+  const external = externalConfigRecord(connection.external_config);
+  if (style === "auto") {
+    delete external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY];
+  } else {
+    external[GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY] = style;
+  }
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
 }
 
 export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
@@ -125,9 +171,11 @@ export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" 
   return "mysql";
 }
 
-export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): "mysql" | "postgres" | "sqlserver" {
+export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): CodeMirrorSqlDialectName {
   if (isJdbcAseProfile(connection)) return "sqlserver";
-  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connection));
+  const databaseType = effectiveDatabaseTypeForConnection(connection);
+  if (databaseType === "clickhouse") return "clickhouse";
+  return codeMirrorSqlDialect(databaseType);
 }
 
 function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {
@@ -138,4 +186,8 @@ function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {
 
 function isGbase8sProfile(driverProfile?: string): boolean {
   return driverProfile === "gbase8s";
+}
+
+function externalConfigRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
 }

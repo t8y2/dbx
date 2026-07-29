@@ -55,7 +55,6 @@ import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
-  aiListModels,
   aiTestConnection,
   checkMcpServerStatus,
   installMcpServer,
@@ -376,6 +375,7 @@ const editingShortcutId = ref<ShortcutActionId | null>(null);
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
+const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
@@ -479,6 +479,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
@@ -743,6 +744,7 @@ function syncEditorSettingsDraftFromStore() {
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+  editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
@@ -821,6 +823,7 @@ const formatterEditorShortcutIds: ShortcutActionId[] = [
   "selectAll",
   "uppercaseSelection",
   "lowercaseSelection",
+  "toggleFold",
 ];
 const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcutIds.map((id) => SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).filter((definition): definition is (typeof SHORTCUT_DEFINITIONS)[number] => !!definition));
 const filteredShortcutDefinitions = computed(() => {
@@ -944,6 +947,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -1032,6 +1036,7 @@ function resetAllDefaults() {
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -1256,6 +1261,10 @@ function setSidebarObjectDisplay(value: "grouped" | "simple") {
   editSidebarObjectDisplay.value = value;
 }
 
+function setRoutineSourceOpenMode(value: "query-tab" | "dialog") {
+  editRoutineSourceOpenMode.value = value;
+}
+
 function setIconTheme(value: DesktopIconTheme) {
   editIconTheme.value = value;
 }
@@ -1328,6 +1337,7 @@ function setSidebarActivation(value: "single" | "double") {
 }
 
 const activeSettingsTab = ref("appearance");
+const settingsContentScrollRef = ref<HTMLElement | null>(null);
 const isWeb = !isTauriRuntime();
 const appSupportInfo = ref<AppSupportInfo | null>(null);
 const appSupportInfoLoading = ref(false);
@@ -1371,6 +1381,12 @@ function settingsCategoryButton(value: SettingsCategory): string {
     "settings-category-button w-auto shrink-0 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm transition-colors lg:w-full",
     value === activeSettingsTab.value ? "settings-category-button--active bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-muted hover:text-foreground",
   ].join(" ");
+}
+
+async function resetSettingsContentScroll() {
+  await nextTick();
+  const scroller = settingsContentScrollRef.value;
+  if (scroller) scroller.scrollTop = 0;
 }
 
 function openExternalUrl(url: string) {
@@ -2015,6 +2031,7 @@ watch(snippetProvider, (provider) => {
 });
 
 watch(activeSettingsTab, async (tab) => {
+  void resetSettingsContentScroll();
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "ai") {
@@ -2338,6 +2355,7 @@ const aiTestErrorCategoryKeys: Record<string, string> = {
   tokenLimit: "ai.testErrorTokenLimit",
   safety: "ai.testErrorSafety",
   emptyResponse: "ai.testErrorEmptyResponse",
+  modelDiscoveryUnsupported: "ai.modelListUnsupported",
   network: "ai.testErrorNetwork",
   unknown: "ai.testErrorUnknown",
 };
@@ -2388,7 +2406,9 @@ watch(aiIsCliProvider, (isCliProvider) => {
   if (isCliProvider) void ensureCliMcpStatus();
 });
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
-const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiUsesConfigurableAnthropicAuth = computed(() => aiEditProvider.value === "claude" || aiEditProvider.value === "anthropic-compatible" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiUsesCompatibleAnthropicApi = computed(() => aiEditProvider.value === "anthropic-compatible" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiSupportsAuthMethod = computed(() => aiUsesConfigurableAnthropicAuth.value);
 const aiCredentialLabel = computed(() => (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer" ? "Auth Token" : "API Key"));
 const aiCredentialPlaceholder = computed(() => {
   if (!aiRequiresApiKey.value) return "Optional";
@@ -2396,7 +2416,7 @@ const aiCredentialPlaceholder = computed(() => {
   return "";
 });
 const aiEndpointPlaceholder = computed(() => {
-  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+  if (aiUsesCompatibleAnthropicApi.value) {
     return "https://api.example.com/v1/messages";
   }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
@@ -2405,7 +2425,7 @@ const aiEndpointPlaceholder = computed(() => {
   return "https://api.openai.com/v1";
 });
 const aiEndpointHint = computed(() => {
-  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+  if (aiUsesCompatibleAnthropicApi.value) {
     return t("ai.anthropicMessagesHint");
   }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
@@ -2668,14 +2688,12 @@ async function aiTestConn() {
   aiTestErrorCopied.value = false;
   try {
     const config = currentAiEditConfig();
-    if (aiIsCliProvider.value) {
-      const result = await aiTestConnection(config);
-      aiTestLatency.value = result.latencyMs ?? null;
-    } else {
-      const startedAt = performance.now();
-      await aiListModels(config);
-      aiTestLatency.value = Math.round(performance.now() - startedAt);
+    const activeModel = settingsStore.activeModel;
+    if (aiEditConfigId.value && activeModel?.configId === aiEditConfigId.value) {
+      config.model = activeModel.modelId;
     }
+    const result = await aiTestConnection(config);
+    aiTestLatency.value = result.latencyMs ?? null;
     aiTestResult.value = "success";
   } catch (e: any) {
     aiTestResult.value = "error";
@@ -3120,7 +3138,7 @@ onUnmounted(cleanupPreviewEditor);
         </nav>
 
         <div class="min-w-0 flex-1 overflow-hidden px-1 flex flex-col">
-          <div class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pr-2">
+          <div ref="settingsContentScrollRef" class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pr-2">
             <section v-if="activeSettingsTab === 'editor'" class="flex flex-col gap-5 py-2">
               <div class="grid gap-4 md:grid-cols-[1fr_auto]">
                 <!-- Font Family -->
@@ -4092,6 +4110,32 @@ onUnmounted(cleanupPreviewEditor);
                             {{ t("settings.sidebarObjectDisplaySimpleDescription") }}
                           </TooltipContent>
                         </Tooltip>
+                      </div>
+                    </div>
+                  </Button>
+                </div>
+              </div>
+              <div class="space-y-2">
+                <div class="flex items-center gap-2">
+                  <Label>{{ t("settings.routineSourceOpenMode") }}</Label>
+                  <HelpTooltip :label="t('settings.routineSourceOpenMode')">
+                    {{ t("settings.routineSourceOpenModeQueryTabDescription") }}
+                  </HelpTooltip>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editRoutineSourceOpenMode === 'query-tab' ? 'dbx-choice-selected' : ''" @click="setRoutineSourceOpenMode('query-tab')">
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.routineSourceOpenModeQueryTab") }}</div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.routineSourceOpenModeQueryTabDescription") }}
+                      </div>
+                    </div>
+                  </Button>
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editRoutineSourceOpenMode === 'dialog' ? 'dbx-choice-selected' : ''" @click="setRoutineSourceOpenMode('dialog')">
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.routineSourceOpenModeDialog") }}</div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.routineSourceOpenModeDialogDescription") }}
                       </div>
                     </div>
                   </Button>

@@ -45,6 +45,7 @@ import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } fr
 import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
+import { resolveHistorySqlRestoreTarget } from "@/lib/history/historyRestoreTarget";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
@@ -254,11 +255,14 @@ function restoreHistorySql(sql: string, entry: HistoryEntry) {
     return;
   }
 
-  const connectionId = entry.connection_id || tab?.connectionId || connectionStore.connections[0]?.id;
-  if (!connectionId) return;
-  const config = connectionStore.getConfig(connectionId);
-  const database = entry.database || tab?.database || (config ? resolveDefaultDatabase(config, []) : "");
-  const tabId = queryStore.createTab(connectionId, database || "", t("tabs.sql"));
+  const target = resolveHistorySqlRestoreTarget({
+    entry,
+    activeTab: tab,
+    firstConnectionId: connectionStore.connections[0]?.id,
+    getConfig: (connectionId) => connectionStore.getConfig(connectionId),
+  });
+  if (!target) return;
+  const tabId = queryStore.createTab(target.connectionId, target.database, t("tabs.sql"), "query", target.schema);
   queryStore.updateSql(tabId, sql);
 }
 
@@ -1521,9 +1525,14 @@ function changeActiveDatabase(database: string) {
   }
 }
 
+function changeActiveCatalog(catalog: string | undefined, database: string) {
+  const tab = activeTab.value;
+  if (tab) queryStore.updateCatalog(tab.id, catalog, database);
+}
+
 async function setActiveDatabaseAsDefault() {
   const tab = activeTab.value;
-  if (!tab || !tab.connectionId || !tab.database) return;
+  if (!tab || !tab.connectionId || !tab.database || tab.catalog) return;
   await connectionStore.setDefaultDatabase(tab.connectionId, tab.database);
 }
 
@@ -1553,8 +1562,11 @@ function ensureQueryTab(): string {
   const tab = activeTab.value;
   if (tab && tab.mode === "query") return tab.id;
   const connId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-  const db = tab?.connectionId === connId ? tab.database : connectionStore.getConfig(connId)?.database || "";
-  return queryStore.createTab(connId, db, undefined, "query");
+  const sameConnectionTab = tab?.connectionId === connId ? tab : undefined;
+  const db = sameConnectionTab?.database || connectionStore.getConfig(connId)?.database || "";
+  const schema = sameConnectionTab?.schema ?? sameConnectionTab?.objectBrowser?.schema ?? sameConnectionTab?.tableMeta?.schema;
+  const catalog = sameConnectionTab?.catalog ?? sameConnectionTab?.objectBrowser?.catalog ?? sameConnectionTab?.tableMeta?.catalog;
+  return queryStore.createTab(connId, db, undefined, "query", schema, undefined, catalog);
 }
 
 function routeAiRedisCommand(command: string, execute: boolean): boolean {
@@ -1976,7 +1988,9 @@ async function initApp() {
   try {
     await settingsStore.initEditorSettings();
     console.log(`[STARTUP]   settingsStore.initEditorSettings: ${(performance.now() - t0).toFixed(0)}ms`);
-    await queryStore.initOpenTabs();
+    await connectionStore.initFromDisk();
+    console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
+    await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
     await settingsStore.initDesktopSettings().catch(() => {});
 
@@ -1991,8 +2005,6 @@ async function initApp() {
         toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
       });
 
-    await connectionStore.initFromDisk();
-    console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     restoreActiveConnectionContext();
   } catch (e: any) {
     toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
@@ -2181,7 +2193,17 @@ onUnmounted(() => {
         />
 
         <div :class="isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
-          <AppSidebar v-show="sidebarOpen" ref="appSidebarRef" :sidebar-width="sidebarWidth" :classic-layout="isClassicLayout" @import="dialogs.onImportClick" @export="dialogs.onExportClick" @start-resize="startSidebarResize" @collapse="setSidebarOpen(false)" />
+          <AppSidebar
+            v-show="sidebarOpen"
+            ref="appSidebarRef"
+            :sidebar-width="sidebarWidth"
+            :classic-layout="isClassicLayout"
+            @import="dialogs.onImportClick"
+            @export="dialogs.onExportClick"
+            @start-resize="startSidebarResize"
+            @collapse="setSidebarOpen(false)"
+            @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
+          />
           <div v-show="!sidebarOpen" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
             <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('sidebar.expand')" :aria-label="t('sidebar.expand')" @click="setSidebarOpen(true)">
               <ChevronsRight class="h-4 w-4" />
@@ -2258,6 +2280,7 @@ onUnmounted(() => {
                   @paste-sql-in-condition="pasteClipboardAsSqlInCondition"
                   @change-connection="changeActiveConnection"
                   @change-database="changeActiveDatabase"
+                  @change-catalog="changeActiveCatalog"
                   @change-schema="changeActiveSchema"
                   @set-default-database="setActiveDatabaseAsDefault"
                   @clear-default-database="clearActiveDefaultDatabase"

@@ -19,6 +19,49 @@ fn column(name: &str) -> EditableStructureColumn {
     }
 }
 
+/// Existing column draft with optional primary-key membership change.
+fn existing_pk_column(
+    name: &str,
+    data_type: &str,
+    was_primary_key: bool,
+    is_primary_key: bool,
+) -> EditableStructureColumn {
+    let mut col = column(name);
+    col.data_type = data_type.to_string();
+    col.is_nullable = false;
+    col.is_primary_key = is_primary_key;
+    col.original = Some(ColumnInfo {
+        name: name.to_string(),
+        data_type: data_type.to_string(),
+        is_nullable: false,
+        column_default: None,
+        is_primary_key: was_primary_key,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    col
+}
+
+fn structure_change_options(
+    database_type: DatabaseType,
+    schema: Option<&str>,
+    table_name: &str,
+    columns: Vec<EditableStructureColumn>,
+) -> TableStructureSqlOptions {
+    TableStructureSqlOptions {
+        database_type: Some(database_type),
+        schema: schema.map(str::to_string),
+        table_name: table_name.to_string(),
+        columns,
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    }
+}
+
 fn index(name: &str, columns: &[&str]) -> EditableStructureIndex {
     EditableStructureIndex {
         id: name.to_string(),
@@ -2547,65 +2590,297 @@ fn builds_h2_schema_qualified_existing_column_statements() {
 
 #[test]
 fn builds_postgres_alter_table_add_primary_key() {
-    let mut id = column("id");
-    id.data_type = "integer".to_string();
-    id.is_nullable = false;
-    id.is_primary_key = true;
-    id.original = Some(ColumnInfo {
-        name: "id".to_string(),
-        data_type: "integer".to_string(),
-        is_nullable: false,
-        column_default: None,
-        is_primary_key: false,
-        extra: None,
-        comment: None,
-        ..Default::default()
-    });
-
-    let result = build_table_structure_change_sql(TableStructureSqlOptions {
-        database_type: Some(DatabaseType::Postgres),
-        schema: Some("public".to_string()),
-        table_name: "users".to_string(),
-        columns: vec![id],
-        indexes: Vec::new(),
-        foreign_keys: Vec::new(),
-        triggers: Vec::new(),
-        table_comment: None,
-        original_table_comment: None,
-    });
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![existing_pk_column("id", "integer", false, true)],
+    ));
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"users\" ADD PRIMARY KEY (\"id\");"]);
 }
 
 #[test]
-fn builds_postgres_alter_table_drop_primary_key() {
-    let mut id = column("id");
-    id.data_type = "integer".to_string();
-    id.is_nullable = false;
-    id.is_primary_key = false;
-    id.original = Some(ColumnInfo {
-        name: "id".to_string(),
-        data_type: "integer".to_string(),
-        is_nullable: false,
-        column_default: None,
-        is_primary_key: true,
-        extra: None,
-        comment: None,
-        ..Default::default()
-    });
+fn builds_dameng_alter_table_add_primary_key() {
+    // DM8: ADD [CONSTRAINT name] PRIMARY KEY — anonymous form matches DBeaver/MySQL-style editors.
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![existing_pk_column("id", "INT", false, true)],
+    ));
 
-    let result = build_table_structure_change_sql(TableStructureSqlOptions {
-        database_type: Some(DatabaseType::Postgres),
-        schema: Some("public".to_string()),
-        table_name: "users".to_string(),
-        columns: vec![id],
-        indexes: Vec::new(),
-        foreign_keys: Vec::new(),
-        triggers: Vec::new(),
-        table_comment: None,
-        original_table_comment: None,
-    });
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"users\" ADD PRIMARY KEY (\"id\");"]);
+}
+
+#[test]
+fn builds_dameng_composite_primary_key_in_draft_order() {
+    let mut tenant_id = existing_pk_column("tenant_id", "INT", false, true);
+    tenant_id.id = "tenant_id".to_string();
+    let mut code = existing_pk_column("code", "VARCHAR(50)", false, true);
+    code.id = "code".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![tenant_id, code],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"users\" ADD PRIMARY KEY (\"tenant_id\", \"code\");"]);
+}
+
+#[test]
+fn dameng_reordering_unchanged_composite_primary_key_does_not_emit_primary_key_ddl() {
+    let mut tenant_id = existing_pk_column("tenant_id", "INT", true, true);
+    tenant_id.id = "tenant_id".to_string();
+    tenant_id.original_position = Some(0);
+    let mut code = existing_pk_column("code", "VARCHAR(50)", true, true);
+    code.id = "code".to_string();
+    code.original_position = Some(1);
+
+    // Dameng reordering is local-only. Moving these columns must not recreate the key
+    // merely because the draft order changed.
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![code, tenant_id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements.is_empty());
+}
+
+#[test]
+fn dameng_adds_new_primary_key_column_before_adding_constraint() {
+    let mut code = column("code");
+    code.data_type = "VARCHAR(50)".to_string();
+    code.is_nullable = false;
+    code.is_primary_key = true;
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![code],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"code\" VARCHAR(50));",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD PRIMARY KEY (\"code\");",
+        ]
+    );
+}
+
+#[test]
+fn builds_dameng_alter_table_drop_primary_key() {
+    // DM8 official: DROP PRIMARY KEY [RESTRICT|CASCADE]; default RESTRICT (no CASCADE from editor).
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![existing_pk_column("id", "INT", true, false)],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"users\" DROP PRIMARY KEY;"]);
+}
+
+#[test]
+fn builds_dameng_alter_table_change_primary_key() {
+    // DBeaver/Navicat-style modify: drop existing key then add the new one (never ADD without DROP).
+    let mut old_pk = existing_pk_column("id", "INT", true, false);
+    old_pk.id = "old_id".to_string();
+    let mut new_pk = existing_pk_column("code", "VARCHAR(50)", false, true);
+    new_pk.id = "new_code".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![old_pk, new_pk],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" DROP PRIMARY KEY;",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD PRIMARY KEY (\"code\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_validates_new_primary_key_column_before_replacing_existing_key() {
+    let mut old_pk = existing_pk_column("id", "INT", true, false);
+    old_pk.id = "old_id".to_string();
+    let mut code = existing_pk_column("code", "VARCHAR(50)", false, true);
+    code.id = "new_code".to_string();
+    code.original.as_mut().unwrap().is_nullable = true;
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![old_pk, code],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" MODIFY (\"code\" VARCHAR(50) NOT NULL);",
+            "ALTER TABLE \"SYSDBA\".\"users\" DROP PRIMARY KEY;",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD PRIMARY KEY (\"code\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_blocks_dropping_former_primary_key_column() {
+    let mut id = existing_pk_column("id", "INT", true, false);
+    id.marked_for_drop = true;
+    let name = existing_pk_column("name", "VARCHAR(50)", false, false);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![id, name],
+    ));
+
+    assert!(result.statements.is_empty());
+    assert!(result.warnings.iter().any(|warning| warning.contains("Primary key column")));
+}
+
+#[test]
+fn oracle_uncheck_primary_key_and_drop_column_does_not_emit_drop_column() {
+    // alter_primary_key is false for Oracle: unchecking PK must not unlock DROP COLUMN without a PK drop.
+    let mut id = existing_pk_column("id", "NUMBER", true, false);
+    id.marked_for_drop = true;
+    let name = existing_pk_column("name", "VARCHAR2(50)", false, false);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oracle,
+        Some("HR"),
+        "users",
+        vec![id, name],
+    ));
+
+    assert!(
+        !result.statements.iter().any(|sql| sql.to_ascii_uppercase().contains("DROP COLUMN")),
+        "must not DROP COLUMN former PK without DROP PRIMARY KEY; got {:?}",
+        result.statements
+    );
+    assert!(
+        !result.statements.iter().any(|sql| sql.to_ascii_uppercase().contains("PRIMARY KEY")),
+        "Oracle must not emit partial PK DDL; got {:?}",
+        result.statements
+    );
+    assert!(
+        result.warnings.iter().any(|w| w.contains("primary key") || w.contains("Primary key")),
+        "expected primary-key related warning; got {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn sqlserver_uncheck_primary_key_and_drop_column_does_not_emit_drop_column() {
+    let mut id = existing_pk_column("id", "int", true, false);
+    id.marked_for_drop = true;
+    let name = existing_pk_column("name", "nvarchar(50)", false, false);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::SqlServer,
+        Some("dbo"),
+        "users",
+        vec![id, name],
+    ));
+
+    assert!(
+        !result.statements.iter().any(|sql| sql.to_ascii_uppercase().contains("DROP COLUMN")),
+        "must not DROP COLUMN former PK without PK drop; got {:?}",
+        result.statements
+    );
+    assert!(result.warnings.iter().any(|w| w.contains("primary key") || w.contains("Primary key")));
+}
+
+#[test]
+fn dameng_set_not_null_before_add_primary_key() {
+    // DM8: PK columns must be NOT NULL; DM auto-adds NOT NULL but clients still MODIFY first.
+    // Order: column MODIFY NOT NULL, then ADD PRIMARY KEY.
+    let mut id = existing_pk_column("id", "INT", false, true);
+    id.original.as_mut().unwrap().is_nullable = true;
+    // is_nullable stays false (set when marking PK) so MODIFY ... NOT NULL is emitted.
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"users\" MODIFY (\"id\" INT NOT NULL);",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD PRIMARY KEY (\"id\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_blocks_dropping_active_primary_key_column() {
+    // Keep a non-PK column so we do not hit the "cannot drop all columns" guard first.
+    let mut id = existing_pk_column("id", "INT", true, true);
+    id.marked_for_drop = true;
+    let name = existing_pk_column("name", "VARCHAR(50)", false, false);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![id, name],
+    ));
+
+    assert!(!result.statements.iter().any(|sql| sql.contains("DROP COLUMN")));
+    assert!(result.warnings.iter().any(|w| w.contains("Primary key column")));
+}
+
+#[test]
+fn dameng_does_not_mutate_primary_key_when_active_key_column_is_marked_for_drop() {
+    let mut id = existing_pk_column("id", "INT", true, true);
+    id.marked_for_drop = true;
+    let code = existing_pk_column("code", "VARCHAR(50)", false, true);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![id, code],
+    ));
+
+    assert!(result.statements.is_empty(), "invalid draft must not emit partial PK DDL: {:?}", result.statements);
+    assert!(result.warnings.iter().any(|warning| warning.contains("Primary key column")));
+}
+
+#[test]
+fn builds_postgres_alter_table_drop_primary_key() {
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        Some("public"),
+        "users",
+        vec![existing_pk_column("id", "integer", true, false)],
+    ));
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE \"public\".\"users\" DROP CONSTRAINT \"users_pkey\";"]);
@@ -2613,49 +2888,17 @@ fn builds_postgres_alter_table_drop_primary_key() {
 
 #[test]
 fn builds_mysql_alter_table_change_primary_key() {
-    let mut old_pk = column("id");
+    let mut old_pk = existing_pk_column("id", "int", true, false);
     old_pk.id = "old_id".to_string();
-    old_pk.data_type = "int".to_string();
-    old_pk.is_nullable = false;
-    old_pk.is_primary_key = false;
-    old_pk.original = Some(ColumnInfo {
-        name: "id".to_string(),
-        data_type: "int".to_string(),
-        is_nullable: false,
-        column_default: None,
-        is_primary_key: true,
-        extra: None,
-        comment: None,
-        ..Default::default()
-    });
-
-    let mut new_pk = column("uuid");
+    let mut new_pk = existing_pk_column("uuid", "varchar(36)", false, true);
     new_pk.id = "new_uuid".to_string();
-    new_pk.data_type = "varchar(36)".to_string();
-    new_pk.is_nullable = false;
-    new_pk.is_primary_key = true;
-    new_pk.original = Some(ColumnInfo {
-        name: "uuid".to_string(),
-        data_type: "varchar(36)".to_string(),
-        is_nullable: false,
-        column_default: None,
-        is_primary_key: false,
-        extra: None,
-        comment: None,
-        ..Default::default()
-    });
 
-    let result = build_table_structure_change_sql(TableStructureSqlOptions {
-        database_type: Some(DatabaseType::Mysql),
-        schema: None,
-        table_name: "users".to_string(),
-        columns: vec![old_pk, new_pk],
-        indexes: Vec::new(),
-        foreign_keys: Vec::new(),
-        triggers: Vec::new(),
-        table_comment: None,
-        original_table_comment: None,
-    });
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "users",
+        vec![old_pk, new_pk],
+    ));
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
@@ -2666,65 +2909,57 @@ fn builds_mysql_alter_table_change_primary_key() {
 
 #[test]
 fn builds_no_statements_when_primary_key_unchanged() {
-    let mut id = column("id");
-    id.data_type = "integer".to_string();
-    id.is_nullable = false;
-    id.is_primary_key = true;
-    id.original = Some(ColumnInfo {
-        name: "id".to_string(),
-        data_type: "integer".to_string(),
-        is_nullable: false,
-        column_default: None,
-        is_primary_key: true,
-        extra: None,
-        comment: None,
-        ..Default::default()
-    });
-
-    let result = build_table_structure_change_sql(TableStructureSqlOptions {
-        database_type: Some(DatabaseType::Postgres),
-        schema: None,
-        table_name: "users".to_string(),
-        columns: vec![id],
-        indexes: Vec::new(),
-        foreign_keys: Vec::new(),
-        triggers: Vec::new(),
-        table_comment: None,
-        original_table_comment: None,
-    });
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        None,
+        "users",
+        vec![existing_pk_column("id", "integer", true, true)],
+    ));
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert!(result.statements.is_empty());
 }
 
 #[test]
-fn warns_sqlite_cannot_alter_primary_key() {
-    let mut id = column("id");
-    id.data_type = "integer".to_string();
-    id.is_nullable = false;
-    id.is_primary_key = true;
-    id.original = Some(ColumnInfo {
-        name: "id".to_string(),
-        data_type: "integer".to_string(),
-        is_nullable: false,
-        column_default: None,
-        is_primary_key: false,
-        extra: None,
-        comment: None,
-        ..Default::default()
-    });
+fn rename_only_primary_key_column_does_not_emit_primary_key_ddl() {
+    let mut id = existing_pk_column("id_new", "integer", true, true);
+    id.original.as_mut().unwrap().name = "id".to_string();
 
-    let result = build_table_structure_change_sql(TableStructureSqlOptions {
-        database_type: Some(DatabaseType::Sqlite),
-        schema: None,
-        table_name: "users".to_string(),
-        columns: vec![id],
-        indexes: Vec::new(),
-        foreign_keys: Vec::new(),
-        triggers: Vec::new(),
-        table_comment: None,
-        original_table_comment: None,
-    });
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "users",
+        vec![id],
+    ));
+
+    // Membership is tracked by draft id, so rename alone is not a PK change.
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(!result.statements.iter().any(|sql| sql.contains("PRIMARY KEY")));
+}
+
+#[test]
+fn warns_sqlite_cannot_alter_primary_key() {
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Sqlite,
+        None,
+        "users",
+        vec![existing_pk_column("id", "integer", false, true)],
+    ));
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("primary key"));
+}
+
+#[test]
+fn warns_sqlserver_cannot_alter_primary_key_without_drop_strategy() {
+    // alter_primary_key is false for SQL Server; fail closed (no partial ADD-only SQL).
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::SqlServer,
+        Some("dbo"),
+        "users",
+        vec![existing_pk_column("id", "int", true, false)],
+    ));
 
     assert_eq!(result.statements, Vec::<String>::new());
     assert_eq!(result.warnings.len(), 1);

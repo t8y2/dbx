@@ -221,6 +221,25 @@ async fn connection_mysql_query_dialect(state: &AppState, connection_id: &str) -
         .unwrap_or_default()
 }
 
+async fn connection_mysql_catalog_dialect(
+    state: &AppState,
+    connection_id: &str,
+) -> Option<db::mysql::MySqlCatalogDialect> {
+    let configs = state.configs.read().await;
+    configs
+        .get(connection_id)
+        .and_then(|config| db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()))
+}
+
+async fn connection_mysql_catalog_dialect_for_pool_key(
+    state: &AppState,
+    pool_key: &str,
+) -> Option<db::mysql::MySqlCatalogDialect> {
+    let configs = state.configs.read().await;
+    crate::connection::config_for_pool_key(pool_key, &configs)
+        .and_then(|config| db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()))
+}
+
 async fn connection_database_type_for_pool_key(state: &AppState, pool_key: &str) -> Option<DatabaseType> {
     let configs = state.configs.read().await;
     configs
@@ -401,6 +420,8 @@ pub struct QueryExecutionOptions {
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
     pub page_size: Option<usize>,
+    /// Doris / StarRocks catalog selected for this query tab.
+    pub catalog: Option<String>,
     pub result_session_id: Option<String>,
     pub client_session_id: Option<String>,
     /// Query timeout in seconds. `None` uses the default (30s).
@@ -1245,6 +1266,14 @@ fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
     }
 }
 
+fn query_pool_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {
+    if database.is_empty() || catalog.is_some() {
+        None
+    } else {
+        Some(database)
+    }
+}
+
 pub async fn operation_budget_for_pool_key(
     state: &AppState,
     pool_key: &str,
@@ -1317,6 +1346,7 @@ pub async fn do_execute(
         crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
     }
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
+    let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
@@ -1424,6 +1454,17 @@ pub async fn do_execute(
                 });
             }
             apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+            wait_for_result_opt(
+                cancel_token.clone(),
+                query_timeout,
+                db::mysql::apply_catalog_database_context(
+                    &mut conn,
+                    mysql_catalog_dialect,
+                    options.catalog.as_deref(),
+                    database.unwrap_or_default(),
+                ),
+            )
+            .await?;
             wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -1826,17 +1867,11 @@ pub async fn execute_sql_statement_with_options(
     // When a query tab has a client session, keep even database-less execution
     // on that tab-scoped pool so connection-level state (for example MySQL @vars)
     // survives across runs.
-    let pool_key = if database.is_empty() {
-        state
-            .get_or_create_pool_for_session(connection_id, None, options.client_session_id.as_deref())
-            .await
-            .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?
-    } else {
-        state
-            .get_or_create_pool_for_session(connection_id, Some(database), options.client_session_id.as_deref())
-            .await
-            .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?
-    };
+    let pool_database = query_pool_database(database, options.catalog.as_deref());
+    let pool_key = state
+        .get_or_create_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
+        .await
+        .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
 
     if is_canceled(&cancel_token) {
         return Err(canceled_error());
@@ -1853,9 +1888,9 @@ pub async fn execute_sql_statement_with_options(
     let action = result.as_ref().err().map(|e| query_pool_error_action(db_type, sql, e));
     match action {
         Some(PoolErrorAction::ReconnectAndRetry) if !is_canceled(&cancel_token) => {
-            let db_opt = if database.is_empty() { None } else { Some(database) };
+            let pool_database = query_pool_database(database, options.catalog.as_deref());
             let new_key = state
-                .reconnect_pool_for_session(connection_id, db_opt, options.client_session_id.as_deref())
+                .reconnect_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
                 .await
                 .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
             with_sql_context(
@@ -1952,12 +1987,10 @@ pub async fn close_query_session(
     database: &str,
     session_id: &str,
     client_session_id: Option<&str>,
+    catalog: Option<&str>,
 ) -> Result<bool, String> {
-    let pool_key = if database.is_empty() {
-        state.get_or_create_pool_for_session(connection_id, None, client_session_id).await?
-    } else {
-        state.get_or_create_pool_for_session(connection_id, Some(database), client_session_id).await?
-    };
+    let pool_database = query_pool_database(database, catalog);
+    let pool_key = state.get_or_create_pool_for_session(connection_id, pool_database, client_session_id).await?;
 
     let connections = state.connections.read().await;
     let pool = connections.get(&pool_key).ok_or("Connection not found")?;
@@ -2050,22 +2083,16 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
     options: QueryExecutionOptions,
     progress: Option<ExecuteMultiProgressCallback>,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
+    let pool_database = query_pool_database(database, options.catalog.as_deref());
     // Reject MongoDB queries that fall through to the generic executor.
     if connection_is_mongodb(state, connection_id).await {
         return Err(MONGO_SHELL_COMMAND_HINT.to_string());
     }
 
-    let pool_key = if database.is_empty() {
-        state
-            .get_or_create_pool_for_session(connection_id, None, options.client_session_id.as_deref())
-            .await
-            .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?
-    } else {
-        state
-            .get_or_create_pool_for_session(connection_id, Some(database), options.client_session_id.as_deref())
-            .await
-            .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?
-    };
+    let pool_key = state
+        .get_or_create_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
+        .await
+        .map_err(|e| query_error_with_omitted_sql_context(&e, sql))?;
     if let Some(execution_id) = options.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
     }
@@ -2111,7 +2138,15 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
     // When use_transaction is explicitly true and we have multiple statements,
     // route through the transaction wrapper instead of the sequential auto-commit loop.
     if options.use_transaction == Some(true) && statements.len() > 1 {
-        let result = execute_statements_in_transaction(state, connection_id, database, &statements, schema).await?;
+        let result = execute_statements_in_transaction(
+            state,
+            connection_id,
+            database,
+            &statements,
+            schema,
+            options.catalog.as_deref(),
+        )
+        .await?;
         return Ok(vec![result.into()]);
     }
 
@@ -2142,6 +2177,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
         // Read-only check for MySQL batch path
         check_read_only_for_connection_multi(state, &pool_key, &statements).await?;
         let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+        let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
         return execute_multi_mysql(
             state,
             &pool_key,
@@ -2149,6 +2185,8 @@ pub async fn execute_multi_core_with_options_for_client_and_progress(
             &pool,
             mode,
             mysql_dialect,
+            mysql_catalog_dialect,
+            database,
             &statements,
             cancel_token,
             options,
@@ -2269,6 +2307,7 @@ where
     (results, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_multi_mysql(
     state: &AppState,
     pool_key: &str,
@@ -2276,6 +2315,8 @@ async fn execute_multi_mysql(
     pool: &db::mysql::MySqlPool,
     mode: crate::connection::MysqlMode,
     dialect: db::mysql::MySqlQueryDialect,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
+    database: &str,
     statements: &[String],
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
@@ -2304,6 +2345,12 @@ async fn execute_multi_mysql(
         }
     };
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
+    wait_for_result_opt(
+        cancel_token.clone(),
+        query_timeout,
+        db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, options.catalog.as_deref(), database),
+    )
+    .await?;
 
     let mut executor = MysqlBatchConnection {
         conn: &mut conn,
@@ -2796,7 +2843,9 @@ pub async fn execute_schema_diff_deploy(
     };
     let atomicity = classify_schema_diff_atomicity(db_type, &parsed, has_transactional_path);
 
-    match execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, &parsed, schema).await {
+    match execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, &parsed, schema, None)
+        .await
+    {
         Ok(result) => SchemaDiffDeployResult {
             transaction_id: tx_id,
             status: crate::two_phase_commit::TransactionStatus::Committed.as_str().to_string(),
@@ -2852,18 +2901,17 @@ pub async fn execute_statements_in_transaction(
     database: &str,
     statements: &[String],
     schema: Option<&str>,
+    catalog: Option<&str>,
 ) -> Result<db::QueryResult, String> {
     let sql_ctx = statements.first().map(|s| s.as_str()).unwrap_or("");
-    let pool_key = if database.is_empty() {
-        connection_id.to_string()
-    } else {
-        state
-            .get_or_create_pool(connection_id, Some(database))
-            .await
-            .map_err(|e| query_error_with_omitted_sql_context(&e, sql_ctx))?
-    };
+    let pool_database = query_pool_database(database, catalog);
+    let pool_key = state
+        .get_or_create_pool(connection_id, pool_database)
+        .await
+        .map_err(|e| query_error_with_omitted_sql_context(&e, sql_ctx))?;
 
-    execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, statements, schema).await
+    execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, statements, schema, catalog)
+        .await
 }
 
 /// Execute multiple SQL statements transactionally on an already-resolved pool.
@@ -2875,12 +2923,14 @@ pub async fn execute_statements_in_transaction_on_pool(
     database: &str,
     statements: &[String],
     schema: Option<&str>,
+    catalog: Option<&str>,
 ) -> Result<db::QueryResult, String> {
     // Read-only check: intercept all transaction paths before dispatching
     check_read_only_for_connection_multi(state, pool_key, statements).await?;
 
     let start = std::time::Instant::now();
     let db_type = connection_database_type(state, connection_id).await;
+    let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
 
     // Clone the pool handle within the lock, then drop it before any async work.
@@ -2926,7 +2976,18 @@ pub async fn execute_statements_in_transaction_on_pool(
             exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
         Some(TxPath::Mysql(pool, _bare)) => {
-            exec_tx_mysql_inner(state, pool_key, pool, statements, start, operation_budget.clone()).await
+            exec_tx_mysql_inner(
+                state,
+                pool_key,
+                pool,
+                statements,
+                start,
+                operation_budget.clone(),
+                mysql_catalog_dialect,
+                catalog,
+                database,
+            )
+            .await
         }
         Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
         Some(TxPath::CloudflareD1(client)) => {
@@ -3068,9 +3129,13 @@ async fn exec_tx_mysql_inner(
     statements: &[String],
     start: std::time::Instant,
     budget: DbOperationBudget,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
+    catalog: Option<&str>,
+    database: &str,
 ) -> Result<db::QueryResult, String> {
     let mut conn = db::mysql::get_conn_with_health_check_with_timeout(&pool, budget.checkout_timeout).await?;
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, None).await?;
+    db::mysql::apply_catalog_database_context(&mut conn, catalog_dialect, catalog, database).await?;
     mysql_query_drop_with_timeout(
         &mut conn,
         "START TRANSACTION",
@@ -3308,8 +3373,9 @@ pub async fn begin_manual_transaction(
     connection_id: &str,
     database: &str,
     schema: Option<&str>,
+    catalog: Option<&str>,
 ) -> Result<String, String> {
-    begin_transaction_session(state, connection_id, database, schema, false).await
+    begin_transaction_session(state, connection_id, database, schema, catalog, false).await
 }
 
 /// Start a read-only, repeatable snapshot for a database backup.
@@ -3318,7 +3384,7 @@ pub async fn begin_database_backup_snapshot(
     connection_id: &str,
     database: &str,
 ) -> Result<String, String> {
-    begin_transaction_session(state, connection_id, database, None, true).await
+    begin_transaction_session(state, connection_id, database, None, None, true).await
 }
 
 fn postgres_transaction_begin_sql(consistent_snapshot: bool) -> &'static str {
@@ -3354,13 +3420,12 @@ async fn begin_transaction_session(
     connection_id: &str,
     database: &str,
     schema: Option<&str>,
+    catalog: Option<&str>,
     consistent_snapshot: bool,
 ) -> Result<String, String> {
-    let pool_key = if database.is_empty() {
-        connection_id.to_string()
-    } else {
-        state.get_or_create_pool(connection_id, Some(database)).await?
-    };
+    let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
+    let pool_database = query_pool_database(database, catalog);
+    let pool_key = state.get_or_create_pool(connection_id, pool_database).await?;
 
     // Clone the pool handle under a brief read lock, then drop the lock before
     // any async I/O — same pattern as do_execute throughout this file.
@@ -3397,6 +3462,7 @@ async fn begin_transaction_session(
         }
         TxnPoolHandle::Mysql(mysql_pool) => {
             let mut conn = mysql_pool.get_conn().await.map_err(|e| format!("Failed to get MySQL connection: {e}"))?;
+            db::mysql::apply_catalog_database_context(&mut conn, mysql_catalog_dialect, catalog, database).await?;
             if let Some(isolation_sql) = mysql_transaction_isolation_sql(consistent_snapshot) {
                 conn.query_drop(isolation_sql).await.map_err(|e| format!("SET TRANSACTION failed: {e}"))?;
             }
@@ -3890,6 +3956,43 @@ mod tests {
     use crate::storage::Storage;
 
     #[test]
+    fn external_catalog_queries_do_not_bind_database_during_pool_creation() {
+        assert_eq!(query_pool_database("bi", Some("paimon_catalog")), None);
+        assert_eq!(query_pool_database("bi", None), Some("bi"));
+        assert_eq!(query_pool_database("", None), None);
+    }
+
+    #[tokio::test]
+    async fn query_and_transaction_paths_resolve_catalog_dialect_from_connection() {
+        let dir = std::env::temp_dir().join(format!("dbx-catalog-dialect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+
+        let mut doris = test_connection_config(DatabaseType::Doris);
+        doris.id = "doris".to_string();
+        let mut starrocks = test_connection_config(DatabaseType::StarRocks);
+        starrocks.id = "starrocks".to_string();
+        {
+            let mut configs = state.configs.write().await;
+            configs.insert(doris.id.clone(), doris);
+            configs.insert(starrocks.id.clone(), starrocks);
+        }
+
+        assert_eq!(
+            connection_mysql_catalog_dialect_for_pool_key(&state, "doris:bi").await,
+            Some(db::mysql::MySqlCatalogDialect::Doris)
+        );
+        assert_eq!(
+            connection_mysql_catalog_dialect(&state, "starrocks").await,
+            Some(db::mysql::MySqlCatalogDialect::StarRocks)
+        );
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn schema_diff_atomicity_marks_mysql_ddl_as_partial() {
         let atomicity = classify_schema_diff_atomicity(
             Some(DatabaseType::Mysql),
@@ -4065,6 +4168,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -5190,6 +5294,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

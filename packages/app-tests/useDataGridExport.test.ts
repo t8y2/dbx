@@ -39,7 +39,16 @@ vi.mock("@/lib/common/clipboard", () => clipboardMock);
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtimeMock.isTauri }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMock.save }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: toastMock }) }));
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: translateMock }) }));
+vi.mock("vue-i18n", () => ({
+  createI18n: () => ({
+    global: {
+      locale: { value: "en" },
+      setLocaleMessage: vi.fn(),
+    },
+    install: vi.fn(),
+  }),
+  useI18n: () => ({ t: translateMock }),
+}));
 
 const { defaultDataGridExportFileName, useDataGridExport } = await import("../../apps/desktop/src/composables/useDataGridExport.ts");
 
@@ -422,7 +431,7 @@ test("complete local query result XLSX export does not re-execute the query", as
   assert.equal(fullExportResult.mock.calls.length, 0);
   assert.equal(queryResultExportRequest.mock.calls.length, 0);
   assert.equal(apiMock.startQueryResultExport.mock.calls.length, 0);
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 5), ["Export", ["id", "name"], ["int4", "text"], completeLocalResult.rows]);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 6), ["Export", ["id", "name"], ["int4", "text"], undefined, completeLocalResult.rows]);
 });
 
 test("MySQL joined query SQL export keeps result aliases instead of source column names", async () => {
@@ -521,10 +530,11 @@ test("complete local query result export removes only internal hidden columns", 
 
   await composable.exportXlsx();
 
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 5), [
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 6), [
     "Export",
     ["id", "name"],
     ["int4", "text"],
+    undefined,
     [
       [1, "Ada"],
       [2, "Lin"],
@@ -549,7 +559,7 @@ test("complete local CSV, XLSX, and TXT exports honor the enabled row limit", as
   assert.equal(apiMock.exportQueryResultCsv.mock.calls[0]?.[2].length, 100);
 
   await composable.exportXlsx();
-  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0]?.[4].length, 100);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0]?.[5].length, 100);
 
   const download = installTextDownloadCapture();
   try {
@@ -695,7 +705,8 @@ test("selected query result XLSX export uses the current source label as the she
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][1], "aaa.apis");
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][2], ["id", "name"]);
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][3], ["bigint(20)", "varchar(64)"]);
-  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][4], [[1, "Ada"]]);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][4], undefined);
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][5], [[1, "Ada"]]);
 });
 
 test("selected query result XLSX export forwards the numericColumnRightAlign setting to the backend", async () => {
@@ -706,13 +717,13 @@ test("selected query result XLSX export forwards the numericColumnRightAlign set
   await composable.exportXlsx([1]);
 
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls.length, 1);
-  // Argument 5 is `numericColumnRightAlign`, and must reflect the persisted
+  // Argument 6 is `numericColumnRightAlign`, and must reflect the persisted
   // setting rather than always defaulting to true.
-  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][5], false);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][6], false);
 
   settingsStore.updateEditorSettings({ numericColumnRightAlign: true });
   await composable.exportXlsx([1]);
-  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[1][5], true);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[1][6], true);
 });
 
 test("streaming query result XLSX export carries numericColumnRightAlign in the backend request", async () => {

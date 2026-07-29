@@ -14,11 +14,11 @@ describe("ObjectBrowser table clipboard context menu", () => {
   });
 
   it("normalizes copied and target schemas before paste validation", () => {
-    expect(objectBrowserSource).toMatch(/function normalizedObjectBrowserTableClipboardEntries\(\)[\s\S]*?normalizeObjectBrowserTableClipboardSchema\(entry\.schema, entry\.database\)/);
+    expect(objectBrowserSource).toMatch(/function normalizedObjectBrowserTableClipboardEntries\(\)[\s\S]*?normalizeObjectBrowserTableClipboardSchema\(entry\.schema, entry\.database, entry\.connectionId\)/);
     expect(objectBrowserSource).toMatch(/function canPasteTableClipboard\(\)[\s\S]*?tableClipboardMatchesTarget\(normalizedObjectBrowserTableClipboardEntries\(\), pasteTableTargetContext\(\)\)/);
     expect(objectBrowserSource).toMatch(/function pasteTableTargetContext\(\)[\s\S]*?normalizeObjectBrowserTableClipboardSchema\(selectedSchema\.value\)/);
-    expect(objectBrowserSource).toMatch(/pasteTableEntries\.value = clipboard\.tables\.map[\s\S]*?normalizeObjectBrowserTableClipboardSchema\(entry\.schema, entry\.database\)/);
-    expect(objectBrowserSource).toMatch(/function normalizeObjectBrowserTableClipboardSchema[\s\S]*?!isSchemaAware\(effectiveDatabaseType\.value\)[\s\S]*?effectiveDatabaseType\.value !== "sqlite"[\s\S]*?return undefined/);
+    expect(objectBrowserSource).toMatch(/pasteTableEntries\.value = clipboard\.tables\.map[\s\S]*?normalizeObjectBrowserTableClipboardSchema\(entry\.schema, entry\.database, entry\.connectionId\)/);
+    expect(objectBrowserSource).toMatch(/function normalizeObjectBrowserTableClipboardSchema[\s\S]*?connectionStore\.getConfig\(connectionId\) \?\? props\.connection[\s\S]*?!isSchemaAware\(connection\.db_type\)[\s\S]*?connection\.db_type !== "sqlite"[\s\S]*?return undefined/);
   });
 
   it("consumes only the clipboard used by a fully successful paste", () => {

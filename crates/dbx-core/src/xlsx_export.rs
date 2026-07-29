@@ -16,6 +16,8 @@ pub struct XlsxWorksheetData {
     pub columns: Vec<String>,
     #[serde(default)]
     pub column_types: Vec<String>,
+    #[serde(default)]
+    pub column_comments: Vec<Option<String>>,
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub numeric_column_right_align: bool,
@@ -37,8 +39,15 @@ pub struct StreamingXlsxWriter<W: Write + Seek> {
 /// Estimate column widths from header names only (used by the streaming path
 /// where full row data is not available up-front).  Each width is clamped to
 /// [10, 60] to stay within reasonable bounds.
-fn estimate_header_widths(columns: &[String]) -> Vec<usize> {
-    columns.iter().map(|col| (col.chars().count() + 2).clamp(10, 60)).collect()
+fn estimate_header_widths(columns: &[String], column_comments: &[Option<String>]) -> Vec<usize> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, col)| {
+            let header_text = column_comments.get(index).and_then(|c| c.as_deref()).unwrap_or(col.as_str());
+            (header_text.chars().count() + 2).clamp(10, 60)
+        })
+        .collect()
 }
 
 /// Build the `<cols>` XML fragment from a width slice.
@@ -52,14 +61,23 @@ fn cols_xml(widths: &[usize]) -> String {
         .collect()
 }
 
+/// Resolve the effective header text: prefer a non-empty column comment, fall
+/// back to the original column name.
+fn effective_header(column: &str, comment: Option<&str>) -> String {
+    comment.filter(|c| !c.is_empty()).unwrap_or(column).to_string()
+}
+
 /// Build a single `<row>` XML fragment for the header row (row 1).
-pub(crate) fn header_row_xml(columns: &[String]) -> String {
+pub(crate) fn header_row_xml(columns: &[String], column_comments: &[Option<String>]) -> String {
     format!(
         "<row r=\"1\">{}</row>",
         columns
             .iter()
             .enumerate()
-            .map(|(index, col)| cell_xml(Some(&Value::String(col.clone())), 0, index, Some(1)))
+            .map(|(index, col)| {
+                let header = effective_header(col, column_comments.get(index).and_then(|c| c.as_deref()));
+                cell_xml(Some(&Value::String(header)), 0, index, Some(1))
+            })
             .collect::<String>()
     )
 }
@@ -107,7 +125,7 @@ pub(crate) fn start_streaming_xlsx_workbook<W: Write + Seek>(
     columns: &[String],
     column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], None, false)
+    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], &[], None, false)
 }
 
 #[cfg(test)]
@@ -118,7 +136,16 @@ pub(crate) fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek
     column_types: &[String],
     trailing_sheets: &[XlsxWorksheetData],
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, trailing_sheets, None, false)
+    start_streaming_xlsx_workbook_with_options(
+        writer,
+        sheet_name,
+        columns,
+        column_types,
+        &[],
+        trailing_sheets,
+        None,
+        false,
+    )
 }
 
 pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
@@ -126,6 +153,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
     sheet_name: Option<&str>,
     columns: &[String],
     column_types: &[String],
+    column_comments: &[Option<String>],
     trailing_sheets: &[XlsxWorksheetData],
     date_time_format: Option<&str>,
     numeric_right_align: bool,
@@ -134,13 +162,14 @@ pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
         sheet_name: sheet_name.map(str::to_string),
         columns: columns.to_vec(),
         column_types: column_types.to_vec(),
+        column_comments: column_comments.to_vec(),
         rows: Vec::new(),
         numeric_column_right_align: numeric_right_align,
     };
     let all_sheets = std::iter::once(primary_sheet).chain(trailing_sheets.iter().cloned()).collect::<Vec<_>>();
     let sheet_names = normalize_unique_sheet_names(&all_sheets);
     let sheet_count = sheet_names.len();
-    let widths = estimate_header_widths(columns);
+    let widths = estimate_header_widths(columns, column_comments);
 
     let mut zip = zip::ZipWriter::new(writer);
     write_zip_entry(&mut zip, "[Content_Types].xml", &content_types_xml_for_sheet_count(sheet_count))?;
@@ -168,7 +197,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
         cols = cols_xml(&widths),
     );
     zip.write_all(sheet_header.as_bytes()).map_err(|err| err.to_string())?;
-    zip.write_all(header_row_xml(columns).as_bytes()).map_err(|err| err.to_string())?;
+    zip.write_all(header_row_xml(columns, column_comments).as_bytes()).map_err(|err| err.to_string())?;
 
     Ok(StreamingXlsxWriter {
         zip,
@@ -289,12 +318,13 @@ fn value_text(value: Option<&Value>) -> String {
     }
 }
 
-fn estimate_column_widths(columns: &[String], rows: &[Vec<Value>]) -> Vec<usize> {
+fn estimate_column_widths(columns: &[String], column_comments: &[Option<String>], rows: &[Vec<Value>]) -> Vec<usize> {
     columns
         .iter()
         .enumerate()
-        .map(|(col_index, column)| {
-            let max_len = std::iter::once(column.chars().count().min(60))
+        .map(|(col_index, col)| {
+            let header_text = effective_header(col, column_comments.get(col_index).and_then(|c| c.as_deref()));
+            let max_len = std::iter::once(header_text.chars().count().min(60))
                 .chain(rows.iter().take(100).map(|row| value_text(row.get(col_index)).chars().count().min(60)))
                 .fold(8usize, usize::max);
             (max_len + 2).clamp(10, 60)
@@ -465,7 +495,7 @@ fn typed_cell_xml(
 fn worksheet_xml(data: &XlsxWorksheetData) -> String {
     let total_rows = data.rows.len() + 1;
     let range = sheet_range(data.columns.len(), total_rows);
-    let widths = estimate_column_widths(&data.columns, &data.rows);
+    let widths = estimate_column_widths(&data.columns, &data.column_comments, &data.rows);
 
     let cols_xml = widths
         .iter()
@@ -475,14 +505,7 @@ fn worksheet_xml(data: &XlsxWorksheetData) -> String {
         })
         .collect::<String>();
 
-    let header_xml = format!(
-        "<row r=\"1\">{}</row>",
-        data.columns
-            .iter()
-            .enumerate()
-            .map(|(index, col)| cell_xml(Some(&Value::String(col.clone())), 0, index, Some(1)))
-            .collect::<String>()
-    );
+    let header_xml = header_row_xml(&data.columns, &data.column_comments);
 
     let body_xml = data
         .rows
@@ -782,6 +805,7 @@ mod tests {
             sheet_name: Some("Users".to_string()),
             columns: vec!["id".to_string(), "name".to_string(), "active".to_string()],
             column_types: vec![],
+            column_comments: vec![],
             rows: vec![vec![json!(1), json!("Ada & Bob"), json!(true)], vec![json!(2), json!(null), json!(false)]],
             numeric_column_right_align: false,
         })
@@ -807,6 +831,7 @@ mod tests {
             sheet_name: Some("Amounts".to_string()),
             columns: vec!["quantity".to_string(), "amount".to_string(), "code".to_string()],
             column_types: vec!["decimal(10,5)".to_string(), "numeric".to_string(), "varchar".to_string()],
+            column_comments: vec![],
             rows: vec![vec![json!("1.00000"), json!("2800.000000"), json!("00123")]],
             numeric_column_right_align: false,
         })
@@ -838,6 +863,7 @@ mod tests {
                 "numeric".to_string(),
                 "timestamp with time zone".to_string(),
             ],
+            column_comments: vec![],
             rows: vec![vec![
                 json!("2024-02-25"),
                 json!("2024-02-25 13:02:15"),
@@ -886,6 +912,7 @@ mod tests {
                 "double".to_string(),
                 "decimal(18,6)".to_string(),
             ],
+            column_comments: vec![],
             rows: vec![vec![
                 json!("2"),
                 json!("42"),
@@ -921,6 +948,7 @@ mod tests {
             sheet_name: Some("Precision".to_string()),
             columns: vec!["large_id".to_string(), "precise_amount".to_string()],
             column_types: vec!["bigint".to_string(), "decimal(30,10)".to_string()],
+            column_comments: vec![],
             rows: vec![vec![json!("9223372036854775807"), json!("123456789012345.6789000000")]],
             numeric_column_right_align: false,
         })
@@ -937,6 +965,7 @@ mod tests {
             sheet_name: Some("bad/name:with*chars?and-a-very-long-tail".to_string()),
             columns: vec!["value".to_string()],
             column_types: vec![],
+            column_comments: vec![],
             rows: vec![vec![json!("ok")]],
             numeric_column_right_align: false,
         })
@@ -953,6 +982,7 @@ mod tests {
                 sheet_name: Some("Result 1".to_string()),
                 columns: vec!["id".to_string()],
                 column_types: vec![],
+                column_comments: vec![],
                 rows: vec![vec![json!(1)]],
                 numeric_column_right_align: false,
             },
@@ -960,6 +990,7 @@ mod tests {
                 sheet_name: Some("Result 2".to_string()),
                 columns: vec!["name".to_string()],
                 column_types: vec![],
+                column_comments: vec![],
                 rows: vec![vec![json!("Ada")]],
                 numeric_column_right_align: false,
             },
@@ -1032,6 +1063,7 @@ mod tests {
                 &columns,
                 &column_types,
                 &[],
+                &[],
                 Some("YYYY/MM/DD HH:mm:ss.SSS"),
                 false,
             )
@@ -1057,6 +1089,7 @@ mod tests {
                 sheet_name: Some("SQL".to_string()),
                 columns: vec!["SQL".to_string()],
                 column_types: vec![],
+                column_comments: vec![],
                 rows: vec![vec![json!("SELECT id, name FROM users")]],
                 numeric_column_right_align: false,
             };
@@ -1087,6 +1120,7 @@ mod tests {
             sheet_name: Some("Aligned".to_string()),
             columns: vec!["amount".to_string(), "label".to_string()],
             column_types: vec!["decimal(10,2)".to_string(), "varchar(50)".to_string()],
+            column_comments: vec![],
             rows: vec![vec![json!(1.5), json!("row")]],
             numeric_column_right_align: true,
         })
@@ -1103,6 +1137,7 @@ mod tests {
             sheet_name: Some("Disabled".to_string()),
             columns: vec!["amount".to_string(), "label".to_string()],
             column_types: vec!["decimal(10,2)".to_string(), "varchar(50)".to_string()],
+            column_comments: vec![],
             rows: vec![vec![json!(1.5), json!("row")]],
             numeric_column_right_align: false,
         })
@@ -1142,6 +1177,7 @@ mod tests {
             sheet_name: Some("CrossDb".to_string()),
             columns: column_types.iter().map(|t| t.to_lowercase()).collect(),
             column_types: column_types.clone(),
+            column_comments: vec![],
             rows: vec![row],
             numeric_column_right_align: true,
         })

@@ -39,6 +39,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sqlFormatter",
   "sidebarActivation",
   "sidebarObjectDisplay",
+  "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
   "autoSelectActiveSidebarNode",
   "openTabsRestoreMode",

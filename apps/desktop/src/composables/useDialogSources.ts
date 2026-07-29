@@ -23,6 +23,11 @@ const pendingImportContent = ref("");
 
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
+const transferPrefillSchema = ref("");
+const transferPrefillTables = ref<string[]>([]);
+const transferPrefillTargetConnectionId = ref("");
+const transferPrefillTargetDatabase = ref("");
+const transferPrefillTargetSchema = ref("");
 const schemaDiffPrefillConnectionId = ref("");
 const schemaDiffPrefillDatabase = ref("");
 const schemaDiffPrefillSchema = ref("");
@@ -62,6 +67,16 @@ const databaseExportAllDatabases = ref(false);
 
 let watchersRegistered = false;
 
+function clearTransferPrefill() {
+  transferPrefillConnectionId.value = "";
+  transferPrefillDatabase.value = "";
+  transferPrefillSchema.value = "";
+  transferPrefillTables.value = [];
+  transferPrefillTargetConnectionId.value = "";
+  transferPrefillTargetDatabase.value = "";
+  transferPrefillTargetSchema.value = "";
+}
+
 export function useDialogSources() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
@@ -77,11 +92,20 @@ export function useDialogSources() {
         if (v) {
           transferPrefillConnectionId.value = v.connectionId;
           transferPrefillDatabase.value = v.database;
+          transferPrefillSchema.value = v.schema ?? "";
+          transferPrefillTables.value = v.tables ?? [];
+          transferPrefillTargetConnectionId.value = v.targetConnectionId ?? "";
+          transferPrefillTargetDatabase.value = v.targetDatabase ?? "";
+          transferPrefillTargetSchema.value = v.targetSchema ?? "";
           showTransferDialog.value = true;
           connectionStore.transferSource = null;
         }
       },
     );
+
+    watch(showTransferDialog, (open) => {
+      if (!open) clearTransferPrefill();
+    });
 
     watch(
       () => connectionStore.schemaDiffSource,
@@ -307,6 +331,11 @@ export function useDialogSources() {
     pendingImportContent,
     transferPrefillConnectionId,
     transferPrefillDatabase,
+    transferPrefillSchema,
+    transferPrefillTables,
+    transferPrefillTargetConnectionId,
+    transferPrefillTargetDatabase,
+    transferPrefillTargetSchema,
     schemaDiffPrefillConnectionId,
     schemaDiffPrefillDatabase,
     schemaDiffPrefillSchema,

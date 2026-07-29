@@ -16,6 +16,11 @@ export interface SqlParameterDescriptor {
   token: string;
 }
 
+export interface SqlBracedParameter extends SqlParameterDescriptor {
+  start: number;
+  end: number;
+}
+
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
@@ -35,6 +40,19 @@ const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
+
+export function readSqlBracedParameterAt(sql: string, start: number, options?: SqlParameterOptions): SqlBracedParameter | null {
+  const open = sql.slice(start, start + 2);
+  const syntax: SqlParameterSyntax | null = open === "${" ? "shell" : open === "#{" ? "mybatis" : null;
+  if (!syntax || (options?.enabledSyntaxes && !options.enabledSyntaxes.includes(syntax))) return null;
+
+  const closeBrace = sql.indexOf("}", start + 2);
+  if (closeBrace === -1) return null;
+  const name = sql.slice(start + 2, closeBrace).trim();
+  if (!PARAMETER_NAME_RE.test(name)) return null;
+
+  return { key: name, name, syntax, token: sql.slice(start, closeBrace + 1), start, end: closeBrace + 1 };
+}
 
 export function extractSqlParameters(sql: string, options?: SqlParameterOptions): string[] {
   return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
@@ -163,26 +181,12 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         continue;
       }
     }
-    if (ch === "$" && next === "{" && isSyntaxEnabled("shell")) {
-      const end = sql.indexOf("}", i + 2);
-      if (end !== -1) {
-        const name = sql.slice(i + 2, end).trim();
-        if (PARAMETER_NAME_RE.test(name)) {
-          occurrences.push({ key: name, name, syntax: "shell", token: sql.slice(i, end + 1), start: i, end: end + 1 });
-          i = end + 1;
-          continue;
-        }
-      }
-    }
-    if (ch === "#" && next === "{" && isSyntaxEnabled("mybatis")) {
-      const end = sql.indexOf("}", i + 2);
-      if (end !== -1) {
-        const name = sql.slice(i + 2, end).trim();
-        if (PARAMETER_NAME_RE.test(name)) {
-          occurrences.push({ key: name, name, syntax: "mybatis", token: sql.slice(i, end + 1), start: i, end: end + 1 });
-          i = end + 1;
-          continue;
-        }
+    if ((ch === "$" || ch === "#") && next === "{") {
+      const parameter = readSqlBracedParameterAt(sql, i, options);
+      if (parameter) {
+        occurrences.push(parameter);
+        i = parameter.end;
+        continue;
       }
     }
     if (isHashLineComment(sql, i)) {

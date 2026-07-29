@@ -1142,13 +1142,16 @@ async function openSource(row: ObjectBrowserRow) {
 }
 
 async function openNewQuery(row: ObjectBrowserRow) {
-  const tabId = queryStore.createTab(props.connection.id, props.database, row.name);
+  const schema = row.schema || selectedSchema.value;
+  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
   queryStore.updateSql(
     tabId,
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
-      schema: row.schema || selectedSchema.value,
+      catalog: props.catalog,
+      database: props.database,
+      schema,
       tableName: row.name,
       limit: 100,
     }),
@@ -1165,7 +1168,7 @@ function openProcedureExecutionSql(sql: string) {
   const row = procedureExecutionTarget.value;
   if (!row || !sql) return;
   const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema);
+  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema, undefined, props.catalog);
   queryStore.updateSql(tabId, sql);
 }
 
@@ -1173,7 +1176,7 @@ async function executeProcedureSql(sql: string) {
   const row = procedureExecutionTarget.value;
   if (!row || !sql) return;
   const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema);
+  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema, undefined, props.catalog);
   queryStore.updateSql(tabId, sql);
   await queryStore.executeTabSql(tabId, sql);
 }

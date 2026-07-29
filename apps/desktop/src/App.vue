@@ -1521,9 +1521,14 @@ function changeActiveDatabase(database: string) {
   }
 }
 
+function changeActiveCatalog(catalog: string | undefined, database: string) {
+  const tab = activeTab.value;
+  if (tab) queryStore.updateCatalog(tab.id, catalog, database);
+}
+
 async function setActiveDatabaseAsDefault() {
   const tab = activeTab.value;
-  if (!tab || !tab.connectionId || !tab.database) return;
+  if (!tab || !tab.connectionId || !tab.database || tab.catalog) return;
   await connectionStore.setDefaultDatabase(tab.connectionId, tab.database);
 }
 
@@ -1553,8 +1558,11 @@ function ensureQueryTab(): string {
   const tab = activeTab.value;
   if (tab && tab.mode === "query") return tab.id;
   const connId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-  const db = tab?.connectionId === connId ? tab.database : connectionStore.getConfig(connId)?.database || "";
-  return queryStore.createTab(connId, db, undefined, "query");
+  const sameConnectionTab = tab?.connectionId === connId ? tab : undefined;
+  const db = sameConnectionTab?.database || connectionStore.getConfig(connId)?.database || "";
+  const schema = sameConnectionTab?.schema ?? sameConnectionTab?.objectBrowser?.schema ?? sameConnectionTab?.tableMeta?.schema;
+  const catalog = sameConnectionTab?.catalog ?? sameConnectionTab?.objectBrowser?.catalog ?? sameConnectionTab?.tableMeta?.catalog;
+  return queryStore.createTab(connId, db, undefined, "query", schema, undefined, catalog);
 }
 
 function routeAiRedisCommand(command: string, execute: boolean): boolean {
@@ -2258,6 +2266,7 @@ onUnmounted(() => {
                   @paste-sql-in-condition="pasteClipboardAsSqlInCondition"
                   @change-connection="changeActiveConnection"
                   @change-database="changeActiveDatabase"
+                  @change-catalog="changeActiveCatalog"
                   @change-schema="changeActiveSchema"
                   @set-default-database="setActiveDatabaseAsDefault"
                   @clear-default-database="clearActiveDefaultDatabase"

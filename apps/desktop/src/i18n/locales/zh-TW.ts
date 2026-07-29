@@ -698,6 +698,8 @@ export default withEnglishFallback({
     saveAllChanges: "全部儲存",
     selectConnection: "選擇連線",
     searchConnection: "搜尋連線……",
+    selectCatalog: "選擇 Catalog",
+    searchCatalog: "搜尋 Catalog……",
     selectDatabase: "選擇資料庫",
     selectDatabaseRequired: "請先選擇資料庫",
     searchDatabase: "搜尋資料庫……",

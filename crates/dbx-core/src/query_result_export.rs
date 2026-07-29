@@ -588,6 +588,7 @@ pub async fn export_query_result_core(
             &request.database,
             &session_id,
             request.client_session_id.as_deref(),
+            None,
         )
         .await;
     }

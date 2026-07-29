@@ -16,6 +16,7 @@ pub struct ExecuteQueryRequest {
     pub database: String,
     pub sql: String,
     pub schema: Option<String>,
+    pub catalog: Option<String>,
     pub execution_id: Option<String>,
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
@@ -40,6 +41,7 @@ pub struct CloseSessionRequest {
     pub connection_id: String,
     pub database: String,
     pub session_id: String,
+    pub catalog: Option<String>,
     pub client_session_id: Option<String>,
 }
 
@@ -48,6 +50,7 @@ pub struct CloseSessionRequest {
 pub struct CloseClientConnectionSessionRequest {
     pub connection_id: String,
     pub database: String,
+    pub catalog: Option<String>,
     pub client_session_id: String,
 }
 
@@ -58,6 +61,7 @@ pub struct ExecuteBatchRequest {
     pub database: String,
     pub statements: Vec<String>,
     pub schema: Option<String>,
+    pub catalog: Option<String>,
     pub timeout_secs: Option<u64>,
 }
 
@@ -349,6 +353,7 @@ pub async fn execute_query(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
             timeout_secs: req.timeout_secs,
@@ -392,6 +397,7 @@ pub async fn execute_multi(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
             timeout_secs: req.timeout_secs,
@@ -449,6 +455,7 @@ pub async fn close_query_session(
         &req.database,
         &req.session_id,
         req.client_session_id.as_deref(),
+        req.catalog.as_deref(),
     )
     .await
     .map_err(AppError::from)?;
@@ -460,7 +467,7 @@ pub async fn close_client_connection_session(
     State(state): State<Arc<WebState>>,
     Json(req): Json<CloseClientConnectionSessionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let database = if req.database.trim().is_empty() { None } else { Some(req.database.as_str()) };
+    let database = query_session_database(&req.database, req.catalog.as_deref());
     let closed = state
         .app
         .close_client_session_pool(&req.connection_id, database, &req.client_session_id)
@@ -468,6 +475,13 @@ pub async fn close_client_connection_session(
         .map_err(AppError::from)?;
 
     Ok(Json(serde_json::json!(closed)))
+}
+fn query_session_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {
+    if database.trim().is_empty() || catalog.is_some() {
+        None
+    } else {
+        Some(database)
+    }
 }
 
 pub async fn execute_script(
@@ -507,6 +521,7 @@ pub async fn execute_in_transaction(
         &req.database,
         &req.statements,
         req.schema.as_deref(),
+        req.catalog.as_deref(),
     )
     .await
     .map_err(AppError::from)?;
@@ -926,6 +941,7 @@ mod tests {
             database: "testdb".to_string(),
             statements: vec!["SELECT 1".to_string()],
             schema: None,
+            catalog: None,
             timeout_secs: None,
         };
 
@@ -949,6 +965,7 @@ mod tests {
             database: "testdb".to_string(),
             statements: vec![],
             schema: None,
+            catalog: None,
             timeout_secs: None,
         };
 
@@ -969,6 +986,7 @@ mod tests {
             database: "testdb".to_string(),
             statements: vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
             schema: None,
+            catalog: None,
             timeout_secs: None,
         };
 

@@ -1021,6 +1021,7 @@ export async function executeQuery(
   executionId?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -1047,6 +1048,7 @@ export async function executeMulti(
   executionId?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -1082,6 +1084,7 @@ export async function executeMultiWithProgress(
   schema?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -1118,20 +1121,22 @@ export async function cancelQuery(executionId: string): Promise<boolean> {
   return invoke("cancel_query", { executionId });
 }
 
-export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string): Promise<boolean> {
+export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
   return invoke("close_query_session", {
     connectionId,
     database,
     sessionId,
     clientSessionId,
+    catalog,
   });
 }
 
-export async function closeClientConnectionSession(connectionId: string, database: string, clientSessionId: string): Promise<boolean> {
+export async function closeClientConnectionSession(connectionId: string, database: string, clientSessionId: string, catalog?: string): Promise<boolean> {
   return invoke("close_client_connection_session", {
     connectionId,
     database,
     clientSessionId,
+    catalog,
   });
 }
 
@@ -1158,17 +1163,18 @@ export async function executeScriptWith2pc(connectionId: string, database: strin
   });
 }
 
-export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
+export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string): Promise<QueryResult> {
   return invoke("execute_in_transaction", {
     connectionId,
     database,
     statements,
     schema,
+    catalog,
   });
 }
 
-export async function beginManualTransaction(connectionId: string, database: string, schema?: string): Promise<string> {
-  return invoke("begin_manual_transaction", { connectionId, database, schema });
+export async function beginManualTransaction(connectionId: string, database: string, schema?: string, catalog?: string): Promise<string> {
+  return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
 export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number): Promise<QueryResult[]> {

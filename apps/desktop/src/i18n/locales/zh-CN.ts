@@ -721,6 +721,8 @@ export default withEnglishFallback({
     saveAllChanges: "全部保存",
     selectConnection: "选择连接",
     searchConnection: "搜索连接...",
+    selectCatalog: "选择 Catalog",
+    searchCatalog: "搜索 Catalog...",
     selectDatabase: "选择数据库",
     selectDatabaseRequired: "请先选择数据库",
     searchDatabase: "搜索数据库...",

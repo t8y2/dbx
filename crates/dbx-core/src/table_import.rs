@@ -3744,6 +3744,7 @@ async fn execute_import_transaction(
         database,
         statements,
         (!schema.trim().is_empty()).then_some(schema),
+        None,
     )
     .await;
     *db_write_ms += started_at.elapsed().as_millis();

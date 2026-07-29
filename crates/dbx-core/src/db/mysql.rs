@@ -1047,6 +1047,29 @@ fn mysql_setup_queries_for_database_with_mode(
     queries
 }
 
+pub(crate) fn catalog_database_context_queries(catalog: Option<&str>, database: &str) -> Vec<String> {
+    let Some(catalog) = catalog.filter(|value| !value.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let mut queries = Vec::with_capacity(2);
+    queries.push(format!("SET catalog = {}", quote_identifier(catalog)));
+    if !database.trim().is_empty() {
+        queries.push(format!("USE {}", quote_identifier(database)));
+    }
+    queries
+}
+
+pub async fn apply_catalog_database_context(
+    conn: &mut mysql_async::Conn,
+    catalog: Option<&str>,
+    database: &str,
+) -> Result<(), String> {
+    for query in catalog_database_context_queries(catalog, database) {
+        conn.query_drop(&query).await.map_err(|error| format!("Failed to select query catalog/database: {error}"))?;
+    }
+    Ok(())
+}
+
 fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {
     if !starts_with_executable_sql_keyword(sql, &["CREATE", "ALTER"]) {
         return false;
@@ -4111,6 +4134,14 @@ mod tests {
     use super::*;
     use crate::db::connection_timeout;
     use mysql_async::consts::ColumnFlags;
+    #[test]
+    fn catalog_database_context_switches_catalog_before_database() {
+        assert_eq!(
+            catalog_database_context_queries(Some("paimon`catalog"), "bi"),
+            vec!["SET catalog = `paimon``catalog`", "USE `bi`"]
+        );
+        assert_eq!(catalog_database_context_queries(None, ""), Vec::<String>::new());
+    }
 
     fn mysql_test_object(name: &str, object_type: &str) -> ObjectInfo {
         ObjectInfo {

@@ -813,6 +813,7 @@ export async function executeQuery(
   executionId?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -839,6 +840,7 @@ export async function executeMulti(
   executionId?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -874,6 +876,7 @@ export async function executeMultiWithProgress(
   schema?: string,
   options?: {
     maxRows?: number;
+    catalog?: string;
     fetchSize?: number;
     pageSize?: number;
     resultSessionId?: string;
@@ -895,20 +898,22 @@ export async function executeMultiWithProgress(
   return results;
 }
 
-export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string): Promise<boolean> {
+export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
   return post("/api/query/close-session", {
     connectionId,
     database,
     sessionId,
     clientSessionId,
+    catalog,
   });
 }
 
-export async function closeClientConnectionSession(connectionId: string, database: string, clientSessionId: string): Promise<boolean> {
+export async function closeClientConnectionSession(connectionId: string, database: string, clientSessionId: string, catalog?: string): Promise<boolean> {
   return post("/api/query/close-client-session", {
     connectionId,
     database,
     clientSessionId,
+    catalog,
   });
 }
 
@@ -939,16 +944,17 @@ export async function executeScriptWith2pc(connectionId: string, database: strin
   });
 }
 
-export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string): Promise<QueryResult> {
+export async function executeInTransaction(connectionId: string, database: string, statements: string[], schema?: string, catalog?: string): Promise<QueryResult> {
   return post("/api/query/execute-in-transaction", {
     connectionId,
     database,
     statements,
     schema,
+    catalog,
   });
 }
 
-export async function beginManualTransaction(_connectionId: string, _database: string, _schema?: string): Promise<string> {
+export async function beginManualTransaction(_connectionId: string, _database: string, _schema?: string, _catalog?: string): Promise<string> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 

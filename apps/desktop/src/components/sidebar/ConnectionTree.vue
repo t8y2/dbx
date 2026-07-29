@@ -1316,14 +1316,14 @@ function clearSidebarTableNameFilters() {
 function openSidebarProcedureSql(sql: string) {
   const target = sidebarProcedureTarget.value;
   if (!target?.connectionId || !target.database || !sql) return;
-  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema);
+  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog);
   queryStore.updateSql(tabId, sql);
 }
 
 async function executeSidebarProcedureSql(sql: string) {
   const target = sidebarProcedureTarget.value;
   if (!target?.connectionId || !target.database || !sql) return;
-  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema);
+  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog);
   queryStore.updateSql(tabId, sql);
   await queryStore.executeTabSql(tabId, sql);
 }

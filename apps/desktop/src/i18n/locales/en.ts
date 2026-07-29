@@ -720,6 +720,8 @@ export default {
     saveAllChanges: "Save all",
     selectConnection: "Select connection",
     searchConnection: "Search connections...",
+    selectCatalog: "Select catalog",
+    searchCatalog: "Search catalogs...",
     selectDatabase: "Select database",
     selectDatabaseRequired: "Select a database first",
     searchDatabase: "Search databases...",

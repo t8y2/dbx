@@ -698,6 +698,8 @@ export default withEnglishFallback({
     saveAllChanges: "すべて保存",
     selectConnection: "接続を選択",
     searchConnection: "接続を検索...",
+    selectCatalog: "カタログを選択",
+    searchCatalog: "カタログを検索...",
     selectDatabase: "データベースを選択",
     searchDatabase: "データベースを検索...",
     selectSchema: "スキーマを選択",

@@ -698,6 +698,8 @@ export default withEnglishFallback({
     saveAllChanges: "Salva tutto",
     selectConnection: "Seleziona connessione",
     searchConnection: "Cerca connessioni...",
+    selectCatalog: "Seleziona catalogo",
+    searchCatalog: "Cerca cataloghi...",
     selectDatabase: "Seleziona database",
     selectDatabaseRequired: "Seleziona prima un database",
     searchDatabase: "Cerca database...",

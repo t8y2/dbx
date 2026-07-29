@@ -700,6 +700,8 @@ export default withEnglishFallback({
     saveAllChanges: "Guardar todo",
     selectConnection: "Seleccionar conexión",
     searchConnection: "Buscar conexiones...",
+    selectCatalog: "Seleccionar catálogo",
+    searchCatalog: "Buscar catálogos...",
     selectDatabase: "Seleccionar base de datos",
     selectDatabaseRequired: "Selecciona una base de datos primero",
     searchDatabase: "Buscar bases de datos...",

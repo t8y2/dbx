@@ -1172,7 +1172,7 @@ async function loadTemplateContext(allowView = false) {
   let columns: ColumnInfo[] = [];
   try {
     const querySchema = connectionObjectTreeQuerySchema(config, node.database, tableSchema);
-    columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
+    columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label, node.catalog);
   } catch (e) {
     console.warn("[DBX][tableSqlTemplate:getColumns:error]", e);
   }
@@ -1181,7 +1181,7 @@ async function loadTemplateContext(allowView = false) {
   if (dbType === "tdengine") {
     try {
       const querySchema = connectionObjectTreeQuerySchema(config, node.database, tableSchema);
-      const tables = await api.listTables(node.connectionId, node.database, querySchema, node.label, 200);
+      const tables = await api.listTables(node.connectionId, node.database, querySchema, node.label, 200, undefined, undefined, node.catalog);
       const matched = tables.find((table) => table.name.toLowerCase() === node.label.toLowerCase());
       if (matched?.table_type) tableType = matched.table_type;
     } catch (e) {
@@ -1192,8 +1192,8 @@ async function loadTemplateContext(allowView = false) {
   return { node, dbType, tableSchema, columns, tableType };
 }
 
-function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, sql: string, title?: string) {
-  const tabId = queryStore.createTab(connectionId, database, title, "query", schema);
+function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, catalog: string | undefined, sql: string, title?: string) {
+  const tabId = queryStore.createTab(connectionId, database, title, "query", schema, undefined, catalog);
   queryStore.updateSql(tabId, sql);
 }
 
@@ -1203,11 +1203,13 @@ async function newSelectTemplate() {
     if (!context) return;
     const sql = buildTableSelectTemplate({
       databaseType: context.dbType,
+      catalog: context.node.catalog,
+      database: context.node.database,
       schema: context.tableSchema,
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, sql);
+    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1219,12 +1221,14 @@ async function newInsertTemplate() {
     if (!context) return;
     const sql = buildTableInsertTemplate({
       databaseType: context.dbType,
+      catalog: context.node.catalog,
+      database: context.node.database,
       schema: context.tableSchema,
       tableName: context.node.label,
       columns: context.columns,
       tableType: context.tableType,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, sql);
+    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1236,11 +1240,13 @@ async function newUpdateTemplate() {
     if (!context) return;
     const sql = buildTableUpdateTemplate({
       databaseType: context.dbType,
+      catalog: context.node.catalog,
+      database: context.node.database,
       schema: context.tableSchema,
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, sql);
+    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1252,11 +1258,13 @@ async function newDeleteTemplate() {
     if (!context) return;
     const sql = buildTableDeleteTemplate({
       databaseType: context.dbType,
+      catalog: context.node.catalog,
+      database: context.node.database,
       schema: context.tableSchema,
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, sql);
+    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -1285,7 +1293,7 @@ async function generateDdlTemplate() {
       });
     }
     const formatted = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(currentDatabaseType()), settingsStore.editorSettings.sqlFormatter);
-    openSqlTemplateTab(node.connectionId, node.database, node.schema, formatted, `DDL - ${node.label}`);
+    openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, formatted, `DDL - ${node.label}`);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   }
@@ -3028,7 +3036,7 @@ function createView() {
   const viewName = "new_view";
   const effectiveDbType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId));
   const viewSqlName = effectiveDbType === "informix" || !node.schema ? viewName : `${node.schema}.${viewName}`;
-  const tabId = queryStore.createTab(node.connectionId, node.database, t("contextMenu.createView"), "query", node.schema);
+  const tabId = queryStore.createTab(node.connectionId, node.database, t("contextMenu.createView"), "query", node.schema, undefined, node.catalog);
   queryStore.updateSql(tabId, `CREATE VIEW ${viewSqlName} AS\nSELECT\n  *\nFROM table_name;\n`);
   queryStore.setObjectSource(tabId, {
     schema: node.schema,
@@ -3063,7 +3071,7 @@ function createMysqlObjectTemplate() {
   const template = mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
   if (!template) return;
   connectionStore.activeConnectionId = node.connectionId;
-  const tabId = queryStore.createTab(node.connectionId, node.database, t(template.titleKey), "query", node.schema);
+  const tabId = queryStore.createTab(node.connectionId, node.database, t(template.titleKey), "query", node.schema, undefined, node.catalog);
   queryStore.updateSql(tabId, template.sql);
 }
 

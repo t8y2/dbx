@@ -45,6 +45,7 @@ import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } fr
 import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
+import { resolveHistorySqlRestoreTarget } from "@/lib/history/historyRestoreTarget";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
@@ -254,11 +255,14 @@ function restoreHistorySql(sql: string, entry: HistoryEntry) {
     return;
   }
 
-  const connectionId = entry.connection_id || tab?.connectionId || connectionStore.connections[0]?.id;
-  if (!connectionId) return;
-  const config = connectionStore.getConfig(connectionId);
-  const database = entry.database || tab?.database || (config ? resolveDefaultDatabase(config, []) : "");
-  const tabId = queryStore.createTab(connectionId, database || "", t("tabs.sql"));
+  const target = resolveHistorySqlRestoreTarget({
+    entry,
+    activeTab: tab,
+    firstConnectionId: connectionStore.connections[0]?.id,
+    getConfig: (connectionId) => connectionStore.getConfig(connectionId),
+  });
+  if (!target) return;
+  const tabId = queryStore.createTab(target.connectionId, target.database, t("tabs.sql"), "query", target.schema);
   queryStore.updateSql(tabId, sql);
 }
 
@@ -1554,7 +1558,8 @@ function ensureQueryTab(): string {
   if (tab && tab.mode === "query") return tab.id;
   const connId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
   const db = tab?.connectionId === connId ? tab.database : connectionStore.getConfig(connId)?.database || "";
-  return queryStore.createTab(connId, db, undefined, "query");
+  const schema = tab?.connectionId === connId ? tab.schema : undefined;
+  return queryStore.createTab(connId, db, undefined, "query", schema);
 }
 
 function routeAiRedisCommand(command: string, execute: boolean): boolean {

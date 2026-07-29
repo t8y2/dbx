@@ -165,6 +165,9 @@ pub struct ExportProgress {
     pub total_rows: Option<u64>,
     pub status: ExportStatus,
     pub error: Option<String>,
+    /// True while listing schema / prefetching table metadata — before objects are written.
+    #[serde(default)]
+    pub preparing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1294,11 +1297,36 @@ fn write_database_export_rows(
     }
 }
 
+fn emit_database_export_running(
+    on_progress: &(impl Fn(ExportProgress) + Sync),
+    export_id: &str,
+    current_object: impl Into<String>,
+    object_index: usize,
+    total_objects: usize,
+    rows_exported: u64,
+    preparing: bool,
+) {
+    on_progress(ExportProgress {
+        export_id: export_id.to_string(),
+        current_object: current_object.into(),
+        object_index,
+        total_objects,
+        rows_exported,
+        total_rows: None,
+        status: ExportStatus::Running,
+        error: None,
+        preparing,
+    });
+}
+
 pub async fn export_database_sql_core(
     state: &crate::connection::AppState,
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    // Emit immediately so the UI is never blank while we list schema metadata.
+    emit_database_export_running(&on_progress, &request.export_id, "", 0, 0, 0, true);
+
     // 1. Get database type
     let db_type = state
         .configs
@@ -1493,53 +1521,15 @@ pub async fn export_database_sql_core(
 
     let mut object_index: usize = 0;
     let mut total_rows_exported = 0_u64;
+    // total_objects is known later for the write phase; preparing updates stay
+    // presence-only so the UI does not show a counter that later resets.
+    emit_database_export_running(&on_progress, &request.export_id, "", 0, 0, 0, true);
 
-    // Export tables
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
-
-    for extension in &postgres_extensions {
-        if is_export_cancelled(&request.export_id).await {
-            return Err("Export cancelled".to_string());
-        }
-        on_progress(ExportProgress {
-            export_id: request.export_id.clone(),
-            current_object: extension.name.clone(),
-            object_index,
-            total_objects,
-            rows_exported: total_rows_exported,
-            total_rows: None,
-            status: ExportStatus::Running,
-            error: None,
-        });
-        writeln!(file, "{}\n", generate_postgres_extension_ddl(extension))
-            .map_err(|e| format!("Failed to write file: {e}"))?;
-        object_index += 1;
-    }
-
-    for sequence in postgres_sequences.iter().filter(|sequence| sequence.owner_table.is_none()) {
-        if is_export_cancelled(&request.export_id).await {
-            return Err("Export cancelled".to_string());
-        }
-
-        on_progress(ExportProgress {
-            export_id: request.export_id.clone(),
-            current_object: sequence.name.clone(),
-            object_index,
-            total_objects,
-            rows_exported: total_rows_exported,
-            total_rows: None,
-            status: ExportStatus::Running,
-            error: None,
-        });
-
-        writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
-            .map_err(|e| format!("Failed to write file: {e}"))?;
-        object_index += 1;
-    }
 
     // 预取各表的 DDL 与列元数据：逐表串行往返在多表数据库上是整库导出耗时的
     // 主要来源（每表 1-2 次网络往返 × 表数）。有界并发预取后，下方写出循环仍按
-    // 原顺序消费，文件内容与逐表查询完全一致。
+    // 原顺序消费，文件内容与逐表查询完全一致。放在写出循环之前，避免准备态与导出态来回跳。
     struct PrefetchedTableMetadata {
         ddl: Option<Result<String, String>>,
         columns: Option<Result<Vec<crate::db::ColumnInfo>, String>>,
@@ -1611,12 +1601,62 @@ pub async fn export_database_sql_core(
             .buffer_unordered(EXPORT_METADATA_PREFETCH_CONCURRENCY);
         while let Some((index, metadata)) = prefetch_stream.next().await {
             prefetched_table_metadata[index] = Some(metadata);
+            if let Some(table_info) = tables.get(index) {
+                // Presence-only updates: no prepare counter that later resets to 0/N.
+                emit_database_export_running(
+                    &on_progress,
+                    &request.export_id,
+                    table_info.name.clone(),
+                    0,
+                    0,
+                    total_rows_exported,
+                    true,
+                );
+            }
             // 取消后不再调度新的预取任务（已在途的任务随 stream 释放而中止），
             // 写出循环入口的取消检查负责最终收尾
             if is_export_cancelled_now(&request.export_id) {
                 break;
             }
         }
+    }
+
+    for extension in &postgres_extensions {
+        if is_export_cancelled(&request.export_id).await {
+            return Err("Export cancelled".to_string());
+        }
+        emit_database_export_running(
+            &on_progress,
+            &request.export_id,
+            extension.name.clone(),
+            object_index,
+            total_objects,
+            total_rows_exported,
+            false,
+        );
+        writeln!(file, "{}\n", generate_postgres_extension_ddl(extension))
+            .map_err(|e| format!("Failed to write file: {e}"))?;
+        object_index += 1;
+    }
+
+    for sequence in postgres_sequences.iter().filter(|sequence| sequence.owner_table.is_none()) {
+        if is_export_cancelled(&request.export_id).await {
+            return Err("Export cancelled".to_string());
+        }
+
+        emit_database_export_running(
+            &on_progress,
+            &request.export_id,
+            sequence.name.clone(),
+            object_index,
+            total_objects,
+            total_rows_exported,
+            false,
+        );
+
+        writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
+            .map_err(|e| format!("Failed to write file: {e}"))?;
+        object_index += 1;
     }
 
     for (table_index, table_info) in tables.iter().enumerate().filter(|_| exports_database_tables(request)) {
@@ -1631,6 +1671,7 @@ pub async fn export_database_sql_core(
                 total_rows: None,
                 status: ExportStatus::Cancelled,
                 error: None,
+                preparing: false,
             });
             return Ok(());
         }
@@ -1647,6 +1688,7 @@ pub async fn export_database_sql_core(
             total_rows: None,
             status: ExportStatus::Running,
             error: None,
+            preparing: false,
         });
 
         // Export structure
@@ -1668,6 +1710,7 @@ pub async fn export_database_sql_core(
                     total_rows: None,
                     status: ExportStatus::Running,
                     error: None,
+                    preparing: false,
                 });
 
                 writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
@@ -1779,6 +1822,7 @@ pub async fn export_database_sql_core(
                                 total_rows: None,
                                 status: ExportStatus::Running,
                                 error: None,
+                                preparing: false,
                             });
                             Ok(())
                         },
@@ -1816,6 +1860,7 @@ pub async fn export_database_sql_core(
                                 total_rows,
                                 status: ExportStatus::Cancelled,
                                 error: None,
+                                preparing: false,
                             });
                             return Ok(());
                         }
@@ -1864,6 +1909,7 @@ pub async fn export_database_sql_core(
                             total_rows,
                             status: ExportStatus::Running,
                             error: None,
+                            preparing: false,
                         });
                         if row_count < batch_size {
                             break;
@@ -1907,6 +1953,7 @@ pub async fn export_database_sql_core(
                 total_rows: None,
                 status: ExportStatus::Running,
                 error: None,
+                preparing: false,
             });
 
             match crate::schema::get_object_source_core(
@@ -1958,6 +2005,7 @@ pub async fn export_database_sql_core(
                 total_rows: None,
                 status: ExportStatus::Running,
                 error: None,
+                preparing: false,
             });
 
             match crate::schema::get_object_source_core(
@@ -2013,6 +2061,7 @@ pub async fn export_database_sql_core(
                 total_rows: None,
                 status: ExportStatus::Running,
                 error: None,
+                preparing: false,
             });
 
             match crate::schema::get_object_source_core(
@@ -2067,6 +2116,7 @@ pub async fn export_database_sql_core(
         total_rows: None,
         status: ExportStatus::Done,
         error: None,
+        preparing: false,
     });
 
     Ok(())

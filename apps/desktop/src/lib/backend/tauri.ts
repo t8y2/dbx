@@ -2851,6 +2851,8 @@ export interface ExportProgress {
   totalRows: number | null;
   status: "Running" | "Done" | "Error" | "Cancelled";
   error: string | null;
+  /** True while listing schema / prefetching metadata before objects are written. */
+  preparing?: boolean;
 }
 
 // --- Table Export ---

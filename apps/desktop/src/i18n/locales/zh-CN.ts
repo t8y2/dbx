@@ -4983,6 +4983,8 @@ export default withEnglishFallback({
     export: "导出",
     exportAllDatabases: "导出全部数据库",
     exporting: "正在导出...",
+    preparing: "正在准备导出（读取表与元数据）...",
+    preparingObject: "正在准备: {object}",
     selectExportDirectory: "选择导出目录",
     currentDatabase: "数据库 {current}/{total}",
     currentTable: "当前: {table} ({current}/{total})",

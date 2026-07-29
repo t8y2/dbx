@@ -4984,6 +4984,8 @@ export default {
     export: "Export",
     exportAllDatabases: "Export All Databases",
     exporting: "Exporting...",
+    preparing: "Preparing export (reading tables and metadata)...",
+    preparingObject: "Preparing: {object}",
     selectExportDirectory: "Select export directory",
     currentDatabase: "Database {current}/{total}",
     currentTable: "Current: {table} ({current}/{total})",

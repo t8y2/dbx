@@ -4751,6 +4751,8 @@ export default withEnglishFallback({
     export: "Exportar",
     exportAllDatabases: "Exportar todas las bases de datos",
     exporting: "Exportando...",
+    preparing: "Preparando exportación (leyendo tablas y metadatos)...",
+    preparingObject: "Preparando: {object}",
     selectExportDirectory: "Seleccionar directorio de exportación",
     currentDatabase: "Base de datos {current}/{total}",
     currentTable: "Actual: {table} ({current}/{total})",

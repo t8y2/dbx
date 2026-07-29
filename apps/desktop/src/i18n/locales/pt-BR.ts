@@ -4753,6 +4753,8 @@ export default withEnglishFallback({
     export: "Exportar",
     exportAllDatabases: "Exportar todos os bancos de dados",
     exporting: "Exportando...",
+    preparing: "Preparando exportação (lendo tabelas e metadados)...",
+    preparingObject: "Preparando: {object}",
     selectExportDirectory: "Selecionar diretório de exportação",
     currentDatabase: "Banco de dados {current}/{total}",
     currentTable: "Atual: {table} ({current}/{total})",

@@ -4420,6 +4420,8 @@ export default withEnglishFallback({
     export: "匯出",
     exportAllDatabases: "匯出全部資料庫",
     exporting: "正在匯出……",
+    preparing: "正在準備匯出（讀取資料表與中繼資料）...",
+    preparingObject: "正在準備: {object}",
     selectExportDirectory: "選擇匯出目錄",
     currentDatabase: "資料庫 {current}/{total}",
     currentTable: "目前： {table} ({current}/{total})",

@@ -4751,6 +4751,8 @@ export default withEnglishFallback({
     export: "エクスポート",
     exportAllDatabases: "すべてのデータベースをエクスポート",
     exporting: "エクスポート中...",
+    preparing: "エクスポートを準備中（テーブルとメタデータを読み取り中）...",
+    preparingObject: "準備中: {object}",
     selectExportDirectory: "エクスポート先ディレクトリを選択",
     currentDatabase: "データベース {current}/{total}",
     currentTable: "現在: {table} ({current}/{total})",

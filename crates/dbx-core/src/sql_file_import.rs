@@ -496,24 +496,25 @@ async fn execute_sql_file_paths_parallel(
         let exec_id = file_request.execution_id.clone();
         futures.push(async move {
             let mut local_progress = SqlFileExecutionProgress::new();
-            let mut mysql_executor = match MySqlSqlFileExecutor::build(state, &file_request, import_target.as_ref()).await {
-                Ok(executor) => executor,
-                Err(error) => {
-                    let p = sql_file_progress(
-                        &exec_id,
-                        SqlFileStatus::Error,
-                        0,
-                        0,
-                        1,
-                        0,
-                        started_at,
-                        "",
-                        Some(error.clone()),
-                    );
-                    let _ = tx.send((idx, p));
-                    return Err(error);
-                }
-            };
+            let mut mysql_executor =
+                match MySqlSqlFileExecutor::build(state, &file_request, import_target.as_ref()).await {
+                    Ok(executor) => executor,
+                    Err(error) => {
+                        let p = sql_file_progress(
+                            &exec_id,
+                            SqlFileStatus::Error,
+                            0,
+                            0,
+                            1,
+                            0,
+                            started_at,
+                            "",
+                            Some(error.clone()),
+                        );
+                        let _ = tx.send((idx, p));
+                        return Err(error);
+                    }
+                };
             let tx_for_emit = tx.clone();
             let mut emit_fn = move |progress: SqlFileProgress| {
                 let _ = tx_for_emit.send((idx, progress));

@@ -30,7 +30,12 @@ function toggle() {
 
 <template>
   <div>
-    <div class="flex items-center gap-1 py-0.5 px-1 rounded cursor-pointer hover:bg-muted text-xs group" :class="{ 'bg-muted/80': selectedTopic === node.fullPath }" :style="{ paddingLeft: `${depth * 12 + 4}px` }" @click="node.isLeaf ? emit('select', node.fullPath) : toggle()">
+    <div
+      class="flex items-center gap-1 py-0.5 pl-2 pr-1 rounded cursor-pointer text-xs group border-l-2 border-transparent"
+      :class="selectedTopic === node.fullPath ? 'bg-primary/25 text-foreground font-semibold border-l-primary shadow-sm ring-1 ring-primary/20' : 'hover:bg-muted/70 text-muted-foreground'"
+      :style="{ paddingLeft: `${depth * 12 + 4}px` }"
+      @click="node.isLeaf ? emit('select', node.fullPath) : toggle()"
+    >
       <!-- Expand/collapse toggle -->
       <button v-if="node.children?.length" class="shrink-0 w-4 h-4 flex items-center justify-center text-muted-foreground" @click.stop="toggle">
         <ChevronRight v-if="!expanded" class="h-3 w-3" />
@@ -39,7 +44,7 @@ function toggle() {
       <span v-else class="w-4 shrink-0" />
 
       <!-- Topic name -->
-      <span class="truncate flex-1 font-mono" :class="{ 'font-medium text-blue-600 dark:text-blue-400': node.isLeaf }">
+      <span class="truncate flex-1 font-mono" :class="selectedTopic === node.fullPath ? 'text-primary' : node.isLeaf ? 'font-medium text-blue-600 dark:text-blue-400' : ''">
         {{ node.name }}
       </span>
 

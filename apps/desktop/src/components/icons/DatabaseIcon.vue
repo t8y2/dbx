@@ -99,6 +99,7 @@ const assetIcons: Record<string, string> = {
   influxdb: "influxdb",
   zookeeper: "zookeeper",
   jdbcx: "jdbcx",
+  mqtt: "mqtt",
 };
 
 const letterIcons: Record<string, { letter: string; color: string }> = {

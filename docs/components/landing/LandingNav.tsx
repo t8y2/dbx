@@ -1,23 +1,24 @@
 "use client";
 
 import Link from "next/link";
+import { Github } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 const i18n = {
   en: {
     home: "Home",
     docs: "Docs",
-    databases: "Databases",
     changelog: "Changelog",
     community: "Community",
+    sponsors: "Sponsors",
     contributors: "Contributors",
     drivers: "Offline Drivers",
-    lang: "中文",
+    langLabel: "Switch to Chinese",
   },
-  cn: { home: "首页", docs: "文档", databases: "数据库", changelog: "更新日志", community: "交流群", contributors: "贡献者", drivers: "离线驱动", lang: "English" },
+  cn: { home: "首页", docs: "文档", changelog: "更新日志", community: "交流群", sponsors: "赞助商", contributors: "贡献者", drivers: "离线驱动", langLabel: "切换到英文" },
 };
 
-export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "databases" | "changelog" | "community" | "contributors" | "drivers" }) {
+export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "databases" | "changelog" | "community" | "sponsors" | "contributors" | "drivers" }) {
   const ref = useRef<HTMLElement>(null);
   const t = i18n[lang];
   const otherLang = lang === "cn" ? "en" : "cn";
@@ -25,6 +26,7 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
     databases: `/${otherLang}/databases`,
     changelog: `/${otherLang}/changelog`,
     community: `/${otherLang}/community`,
+    sponsors: `/${otherLang}/sponsors`,
     contributors: `/${otherLang}/contributors`,
     drivers: `/${otherLang}/drivers`,
   };
@@ -57,14 +59,14 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
           <Link href={`/${lang}/docs/what-is-dbx`} className="landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden text-landing-muted">
             {t.docs}
           </Link>
-          <Link href={`/${lang}/databases`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "databases" ? "text-landing-ink" : "text-landing-muted"}`}>
-            {t.databases}
-          </Link>
           <Link href={`/${lang}/changelog`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "changelog" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.changelog}
           </Link>
           <Link href={`/${lang}/community`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "community" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.community}
+          </Link>
+          <Link href={`/${lang}/sponsors`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[900px]:hidden ${active === "sponsors" ? "text-landing-ink" : "text-landing-muted"}`}>
+            {t.sponsors}
           </Link>
           <Link href={`/${lang}/contributors`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[900px]:hidden ${active === "contributors" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.contributors}
@@ -72,11 +74,11 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
           <Link href={`/${lang}/drivers`} className={`landing-nav-link rounded-[7px] px-[11px] py-2 text-[13px] font-medium max-[760px]:hidden ${active === "drivers" ? "text-landing-ink" : "text-landing-muted"}`}>
             {t.drivers}
           </Link>
-          <Link href="https://github.com/t8y2/dbx" target="_blank" className="landing-nav-link rounded-[7px] px-[11px] py-2 text-landing-muted text-[13px] font-medium max-[760px]:hidden">
-            GitHub
+          <Link href="https://github.com/t8y2/dbx" target="_blank" aria-label="GitHub" title="GitHub" className="landing-nav-link inline-flex size-9 items-center justify-center rounded-[7px] text-landing-muted max-[760px]:hidden">
+            <Github size={18} strokeWidth={2} />
           </Link>
-          <Link href={langHref} className="landing-nav-link rounded-[7px] px-[11px] py-2 text-landing-muted text-[13px] font-medium ml-1.5 border border-landing-line">
-            {t.lang}
+          <Link href={langHref} aria-label={t.langLabel} title={t.langLabel} className="landing-nav-link ml-1.5 inline-flex h-9 items-center justify-center rounded-[7px] border border-landing-line px-2.5 text-[12px] font-[650] tracking-tight text-landing-muted">
+            文/A
           </Link>
         </div>
       </div>

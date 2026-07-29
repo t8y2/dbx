@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ConsumerInfo, ProducerInfo, SubscriptionInfo, TopicInfo, TopicRef, TopicStats, MqSystemKind } from "@/types/mq";
@@ -147,7 +148,7 @@ async function loadTopics(force = false) {
   try {
     await topicSelectRef.value?.loadTopics();
   } catch (e: unknown) {
-    error.value = formatError(e);
+    error.value = translateBackendError(t, formatError(e));
   } finally {
     topicsLoading.value = false;
   }
@@ -260,7 +261,7 @@ async function loadRuntimeClients() {
     }
   } catch (e: unknown) {
     if (isRuntimeLoadCurrent(loadSeq, currentKey)) {
-      error.value = formatError(e) || String(e);
+      error.value = translateBackendError(t, formatError(e)) || String(e);
     }
   } finally {
     if (loadSeq === runtimeLoadSeq) {

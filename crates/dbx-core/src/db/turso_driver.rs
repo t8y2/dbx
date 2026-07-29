@@ -349,6 +349,7 @@ pub async fn execute_query_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 
@@ -367,6 +368,7 @@ pub async fn execute_query_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     } else {
         // Batch multiple statements into a single pipeline for transactional integrity
@@ -382,6 +384,7 @@ pub async fn execute_query_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         })
     }
 }
@@ -564,6 +567,7 @@ fn query_result_from_turso_result(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 

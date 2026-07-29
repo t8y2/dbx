@@ -21,6 +21,7 @@ const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releas
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
 const MAX_PORTABLE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_PORTABLE_SIGNATURE_BYTES: usize = 64 * 1024;
+const IS_WINDOWS_7_TARGET: bool = cfg!(target_vendor = "win7");
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -208,7 +209,12 @@ pub async fn check_for_updates(
     let current_version = env!("CARGO_PKG_VERSION");
     let mut info = dbx_core::update::build_update_info(release, current_version);
     info.portable_mode = crate::data_dir::is_portable_mode();
+    info.manual_update_only = requires_manual_update(IS_WINDOWS_7_TARGET);
     Ok(info)
+}
+
+fn requires_manual_update(is_windows_7_target: bool) -> bool {
+    is_windows_7_target
 }
 
 #[tauri::command]
@@ -229,7 +235,11 @@ pub async fn download_update(
     source: UpdateDownloadSource,
     latest_version: Option<String>,
 ) -> Result<(), String> {
-    let portable_version = if crate::data_dir::is_portable_mode() {
+    let portable_mode = crate::data_dir::is_portable_mode();
+    if requires_manual_update(IS_WINDOWS_7_TARGET) {
+        return Err("Windows 7 builds must be updated with the dedicated Windows 7 offline installer.".to_string());
+    }
+    let portable_version = if portable_mode {
         let requested_version =
             latest_version.as_deref().ok_or_else(|| "Latest version is required for portable updates.".to_string())?;
         Some(update_portable::validate_requested_portable_version(requested_version, env!("CARGO_PKG_VERSION"))?)
@@ -446,9 +456,15 @@ async fn update_url_is_available(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        tag_version, UpdateDownloadSource, CNB_RELEASE_DOWNLOAD_PREFIX, GITHUB_RELEASE_DOWNLOAD_PREFIX,
-        OFFICIAL_UPDATE_ENDPOINTS, R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
+        requires_manual_update, tag_version, UpdateDownloadSource, CNB_RELEASE_DOWNLOAD_PREFIX,
+        GITHUB_RELEASE_DOWNLOAD_PREFIX, OFFICIAL_UPDATE_ENDPOINTS, R2_LATEST_RELEASE_DOWNLOAD_PREFIX,
     };
+
+    #[test]
+    fn all_windows_7_builds_require_manual_updates() {
+        assert!(requires_manual_update(true));
+        assert!(!requires_manual_update(false));
+    }
 
     #[test]
     fn normalizes_update_tag_versions() {

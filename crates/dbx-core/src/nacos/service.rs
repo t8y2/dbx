@@ -162,6 +162,15 @@ pub async fn nacos_update_instance_core(
     admin.update_instance(req).await
 }
 
+pub async fn nacos_get_dashboard_core(
+    state: &AppState,
+    conn_id: &str,
+    query: NacosDashboardQuery,
+) -> Result<NacosDashboardSnapshot, String> {
+    let admin = get_admin(state, conn_id).await?;
+    admin.get_dashboard(query).await
+}
+
 pub async fn nacos_raw_request_core(
     state: &AppState,
     conn_id: &str,
@@ -209,6 +218,7 @@ mod tests {
         let mut cfg = crate::models::connection::ConnectionConfig {
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -221,6 +231,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -278,6 +289,7 @@ mod tests {
         let cfg = crate::models::connection::ConnectionConfig {
             id: "nacos-rollback".to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -290,6 +302,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

@@ -27,6 +27,7 @@ test("near-bottom check matches the grid threshold", () => {
 
 test("infinite scroll requests only the next bounded segment", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  assert.match(source, /function infiniteScrollNextPage\(\) \{[\s\S]*?if \(!canFetchNextInfiniteScrollSegment\.value\) \{[\s\S]*?infiniteScrollAllLoaded = true;[\s\S]*?return;[\s\S]*?\}/);
   assert.match(source, /const nextOffset = props\.result\.rows\.length/);
   assert.match(source, /Math\.min\(pageSize\.value, remainingRows\)/);
   assert.doesNotMatch(source, /emit\("paginate", 0, cumulativeLimit/);

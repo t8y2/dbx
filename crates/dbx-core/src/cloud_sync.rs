@@ -1091,11 +1091,15 @@ mod tests {
                 proxy_url: String::new(),
                 enable_thinking: true,
                 reasoning_level: crate::ai::AiReasoningLevel::Default,
+                runtime_effort: None,
                 context_window: None,
+                max_retries: None,
                 codex_cli_path: None,
                 codex_cli_env: Default::default(),
                 claude_code_cli_path: None,
                 claude_code_cli_env: Default::default(),
+                pi_agent_cli_path: None,
+                pi_agent_cli_env: Default::default(),
             },
         }
     }
@@ -1117,6 +1121,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "Postgres".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,
@@ -1129,6 +1134,7 @@ mod tests {
             database: Some("app_db".to_string()),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1171,6 +1177,7 @@ mod tests {
         ConnectionConfig {
             id: id.to_string(),
             name: "Nacos".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Nacos,
             driver_profile: None,
             driver_label: None,
@@ -1183,6 +1190,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1262,6 +1270,7 @@ mod tests {
         let mut config = ConnectionConfig {
             id: "id".to_string(),
             name: "name".to_string(),
+            note: String::new(),
             db_type: DatabaseType::Postgres,
             driver_profile: None,
             driver_label: None,
@@ -1274,6 +1283,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string()),
             color: None,

@@ -165,3 +165,79 @@ test("batches large Oracle data generation statements", () => {
   assert.equal(result.statements[0].match(/\n  INTO /g)?.length, 100);
   assert.equal(result.statements[1].match(/\n  INTO /g)?.length, 1);
 });
+
+test("generates TDengine stable rows with one child table identity and stable tag values", () => {
+  const result = generateTableData(
+    {
+      tableName: "sensor_data",
+      tableType: "STABLE",
+      schema: "dbx_issue4512",
+      database: "dbx_issue4512",
+      rowCount: 2,
+      columns: [
+        {
+          columnName: "ts",
+          dataType: "TIMESTAMP",
+          rowCount: 2,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 1, increment: 1 },
+        },
+        {
+          columnName: "temperature",
+          dataType: "FLOAT",
+          rowCount: 2,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 20, increment: 1 },
+        },
+        {
+          columnName: "device_id",
+          dataType: "BINARY(64)",
+          rowCount: 2,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 100, increment: 1 },
+          isTag: true,
+        },
+      ],
+    },
+    "tdengine",
+  );
+
+  assert.deepEqual(result.columns, ["tbname", "ts", "temperature", "device_id"]);
+  assert.match(String(result.rows[0][0]), /^dbx_gen_[a-z0-9]+_[a-z0-9]+$/);
+  assert.equal(result.rows[1][0], result.rows[0][0]);
+  assert.deepEqual(
+    result.rows.map((row) => row.slice(1)),
+    [
+      [1, 20, 100],
+      [2, 21, 100],
+    ],
+  );
+  assert.match(result.sql, /^INSERT INTO `sensor_data` \(`tbname`, `ts`, `temperature`, `device_id`\) VALUES\n/);
+  assert.equal(result.sql.match(/'dbx_gen_[a-z0-9]+_[a-z0-9]+'/g)?.length, 2);
+});
+
+test("keeps ordinary TDengine table generation unchanged", () => {
+  const result = generateTableData(
+    {
+      tableName: "sensor_data_001",
+      tableType: "TABLE",
+      schema: "dbx_issue4512",
+      database: "dbx_issue4512",
+      rowCount: 1,
+      columns: [
+        {
+          columnName: "ts",
+          dataType: "TIMESTAMP",
+          rowCount: 1,
+          generatorKey: "sequence",
+          generatorParams: { startValue: 1, increment: 1 },
+        },
+      ],
+    },
+    "tdengine",
+  );
+
+  assert.deepEqual(result.columns, ["ts"]);
+  assert.deepEqual(result.rows, [[1]]);
+  assert.doesNotMatch(result.sql, /tbname/);
+});

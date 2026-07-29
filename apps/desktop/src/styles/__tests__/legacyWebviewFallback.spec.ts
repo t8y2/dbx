@@ -53,6 +53,9 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(desktopIndexSource).toContain('href="/connection-dialog-legacy.css"');
     expect(connectionDialogLegacyCss).toContain("@media (min-width: 640px)");
     expect(connectionDialogLegacyCss).toContain("@media (min-width: 1024px)");
+    expect(connectionDialogLegacyCss).toContain("min-width: 38rem !important;");
+    expect(connectionDialogLegacyCss).toContain("width: 0 !important;");
+    expect(connectionDialogLegacyCss).toContain(".connection-db-picker-option");
     expect(connectionDialogLegacyCss).not.toContain("width >=");
     expect(connectionDialogSource).not.toContain("@media (min-width: 640px)");
   });

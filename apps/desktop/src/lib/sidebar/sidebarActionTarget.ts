@@ -12,13 +12,17 @@ function sameActionTarget(left: TreeNode, right: SidebarActionTarget): boolean {
   return left.id === right.id && left.type === right.type && left.connectionId === right.connectionId && left.database === right.database && left.schema === right.schema && left.catalog === right.catalog && left.label === right.label && left.signature === right.signature;
 }
 
+export function matchesSidebarActionTarget(node: TreeNode, target: SidebarActionTarget): boolean {
+  return sameActionTarget(node, target);
+}
+
 export function findSidebarActionTarget(nodes: readonly TreeNode[], target: SidebarActionTarget): TreeNode | null {
   const visited = new WeakSet<TreeNode>();
   const find = (items: readonly TreeNode[]): TreeNode | null => {
     for (const node of items) {
       if (visited.has(node)) continue;
       visited.add(node);
-      if (sameActionTarget(node, target)) return node;
+      if (matchesSidebarActionTarget(node, target)) return node;
       const child = node.children ? find(node.children) : null;
       if (child) return child;
       const hiddenChild = node.hiddenChildren ? find(node.hiddenChildren) : null;

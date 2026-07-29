@@ -103,14 +103,6 @@ test("direct draft row copy is ignored", async () => {
   assert.equal(vi.mocked(copyToClipboard).mock.calls.length, 0);
 });
 
-test("selected draft row TSV copy is ignored", async () => {
-  const exporter = createExportContext({ selectedRowIds: new Set([draftRowId]) });
-
-  await exporter.copySelectedRowsTsv();
-
-  assert.equal(vi.mocked(copyToClipboard).mock.calls.length, 0);
-});
-
 test("empty selected row export does not fall back to full export", async () => {
   let fullExportCalls = 0;
   const exporter = createExportContext({

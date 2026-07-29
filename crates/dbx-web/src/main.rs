@@ -2,6 +2,7 @@ mod auth;
 mod error;
 mod routes;
 mod sse;
+mod ssh_prompt;
 mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -16,13 +17,47 @@ use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use dbx_core::connection::AppState;
+use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
+use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::Storage;
 use state::WebState;
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
+use utoipa::OpenApi;
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "DBX Data Grid Extractor API", description = "HTTP contract for data-grid clipboard extraction."),
+    paths(routes::query::extract_data_grid_selection),
+    tags((name = "data-grid", description = "Data grid extraction and clipboard formats"))
+)]
+struct ApiDoc;
+
+async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
+    axum::Json(ApiDoc::openapi())
+}
+
+#[cfg(test)]
+mod data_grid_extractor_openapi_tests {
+    use super::*;
+
+    #[test]
+    fn extractor_openapi_contains_the_versioned_request_and_error_responses() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize extractor OpenAPI document");
+        let operation = &document["paths"]["/api/query/extract-data-grid-selection"]["post"];
+
+        assert_eq!(operation["requestBody"]["required"], true);
+        assert!(operation["responses"].get("200").is_some());
+        assert!(operation["responses"].get("400").is_some());
+        assert!(operation["responses"].get("413").is_some());
+        assert!(operation["responses"].get("422").is_some());
+        assert!(operation["responses"].get("500").is_some());
+    }
+}
 
 fn web_compression_predicate() -> impl Predicate {
     // XLSX exports are already compressed ZIP archives, so gzip would only add CPU overhead.
@@ -169,6 +204,28 @@ async fn main() {
         let db_path = data_dir.join("dbx.db");
         let storage = Storage::open(&db_path).await.expect("Failed to open storage");
         storage.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
+
+        // Initialize core dialect registry and load external plugin dialects
+        register_core_dialects();
+        let registry = DialectRegistry::global();
+        let plugin_dirs = vec![data_dir.join("plugins").join("dialects")];
+        let load_result = DialectPluginLoader::scan_and_load(registry, &plugin_dirs);
+        log::info!(
+            "Dialect plugins loaded: {} success, {} errors, {} skipped",
+            load_result.loaded.len(),
+            load_result.errors.len(),
+            load_result.skipped.len()
+        );
+
+        // Start dialect YAML hot-reload watcher
+        let watch_dirs = plugin_dirs.clone();
+        tokio::spawn(async move {
+            if let Err(e) = DialectHotReload::run_forever(watch_dirs, DialectRegistry::global()).await {
+                log::error!("Dialect hot-reload watcher exited: {e}");
+            }
+        });
+        log::info!("Dialect hot-reload watcher started");
+
         Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             data_dir.join("plugins"),
@@ -201,12 +258,16 @@ async fn main() {
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),
         sse_channels: RwLock::new(HashMap::new()),
+        transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
+        ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
     });
+
+    ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
 
     // API routes
     let api = Router::new()
@@ -250,6 +311,8 @@ async fn main() {
         // System
         .route("/system/fonts", get(routes::jdbc::list_system_fonts))
         .route("/ssh/config-hosts", get(routes::ssh_config::list_ssh_config_hosts))
+        .route("/ssh/prompts", get(routes::ssh_prompt::stream_ssh_prompts))
+        .route("/ssh/prompts/resolve", post(routes::ssh_prompt::resolve_ssh_prompt))
         // Tunnel profiles
         .route("/tunnel-profiles/list", get(routes::tunnel_profiles::load_tunnel_profiles))
         .route("/tunnel-profiles/save", post(routes::tunnel_profiles::save_tunnel_profiles))
@@ -309,6 +372,7 @@ async fn main() {
         .route("/schema/extensions", get(routes::schema::list_extensions))
         .route("/schema/available-extensions", get(routes::schema::list_available_extensions))
         .route("/schema/ddl", get(routes::schema::get_ddl))
+        .route("/dialect/data-types", get(routes::dialect::list_data_types))
         .route("/schema-diff/prepare", post(routes::schema_diff::prepare_schema_diff))
         .route("/schema-diff/generate-sync-sql", post(routes::schema_diff::generate_schema_sync_sql))
         .route(
@@ -331,6 +395,7 @@ async fn main() {
         .route("/query/execute-batch", post(routes::query::execute_batch))
         .route("/query/execute-script", post(routes::query::execute_script))
         .route("/query/execute-in-transaction", post(routes::query::execute_in_transaction))
+        .route("/query/execute-script-2pc", post(routes::query::execute_script_with_2pc))
         .route("/query/analyze-sql-references", post(routes::query::analyze_sql_references))
         .route("/query/find-statement-at-cursor", post(routes::query::find_statement_at_cursor))
         .route("/query/prepare-pagination-plan", post(routes::query::prepare_query_pagination_execution_plan))
@@ -377,6 +442,12 @@ async fn main() {
         .route("/query/build-single-column-alter-sql", post(routes::query::build_single_column_alter_sql))
         .route("/query/analyze-editability", post(routes::query::analyze_editable_query_editability))
         .route("/query/prepare-data-grid-save", post(routes::query::prepare_data_grid_save))
+        .route("/query/data-grid-extractor-openapi.json", get(openapi_json))
+        .route(
+            "/query/extract-data-grid-selection",
+            post(routes::query::extract_data_grid_selection)
+                .layer(DefaultBodyLimit::max(DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES)),
+        )
         .route(
             "/query/build-data-grid-copy-update-statements",
             post(routes::query::build_data_grid_copy_update_statements),
@@ -421,6 +492,9 @@ async fn main() {
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
+        .route("/redis/get-stream-groups", post(routes::redis::get_stream_groups))
+        .route("/redis/get-stream-consumers", post(routes::redis::get_stream_consumers))
+        .route("/redis/get-stream-pending", post(routes::redis::get_stream_pending))
         .route("/redis/load-more", post(routes::redis::load_more))
         .route("/redis/set-string", post(routes::redis::set_string))
         .route("/redis/delete-key", post(routes::redis::delete_key))
@@ -451,11 +525,22 @@ async fn main() {
         .route("/etcd/get", post(routes::etcd::get))
         .route("/etcd/put", post(routes::etcd::put))
         .route("/etcd/delete", post(routes::etcd::delete))
+        .route("/etcd/rename", post(routes::etcd::rename))
+        .route("/etcd/history", post(routes::etcd::history))
+        .route("/etcd/status", post(routes::etcd::status))
         // ZooKeeper
         .route("/zookeeper/list-prefix", post(routes::zookeeper::list_prefix))
         .route("/zookeeper/get", post(routes::zookeeper::get))
         .route("/zookeeper/put", post(routes::zookeeper::put))
         .route("/zookeeper/delete", post(routes::zookeeper::delete))
+        // HBase REST
+        .route("/hbase/table-schema", post(routes::hbase::get_table_schema))
+        .route("/hbase/scan-rows", post(routes::hbase::scan_rows))
+        .route("/hbase/get-row", post(routes::hbase::get_row))
+        .route("/hbase/put-row", post(routes::hbase::put_row))
+        .route("/hbase/delete-row", post(routes::hbase::delete_row))
+        .route("/hbase/create-table", post(routes::hbase::create_table))
+        .route("/hbase/delete-table", post(routes::hbase::delete_table))
         // Nacos
         .route("/nacos/test-connection", post(routes::nacos::test_connection))
         .route("/nacos/namespaces/list", post(routes::nacos::list_namespaces))
@@ -473,6 +558,7 @@ async fn main() {
         .route("/nacos/services/list", post(routes::nacos::list_services))
         .route("/nacos/instances/list", post(routes::nacos::list_instances))
         .route("/nacos/instances/update", post(routes::nacos::update_instance))
+        .route("/nacos/dashboard", post(routes::nacos::get_dashboard))
         .route("/nacos/raw", post(routes::nacos::raw_request))
         .route("/nacos/configs/search", post(routes::nacos::search_config_content))
         .route("/nacos/configs/search/cancel", post(routes::nacos::cancel_operation))
@@ -546,6 +632,7 @@ async fn main() {
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
         .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))
         .route("/ai/provider-configs", get(routes::ai::load_ai_provider_configs))
+        .route("/ai/chat-selection", post(routes::ai::save_ai_chat_selection).get(routes::ai::load_ai_chat_selection))
         .route("/ai/configs", post(routes::ai::save_ai_configs).get(routes::ai::load_ai_configs))
         .route("/ai/default-config", post(routes::ai::set_default_ai_config))
         .route("/ai/config-item", post(routes::ai::save_ai_config_item))
@@ -559,6 +646,7 @@ async fn main() {
         .route("/ai/cancel-stream", post(routes::ai::ai_cancel_stream))
         .route("/ai/test-connection", post(routes::ai::ai_test_connection))
         .route("/ai/models", post(routes::ai::ai_list_models))
+        .route("/ai/model-effort", post(routes::ai::ai_resolve_model_effort))
         // Prompt templates
         .route(
             "/prompt-templates",
@@ -630,6 +718,10 @@ async fn main() {
         .route(
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
+        )
+        .route(
+            "/app-settings/max-retries",
+            get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
         )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync

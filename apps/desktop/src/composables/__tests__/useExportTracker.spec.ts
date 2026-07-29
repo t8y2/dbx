@@ -10,7 +10,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 import * as api from "@/lib/backend/api";
-import { formatDataTransferDuration, useExportTracker } from "@/composables/useExportTracker";
+import { formatDataTransferDuration, MAX_TRANSFER_FAILURE_DETAIL_BYTES, MAX_TRANSFER_FAILURE_DETAILS, MAX_TRANSFER_FAILURE_ERROR_BYTES, useExportTracker } from "@/composables/useExportTracker";
 
 let now = 0;
 
@@ -158,6 +158,154 @@ describe("data transfer task duration", () => {
     expect(task.elapsedMs).toBe(1_234);
     expect(task.startedAt).toBeUndefined();
     expect(task.finishedAt).toBeUndefined();
+  });
+});
+
+describe("data transfer failure details", () => {
+  it("preserves per-table failures after the terminal summary and deduplicates table updates", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("failure-details", "users and orders", 2);
+
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error", false), table: "users", error: "permission denied" });
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error", false), table: "orders", error: "table missing" });
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error", false), table: "users", error: "permission denied by policy" });
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error"), table: "", error: "2 table(s) failed: users, orders" });
+
+    expect(task.errorMessage).toBe("2 table(s) failed: users, orders");
+    expect(task.transferFailures).toEqual([
+      { table: "users", error: "permission denied by policy" },
+      { table: "orders", error: "table missing" },
+    ]);
+  });
+
+  it("bounds many distinct failures and deduplicates retained and omitted table updates", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("many-failures", "many tables", 250);
+
+    for (let index = 0; index < 250; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+      });
+    }
+
+    expect(task.transferFailures).toHaveLength(MAX_TRANSFER_FAILURE_DETAILS);
+    expect(task.transferFailuresOmitted).toBe(150);
+
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, "error", false),
+      table: "table_150",
+      error: "updated omitted failure",
+    });
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, "error", false),
+      table: "table_0",
+      error: "updated retained failure",
+    });
+
+    expect(task.transferFailuresOmitted).toBe(150);
+    expect(task.transferFailures?.[0]).toEqual({ table: "table_0", error: "updated retained failure" });
+  });
+
+  it("counts omitted failures once for an online subscription", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("online-failures", "many tables", 250);
+
+    for (let index = 0; index < 250; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+      });
+    }
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "done"));
+
+    expect(task.transferFailures).toHaveLength(MAX_TRANSFER_FAILURE_DETAILS);
+    expect(task.transferFailuresOmitted).toBe(150);
+  });
+
+  it("combines pre-subscription and local omissions for a mid-transfer subscription", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("mid-transfer-failures", "many tables", 250);
+
+    for (let index = 12; index < 250; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+        ...(index === 249 ? { transferFailuresOmitted: 12 } : {}),
+      });
+    }
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "done"));
+
+    expect(task.transferFailures).toHaveLength(MAX_TRANSFER_FAILURE_DETAILS);
+    expect(task.transferFailuresOmitted).toBe(150);
+  });
+
+  it("combines replay and local omissions for a delayed subscription", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("delayed-failures", "many tables", 250);
+
+    for (let index = 12; index < 250; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+      });
+    }
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "done"), transferFailuresOmitted: 12 });
+
+    expect(task.transferFailures).toHaveLength(MAX_TRANSFER_FAILURE_DETAILS);
+    expect(task.transferFailuresOmitted).toBe(150);
+  });
+
+  it("limits individual and total UTF-8 error detail bytes without splitting characters", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("long-failures", "long errors", 40);
+    const longError = "错误🙂".repeat(4_000);
+
+    for (let index = 0; index < 40; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `long_table_${index}`,
+        error: longError,
+      });
+    }
+
+    const encoder = new TextEncoder();
+    const retainedBytes = task.transferFailures!.reduce((total, failure) => {
+      expect(encoder.encode(failure.error).length).toBeLessThanOrEqual(MAX_TRANSFER_FAILURE_ERROR_BYTES);
+      expect(failure.error.endsWith("\ud83d")).toBe(false);
+      expect(failure.truncated).toBe(true);
+      return total + encoder.encode(failure.table).length + encoder.encode(failure.error).length;
+    }, 0);
+
+    expect(retainedBytes).toBeLessThanOrEqual(MAX_TRANSFER_FAILURE_DETAIL_BYTES);
+    expect(task.transferFailuresOmitted).toBeGreaterThan(0);
+  });
+
+  it("saturates omitted failure counting after the deduplication cap", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("omitted-cap", "many tables", 4_197);
+
+    for (let index = 0; index < MAX_TRANSFER_FAILURE_DETAILS + 4_097; index += 1) {
+      tracker.updateDataTransferTask(task.exportId, {
+        ...transferProgress(task.exportId, "error", false),
+        table: `table_${index}`,
+        error: `failure ${index}`,
+      });
+    }
+
+    expect(task.transferFailuresOmitted).toBe(4_096);
+
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, "error", false),
+      table: "table_4_196",
+      error: "repeated omitted failure",
+    });
+
+    expect(task.transferFailuresOmitted).toBe(4_096);
   });
 });
 

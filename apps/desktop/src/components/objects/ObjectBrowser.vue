@@ -46,6 +46,7 @@ import {
   X,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -60,14 +61,25 @@ import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditi
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
-import { buildDropObjectSql, buildDropTableSql, buildDuplicateTableStructureSql, buildCopyTableDataSql, buildEmptyTableSql, buildTruncateTableSql, supportsDropTableCascade, supportsTruncateTableCascade, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import {
+  buildDropObjectSql,
+  buildDropTableSql,
+  buildDuplicateTableStructureSql,
+  buildCopyTableDataSql,
+  buildEmptyTableSql,
+  buildTruncateTableSql,
+  collectDuplicateTableColumnComments,
+  supportsDropTableCascade,
+  supportsTruncateTableCascade,
+  type TableAdminSqlOptions,
+} from "@/lib/database/dbAdminSql";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
@@ -82,7 +94,9 @@ import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
+import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import {
   buildObjectBrowserRows,
   countObjectBrowserRowsByFilter,
@@ -106,6 +120,8 @@ import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableI
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
+import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
+import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -211,6 +227,8 @@ const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
 const selectedTableIds = ref<Set<string>>(new Set());
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
 const showBatchDropConfirm = ref(false);
+const batchDropExecuting = ref(false);
+const batchDropProgress = ref({ completed: 0, total: 0 });
 const batchDropPreviewSql = ref("");
 const showBatchTruncateConfirm = ref(false);
 const batchTruncatePreviewSql = ref("");
@@ -233,7 +251,7 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   updated_at: 150,
   comment: 260,
 });
-let loadId = 0;
+const objectBrowserRowsLoadGuard = createObjectBrowserRowsLoadGuard();
 let stopColumnResize: (() => void) | null = null;
 let preserveObjectFilterScrollOnce = false;
 
@@ -399,6 +417,13 @@ watch(objectFilter, () => {
   }
   scrollObjectsToTop();
 });
+watch(
+  () => props.connection.show_system_schemas,
+  (value, oldValue) => {
+    if (value === oldValue) return;
+    void reload();
+  },
+);
 
 const showCheckboxColumn = computed(() => settingsStore.editorSettings.objectBrowserShowCheckbox || selectedTableCount.value > 0);
 
@@ -531,6 +556,7 @@ const selectedTableCount = computed(() => selectedTableRows.value.length);
 const canBatchDropCascade = computed(() => selectedTableCount.value > 0 && supportsDropTableCascade(effectiveDatabaseType.value));
 const canBatchTruncateCascade = computed(() => selectedTableCount.value > 0 && supportsTruncateTableCascade(effectiveDatabaseType.value));
 const allVisibleTablesSelected = computed(() => visibleSelectableRows.value.length > 0 && visibleSelectableRows.value.every((row) => selectedTableIds.value.has(row.id)));
+const batchDropProgressPercent = computed(() => (batchDropProgress.value.total > 0 ? Math.round((batchDropProgress.value.completed / batchDropProgress.value.total) * 100) : 0));
 
 function iconFor(row: ObjectBrowserRow) {
   if (row.type === "VIEW" || row.type === "MATERIALIZED_VIEW") return Eye;
@@ -923,7 +949,7 @@ async function fetchTableDdl() {
   tableDdlLoading.value = true;
   try {
     const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDdl(props.connection.id, props.database || "", schema, row.name, tableDdlObjectType(row.type), props.catalog);
+    const ddl = await api.getTableDisplayDdl(props.connection.id, props.database || "", schema, row.name, tableDdlObjectType(row.type), props.catalog);
     if (sidePanelGuard.isStale(epoch)) return;
     tableDdlContent.value = ddl;
   } catch (e: any) {
@@ -1501,37 +1527,55 @@ async function refreshBatchDropPreviewSql() {
 function requestBatchDropTables() {
   if (selectedTableCount.value === 0) return;
   batchDropCascade.value = false;
+  batchDropProgress.value = { completed: 0, total: 0 };
   batchDropPreviewSql.value = "";
   void refreshBatchDropPreviewSql();
   showBatchDropConfirm.value = true;
 }
 
 async function confirmBatchDropTables() {
-  const targets = await fetchSortedTableRowsForDrop();
-  if (targets.length === 0) return;
+  if (batchDropExecuting.value) return;
+  batchDropExecuting.value = true;
   try {
+    const targets = await fetchSortedTableRowsForDrop();
+    if (targets.length === 0) return;
+    batchDropProgress.value = { completed: 0, total: targets.length };
     const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-    const statements = await Promise.all(
-      targets.map(async (row) => ({
-        row,
-        sql: await buildDropTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
+    const plan = await Promise.all(
+      targets.map(async (target) => ({
+        target,
+        sql: await buildDropTableSql(tableAdminSqlOptions(target, { cascade: useCascade })),
       })),
     );
-    const executed = await executeObjectBrowserSqlWithProductionGuard(statements.map(({ sql }) => sql).join(";\n"), async () => {
-      for (const { row, sql } of statements) {
-        await api.executeQuery(props.connection.id, props.database, sql);
-        closeDroppedTableObjectTabsForRow(row);
-      }
-      return true;
-    });
-    if (!executed) return;
-    toast(t("objects.batchDropSuccess", { count: targets.length }));
-    removePinnedObjectBrowserRows(targets);
-    clearTableSelection();
-    await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+    const batchSql = plan.map(({ sql }) => sql).join(";\n");
+    const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, () =>
+      runBatchTableDrop({
+        databaseType: effectiveDatabaseType.value,
+        plan,
+        executeStatement: (sql) => api.executeQuery(props.connection.id, props.database, sql),
+        executeBatch: (sql, onProgress) => api.executeMultiWithProgress(props.connection.id, props.database, sql, onProgress),
+        onProgress: (progress) => {
+          batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
+        },
+      }),
+    );
+    if (!result) return;
+
+    for (const row of result.succeeded) closeDroppedTableObjectTabsForRow(row);
+    if (result.succeeded.length > 0) {
+      removePinnedObjectBrowserRows(result.succeeded);
+      await reload();
+      await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+    }
+
+    if (result.failed) throw result.failed;
+    toast(t("objects.batchDropSuccess", { count: result.succeeded.length }));
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    batchDropExecuting.value = false;
+    batchDropProgress.value = { completed: 0, total: 0 };
+    showBatchDropConfirm.value = false;
   }
 }
 
@@ -1809,6 +1853,30 @@ function requestDuplicateStructure(row: ObjectBrowserRow) {
   showDuplicateDialog.value = true;
 }
 
+async function buildDuplicateStructurePlan(sourceName: string, targetName: string, schema: string | undefined, sourceColumns?: ColumnInfo[]) {
+  let columns = sourceColumns;
+  if (effectiveDatabaseType.value === "dameng" && !columns) {
+    try {
+      columns = await api.getColumns(props.connection.id, props.database, schema || "", sourceName, props.catalog);
+    } catch (error) {
+      console.warn(`Failed to load Dameng column comments for table clone: ${sourceName}`, error);
+    }
+  }
+  const columnComments = effectiveDatabaseType.value === "dameng" ? collectDuplicateTableColumnComments(columns ?? []) : [];
+  const sql = await buildDuplicateTableStructureSql({
+    databaseType: effectiveDatabaseType.value,
+    schema,
+    sourceName,
+    targetName,
+    columnComments,
+  });
+  return { sql, sourceColumns: columns, executeAsScript: columnComments.length > 0 };
+}
+
+function executeDuplicateStructurePlan(plan: { sql: string; executeAsScript: boolean }, schema: string | undefined) {
+  return plan.executeAsScript ? api.executeScript(props.connection.id, props.database, plan.sql, schema) : api.executeQuery(props.connection.id, props.database, plan.sql, schema);
+}
+
 async function confirmDuplicateStructure() {
   const row = duplicateTarget.value;
   const newName = duplicateTableName.value.trim();
@@ -1816,13 +1884,8 @@ async function confirmDuplicateStructure() {
   showDuplicateDialog.value = false;
   try {
     const schema = row.schema || selectedSchema.value;
-    const sql = await buildDuplicateTableStructureSql({
-      databaseType: effectiveDatabaseType.value,
-      schema,
-      sourceName: row.name,
-      targetName: newName,
-    });
-    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, schema));
+    const plan = await buildDuplicateStructurePlan(row.name, newName, schema);
+    const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
     if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
     await reload();
@@ -1840,7 +1903,7 @@ function copySelectedTablesToClipboard() {
     tables: selectedRows.map((row) => ({
       connectionId: props.connection.id,
       database: props.database,
-      schema: row.schema || selectedSchema.value,
+      schema: normalizeObjectBrowserTableClipboardSchema(row.schema || selectedSchema.value),
       tableName: row.name,
     })),
   };
@@ -1848,16 +1911,29 @@ function copySelectedTablesToClipboard() {
 }
 
 function canPasteTableClipboard(): boolean {
+  return tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
+}
+
+function normalizedObjectBrowserTableClipboardEntries() {
   const clipboard = connectionStore.treeClipboard;
-  return clipboard?.kind === "table-copy" && tableClipboardMatchesTarget(clipboard.tables, pasteTableTargetContext());
+  if (clipboard?.kind !== "table-copy") return [];
+  return clipboard.tables.map((entry) => ({
+    ...entry,
+    schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database),
+  }));
 }
 
 function pasteTableTargetContext(): TableClipboardContext {
   return {
     connectionId: props.connection.id,
     database: props.database,
-    schema: selectedSchema.value,
+    schema: normalizeObjectBrowserTableClipboardSchema(selectedSchema.value),
   };
+}
+
+function normalizeObjectBrowserTableClipboardSchema(schema?: string, database = props.database): string | undefined {
+  if (!isSchemaAware(effectiveDatabaseType.value) && effectiveDatabaseType.value !== "sqlite") return undefined;
+  return connectionObjectTreeNodeSchema(props.connection, database, schema);
 }
 
 function copySingleTableToClipboard(row: ObjectBrowserRow) {
@@ -1867,7 +1943,7 @@ function copySingleTableToClipboard(row: ObjectBrowserRow) {
       {
         connectionId: props.connection.id,
         database: props.database,
-        schema: row.schema || selectedSchema.value,
+        schema: normalizeObjectBrowserTableClipboardSchema(row.schema || selectedSchema.value),
         tableName: row.name,
       },
     ],
@@ -1885,7 +1961,7 @@ function openPasteTableDialog() {
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
     targetName: `${entry.tableName}_copy`,
-    schema: entry.schema,
+    schema: normalizeObjectBrowserTableClipboardSchema(entry.schema, entry.database),
   }));
   showPasteDialog.value = true;
 }
@@ -1910,27 +1986,31 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
 async function confirmPasteTable() {
   const entries = pasteTableEntries.value.filter((entry) => entry.targetName.trim());
   if (entries.length === 0) return;
+  const clipboardAtPasteStart = connectionStore.treeClipboard;
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
   let successCount = 0;
   let failCount = 0;
+  let pasteCancelled = false;
+  let hasMutatedTable = false;
   for (const entry of entries) {
     const targetName = entry.targetName.trim();
     const schema = entry.schema || selectedSchema.value;
     try {
+      let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
-        const structureSql = await buildDuplicateTableStructureSql({
-          databaseType: effectiveDatabaseType.value,
-          schema,
-          sourceName: entry.sourceName,
-          targetName,
-        });
-        const executed = await executeObjectBrowserSqlWithProductionGuard(structureSql, () => api.executeQuery(props.connection.id, props.database, structureSql, schema));
-        if (!executed) return;
+        const plan = await buildDuplicateStructurePlan(entry.sourceName, targetName, schema, sourceColumns);
+        sourceColumns = plan.sourceColumns;
+        const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(plan, schema));
+        if (!executed) {
+          pasteCancelled = true;
+          break;
+        }
+        hasMutatedTable = true;
       }
       if (copyData) {
-        const sourceColumns = await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName, props.catalog);
+        sourceColumns ??= await api.getColumns(props.connection.id, props.database, schema || "", entry.sourceName, props.catalog);
         const dataCopyColumnOptions = tableDataCopyColumnOptions(effectiveDatabaseType.value, sourceColumns);
         if (dataCopyColumnOptions.columns.length === 0) {
           throw new Error("No writable columns available for table data copy.");
@@ -1943,7 +2023,11 @@ async function confirmPasteTable() {
           ...dataCopyColumnOptions,
         });
         const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema));
-        if (!executed) return;
+        if (!executed) {
+          pasteCancelled = true;
+          break;
+        }
+        hasMutatedTable = true;
       }
       successCount++;
     } catch (e: any) {
@@ -1951,7 +2035,22 @@ async function confirmPasteTable() {
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
     }
   }
+  if (pasteCancelled) {
+    if (hasMutatedTable) {
+      try {
+        await reload();
+        await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+        toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
+      } catch (e: any) {
+        toast(t("contextMenu.pasteTableRefreshFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+      }
+    }
+    return;
+  }
   if (failCount === 0) {
+    if (connectionStore.treeClipboard === clipboardAtPasteStart) {
+      connectionStore.treeClipboard = null;
+    }
     toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
   } else {
     toast(t("contextMenu.batchPastePartialFail", { success: successCount, failed: failCount }), 5000);
@@ -2124,72 +2223,110 @@ async function saveSource() {
   }
 }
 
-async function loadSchemas() {
+async function loadSchemas(epoch: number): Promise<boolean> {
+  if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return false;
   if (!needsSchema.value) {
     schemas.value = [];
     selectedSchema.value = undefined;
-    return;
+    return true;
   }
   loadingSchemas.value = true;
+  const connectionId = props.connection.id;
+  const database = props.database;
   try {
-    const names = await api.listSchemas(props.connection.id, props.database);
+    const names = filterSchemaNamesForConnection(await api.listSchemas(connectionId, database), props.connection, database, {
+      showSystemSchemas: props.connection.show_system_schemas === true,
+    });
+    if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return false;
     schemas.value = names;
+    if (names.length === 0) {
+      selectedSchema.value = undefined;
+      return true;
+    }
     if (!selectedSchema.value || !names.includes(selectedSchema.value)) {
       selectedSchema.value = names.includes("public") ? "public" : names[0];
     }
+    return true;
   } finally {
-    loadingSchemas.value = false;
+    if (objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) loadingSchemas.value = false;
   }
 }
 
-async function loadObjects() {
-  const id = ++loadId;
-  loadingObjects.value = true;
+function objectBrowserRowsCacheScope(schema: string): ObjectBrowserRowsCacheScope {
+  return {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema,
+    catalog: props.catalog,
+  };
+}
+
+function applyObjectBrowserRows(nextRows: ObjectBrowserRow[]) {
+  rows.value = nextRows;
+  const availableTableIds = new Set(rows.value.filter((row) => row.type === "TABLE").map((row) => row.id));
+  setSelectedTableIds(new Set([...selectedTableIds.value].filter((id) => availableTableIds.has(id))));
+  expandedPartitionParentIds.value = new Set([...expandedPartitionParentIds.value].filter((id) => rows.value.some((row) => row.id === id && row.partitionCount)));
+}
+
+function finishObjectBrowserRowsLoad() {
+  loadingObjects.value = false;
+  if (!userHasSelectedFilter.value && objectCounts.value.tables > 0) {
+    // The default table filter is a presentation choice, not a user query
+    // change, so preserve the tab's saved scroll offset across remounts.
+    preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
+    objectFilter.value = "tables";
+  }
+  restoreObjectBrowserViewport();
+}
+
+async function loadObjects(options?: { allowCached?: boolean }) {
   error.value = "";
-  rows.value = [];
-  try {
-    const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
-    const objects: ObjectInfo[] = await api.listObjects(props.connection.id, props.database, schema, undefined, undefined, undefined, undefined, props.catalog);
-    if (id !== loadId) return;
-    rows.value = buildObjectBrowserRows({
-      objects,
-      database: props.database,
-      fallbackSchema: schema,
-      rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
-    });
-    const availableTableIds = new Set(rows.value.filter((row) => row.type === "TABLE").map((row) => row.id));
-    setSelectedTableIds(new Set([...selectedTableIds.value].filter((id) => availableTableIds.has(id))));
-    expandedPartitionParentIds.value = new Set([...expandedPartitionParentIds.value].filter((id) => rows.value.some((row) => row.id === id && row.partitionCount)));
-    void loadObjectStatistics(id, schema);
-  } catch (e: any) {
-    if (id !== loadId) return;
-    error.value = e?.message || String(e);
-  } finally {
-    if (id === loadId) {
-      loadingObjects.value = false;
-      if (!userHasSelectedFilter.value && objectCounts.value.tables > 0) {
-        // The default table filter is a presentation choice, not a user query
-        // change, so preserve the tab's saved scroll offset across remounts.
-        preserveObjectFilterScrollOnce = objectFilter.value !== "tables";
-        objectFilter.value = "tables";
-      }
-      restoreObjectBrowserViewport();
+  const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
+  const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
+  const cacheWriteToken = createObjectBrowserRowsCacheWriteToken(request.scope);
+  if (options?.allowCached) {
+    const cachedRows = getCachedObjectBrowserRows(request.scope);
+    if (cachedRows) {
+      applyObjectBrowserRows(cachedRows);
+      finishObjectBrowserRowsLoad();
+      return;
     }
   }
+
+  loadingObjects.value = true;
+  rows.value = [];
+  try {
+    const objects: ObjectInfo[] = await api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, undefined, undefined, undefined, undefined, request.scope.catalog);
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+    const nextRows = buildObjectBrowserRows({
+      objects,
+      database: request.scope.database,
+      fallbackSchema: request.scope.schema,
+      rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+    });
+    applyObjectBrowserRows(nextRows);
+    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
+    void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+  } catch (e: any) {
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+    error.value = e?.message || String(e);
+  } finally {
+    if (objectBrowserRowsLoadGuard.isCurrent(request)) finishObjectBrowserRowsLoad();
+  }
 }
 
-async function loadObjectStatistics(id: number, schema: string) {
+async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   if (!rows.value.some((row) => row.type === "TABLE")) return;
   try {
-    const stats = await api.listObjectStatistics(props.connection.id, props.database, schema);
-    if (id !== loadId || stats.length === 0) return;
-    mergeObjectStatistics(stats, schema);
+    const stats = await api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema);
+    if (!objectBrowserRowsLoadGuard.isCurrent(request) || stats.length === 0) return;
+    mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, cachedAt);
   } catch (e) {
     console.debug("[ObjectBrowser] table statistics unavailable", e);
   }
 }
 
-function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string) {
+function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
   rows.value = rows.value.map((row) => {
     if (row.type !== "TABLE") return row;
@@ -2201,6 +2338,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
     };
   });
+  cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {
@@ -2211,9 +2349,11 @@ function normalizeStatisticNumber(value: number | null | undefined): number | nu
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-async function reload() {
-  await loadSchemas();
-  await loadObjects();
+async function reload(options?: { allowCachedObjects?: boolean; contextEpoch?: number }) {
+  const epoch = options?.contextEpoch ?? objectBrowserRowsLoadGuard.invalidate();
+  if (!(await loadSchemas(epoch))) return;
+  if (!objectBrowserRowsLoadGuard.isEpochCurrent(epoch)) return;
+  await loadObjects({ allowCached: options?.allowCachedObjects });
 }
 
 function refresh(): boolean {
@@ -2278,12 +2418,14 @@ function onSearchKeydown(event: KeyboardEvent) {
 defineExpose({ focusSearch, refresh });
 
 onBeforeUnmount(() => {
+  objectBrowserRowsLoadGuard.invalidate();
   stopColumnResize?.();
 });
 
 watch(
   [() => props.connection.id, () => props.database, () => props.schema],
   async () => {
+    const contextEpoch = objectBrowserRowsLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
     objectFilter.value = "all";
@@ -2302,7 +2444,8 @@ watch(
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connection.id, e);
     }
-    void reload();
+    if (!objectBrowserRowsLoadGuard.isEpochCurrent(contextEpoch)) return;
+    void reload({ allowCachedObjects: true, contextEpoch });
   },
   { immediate: true },
 );
@@ -2320,6 +2463,23 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
       { label: "XLSX", action: () => exportDataXlsx(item) },
     ],
   };
+}
+
+function objectBrowserTableClipboardMenuState(item: ObjectBrowserRow) {
+  return tableClipboardMenuState(normalizedObjectBrowserTableClipboardEntries(), {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: normalizeObjectBrowserTableClipboardSchema(item.schema || selectedSchema.value),
+    tableName: item.name,
+  });
+}
+
+function tableClipboardMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: () => copySingleTableToClipboard(item), icon: Copy };
+  const state = objectBrowserTableClipboardMenuState(item);
+  if (state === "copy") return [copyItem];
+  const pasteItem: ContextMenuItem = { label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
+  return state === "paste" ? [pasteItem] : [copyItem, pasteItem];
 }
 
 function isSelectedBatchTableContext(item: ObjectBrowserRow): boolean {
@@ -2351,7 +2511,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
-    { label: t("contextMenu.copyTable"), action: () => copySingleTableToClipboard(item), icon: Copy },
+    ...tableClipboardMenuItems(item),
     { label: "", separator: true },
     ...(supportsTruncateTable.value
       ? [
@@ -2665,7 +2825,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </div>
           <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item }">
-              <CustomContextMenu :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+              <CustomContextMenu :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
                 <div
                   class="grid h-[34px] cursor-pointer items-center gap-3 border-b px-3 hover:bg-accent/50"
                   :class="{
@@ -2673,7 +2833,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     'bg-primary/10': sidePanelRow?.id === item.id && !selectedTableIds.has(item.id),
                     'bg-primary/5': selectedTableIds.has(item.id),
                   }"
-                  :style="{ gridTemplateColumns, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 hsl(var(--primary))' : undefined }"
+                  :style="{ gridTemplateColumns, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 var(--primary)' : undefined }"
                   @click="onRowClick(item, $event)"
                   @contextmenu="onContextMenu"
                 >
@@ -2724,7 +2884,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <RecycleScroller ref="gridScrollerRef" v-if="gridRows.length > 0" class="object-browser-grid-scroller h-full" :items="gridRows" :item-size="objectGridRowHeight" :buffer="600" :skip-hover="true" key-field="key">
             <template #default="{ item: row }">
               <div class="object-browser-grid-row" :style="{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`, height: `${objectGridRowHeight - OBJECT_GRID_GAP}px` }">
-                <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
+                <CustomContextMenu v-for="item in row.cards" :key="item.id" :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu }">
                   <div
                     class="relative flex h-full min-h-0 cursor-pointer flex-col items-center gap-1 rounded-lg border bg-card p-3 text-center transition-all hover:border-primary/40 hover:shadow-sm"
                     :class="{
@@ -3005,9 +3165,27 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </template>
   </DangerConfirmDialog>
 
-  <DangerConfirmDialog v-model:open="showBatchDropConfirm" :title="t('objects.confirmBatchDropTitle')" :message="t('objects.confirmBatchDropMessage', { count: selectedTableCount })" :sql="batchDropPreviewSql" :confirm-label="t('objects.dropSelected')" @confirm="confirmBatchDropTables">
-    <template v-if="canBatchDropCascade" #options>
-      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+  <DangerConfirmDialog
+    v-model:open="showBatchDropConfirm"
+    :title="t('objects.confirmBatchDropTitle')"
+    :message="t('objects.confirmBatchDropMessage', { count: selectedTableCount })"
+    :sql="batchDropPreviewSql"
+    :confirm-label="t('objects.dropSelected')"
+    :loading="batchDropExecuting"
+    :close-on-confirm="false"
+    @confirm="confirmBatchDropTables"
+  >
+    <template #options>
+      <div v-if="batchDropExecuting" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">
+        <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
+          <span>{{ batchDropProgress.completed }} / {{ batchDropProgress.total }}</span>
+          <span>{{ batchDropProgressPercent }}%</span>
+        </div>
+        <div class="h-2 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-valuemin="0" :aria-valuemax="batchDropProgress.total" :aria-valuenow="batchDropProgress.completed">
+          <div class="h-full bg-primary transition-[width] duration-200" :style="{ width: `${batchDropProgressPercent}%` }" />
+        </div>
+      </div>
+      <label v-if="canBatchDropCascade" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
         <input v-model="batchDropCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchDropPreviewSql()" />
         <span class="grid gap-0.5">
           <span class="font-medium text-foreground">{{ t("contextMenu.dropTableCascade") }}</span>

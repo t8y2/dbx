@@ -1,43 +1,10 @@
 {
   "protocolVersion": 2,
   "handshakeMethod": "handshake",
-  "handshakeResponseFields": [
-    "protocolVersion",
-    "agentProtocolVersion",
-    "capabilities"
-  ],
-  "allCapabilities": [
-    "connect",
-    "test_connection",
-    "metadata",
-    "query",
-    "paged_query",
-    "transaction",
-    "ddl",
-    "kv",
-    "kv_ttl",
-    "multi_session"
-  ],
-  "capabilities": [
-    "connect",
-    "test_connection",
-    "metadata",
-    "query",
-    "paged_query",
-    "transaction",
-    "ddl",
-    "multi_session"
-  ],
-  "defaultSqlCapabilities": [
-    "connect",
-    "test_connection",
-    "metadata",
-    "query",
-    "paged_query",
-    "transaction",
-    "ddl",
-    "multi_session"
-  ],
+  "handshakeResponseFields": ["protocolVersion", "agentProtocolVersion", "capabilities"],
+  "allCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "kv", "kv_ttl", "kv_cas", "kv_list_values", "kv_status", "kv_history", "multi_session"],
+  "capabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "multi_session"],
+  "defaultSqlCapabilities": ["connect", "test_connection", "metadata", "query", "paged_query", "transaction", "ddl", "multi_session"],
   "commonMethods": [
     "handshake",
     "connect",
@@ -76,28 +43,8 @@
     "disconnect",
     "shutdown"
   ],
-  "mongoLegacyMethods": [
-    "list_databases",
-    "list_collections",
-    "find_documents",
-    "find_documents_extended_json",
-    "count_documents",
-    "server_version",
-    "create_index",
-    "drop_indexes",
-    "drop_collection",
-    "insert_document",
-    "update_document",
-    "update_documents",
-    "delete_document",
-    "delete_documents"
-  ],
-  "kvMethods": [
-    "kv_list_prefix",
-    "kv_get",
-    "kv_put",
-    "kv_delete"
-  ],
+  "mongoLegacyMethods": ["list_databases", "list_collections", "find_documents", "find_documents_extended_json", "count_documents", "server_version", "create_index", "drop_indexes", "drop_collection", "insert_document", "update_document", "update_documents", "delete_document", "delete_documents"],
+  "kvMethods": ["kv_list_prefix", "kv_get", "kv_put", "kv_delete", "kv_rename", "kv_history", "kv_status"],
   "sessionField": "agentSessionId",
   "cursorSessionField": "sessionId"
 }

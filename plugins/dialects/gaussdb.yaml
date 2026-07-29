@@ -1,0 +1,204 @@
+dialect:
+  name: "GaussDB"
+  display_name: "GaussDB / openGauss"
+  versions:
+    - version: "5.0"
+      status: "RECOMMENDED"
+    - version: "3.0"
+      status: "COMPATIBLE"
+
+types:
+  - name: "SMALLINT"
+    category: "INTEGER"
+    aliases: ["INT2"]
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT", "INT4"]
+  - name: "BIGINT"
+    category: "INTEGER"
+    aliases: ["INT8"]
+  - name: "TINYINT"
+    category: "INTEGER"
+  - name: "SMALLSERIAL"
+    category: "INTEGER"
+  - name: "SERIAL"
+    category: "INTEGER"
+  - name: "BIGSERIAL"
+    category: "INTEGER"
+  - name: "REAL"
+    category: "FLOAT"
+    aliases: ["FLOAT4"]
+  - name: "DOUBLE PRECISION"
+    category: "FLOAT"
+    aliases: ["FLOAT8"]
+  - name: "NUMERIC"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["DECIMAL"]
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+    aliases: ["CHARACTER VARYING"]
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+    aliases: ["CHARACTER"]
+  - name: "TEXT"
+    category: "STRING"
+  - name: "CLOB"
+    category: "STRING"
+  - name: "BYTEA"
+    category: "BINARY"
+    aliases: ["BLOB", "RAW"]
+  - name: "BOOLEAN"
+    category: "BOOLEAN"
+    aliases: ["BOOL"]
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIME"
+    category: "TIME"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+  - name: "TIMESTAMPTZ"
+    category: "DATETIME"
+    aliases: ["TIMESTAMP WITH TIME ZONE"]
+    semantic_fidelity_base: 0.9
+  - name: "INTERVAL"
+    category: "INTERVAL"
+    semantic_fidelity_base: 0.7
+  - name: "UUID"
+    category: "UUID"
+  - name: "JSON"
+    category: "JSON"
+  - name: "JSONB"
+    category: "JSON"
+    semantic_fidelity_base: 0.9
+  - name: "POINT"
+    category: "SPATIAL"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  comment: true
+  create_index: true
+  drop_index: true
+  rebuild_index: true
+  index_type: true
+  index_include: true
+  index_filter: true
+  alter_primary_key: true
+  foreign_key: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  create_trigger: true
+  drop_trigger: true
+  create_function: true
+  drop_function: true
+  create_sequence: true
+  drop_sequence: true
+  alter_owner: true
+  grant_revoke: true
+  if_not_exists: true
+  create_or_replace: true
+  transactional_ddl: true
+  temporary_table: true
+  identity_columns: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} ALTER COLUMN {column} TYPE {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+    create_index: "CREATE INDEX IF NOT EXISTS {name} ON {table} ({columns})"
+    drop_index: "DROP INDEX IF EXISTS {name}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+  modify_column: "ALTER TABLE {table} ALTER COLUMN {column} TYPE {original_type}"
+  create_table: "DROP TABLE IF EXISTS {table}"
+  drop_table: "-- Restore from backup: {table}"
+
+online_safety:
+  add_column:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+  modify_column:
+    level: "BLOCKING_LONG"
+    cost: "MEDIUM"
+  drop_column:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+  drop_table:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+  truncate:
+    level: "REQUIRES_GHOST"
+    cost: "HIGH"
+  create_index:
+    level: "BLOCKING_SHORT"
+    cost: "MEDIUM"
+  drop_index:
+    level: "NON_BLOCKING"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  drop_schema: "FATAL"
+  truncate: "DANGEROUS"
+  drop_column: "DANGEROUS"
+  alter_type: "MODIFY"
+  add_column: "SAFE"
+  create_table: "SAFE"
+
+structural_capabilities:
+  supports_schemas: true
+  max_columns_per_table: 1600
+  max_indexes_per_table: 100
+  max_query_size_bytes: 268435456
+  max_foreign_key_name_length: 63
+  supports_full_text_index: true
+  supports_spatial_index: true
+  supports_partitioning: true
+  supports_table_sampling: true
+  supports_on_update_cascade: true
+  supports_on_delete_set_null: true
+  supports_deferrable_constraints: true
+  supports_array_type: true
+  supports_json_type: true
+  supports_uuid_type: true
+  supports_sequences: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: true
+  max_length: 63
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = '{schema}'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = '{schema}' AND table_name = '{table}' ORDER BY ordinal_position"
+    performance_profile: "MEDIUM"
+  list_indexes:
+    sql: "SELECT indexname, indexdef FROM pg_catalog.pg_indexes WHERE schemaname = '{schema}' AND tablename = '{table}'"
+    performance_profile: "MEDIUM"
+  list_foreign_keys:
+    sql: "SELECT tc.constraint_name, kcu.column_name, ccu.table_name AS ref_table, ccu.column_name AS ref_column FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = '{schema}' AND tc.table_name = '{table}'"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT tc.table_name, ccu.table_name AS ref_table FROM information_schema.table_constraints tc JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = '{schema}'"
+    depth_support: 3
+    performance_profile: "HEAVY"
+
+pre_execution_checks:
+  - name: "lock_timeout"
+    sql: "SET lock_timeout = '3s'"
+  - name: "statement_timeout"
+    sql: "SET statement_timeout = '30s'"

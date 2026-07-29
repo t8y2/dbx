@@ -359,15 +359,15 @@ function getConnectionName(id: string) {
 <template>
   <Dialog v-model:open="open">
     <DialogContent class="sm:max-w-[780px] max-h-[80vh] flex flex-col overflow-hidden" @interact-outside.prevent>
-      <DialogHeader>
+      <DialogHeader class="shrink-0">
         <DialogTitle class="flex items-center gap-2">
           <ArrowRightLeft class="w-4 h-4" />
           {{ t("transfer.title") }}
         </DialogTitle>
       </DialogHeader>
 
-      <div class="flex-1 min-h-0 overflow-auto">
-        <div class="grid gap-4 py-3">
+      <div class="min-h-0 flex-1 overflow-hidden">
+        <div class="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-4 py-3">
           <!-- Source / Target Side by Side -->
           <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
             <!-- Source Section -->
@@ -495,7 +495,7 @@ function getConnectionName(id: string) {
           </div>
 
           <!-- Tables Section -->
-          <div class="space-y-2">
+          <div class="flex min-h-0 flex-col gap-2">
             <div class="flex items-center justify-between">
               <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 {{ t("transfer.tables") }}
@@ -518,7 +518,7 @@ function getConnectionName(id: string) {
             <div v-else-if="sourceTables.length === 0" class="text-xs text-muted-foreground py-4 text-center">
               {{ t("transfer.noTables") }}
             </div>
-            <div v-else class="border rounded-md max-h-[200px] overflow-y-auto">
+            <div v-else class="min-h-0 max-h-[200px] overflow-y-auto rounded-md border">
               <div v-for="table in filteredTables" :key="table" class="flex items-center gap-2 px-2.5 py-1.5 hover:bg-muted/50 cursor-pointer text-xs" @click="toggleTable(table)">
                 <CheckSquare v-if="selectedTables.has(table)" class="w-3.5 h-3.5 text-primary shrink-0" />
                 <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
@@ -568,7 +568,7 @@ function getConnectionName(id: string) {
         </div>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="shrink-0">
         <Button variant="outline" size="sm" @click="open = false">
           {{ t("transfer.cancel") }}
         </Button>

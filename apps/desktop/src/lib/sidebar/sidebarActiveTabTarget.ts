@@ -27,7 +27,17 @@ export type ActiveTabSidebarTarget =
       collectionName: string;
     }
   | {
+      type: "hbase-table";
+      connectionId: string;
+      namespace: string;
+      tableName: string;
+    }
+  | {
       type: "etcd-root";
+      connectionId: string;
+    }
+  | {
+      type: "etcd-dashboard";
       connectionId: string;
     }
   | {
@@ -108,8 +118,22 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     };
   }
 
+  if (tab.mode === "hbase") {
+    if (!tab.sql) return null;
+    return {
+      type: "hbase-table",
+      connectionId: tab.connectionId,
+      namespace: tab.database,
+      tableName: tab.sql || tab.title,
+    };
+  }
+
   if (tab.mode === "etcd") {
     return { type: "etcd-root", connectionId: tab.connectionId };
+  }
+
+  if (tab.mode === "etcd-dashboard") {
+    return { type: "etcd-dashboard", connectionId: tab.connectionId };
   }
 
   if (tab.mode === "zookeeper") {
@@ -168,6 +192,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     return node.type === "vector-collection" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.collectionName;
   }
 
+  if (target.type === "hbase-table") {
+    return node.type === "table" && node.connectionId === target.connectionId && node.database === target.namespace && node.label === target.tableName;
+  }
+
   if (target.type === "query-context") {
     if (target.schema) {
       return node.type === "schema" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.schema;
@@ -177,6 +205,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 
   if (target.type === "etcd-root") {
     return node.type === "etcd-root" && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "etcd-dashboard") {
+    return node.type === "etcd-dashboard" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "zookeeper-root") {

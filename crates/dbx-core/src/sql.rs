@@ -113,6 +113,7 @@ struct SqlDialectProfile {
     supports_custom_delimiter_commands: bool,
     supports_mysql_routine_blocks: bool,
     supports_dollar_quoted_strings: bool,
+    supports_postgres_dollar_quoted_routines: bool,
     supports_hana_do_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
@@ -127,6 +128,7 @@ impl Default for SqlDialectProfile {
             supports_custom_delimiter_commands: true,
             supports_mysql_routine_blocks: false,
             supports_dollar_quoted_strings: true,
+            supports_postgres_dollar_quoted_routines: false,
             supports_hana_do_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
@@ -136,6 +138,10 @@ impl Default for SqlDialectProfile {
 
 impl SqlDialectProfile {
     fn for_database_type(db_type: DatabaseType) -> Self {
+        if matches!(db_type, DatabaseType::Gaussdb) {
+            return Self::gaussdb();
+        }
+
         if Self::is_oracle_like_database(db_type) {
             return Self::oracle_like();
         }
@@ -161,6 +167,10 @@ impl SqlDialectProfile {
 
     fn oracle_like() -> Self {
         Self { supports_oracle_plsql_blocks: true, supports_slash_line_block_delimiter: true, ..Self::default() }
+    }
+
+    fn gaussdb() -> Self {
+        Self { supports_postgres_dollar_quoted_routines: true, ..Self::oracle_like() }
     }
 
     fn sql_server() -> Self {
@@ -271,6 +281,7 @@ pub struct SqlStatementSplitter {
     in_line_comment: bool,
     in_block_comment: bool,
     dollar_quote_tag: Option<String>,
+    postgres_dollar_quoted_routine: bool,
     previous: Option<char>,
     custom_delimiter: Option<String>,
     options: SqlParsingOptions,
@@ -373,6 +384,11 @@ impl SqlStatementSplitter {
                     .flatten()
                 {
                     if self.custom_delimiter.is_none() && !self.on_delimiter_line() {
+                        if self.options.profile.supports_postgres_dollar_quoted_routines
+                            && starts_with_postgres_dollar_quoted_routine_prefix(&self.buffer)
+                        {
+                            self.postgres_dollar_quoted_routine = true;
+                        }
                         for tag_ch in tag.chars() {
                             self.buffer.push(tag_ch);
                             self.previous = Some(tag_ch);
@@ -416,6 +432,7 @@ impl SqlStatementSplitter {
                             self.buffer.push(ch);
                         }
                     } else if self.options.profile.supports_oracle_plsql_blocks
+                        && !self.postgres_dollar_quoted_routine
                         && starts_with_oracle_plsql_block(&self.buffer)
                     {
                         self.buffer.push(ch);
@@ -445,6 +462,7 @@ impl SqlStatementSplitter {
                             statements.push(before.to_string());
                         }
                         self.buffer.clear();
+                        self.postgres_dollar_quoted_routine = false;
                         self.previous = None;
                         i += 1;
                         continue;
@@ -464,6 +482,7 @@ impl SqlStatementSplitter {
                             }
                         }
                         self.buffer.clear();
+                        self.postgres_dollar_quoted_routine = false;
                         self.previous = None;
                         i += 1;
                         continue;
@@ -515,6 +534,7 @@ impl SqlStatementSplitter {
             statements.push(statement.to_string());
         }
         self.buffer.clear();
+        self.postgres_dollar_quoted_routine = false;
         self.previous = None;
     }
 
@@ -726,6 +746,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
     let mut in_block_comment = false;
     let mut dollar_quote_tag: Option<String> = None;
     let mut custom_delimiter: Option<String> = None;
+    let mut postgres_dollar_quoted_routine = false;
 
     while i < sql.len() {
         if let Some(tag) = &dollar_quote_tag {
@@ -779,6 +800,11 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 options.profile.supports_dollar_quoted_strings.then(|| dollar_quote_tag_at_str(sql, i)).flatten()
             {
                 if custom_delimiter.is_none() && !is_on_delimiter_line(sql, start, i) {
+                    if options.profile.supports_postgres_dollar_quoted_routines
+                        && starts_with_postgres_dollar_quoted_routine_prefix(&sql[start..i])
+                    {
+                        postgres_dollar_quoted_routine = true;
+                    }
                     i += tag.len();
                     dollar_quote_tag = Some(tag);
                     continue;
@@ -790,6 +816,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 if options.profile.supports_slash_line_block_delimiter && line == "/" {
                     push_statement_range(&mut ranges, sql, start, line_start, options);
                     start = i + ch.len_utf8();
+                    postgres_dollar_quoted_routine = false;
                     i = start;
                     continue;
                 }
@@ -802,6 +829,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                     }
                     custom_delimiter = if new_delimiter == ";" { None } else { Some(new_delimiter.to_string()) };
                     start = i + ch.len_utf8();
+                    postgres_dollar_quoted_routine = false;
                     i = start;
                     continue;
                 }
@@ -836,8 +864,9 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                     }
                     push_statement_range(&mut ranges, sql, start, i, options);
                 } else {
-                    let is_oracle_plsql =
-                        options.profile.supports_oracle_plsql_blocks && starts_with_oracle_plsql_block(&sql[start..i]);
+                    let is_oracle_plsql = options.profile.supports_oracle_plsql_blocks
+                        && !postgres_dollar_quoted_routine
+                        && starts_with_oracle_plsql_block(&sql[start..i]);
                     if is_oracle_plsql {
                         if !oracle_plsql_block_is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
@@ -856,6 +885,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 }
                 i += ch.len_utf8();
                 start = i;
+                postgres_dollar_quoted_routine = false;
             }
             _ => {
                 i += ch.len_utf8();
@@ -865,6 +895,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                             let end = i - delimiter.len();
                             push_statement_range(&mut ranges, sql, start, end, options);
                             start = i;
+                            postgres_dollar_quoted_routine = false;
                         }
                     }
                 }
@@ -1990,6 +2021,19 @@ fn starts_with_oracle_plsql_block(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).starts_block()
 }
 
+fn starts_with_postgres_dollar_quoted_routine_prefix(sql: &str) -> bool {
+    let block = OraclePlSqlBlock::parse(sql);
+    let Some(first) = block.tokens.first() else {
+        return false;
+    };
+    if !first.is_word("CREATE") {
+        return false;
+    }
+    let tokens = OraclePlSqlBlock::skip_create_modifiers(&block.tokens[1..]);
+    tokens.first().is_some_and(|token| token.is_any_word(&["FUNCTION", "PROCEDURE"]))
+        && block.tokens.iter().rev().find_map(OraclePlSqlToken::as_word) == Some("AS")
+}
+
 fn oracle_plsql_block_is_complete(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).is_complete()
 }
@@ -3072,7 +3116,6 @@ SELECT 2;";
         for db_type in [
             DatabaseType::Oracle,
             DatabaseType::Dameng,
-            DatabaseType::Gaussdb,
             DatabaseType::Yashandb,
             DatabaseType::Oscar,
             DatabaseType::OceanbaseOracle,
@@ -3081,7 +3124,14 @@ SELECT 2;";
             assert_eq!(profile, SqlDialectProfile::oracle_like());
             assert!(profile.supports_oracle_plsql_blocks);
             assert!(profile.supports_slash_line_block_delimiter);
+            assert!(!profile.supports_postgres_dollar_quoted_routines);
         }
+
+        let gaussdb = SqlDialectProfile::for_database_type(DatabaseType::Gaussdb);
+        assert_eq!(gaussdb, SqlDialectProfile::gaussdb());
+        assert!(gaussdb.supports_oracle_plsql_blocks);
+        assert!(gaussdb.supports_slash_line_block_delimiter);
+        assert!(gaussdb.supports_postgres_dollar_quoted_routines);
 
         let sql_server = SqlDialectProfile::for_database_type(DatabaseType::SqlServer);
         assert_eq!(sql_server, SqlDialectProfile::sql_server());
@@ -3146,6 +3196,71 @@ END;";
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Dameng), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Gaussdb), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Xugu), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn gaussdb_split_separates_dollar_quoted_function_from_following_statements() {
+        let sql = "\
+DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid;
+
+CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid (v_str IN TEXT) RETURNS varchar(36) LANGUAGE PLPGSQL IMMUTABLE AS $function$
+DECLARE
+    str1 TEXT;
+BEGIN
+    str1 := md5(v_str);
+    RETURN CAST(str1 AS varchar(36));
+END$function$;
+
+DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Gaussdb);
+        assert_eq!(statements.len(), 3);
+        assert_eq!(statements[0], "DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid");
+        assert!(statements[1].starts_with("CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid"));
+        assert!(statements[1].ends_with("END$function$"));
+        assert_eq!(statements[2], "DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_missing");
+    }
+
+    #[test]
+    fn gaussdb_split_separates_issue_4573_procedure_from_following_statements() {
+        let sql = "\
+CREATE OR REPLACE PROCEDURE createIndex (
+  dbName IN VARCHAR(32),
+  tableName IN VARCHAR(64),
+  indexInfo IN VARCHAR(64),
+  indexColumns IN VARCHAR(128)
+) AS
+DECLARE STMT TEXT;
+
+DECLARE flag int;
+
+BEGIN
+SELECT
+  count(*) INTO flag
+FROM
+  PG_CATALOG.PG_INDEXES
+WHERE
+  schemaname = dbName
+  AND TABLENAME = tableName
+  AND INDEXNAME = indexInfo;
+
+IF flag = 0 THEN STMT := 'CREATE INDEX ' || indexInfo || ' ON ' || dbName || '.' || tableName || '(' || indexColumns || ')';
+
+EXECUTE STMT;
+
+END IF;
+
+END;
+
+SELECT 1 AS after_procedure;
+SELECT 2 AS final_statement;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Gaussdb);
+        assert_eq!(statements.len(), 3);
+        assert!(statements[0].starts_with("CREATE OR REPLACE PROCEDURE createIndex"));
+        assert!(statements[0].ends_with("END;"));
+        assert_eq!(statements[1], "SELECT 1 AS after_procedure");
+        assert_eq!(statements[2], "SELECT 2 AS final_statement");
     }
 
     #[test]

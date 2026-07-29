@@ -19,6 +19,7 @@ describe("shortcutRegistry editor actions", () => {
     "uppercaseSelection",
     "lowercaseSelection",
     "exPasteSqlInCondition",
+    "toggleFold",
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection"];
 
@@ -28,6 +29,17 @@ describe("shortcutRegistry editor actions", () => {
     expect(definition).toMatchObject({ scope: "sidebar", defaultShortcut: "Alt", inputKind: "modifier-only" });
     expect(DEFAULT_SHORTCUT_SETTINGS.openDataInNewTab).toBe("Alt");
     expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.openDataInNewTab, "MacIntel")).toBe("Alt");
+  });
+
+  it("registers a conflict-free DBeaver-style shortcut for executing in a new result tab", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "executeSqlInNewResultTab");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Mod+\\" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.executeSqlInNewResultTab).toBe("Mod+\\");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.executeSqlInNewResultTab, "MacIntel")).toBe("Cmd+\\");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.executeSqlInNewResultTab, "Win32")).toBe("Ctrl+\\");
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.executeSqlInNewResultTab)).toBe("Mod-\\");
+    expect(findShortcutConflict("executeSqlInNewResultTab", DEFAULT_SHORTCUT_SETTINGS.executeSqlInNewResultTab, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
   it("resolves the close-other-tabs default per platform and heals cross-platform synced defaults", () => {
@@ -89,6 +101,7 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.uppercaseSelection).toBe("Shift+Alt+U");
     expect(shortcuts.lowercaseSelection).toBe("Shift+Alt+L");
     expect(shortcuts.exPasteSqlInCondition).toBe("");
+    expect(shortcuts.toggleFold).toBe("Mod+.");
   });
 
   it("detects conflicts between formatter editor shortcuts and other editor shortcuts", () => {

@@ -1,6 +1,20 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildRedisKeyTree, collectRedisGroupKeyRaws, collectExpandedGroupIds, flattenVisibleRedisKeyTree, mergeKeysIntoRedisKeyTree, redisKeyNameCopyText, redisKeyToFlatTreeRow, type RedisKeyTreeNode } from "../../apps/desktop/src/lib/redis/redisKeyTree.ts";
+import {
+  appendRedisKeysToTreeIndex,
+  buildRedisKeyTree,
+  canBuildRedisFuzzyTree,
+  collectRedisGroupKeyRaws,
+  collectExpandedGroupIds,
+  createRedisKeyTreeIndex,
+  flattenVisibleRedisKeyTree,
+  mergeKeysIntoRedisKeyTree,
+  redisKeyNameCopyText,
+  redisKeyToFlatTreeRow,
+  REDIS_FUZZY_TREE_MAX_KEYS,
+  type RedisKeyTreeGroupNode,
+  type RedisKeyTreeNode,
+} from "../../apps/desktop/src/lib/redis/redisKeyTree.ts";
 import type { RedisKeyInfo } from "../../apps/desktop/src/lib/backend/api.ts";
 
 function makeKey(key_display: string, key_raw: string, key_type = "string", ttl = -1): RedisKeyInfo {
@@ -10,6 +24,18 @@ function makeKey(key_display: string, key_raw: string, key_type = "string", ttl 
 function leafLabels(nodes: RedisKeyTreeNode[]): string[] {
   return nodes.filter((node) => node.kind === "leaf").map((node) => node.label);
 }
+
+function findGroup(nodes: RedisKeyTreeNode[], label: string): RedisKeyTreeGroupNode {
+  const group = nodes.find((node) => node.kind === "group" && node.label === label);
+  assert.ok(group);
+  assert.equal(group.kind, "group");
+  return group;
+}
+
+test("fuzzy hierarchy stops before the configured key limit is exceeded", () => {
+  assert.equal(canBuildRedisFuzzyTree(REDIS_FUZZY_TREE_MAX_KEYS), true);
+  assert.equal(canBuildRedisFuzzyTree(REDIS_FUZZY_TREE_MAX_KEYS + 1), false);
+});
 
 test("buildRedisKeyTree groups colon-delimited keys by segment", () => {
   const tree = buildRedisKeyTree([makeKey("a:b:c", "k1"), makeKey("a:b:d", "k2"), makeKey("a:e", "k3"), makeKey("x", "k4")], 0);
@@ -125,6 +151,81 @@ test("collectRedisGroupKeyRaws returns every leaf key under a group", () => {
   if (!userGroup || userGroup.kind !== "group") return;
 
   assert.deepEqual(collectRedisGroupKeyRaws(userGroup), ["k2", "k1", "k3"]);
+});
+
+test("group identity keeps NUL-containing path segments isolated", () => {
+  const firstKeyRaw = "raw-first";
+  const secondKeyRaw = "raw-second";
+  const index = createRedisKeyTreeIndex([makeKey(`a\0b:c:x`, firstKeyRaw), makeKey(`a:b\0c:y`, secondKeyRaw)], 0);
+
+  const firstRoot = findGroup(index.root, `a\0b`);
+  const firstBranch = findGroup(firstRoot.children, "c");
+  const secondRoot = findGroup(index.root, "a");
+  const secondBranch = findGroup(secondRoot.children, `b\0c`);
+
+  assert.notEqual(firstBranch.id, secondBranch.id);
+  assert.equal(index.groupById.size, 4);
+  assert.deepEqual(collectRedisGroupKeyRaws(firstRoot), [firstKeyRaw]);
+  assert.deepEqual(collectRedisGroupKeyRaws(secondRoot), [secondKeyRaw]);
+  assert.deepEqual(index.ancestorGroupIdsByKeyRaw.get(firstKeyRaw), [firstRoot.id, firstBranch.id]);
+  assert.deepEqual(index.ancestorGroupIdsByKeyRaw.get(secondKeyRaw), [secondRoot.id, secondBranch.id]);
+});
+
+test("tree index incrementally merges SCAN pages with loaded counts and selection ancestry", () => {
+  const index = createRedisKeyTreeIndex([makeKey("team:api:v1", "k1"), makeKey("team:web:home", "k2")], 0);
+  const team = findGroup(index.root, "team");
+  const api = findGroup(team.children, "api");
+
+  const { addedGroupIds } = appendRedisKeysToTreeIndex(
+    index,
+    [
+      makeKey("team:api:v2", "k3"),
+      makeKey("orders:1", "k4"),
+      // SCAN may return the same key more than once across pages.
+      makeKey("team:api:v1", "k1"),
+    ],
+    0,
+  );
+
+  const orders = findGroup(index.root, "orders");
+  assert.deepEqual(
+    index.root.map((node) => node.label),
+    ["orders", "team"],
+  );
+  assert.equal(team.loadedLeafCount, 3);
+  assert.equal(api.loadedLeafCount, 2);
+  assert.equal(orders.loadedLeafCount, 1);
+  assert.equal(index.keyRaws.size, 4);
+  assert.deepEqual(index.ancestorGroupIdsByKeyRaw.get("k3"), [team.id, api.id]);
+  assert.ok(addedGroupIds.has(orders.id));
+  assert.ok(!addedGroupIds.has(team.id));
+  assert.deepEqual(collectRedisGroupKeyRaws(team), ["k1", "k3", "k2"]);
+});
+
+test("buildRedisKeyTree honors custom and empty Redis key separators", () => {
+  const customSeparatorTree = buildRedisKeyTree([makeKey("service/api/v1", "k1"), makeKey("service/web", "k2"), makeKey("literal:colon", "k3")], 0, "/");
+  const service = findGroup(customSeparatorTree, "service");
+  const api = findGroup(service.children, "api");
+
+  assert.equal(service.loadedLeafCount, 2);
+  assert.equal(api.loadedLeafCount, 1);
+  assert.deepEqual(collectRedisGroupKeyRaws(service), ["k1", "k2"]);
+  assert.deepEqual(
+    buildRedisKeyTree([makeKey("service/api/v1", "k1"), makeKey("literal:colon", "k2")], 0, "").map((node) => `${node.kind}:${node.label}`),
+    ["leaf:literal:colon", "leaf:service/api/v1"],
+  );
+});
+
+test("tree keeps a namespace leaf alongside its child group", () => {
+  const tree = buildRedisKeyTree([makeKey("session", "k1"), makeKey("session:active", "k2")], 0);
+  const sessionGroup = findGroup(tree, "session");
+
+  assert.equal(sessionGroup.loadedLeafCount, 1);
+  assert.deepEqual(
+    tree.map((node) => `${node.kind}:${node.label}`),
+    ["group:session", "leaf:session"],
+  );
+  assert.deepEqual(collectRedisGroupKeyRaws(sessionGroup), ["k2"]);
 });
 
 test("mergeKeysIntoRedisKeyTree adds new leaf to existing group", () => {

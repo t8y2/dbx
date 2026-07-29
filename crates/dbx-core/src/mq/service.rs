@@ -857,6 +857,7 @@ mod tests {
         ConnectionConfig {
             id: "readonly-mq".to_string(),
             name: "Read only MQ".to_string(),
+            note: String::new(),
             db_type: DatabaseType::MessageQueue,
             driver_profile: Some("pulsar".to_string()),
             driver_label: Some("Apache Pulsar".to_string()),
@@ -869,6 +870,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

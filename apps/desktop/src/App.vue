@@ -45,18 +45,20 @@ import { findTreeNodeById, resolveNewQueryTarget, resolveNewQueryInitialSql } fr
 import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
+import { resolveHistorySqlRestoreTarget } from "@/lib/history/historyRestoreTarget";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
-import { sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
   isModRShortcut,
@@ -253,11 +255,14 @@ function restoreHistorySql(sql: string, entry: HistoryEntry) {
     return;
   }
 
-  const connectionId = entry.connection_id || tab?.connectionId || connectionStore.connections[0]?.id;
-  if (!connectionId) return;
-  const config = connectionStore.getConfig(connectionId);
-  const database = entry.database || tab?.database || (config ? resolveDefaultDatabase(config, []) : "");
-  const tabId = queryStore.createTab(connectionId, database || "", t("tabs.sql"));
+  const target = resolveHistorySqlRestoreTarget({
+    entry,
+    activeTab: tab,
+    firstConnectionId: connectionStore.connections[0]?.id,
+    getConfig: (connectionId) => connectionStore.getConfig(connectionId),
+  });
+  if (!target) return;
+  const tabId = queryStore.createTab(target.connectionId, target.database, t("tabs.sql"), "query", target.schema);
   queryStore.updateSql(tabId, sql);
 }
 
@@ -300,6 +305,7 @@ const {
   showDangerDialog,
   suppressDangerConfirm,
   tryExecute,
+  tryExecuteInNewResultTab,
   doExecute,
   cancelActiveExecution,
   tryExplain,
@@ -324,6 +330,11 @@ const {
 function requestActiveEditorExecute() {
   if (contentAreaRef.value?.requestQueryEditorExecute?.()) return;
   void tryExecute();
+}
+
+function requestActiveEditorExecuteInNewResultTab() {
+  if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
+  void tryExecuteInNewResultTab();
 }
 
 const dialogs = useDialogSources();
@@ -1077,21 +1088,19 @@ async function openSqlFile() {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = ".sql";
-      input.onchange = () => {
+      input.onchange = async () => {
         const file = input.files?.[0];
         if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (typeof reader.result === "string") {
-            queryStore.updateSql(tab.id, reader.result);
-          }
-        };
-        reader.readAsText(file);
+        try {
+          queryStore.updateSql(tab.id, await readBrowserSqlFile(file));
+        } catch (e: any) {
+          toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+        }
       };
       input.click();
     }
   } catch (e: any) {
-    toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
 }
 
@@ -1124,7 +1133,7 @@ async function openSqlFilePath(path: string) {
     const database = activeTab.value?.database || (connection ? resolveDefaultDatabase(connection, []) : "");
     queryStore.openExternalSqlFile(connectionId, database, path, content);
   } catch (e: any) {
-    toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
+    toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
   }
 }
 
@@ -1549,7 +1558,8 @@ function ensureQueryTab(): string {
   if (tab && tab.mode === "query") return tab.id;
   const connId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
   const db = tab?.connectionId === connId ? tab.database : connectionStore.getConfig(connId)?.database || "";
-  return queryStore.createTab(connId, db, undefined, "query");
+  const schema = tab?.connectionId === connId ? tab.schema : undefined;
+  return queryStore.createTab(connId, db, undefined, "query", schema);
 }
 
 function routeAiRedisCommand(command: string, execute: boolean): boolean {
@@ -1643,7 +1653,10 @@ async function handleQuickOpenSelect(item: any) {
       const database = connection ? resolveDefaultDatabase(connection, []) : "";
       queryStore.openExternalSqlFile(connectionId, database, item.filePath, content);
     } catch (e: any) {
-      toast(e?.message || String(e), 5000);
+      toast(
+        externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)),
+        5000,
+      );
     }
     return;
   }
@@ -1684,7 +1697,7 @@ async function handleQuickOpenSelect(item: any) {
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch") {
-        await connectionStore.loadElasticsearchIndices(item.connectionId);
+        await connectionStore.openElasticsearchConnectionTree(item.connectionId);
       } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await connectionStore.loadVectorCollections(item.connectionId);
       } else if (config?.db_type === "mq") {
@@ -1709,7 +1722,7 @@ async function handleQuickOpenSelect(item: any) {
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch") {
-        await connectionStore.loadElasticsearchIndices(item.connectionId);
+        await connectionStore.openElasticsearchConnectionTree(item.connectionId);
       } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await connectionStore.loadVectorCollections(item.connectionId);
       } else if (config?.db_type === "mq") {
@@ -1904,6 +1917,12 @@ function handleKeydown(e: KeyboardEvent) {
     void openSaveSqlDialog();
     return;
   }
+  if (activeTab.value?.mode === "query" && isExecuteSqlInNewResultTabShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
+    e.preventDefault();
+    e.stopPropagation();
+    requestActiveEditorExecuteInNewResultTab();
+    return;
+  }
   if (activeTab.value?.mode === "query" && isExecuteSqlShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
@@ -1962,7 +1981,9 @@ async function initApp() {
   try {
     await settingsStore.initEditorSettings();
     console.log(`[STARTUP]   settingsStore.initEditorSettings: ${(performance.now() - t0).toFixed(0)}ms`);
-    await queryStore.initOpenTabs();
+    await connectionStore.initFromDisk();
+    console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
+    await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
     await settingsStore.initDesktopSettings().catch(() => {});
 
@@ -1977,8 +1998,6 @@ async function initApp() {
         toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
       });
 
-    await connectionStore.initFromDisk();
-    console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     restoreActiveConnectionContext();
   } catch (e: any) {
     toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
@@ -2265,6 +2284,7 @@ onUnmounted(() => {
                     @fix-with-ai="fixWithAi"
                     @send-selection-to-ai="sendSelectionToAi"
                     @execute="tryExecute($event)"
+                    @execute-in-new-result-tab="tryExecuteInNewResultTab($event)"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"
                     @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"

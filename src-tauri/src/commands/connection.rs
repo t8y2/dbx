@@ -176,6 +176,7 @@ mod tests {
         ConnectionConfig {
             id: "mongo".to_string(),
             name: "MongoDB".to_string(),
+            note: String::new(),
             db_type: DatabaseType::MongoDb,
             driver_profile: Some("mongodb".to_string()),
             driver_label: Some("MongoDB".to_string()),
@@ -188,6 +189,7 @@ mod tests {
             database: Some("RestCloud_V45PUB_Gateway".to_string()),
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -919,6 +921,18 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::Hbase => {
+                let client = db::hbase_driver::HBaseClient::new(
+                    &url,
+                    Some(&config.username),
+                    Some(&config.password),
+                    false,
+                    connect_timeout,
+                )?;
+                db::hbase_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
                 let kind = match config.db_type {
                     DatabaseType::Qdrant => db::vector_driver::VectorDbKind::Qdrant,
@@ -1239,6 +1253,17 @@ pub async fn connect_db(
             );
             db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Elasticsearch(client)
+        }
+        DatabaseType::Hbase => {
+            let client = db::hbase_driver::HBaseClient::new(
+                &url,
+                Some(&db_config.username),
+                Some(&db_config.password),
+                false,
+                connect_timeout,
+            )?;
+            db::hbase_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::HBase(client)
         }
         DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
             let kind = match db_config.db_type {

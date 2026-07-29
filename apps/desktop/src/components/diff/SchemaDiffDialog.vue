@@ -5,22 +5,44 @@ import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogContent } from "
 import { Button } from "@/components/ui/button";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck } from "@lucide/vue";
+import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
+import FieldMappingDialog from "@/components/diff/FieldMappingDialog.vue";
 import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue";
 import SchemaDiffDdlPanel from "@/components/diff/SchemaDiffDdlPanel.vue";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue";
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
+import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
 import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, shouldFetchSchemaDiffDdl } from "@/lib/schema/schemaDiffMetadataLoad";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
-import type { SchemaDiffCompareOptions, SchemaDiffConfig } from "@/types/schemaDiff";
+import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry } from "@/types/schemaDiff";
 import type { ObjectSourceKind, TableInfo } from "@/types/database";
-import { buildDeploySqlForObjects, convertToSchemaDiffObjects, groupDiffObjects, schemaDiffDeployTargetSchema, type OperationGroup, type SchemaDiffObject, type DiffOperationType, type DiffObjectKind, type SchemaDiffPreparation, type TableSchemaDetail } from "@/lib/schema/schemaDiff";
+import {
+  buildDeploySqlForObjects,
+  convertToSchemaDiffObjects,
+  groupDiffObjects,
+  injectColumnRenameSql,
+  schemaDiffDeployTargetSchema,
+  databaseTypeToDialectKind,
+  normalizeDialectKind,
+  type OperationGroup,
+  type SchemaDiffObject,
+  type DiffOperationType,
+  type DiffObjectKind,
+  type SchemaDiffPreparation,
+  type MissingRollbackObject,
+  type RollbackCompleteness,
+  type TableSchemaDetail,
+  type RenameCandidate,
+  type CompatibilityWarning,
+  type PermissionDiff,
+  type DependencyGraph,
+} from "@/lib/schema/schemaDiff";
 import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
@@ -53,6 +75,16 @@ const ignoreComments = ref(false);
 
 // Options panel
 const showOptionsPanel = ref(false);
+const showFieldMappingDialog = ref(false);
+const sourceDbType = computed(() => store.getConfig(sourceConnectionId.value)?.db_type ?? "");
+const targetDbType = computed(() => store.getConfig(targetConnectionId.value)?.db_type ?? "");
+
+// Clear stale field mappings when source and target are the same type
+watch([sourceDbType, targetDbType], ([src, tgt]) => {
+  if (src && src === tgt && activeConfig.value?.options.fieldMappings?.length) {
+    handleFieldMappingsUpdate([]);
+  }
+});
 const optionTree = computed(() => {
   const targetConfig = store.getConfig(targetConnectionId.value);
   const dbType = targetConfig?.db_type || "postgres";
@@ -70,7 +102,22 @@ const executing = ref(false);
 const lastDiffResult = ref<SchemaDiffPreparation | null>(null);
 const targetDbVersion = ref<string | null>(null);
 const showResultDialog = ref(false);
-const deployResult = ref<{ success: boolean; message: string; affectedRows?: number } | null>(null);
+const deployResult = ref<{ success: boolean; status?: string; message: string; affectedRows?: number; error?: string } | null>(null);
+
+// Phase 4 result fields
+const rollbackSql = ref("");
+const rollbackCompleteness = ref<RollbackCompleteness>("complete");
+const missingRollbackObjects = ref<MissingRollbackObject[]>([]);
+const renameCandidates = ref<RenameCandidate[]>([]);
+const compatibilityWarnings = ref<CompatibilityWarning[]>([]);
+const permissionDiffs = ref<PermissionDiff[]>([]);
+const dependencyGraph = ref<DependencyGraph | null>(null);
+
+// Rename candidates panel
+const showRenamePanel = ref(true);
+
+// Rollback / forward SQL mode in deploy step
+const deploySqlMode = ref<"forward" | "rollback">("forward");
 
 // Dialog size memory (width + height + splitpanes ratio)
 const DIALOG_SIZE_KEY = "dbx-schema-diff-size";
@@ -274,6 +321,13 @@ function handleOptionsUpdate(options: SchemaDiffCompareOptions) {
   }
 }
 
+function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
+  if (activeConfig.value) {
+    const updated = { ...activeConfig.value.options, fieldMappings: mappings };
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions(updated, getDbType()));
+  }
+}
+
 /** Map a JDBC table_type to an ObjectSourceKind for getTableDdl routing.
  *  Views and materialized views need the object_type parameter so the
  *  backend can call DBMS_METADATA.GET_DDL with the correct type. */
@@ -323,6 +377,15 @@ async function loadSchemaDetails(tables: TableInfo[], context: SchemaDetailLoadC
 async function handleCompare() {
   loading.value = true;
   step.value = "compare";
+
+  // Reset Phase 4 state to prevent stale data from previous compares
+  rollbackSql.value = "";
+  rollbackCompleteness.value = "complete";
+  missingRollbackObjects.value = [];
+  renameCandidates.value = [];
+  compatibilityWarnings.value = [];
+  permissionDiffs.value = [];
+  dependencyGraph.value = null;
 
   try {
     const sourceConfig = store.getConfig(sourceConnectionId.value);
@@ -404,17 +467,53 @@ async function handleCompare() {
       ignoreComments: ignoreComments.value,
       cascadeDelete: opts?.cascadeDelete ?? false,
       compareColumnOrder: opts.compareColumnOrder,
+      detectRenames: opts?.detectRenames ?? false,
+      detectTableRenames: opts?.detectTableRenames ?? false,
+      renameThreshold: opts?.renameThreshold ?? 0.5,
+      enableRollback: opts?.enableRollback ?? false,
+      batchPatterns: opts?.batchPatterns
+        ? opts.batchPatterns
+            .split(",")
+            .map((s: string) => s.trim())
+            .filter(Boolean)
+        : undefined,
+      sourceDialect: opts?.sourceDialect ? normalizeDialectKind(opts.sourceDialect) : sourceConfig?.db_type ? databaseTypeToDialectKind(sourceConfig.db_type) : undefined,
+      targetDialect: opts?.targetDialect ? normalizeDialectKind(opts.targetDialect) : targetConfig?.db_type ? databaseTypeToDialectKind(targetConfig.db_type) : undefined,
+      compatibilityThreshold: opts?.compatibilityThreshold ?? 0.5,
+      fieldMappings:
+        opts?.fieldMappings?.map((m: FieldMappingEntry) => ({
+          sourceType: m.sourceType,
+          targetType: m.targetType,
+          paramStrategy: m.paramStrategy ?? "preserve",
+          customParams: m.customParams,
+        })) || [],
     });
 
+    // Extract new result fields
+    rollbackSql.value = result.rollbackSyncSql ?? "";
+    rollbackCompleteness.value = result.rollbackCompleteness ?? "complete";
+    missingRollbackObjects.value = result.missingRollbackObjects ?? [];
+    renameCandidates.value = result.renameCandidates ?? [];
+    compatibilityWarnings.value = result.compatibilityWarnings ?? [];
+    permissionDiffs.value = result.permissionDiffs ?? [];
+    dependencyGraph.value = result.dependencyGraph ?? null;
+
     // Convert to unified objects
-    diffObjects.value = convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs);
+    diffObjects.value = convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs, result.renameCandidates);
 
     // Group by operation type and object kind
     diffGroups.value = groupDiffObjects(diffObjects.value);
 
-    // Save full result and generate deploy SQL
+    // Save full result and apply column rename detection to SQL
     lastDiffResult.value = result;
     deploySqlAll.value = result.syncSql;
+    if (opts?.detectRenames && opts.renameThreshold) {
+      deploySqlAll.value = injectColumnRenameSql(deploySqlAll.value, result.diffs, opts.renameThreshold);
+      if (rollbackSql.value) {
+        rollbackSql.value = injectColumnRenameSql(rollbackSql.value, result.diffs, opts.renameThreshold, true);
+      }
+    }
+    deploySqlMode.value = "forward";
     regenerateDeploySql();
 
     step.value = "result";
@@ -498,28 +597,111 @@ function regenerateDeploySql() {
   deploySql.value = buildDeploySqlForObjects(diffObjects.value);
 }
 
+function switchDeploySqlMode(mode: "forward" | "rollback") {
+  if (mode === "rollback" && rollbackCompleteness.value === "incomplete") {
+    toast(t("diff.rollbackIncompleteBlocked"), 4000);
+    return;
+  }
+  deploySqlMode.value = mode;
+  if (mode === "rollback" && rollbackSql.value) {
+    deploySql.value = rollbackSql.value;
+  } else {
+    regenerateDeploySql();
+  }
+}
+
+const canExecuteDeploy = computed(() => {
+  if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
+    return false;
+  }
+  return true;
+});
+
+function applyRename(rc: RenameCandidate) {
+  let found = false;
+  for (const obj of diffObjects.value) {
+    // Backend-detected renamed diff (diff_type = "renamed")
+    if (obj.renameMetadata?.sourceName === rc.sourceName && obj.renameMetadata?.targetName === rc.targetName) {
+      obj.renameMetadata.confirmed = true;
+      obj.selected = true;
+      found = true;
+    }
+    // Legacy delete+create pair
+    if (obj.operationType === "delete" && obj.name === rc.sourceName) {
+      obj.deploySql = `-- Renamed to ${rc.targetName}\n${obj.deploySql ?? ""}`;
+      obj.renameMetadata = { confirmed: true, targetName: rc.targetName, score: rc.score };
+      found = true;
+    }
+    if (obj.operationType === "create" && obj.name === rc.targetName) {
+      obj.deploySql = `-- Renamed from ${rc.sourceName}\n${obj.deploySql ?? ""}`;
+      obj.sourceName = rc.sourceName;
+      obj.renameMetadata = { confirmed: true, sourceName: rc.sourceName, score: rc.score };
+      found = true;
+    }
+  }
+  if (found) {
+    regenerateDeploySql();
+    toast(t("diff.renameApplied"), 2000);
+  }
+}
+
+function ignoreRename(index: number) {
+  const rc = renameCandidates.value[index];
+  if (rc) {
+    for (const obj of diffObjects.value) {
+      if (obj.renameMetadata?.sourceName === rc.sourceName && obj.renameMetadata?.targetName === rc.targetName) {
+        obj.renameMetadata.confirmed = false;
+        obj.selected = false;
+      }
+    }
+  }
+  renameCandidates.value.splice(index, 1);
+  regenerateDeploySql();
+}
+
 async function handleExecuteScript() {
   if (!deploySql.value || deploySql.value.startsWith("-- ")) {
     toast(t("diff.noObjectsSelected"), 3000);
     return;
   }
+  if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
+    toast(t("diff.rollbackIncompleteBlocked"), 5000);
+    return;
+  }
 
+  await executeDeploySql();
+}
+
+async function executeDeploySql() {
   executing.value = true;
   try {
-    const result = await executeWithProductionSqlGuard({
-      connection: store.getConfig(targetConnectionId.value),
+    const targetConnection = store.getConfig(targetConnectionId.value);
+    const failed = await executeWithProductionSqlGuard({
+      connection: targetConnection,
       database: targetDatabase.value,
       sql: deploySql.value,
       source: t("production.sourceSchemaDiff"),
-      execute: () => api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value),
+      execute: async () => {
+        const txLog = await api.executeScriptWith2pc(targetConnectionId.value, targetDatabase.value, [deploySql.value], targetSchema.value);
+        return txLog;
+      },
     });
-    if (!result) return;
-    toast(t("diff.executeSuccess"), 3000);
+    if (failed === undefined) return;
+    showDeployTxResult(failed);
   } catch (e: any) {
-    toast(e?.message || String(e), 5000);
+    deployResult.value = {
+      success: false,
+      message: e?.message || String(e),
+    };
+    showResultDialog.value = true;
   } finally {
     executing.value = false;
   }
+}
+
+function showDeployTxResult(txLog: any) {
+  deployResult.value = buildDeployTxResult(txLog, t);
+  showResultDialog.value = true;
 }
 async function handleSelectObject(obj: SchemaDiffObject) {
   selectedObjectId.value = obj.id;
@@ -575,9 +757,9 @@ function handleLoadHistoryConfig(config: SchemaDiffConfig) {
 
 function handleSaveConfig() {
   if (activeConfig.value) {
-    const name = window.prompt(t("diff.saveConfigPrompt") || "Please enter config name:", activeConfig.value.name || "Default");
+    const name = window.prompt(t("diff.saveConfigPrompt"), activeConfig.value.name || t("diff.defaultConfigName"));
     if (name === null) return; // User cancelled
-    const configToSave = { ...activeConfig.value, name: name.trim() || "Default" };
+    const configToSave = { ...activeConfig.value, name: name.trim() || t("diff.defaultConfigName") };
     saveToHistory(configToSave);
     toast(t("diff.configSaved"), 2000);
   }
@@ -631,36 +813,21 @@ function handleDeployReview() {
 }
 
 async function handleDeploy() {
+  if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
+    toast(t("diff.rollbackIncompleteBlocked"), 5000);
+    return;
+  }
   showConfirmDialog.value = true;
 }
 
 async function onConfirmDeploy() {
   showConfirmDialog.value = false;
-  executing.value = true;
-  try {
-    const result = await executeWithProductionSqlGuard({
-      connection: store.getConfig(targetConnectionId.value),
-      database: targetDatabase.value,
-      sql: deploySql.value,
-      source: t("production.sourceSchemaDiff"),
-      execute: () => api.executeScript(targetConnectionId.value, targetDatabase.value, deploySql.value, targetSchema.value),
-    });
-    if (!result) return;
-    deployResult.value = {
-      success: true,
-      message: t("diff.deploySuccess"),
-      affectedRows: result.affected_rows,
-    };
-    showResultDialog.value = true;
-  } catch (e: any) {
-    deployResult.value = {
-      success: false,
-      message: e?.message || String(e),
-    };
-    showResultDialog.value = true;
-  } finally {
-    executing.value = false;
+  if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
+    toast(t("diff.rollbackIncompleteBlocked"), 5000);
+    return;
   }
+
+  await executeDeploySql();
 }
 
 const deployStats = computed(() => {
@@ -724,6 +891,8 @@ const targetConnectionInfo = computed(() => {
           @save-config="handleSaveConfig"
           @load-history-config="handleLoadHistoryConfig"
           @delete-history-config="handleDeleteHistoryConfig"
+          @update:field-mappings="handleFieldMappingsUpdate"
+          @open-field-mapping="showFieldMappingDialog = true"
         />
 
         <!-- Compare Loading -->
@@ -734,6 +903,49 @@ const targetConnectionInfo = computed(() => {
 
         <!-- Result Step -->
         <template v-else-if="step === 'result'">
+          <!-- Rename Candidates Panel -->
+          <div v-if="renameCandidates.length > 0" class="border-b bg-amber-50 dark:bg-amber-950/20 shrink-0 overflow-hidden">
+            <button class="flex items-center gap-2 px-3 py-1.5 w-full text-left text-xs font-medium hover:bg-amber-100/50 dark:hover:bg-amber-900/30 transition-colors" @click="showRenamePanel = !showRenamePanel">
+              <ChevronDown v-if="showRenamePanel" class="w-3 h-3" />
+              <ChevronRight v-else class="w-3 h-3" />
+              {{ t("diff.renameCandidates") }}
+              <span class="ml-auto text-muted-foreground font-normal">{{ renameCandidates.length }} candidate(s)</span>
+            </button>
+            <div v-if="showRenamePanel" class="px-3 pb-2 text-xs">
+              <table class="w-full">
+                <thead>
+                  <tr class="text-muted-foreground border-b">
+                    <th class="text-left py-1 pr-4">{{ t("diff.sourceTable") }}</th>
+                    <th class="text-left py-1 pr-4">{{ t("diff.targetTable") }}</th>
+                    <th class="text-left py-1 pr-4">{{ t("diff.similarity") }}</th>
+                    <th class="text-left py-1">{{ t("common.action") }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(rc, i) in renameCandidates" :key="i" class="border-b border-amber-200/50 dark:border-amber-800/30">
+                    <td class="py-1 pr-4 font-mono">{{ rc.sourceName }}</td>
+                    <td class="py-1 pr-4 font-mono">{{ rc.targetName }}</td>
+                    <td class="py-1 pr-4">
+                      <span
+                        class="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                        :class="rc.score >= 0.8 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' : rc.score >= 0.5 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
+                        >{{ (rc.score * 100).toFixed(0) }}%</span
+                      >
+                    </td>
+                    <td class="py-1">
+                      <button class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors mr-1" @click="applyRename(rc)">
+                        {{ t("diff.confirmRename") }}
+                      </button>
+                      <button class="text-xs px-2 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors" @click="ignoreRename(i)">
+                        {{ t("diff.ignore") }}
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <Splitpanes horizontal class="flex-1 min-h-0" @resized="handleSplitpanesResized">
             <Pane :size="splitpanesSize" min-size="20">
               <div class="h-full overflow-auto">
@@ -750,14 +962,45 @@ const targetConnectionInfo = computed(() => {
               </div>
             </Pane>
             <Pane :size="100 - splitpanesSize" min-size="20">
-              <SchemaDiffDdlPanel :selected-object="selectedObject" :deploy-sql="deploySql" :deploy-sql-all="deploySqlAll" @execute-script="handleExecuteScript" />
+              <SchemaDiffDdlPanel
+                :selected-object="selectedObject"
+                :deploy-sql="deploySql"
+                :deploy-sql-all="deploySqlAll"
+                :compatibility-warnings="compatibilityWarnings"
+                :rollback-sql="rollbackSql"
+                :deploy-sql-mode="deploySqlMode"
+                :dependency-graph="dependencyGraph"
+                :permission-diffs="permissionDiffs"
+                :rollback-completeness="rollbackCompleteness"
+                :missing-rollback-objects="missingRollbackObjects"
+                :can-execute="canExecuteDeploy"
+                @update:deploy-sql-mode="switchDeploySqlMode"
+                @execute-script="handleExecuteScript"
+              />
             </Pane>
           </Splitpanes>
         </template>
 
         <!-- Deploy Review Step -->
         <template v-else-if="step === 'deploy-review'">
-          <SchemaDiffDeployStep v-model:deploy-sql="deploySql" :selected-objects="diffObjects" :target-connection-id="targetConnectionId" :target-database="targetDatabase" :target-schema="targetSchema" :executing="executing" @back="step = 'result'" @deploy="handleDeploy" />
+          <SchemaDiffDeployStep
+            v-model:deploy-sql="deploySql"
+            :selected-objects="diffObjects"
+            :target-connection-id="targetConnectionId"
+            :target-database="targetDatabase"
+            :target-schema="targetSchema"
+            :executing="executing"
+            :rollback-sql="rollbackSql"
+            :deploy-sql-mode="deploySqlMode"
+            :compatibility-warnings="compatibilityWarnings"
+            :rename-candidates="renameCandidates"
+            :rollback-completeness="rollbackCompleteness"
+            :missing-rollback-objects="missingRollbackObjects"
+            :can-execute="canExecuteDeploy"
+            @update:deploy-sql-mode="switchDeploySqlMode"
+            @back="step = 'result'"
+            @deploy="handleDeploy"
+          />
         </template>
       </div>
 
@@ -837,12 +1080,23 @@ const targetConnectionInfo = computed(() => {
             <DialogTitle class="flex items-center gap-2" :class="deployResult?.success ? 'text-green-500' : 'text-destructive'">
               <AlertTriangle v-if="!deployResult?.success" class="h-5 w-5" />
               <CircleCheck v-else class="h-5 w-5" />
-              {{ deployResult?.success ? t("diff.deploySuccess") : t("diff.deployFailed") }}
+              <template v-if="deployResult?.status === 'mixed'">{{ t("diff.deployMixedTitle") }}</template>
+              <template v-else-if="deployResult?.status === 'rolled_back'">{{ t("diff.deployRolledBackTitle") }}</template>
+              <template v-else>{{ deployResult?.success ? t("diff.deploySuccess") : t("diff.deployFailed") }}</template>
             </DialogTitle>
           </DialogHeader>
 
           <div class="py-2">
-            <div v-if="deployResult?.success" class="space-y-2">
+            <div v-if="deployResult?.status === 'mixed'" class="space-y-2">
+              <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
+              <div class="bg-yellow-50 border border-yellow-300 p-3 rounded text-xs text-yellow-800">
+                {{ t("diff.deployMixedWarning") }}
+              </div>
+            </div>
+            <div v-else-if="deployResult?.status === 'rolled_back'" class="space-y-2">
+              <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
+            </div>
+            <div v-else-if="deployResult?.success" class="space-y-2">
               <p class="text-sm text-muted-foreground">{{ t("diff.deploySuccessMessage") }}</p>
               <div class="bg-muted p-3 rounded text-xs font-mono">
                 <div>{{ t("diff.affectedRows") }}: {{ deployResult.affectedRows ?? 0 }}</div>
@@ -875,11 +1129,25 @@ const targetConnectionInfo = computed(() => {
         <div class="bg-card border rounded-lg shadow-lg w-[760px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-auto p-4">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-sm font-medium">{{ t("schemaDiff.optionsTitle") }}</h3>
-            <Button variant="ghost" size="sm" @click="showOptionsPanel = false">✕</Button>
+            <Button variant="ghost" size="sm" @click="showOptionsPanel = false" :aria-label="t('common.close')">✕</Button>
           </div>
           <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
         </div>
       </div>
+
+      <!-- Field Mapping Dialog Overlay -->
+      <FieldMappingDialog
+        :open="showFieldMappingDialog"
+        :mappings="activeConfig?.options.fieldMappings ?? []"
+        :source-db-type="sourceDbType"
+        :target-db-type="targetDbType"
+        :source-connection-id="sourceConnectionId"
+        :source-database="sourceDatabase"
+        :target-connection-id="targetConnectionId"
+        :target-database="targetDatabase"
+        @update:open="showFieldMappingDialog = $event"
+        @save="handleFieldMappingsUpdate"
+      />
     </DialogContent>
   </Dialog>
 </template>
@@ -887,10 +1155,10 @@ const targetConnectionInfo = computed(() => {
 <style scoped>
 :deep(.splitpanes--horizontal > .splitpanes__splitter) {
   height: 8px;
-  background: hsl(var(--border));
+  background: var(--border);
   cursor: row-resize;
 }
 :deep(.splitpanes--horizontal > .splitpanes__splitter:hover) {
-  background: hsl(var(--primary));
+  background: var(--primary);
 }
 </style>

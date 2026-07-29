@@ -12,6 +12,7 @@ import { ChevronDown, ChevronRight, DatabaseBackup, FolderOpen, Loader2, Pencil,
 import * as api from "@/lib/backend/api";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { useToast } from "@/composables/useToast";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { nextDatabaseBackupRunAt, normalizeDatabaseBackupTablePatterns, supportsScheduledDatabaseBackup, type DatabaseBackupFile, type DatabaseBackupRun, type DatabaseBackupSchedule } from "@/lib/backup/scheduledDatabaseBackup";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -213,7 +214,7 @@ async function runNow(schedule: DatabaseBackupSchedule) {
     if (!run) return;
     if (run.status === "success") toast(t("databaseBackup.runSuccess", { count: run.files.length }), 3000);
     else if (run.status === "cancelled") toast(t("databaseBackup.runCancelled"), 3000);
-    else toast(t("databaseBackup.runFailed", { error: run.error || t("databaseBackup.unknownError") }), 5000);
+    else toast(t("databaseBackup.runFailed", { error: run.error ? translateBackendError(t, run.error) : t("databaseBackup.unknownError") }), 5000);
   } catch (error: any) {
     toast(error?.message || String(error), 5000);
   }
@@ -261,7 +262,7 @@ async function revealBackup(file: DatabaseBackupFile) {
   try {
     await api.revealPathInFileManager(file.filePath);
   } catch (error: any) {
-    toast(error?.message || String(error), 5000);
+    toast(translateBackendError(t, error), 5000);
   }
 }
 
@@ -345,7 +346,7 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
                 <span>{{ run.connectionName || connectionName(run.connectionId) }}</span>
                 <span>{{ formatDate(run.startedAt) }}</span>
                 <span>{{ t("databaseBackup.fileCount", { count: run.files.length }) }}</span>
-                <span v-if="run.error" class="break-all text-destructive">{{ run.error }}</span>
+                <span v-if="run.error" class="break-all text-destructive">{{ translateBackendError(t, run.error) }}</span>
               </div>
             </div>
             <div class="flex items-center justify-end gap-1">

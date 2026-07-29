@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { Dialog, DialogFooter, DialogHeader, DialogScrollContent, DialogTitle } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +19,7 @@ import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
+import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
@@ -35,10 +37,45 @@ const props = defineProps<{
 
 const store = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
+// Tauri = real filesystem paths; Web = browser File.name (no path) + server temp paths.
+const isDesktopRuntime = isTauriRuntime();
 
 const fileInput = ref<HTMLInputElement | null>(null);
-const filePath = ref("");
 const previews = ref<SqlFilePreview[]>([]);
+const activePreviewPath = ref("");
+// Only the active file's preview body is mounted (reka-ui unmounts inactive
+// TabsContent), so switching files keeps the DOM small even with many files.
+watch(previews, (list) => {
+  if (list.length === 0) {
+    activePreviewPath.value = "";
+  } else if (!list.some((item) => item.filePath === activePreviewPath.value)) {
+    activePreviewPath.value = list[0]!.filePath;
+  }
+});
+
+const activePreview = computed<SqlFilePreview | null>(() => {
+  return previews.value.find((item) => item.filePath === activePreviewPath.value) ?? previews.value[0] ?? null;
+});
+
+// Disambiguate files that share the same fileName.
+// Desktop: prepend parent directory segments until unique (e.g. migration/create.sql).
+// Web: browser File.name has no path, so use a stable 1-based index suffix.
+const displayFileNames = computed(() => buildDisplayFileNames(previews.value, isDesktopRuntime));
+
+// Display-only text for the file-path input. In Web mode this shows user-facing
+// labels instead of server temp paths (which contain meaningless UUIDs).
+// Execution always uses previews[].filePath directly.
+const filePathDisplay = computed(() => {
+  if (previews.value.length === 0) return "";
+  if (isDesktopRuntime) return previews.value.map((item) => item.filePath).join("; ");
+  return previews.value.map((item) => displayFileNames.value.get(item.filePath) ?? item.fileName).join("; ");
+});
+
+// Desktop tooltip shows the real file path; Web tooltip shows the user-facing
+// label only — never the server temp path (which contains a meaningless UUID).
+function tooltipText(item: SqlFilePreview): string {
+  return computeTooltipText(item, displayFileNames.value, isDesktopRuntime);
+}
 const selectingFile = ref(false);
 const loadingPreview = ref(false);
 const connectionId = ref("");
@@ -97,14 +134,16 @@ const progressPercent = computed(() => {
   if (current <= 0) return running.value ? 8 : 0;
   return Math.min(95, Math.max(8, Math.round((attempted / current) * 100)));
 });
-const preview = computed(() => previews.value[0] ?? null);
-const previewLineCount = computed(() => preview.value?.preview.split(/\r\n|\r|\n/).length ?? 0);
-const previewLineNumbers = computed(() => Array.from({ length: previewLineCount.value }, (_, index) => index + 1));
-const previewIsTruncated = computed(() => {
-  if (!preview.value) return false;
-  return preview.value.sizeBytes > preview.value.preview.length;
-});
-const previewLineSummary = computed(() => (previewIsTruncated.value ? t("sqlFile.previewingFirstLines", { count: previewLineCount.value }) : t("sqlFile.previewingLines", { count: previewLineCount.value })));
+function previewLineCount(item: SqlFilePreview) {
+  return item.preview.split(/\r\n|\r|\n/).length;
+}
+function previewIsTruncated(item: SqlFilePreview) {
+  return item.sizeBytes > item.preview.length;
+}
+function previewLineSummary(item: SqlFilePreview) {
+  const count = previewLineCount(item);
+  return previewIsTruncated(item) ? t("sqlFile.previewingFirstLines", { count }) : t("sqlFile.previewingLines", { count });
+}
 
 function connectionIconType(id: string) {
   const config = store.getConfig(id);
@@ -165,7 +204,6 @@ function resetExecution() {
 }
 
 function resetState() {
-  filePath.value = "";
   previews.value = [];
   selectingFile.value = false;
   loadingPreview.value = false;
@@ -224,7 +262,6 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
 async function loadPreviews(filesOrPaths: Array<string | File>) {
   loadingPreview.value = true;
   previews.value = [];
-  filePath.value = "";
   resetExecution();
   try {
     const nextPreviews: SqlFilePreview[] = [];
@@ -232,7 +269,6 @@ async function loadPreviews(filesOrPaths: Array<string | File>) {
       nextPreviews.push(await previewSelectedSqlFile(fileOrPath));
     }
     previews.value = nextPreviews;
-    filePath.value = nextPreviews.map((item) => item.filePath).join("; ");
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {
@@ -327,7 +363,7 @@ async function startExecution() {
   terminalError.value = "";
   progress.value = null;
   const taskLabel = previews.value.length === 1 ? previews.value[0]!.fileName : `${previews.value[0]!.fileName} (+${previews.value.length - 1})`;
-  addSqlFileTask(batchId, taskLabel, filePath.value);
+  addSqlFileTask(batchId, taskLabel, filePathDisplay.value);
 
   try {
     await store.ensureConnected(connectionId.value);
@@ -477,7 +513,7 @@ watch(
 
           <div class="flex items-center gap-2">
             <input ref="fileInput" type="file" accept=".sql,text/sql" multiple class="hidden" @change="handleFileInputChange" />
-            <Input :model-value="filePath" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
+            <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
               <FolderOpen v-else class="w-3.5 h-3.5 mr-1.5" />
@@ -485,24 +521,45 @@ watch(
             </Button>
           </div>
 
-          <div v-if="preview" class="min-w-0 max-w-full overflow-hidden rounded-md border">
-            <div class="flex items-center justify-between gap-3 px-3 py-2 text-xs border-b bg-muted/40">
-              <div class="min-w-0 flex items-center gap-2">
-                <FileCode class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                <span class="font-medium truncate">{{ preview.fileName }}</span>
-                <span v-if="previews.length > 1" class="shrink-0 text-muted-foreground">(+{{ previews.length - 1 }})</span>
+          <div v-if="previews.length" class="flex min-w-0 gap-3">
+            <div v-if="previews.length > 1" class="flex w-48 shrink-0 flex-col rounded-md border bg-muted/20">
+              <div class="flex shrink-0 items-center gap-2 rounded-t-md border-b bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                <FileCode class="w-3.5 h-3.5 shrink-0" />
+                <span class="font-medium">{{ previews.length }}</span>
               </div>
-              <div class="flex shrink-0 items-center gap-2 text-muted-foreground">
-                <span>{{ previewLineSummary }}</span>
-                <span class="h-3 w-px bg-border" />
-                <span>{{ formatBytes(preview.sizeBytes) }}</span>
+              <!-- Keep this max-height in sync with the preview viewer so the list
+                   matches the preview pane height and scrolls internally. -->
+              <div class="max-h-[min(46vh,420px)] min-h-0 overflow-y-auto p-1">
+                <Tooltip v-for="item in previews" :key="item.filePath">
+                  <TooltipTrigger as-child>
+                    <button type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs" :class="item.filePath === activePreviewPath ? 'bg-primary/10 text-primary font-medium' : 'text-muted-foreground hover:bg-muted'" @click="activePreviewPath = item.filePath">
+                      <FileCode class="w-3.5 h-3.5 shrink-0" />
+                      <span class="min-w-0 flex-1 truncate">{{ displayFileNames.get(item.filePath) ?? item.fileName }}</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right" class="max-w-[360px] break-all">{{ tooltipText(item) }}</TooltipContent>
+                </Tooltip>
               </div>
             </div>
-            <div class="sql-file-preview-viewer flex min-h-56 max-h-[min(42vh,360px)] max-w-full overflow-auto bg-muted/15 text-xs">
-              <div class="sticky left-0 z-10 select-none border-r bg-background/95 px-2 py-3 text-right font-mono leading-5 text-muted-foreground/70">
-                <div v-for="lineNumber in previewLineNumbers" :key="lineNumber">{{ lineNumber }}</div>
+
+            <div v-if="activePreview" class="min-w-0 flex-1 flex flex-col">
+              <div class="flex items-center justify-between gap-3 rounded-t-md border border-b-0 px-3 py-2 text-xs bg-muted/40">
+                <div class="min-w-0 flex items-center gap-2">
+                  <FileCode class="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                  <span class="font-medium truncate">{{ displayFileNames.get(activePreview.filePath) ?? activePreview.fileName }}</span>
+                </div>
+                <div class="flex shrink-0 items-center gap-2 text-muted-foreground">
+                  <span>{{ previewLineSummary(activePreview) }}</span>
+                  <span class="h-3 w-px bg-border" />
+                  <span>{{ formatBytes(activePreview.sizeBytes) }}</span>
+                </div>
               </div>
-              <pre class="min-w-max flex-1 p-3 font-mono leading-5 whitespace-pre" v-html="highlight(preview.preview)"></pre>
+              <div class="sql-file-preview-viewer flex max-w-full overflow-auto bg-muted/15 text-xs rounded-b-md border border-t-0" :class="previews.length === 1 ? 'min-h-56 max-h-[min(46vh,420px)]' : 'min-h-0 max-h-[min(46vh,420px)]'">
+                <div class="sticky left-0 z-10 select-none border-r bg-background/95 px-2 py-3 text-right font-mono leading-5 text-muted-foreground/70">
+                  <div v-for="n in previewLineCount(activePreview)" :key="n">{{ n }}</div>
+                </div>
+                <pre class="min-w-max flex-1 p-3 font-mono leading-5 whitespace-pre" v-html="highlight(activePreview.preview)"></pre>
+              </div>
             </div>
           </div>
         </div>

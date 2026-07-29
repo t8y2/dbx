@@ -1150,7 +1150,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if *db_type == DatabaseType::Postgres {
                 return quote_postgres_string_literal(&literal);
             }
-            let escaped = if is_postgres_family_target(db_type) {
+            let escaped = if is_postgres_family_target(db_type) || *db_type == DatabaseType::SqlServer {
                 literal.replace('\'', "''")
             } else {
                 literal.replace('\\', "\\\\").replace('\'', "''")
@@ -2978,6 +2978,7 @@ async fn execute_on_pool_once(
                         truncated: false,
                         session_id: None,
                         has_more: false,
+                        elasticsearch_raw_body: None,
                     })
                 } else {
                     let affected = con.execute(&sql, []).map_err(|e| e.to_string())?;
@@ -2991,6 +2992,7 @@ async fn execute_on_pool_once(
                         truncated: false,
                         session_id: None,
                         has_more: false,
+                        elasticsearch_raw_body: None,
                     })
                 }
             })
@@ -4921,6 +4923,7 @@ mod tests {
         crate::models::connection::ConnectionConfig {
             id: id.to_string(),
             name: id.to_string(),
+            note: String::new(),
             db_type: DatabaseType::DuckDb,
             driver_profile: None,
             driver_label: None,
@@ -4933,6 +4936,7 @@ mod tests {
             database: None,
             visible_databases: None,
             visible_schemas: None,
+            show_system_schemas: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -5009,6 +5013,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         }
     }
 
@@ -6243,6 +6248,27 @@ mod tests {
         );
 
         assert_eq!(sql, "INSERT INTO [dbo].[customers] ([name], [note]) VALUES\n(N'Tiếng Việt', N'O''Brien')");
+    }
+
+    #[test]
+    fn sqlserver_insert_preserves_backslashes_control_characters_quotes_and_unicode() {
+        let sql = generate_insert_typed(
+            &[String::from("escape_sequence"), String::from("line_break"), String::from("quote_and_unicode")],
+            &[
+                Some(String::from("nvarchar(max)")),
+                Some(String::from("nvarchar(max)")),
+                Some(String::from("nvarchar(max)")),
+            ],
+            &[vec![json!(r#"\n"#), json!("line1\r\nline2"), json!("O'Brien / Tiếng Việt")]],
+            "notes",
+            "dbo",
+            &DatabaseType::SqlServer,
+        );
+
+        assert_eq!(
+            sql,
+            "INSERT INTO [dbo].[notes] ([escape_sequence], [line_break], [quote_and_unicode]) VALUES\n(N'\\n', N'line1\r\nline2', N'O''Brien / Tiếng Việt')"
+        );
     }
 
     #[test]

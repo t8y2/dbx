@@ -54,6 +54,9 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     let include_oracle_row_id = options.include_row_id
         && uses_oracle_row_id(database_type)
         && !is_view_table_type(options.table_type.as_deref());
+    let offset = options.offset.unwrap_or(0);
+    let oracle_view_first_page =
+        database_type == Some(DatabaseType::Oracle) && is_view_table_type(options.table_type.as_deref()) && offset == 0;
 
     let select_columns = if include_oracle_row_id {
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
@@ -109,6 +112,9 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
             )
         }
         TablePaginationStrategy::Rownum => {
+            if oracle_view_first_page {
+                return format!("SELECT {page_select_columns} FROM {table_alias}{where_clause}{order}");
+            }
             let rownum_inner_select_columns =
                 if include_oracle_row_id { &select_columns } else { &rownum_select_columns };
             build_rownum_table_select_sql(
@@ -118,7 +124,7 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
                 rownum_inner_select_columns,
                 &page_select_columns,
                 limit,
-                options.offset.unwrap_or(0),
+                offset,
             )
         }
         TablePaginationStrategy::Unbounded => {

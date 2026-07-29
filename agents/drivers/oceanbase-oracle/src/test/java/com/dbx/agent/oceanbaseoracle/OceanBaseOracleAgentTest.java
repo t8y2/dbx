@@ -7,6 +7,7 @@ import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
@@ -18,9 +19,13 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 class OceanBaseOracleAgentTest {
@@ -115,6 +120,24 @@ class OceanBaseOracleAgentTest {
             "ALTER SESSION SET ob_query_timeout = 14000000",
             "SELECT 3 FROM DUAL"
         ), sql);
+    }
+
+    @Test
+    void readsBlobValuesAsHexWithoutStringConversion() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, queryConnection(blobResultSet()));
+
+        QueryResult result = agent.executeQuery(
+            "SELECT PAYLOAD, EMPTY_PAYLOAD, DESCRIPTION FROM DOCUMENTS",
+            null,
+            new ExecuteQueryOptions(10, null, 5)
+        );
+
+        Assertions.assertEquals(List.of("PAYLOAD", "EMPTY_PAYLOAD", "DESCRIPTION"), result.getColumns());
+        Assertions.assertEquals(
+            List.of(Arrays.asList("0x012aff", null, "plain text")),
+            result.getRows()
+        );
     }
 
     @Test
@@ -417,6 +440,90 @@ class OceanBaseOracleAgentTest {
                 return false;
             }
             return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection queryConnection(ResultSet resultSet) {
+        Statement statement = proxy(Statement.class, (method, args) -> {
+            switch (method.getName()) {
+                case "execute":
+                    return !String.valueOf(args[0]).startsWith("ALTER SESSION");
+                case "getResultSet":
+                    return resultSet;
+                case "getUpdateCount":
+                    return 0;
+                case "close":
+                case "setMaxRows":
+                case "setFetchSize":
+                case "setQueryTimeout":
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static ResultSet blobResultSet() {
+        String[] columns = {"PAYLOAD", "EMPTY_PAYLOAD", "DESCRIPTION"};
+        int[] sqlTypes = {Types.BLOB, Types.BLOB, Types.VARCHAR};
+        String[] typeNames = {"BLOB", "BLOB", "VARCHAR2"};
+        int[] rowIndex = {-1};
+        boolean[] wasNull = {false};
+        ResultSetMetaData metadata = proxy(ResultSetMetaData.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getColumnCount":
+                    return columns.length;
+                case "getColumnLabel":
+                    return columns[((Number) args[0]).intValue() - 1];
+                case "getColumnType":
+                    return sqlTypes[((Number) args[0]).intValue() - 1];
+                case "getColumnTypeName":
+                    return typeNames[((Number) args[0]).intValue() - 1];
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(ResultSet.class, (method, args) -> {
+            switch (method.getName()) {
+                case "next":
+                    rowIndex[0] += 1;
+                    return rowIndex[0] == 0;
+                case "getMetaData":
+                    return metadata;
+                case "getBytes":
+                    int bytesColumn = ((Number) args[0]).intValue();
+                    if (bytesColumn == 1) {
+                        wasNull[0] = false;
+                        return new byte[]{0x01, 0x2A, (byte) 0xFF};
+                    }
+                    if (bytesColumn == 2) {
+                        wasNull[0] = true;
+                        return null;
+                    }
+                    throw new AssertionError("Text columns should not be read with getBytes");
+                case "getString":
+                    int stringColumn = ((Number) args[0]).intValue();
+                    if (stringColumn != 3) {
+                        throw new SQLFeatureNotSupportedException("ORA_BLOB.getString() is unsupported");
+                    }
+                    wasNull[0] = false;
+                    return "plain text";
+                case "wasNull":
+                    return wasNull[0];
+                case "close":
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
         });
     }
 

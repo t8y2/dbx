@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.5.67"
+version = "0.5.69"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -66,6 +66,9 @@ axum = { version = "0.8", features = ["ws"] }
 font-kit = "0.14.3"
 tauri-plugin-clipboard-manager = "2.3.2"
 sys-locale = "0.3"
+
+[dev-dependencies]
+tauri = { version = "2.10.3", features = ["test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }

@@ -1,7 +1,20 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { activeResultRun, databaseDisplayNameForTab, executionSummaryItems, middleEllipsis, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, tabDisplayTitle, tabModeLabel, tabularResultItems } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
+import {
+  activeResultRun,
+  databaseDisplayNameForTab,
+  executionSummaryItems,
+  middleEllipsis,
+  nextExecutionSummaryView,
+  resultGridCacheKey,
+  resultRunItems,
+  resultSourceRange,
+  resultSqlForGrid,
+  tabDisplayTitle,
+  tabModeLabel,
+  tabularResultItems,
+} from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 
@@ -120,6 +133,26 @@ test("zookeeper tabs use key browser labels", () => {
     const tab = queryTab({ mode: "zookeeper", database: "", title: "ZooKeeper Keys" });
     assert.equal(tabDisplayTitle(tab, t), "ZK Prod@keys");
     assert.equal(tabModeLabel(tab, t), "ZooKeeper");
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("HBase tabs identify the table and namespace", () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    name: "HBase Dev",
+    db_type: "hbase",
+    port: 8080,
+  });
+  const t = (key: string) => key;
+
+  try {
+    const tab = queryTab({ mode: "hbase", database: "analytics", title: "events", sql: "events" });
+    assert.equal(tabDisplayTitle(tab, t), "events@analytics");
+    assert.equal(tabModeLabel(tab, t), "HBase");
   } finally {
     restoreStorage();
   }

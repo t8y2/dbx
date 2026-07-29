@@ -76,6 +76,7 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
         source_columns: None,
         rows: result.rows.clone(),
         exclude_primary_keys: false,
+        include_computed_columns: false,
         insert_mode: DataGridCopyInsertMode::Merged,
     })
     .expect("copy insert");

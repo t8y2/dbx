@@ -268,7 +268,7 @@ async function resendMessage() {
   resendSuccess.value = undefined;
   try {
     const message = selectedMessage.value;
-    const headers: Record<string, string> = { ...(message?.headers ?? {}) };
+    const headers: Record<string, string> = { ...message?.headers };
     if (isRocketMqCluster.value && message?.tag?.trim()) {
       headers.TAGS = message.tag.trim();
     }

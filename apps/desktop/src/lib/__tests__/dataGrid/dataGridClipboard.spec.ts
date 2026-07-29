@@ -125,8 +125,15 @@ describe("parseDataGridClipboard", () => {
     ]);
   });
 
+  it("preserves embedded tabs and newlines even without null values", () => {
+    const text = '"left\tinside"\t"line 1\nline 2"';
+    rememberDataGridClipboardCopy(text, [["left\tinside", "line 1\nline 2"]]);
+
+    expect(parseDataGridClipboard(text)).toEqual([["left\tinside", "line 1\nline 2"]]);
+  });
+
   it("restores null positions after copied headers", () => {
-    rememberDataGridClipboardCopy("name\tnote\nAda\tNULL", [["Ada", null]], true);
+    rememberDataGridClipboardCopy("name\tnote\nAda\tNULL", [["Ada", null]], ["name", "note"]);
 
     expect(parseDataGridClipboard("name\tnote\nAda\tNULL")).toEqual([
       ["name", "note"],

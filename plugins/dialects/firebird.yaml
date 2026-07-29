@@ -1,0 +1,98 @@
+dialect:
+  name: "Firebird"
+  display_name: "Firebird"
+  versions:
+    - version: "5"
+      status: "RECOMMENDED"
+
+types:
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INTEGER"
+    category: "INTEGER"
+    aliases: ["INT"]
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "DOUBLE PRECISION"
+    category: "FLOAT"
+  - name: "NUMERIC"
+    category: "DECIMAL"
+    has_precision: true
+    aliases: ["DECIMAL"]
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+  - name: "BLOB SUB_TYPE TEXT"
+    category: "STRING"
+  - name: "BLOB SUB_TYPE BINARY"
+    category: "BINARY"
+  - name: "DATE"
+    category: "DATE"
+  - name: "TIME"
+    category: "TIME"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  alter_column_type: true
+  create_index: true
+  drop_index: true
+  foreign_key: true
+  create_table: true
+  drop_table: true
+  create_trigger: true
+  drop_trigger: true
+  alter_owner: true
+  if_not_exists: true
+  transactional_ddl: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP {column}"
+    create_table: "CREATE TABLE {table} ({columns})"
+    drop_table: "DROP TABLE {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP {column}"
+  drop_column: "ALTER TABLE {table} ADD {column} {original_type}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  supports_schemas: false
+  max_columns_per_table: 32768
+  max_indexes_per_table: 256
+  max_query_size_bytes: 16777216
+  max_foreign_key_name_length: 31
+  supports_on_update_cascade: true
+  supports_deferrable_constraints: true
+
+identifier_rules:
+  quote_char: '"'
+  case_sensitive: true
+  max_length: 31
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT RDB$RELATION_NAME FROM RDB$RELATIONS WHERE RDB$SYSTEM_FLAG = 0 AND RDB$VIEW_BLR IS NULL"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT RDB$FIELD_NAME, RDB$FIELD_SOURCE FROM RDB$RELATION_FIELDS WHERE RDB$RELATION_NAME = '{table}' ORDER BY RDB$FIELD_POSITION"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT RDB$RELATION_NAME, RDB$CONSTRAINT_NAME FROM RDB$RELATION_CONSTRAINTS WHERE RDB$CONSTRAINT_TYPE = 'FOREIGN KEY'"
+    depth_support: 1
+    performance_profile: "MEDIUM"

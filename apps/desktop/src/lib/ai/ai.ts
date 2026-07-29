@@ -95,6 +95,11 @@ export interface AiRequestInput {
   instruction: string;
   context: AiContext;
   allowWriteSql?: boolean;
+  /** When allowWriteSql is true, the specific write SQL the user confirmed. */
+  confirmedWriteSql?: string;
+  /** Connection/database snapshot at confirmation time; verified at backend. */
+  confirmedConnectionId?: string;
+  confirmedDatabase?: string;
 }
 
 export interface CustomPromptContext {
@@ -187,6 +192,9 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     onEvent,
     input.mode || "ask",
     input.allowWriteSql || false,
+    input.confirmedWriteSql,
+    input.confirmedConnectionId,
+    input.confirmedDatabase,
   );
 }
 
@@ -348,8 +356,8 @@ function buildModePromptLines(mode: AiAssistantMode, isZh: boolean): string[] {
         ? "用户提出数据查询意图时，必须调用 execute_query 工具执行 SQL，不要只输出 SQL 文本后停止。先用 list_tables/get_columns 了解 schema，再调用 execute_query 获取真实结果，最后基于结果回答用户。"
         : "When the user expresses a data query intent, you MUST call the execute_query tool to run the SQL — do NOT just output SQL text and stop. Use list_tables/get_columns to understand the schema first, then call execute_query to get real results, then answer based on the actual data.",
       isZh
-        ? "只有 SELECT、WITH、SHOW、DESCRIBE、EXPLAIN 可以通过 execute_query 执行。如果用户要求写入操作，先解释原因，不要执行。"
-        : "Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN can be executed via execute_query. If the user requests a write operation, explain why it is blocked instead of executing.",
+        ? "当用户要求写入操作（INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE 等）时，先在一个 ```sql 代码块中给出精确的写 SQL，再在回复末尾用问句明确询问用户是否确认执行（例如'需要我执行这条 CREATE TABLE 语句吗？'）。待用户明确确认后再调用 execute_query，并原样使用该代码块中的 SQL，不得改写、重新格式化或补充语句。禁止不经确认直接执行写入。"
+        : "When the user requests a write operation (INSERT/UPDATE/DELETE/CREATE/ALTER/DROP/TRUNCATE, etc.), first put the exact proposed write SQL in one ```sql code block, then ask for explicit confirmation at the end of your reply with a question that names the specific operation (e.g., 'Should I execute this CREATE TABLE?'). Only call execute_query for writes after the user explicitly confirms, and use the exact SQL from that code block without rewriting, reformatting, or adding statements. Never execute writes without confirmation.",
       isZh ? "如果安全执行条件不满足，先说明原因，再给只读预览或澄清问题。" : "If safe execution requirements are not met, explain why first, then provide a read-only preview or a clarifying question.",
     ];
   }

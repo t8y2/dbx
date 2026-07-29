@@ -36,6 +36,23 @@ test("keeps the legacy analyzer API for editable SELECT queries", () => {
   assert.deepEqual(analysis.columns, []);
 });
 
+test("recognizes top-level SQL set operations as read-only", () => {
+  for (const operator of ["UNION", "INTERSECT", "EXCEPT", "MINUS"]) {
+    const sql = `SELECT id FROM users ${operator} SELECT id FROM archived_users`;
+
+    assert.deepEqual(analyzeEditableQueryEditability(sql), { editable: false, reason: "set-operation" }, operator);
+  }
+});
+
+test("ignores MINUS in strings, comments, and nested queries", () => {
+  for (const sql of ["SELECT id, 'MINUS' AS operation FROM users", "SELECT id FROM users -- MINUS\nWHERE active = 1", "SELECT id FROM users /* MINUS */ WHERE active = 1", "SELECT * FROM users WHERE id IN (SELECT id FROM archived_users MINUS SELECT id FROM blocked_users)"]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.equal(result.analysis.tableName, "users", sql);
+  }
+});
+
 test("recognizes Oracle FOR UPDATE variants without treating FOR as an alias", () => {
   for (const sql of [
     "SELECT * FROM employees FOR UPDATE",

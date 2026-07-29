@@ -170,7 +170,7 @@
         # ------------------------------------------------------------------ #
         packages.dbx-desktop = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "dbx-desktop";
-          version = "0.5.67";
+          version = "0.5.69";
 
           src = pkgs.lib.cleanSource ./.;
 
@@ -190,9 +190,9 @@
           cargoDeps = pkgs.rustPlatform.importCargoLock {
             lockFile = ./Cargo.lock;
             outputHashes = {
-                "tokio-postgres-0.7.17" = "sha256-mGzfqYmo1PPcpKOlyA6ePzZA4lrNspOJ5G52meHiocY=";
+                "tokio-postgres-0.7.18" = "sha256-HRbYVSD7iIwG3m1tOGoIZy0xAZwALWIpTtakVSYPIYI=";
                 "mysql-common-derive-0.32.2" = "sha256-8lWgsdTuLTgOmzP7tXmA9LnomOE0wjxXsCBw9NEMt2o=";
-                "mysql_async-0.37.0" = "sha256-r4+VFDmflMu7KLButuwE/lcYAlPuacXiDQN6ZdBhuwo=";
+                "mysql_async-0.37.0" = "sha256-tMFvmypIBh1GHg3cLFWmLf6N1wrwKPlzx2G/MHwtlFM=";
             };
           };
 

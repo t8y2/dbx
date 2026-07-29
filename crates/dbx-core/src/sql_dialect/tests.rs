@@ -819,7 +819,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             include_row_id: true,
             ..Default::default()
         }),
-        "SELECT \"ID\", \"NAME\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\") WHERE ROWNUM <= 100"
+        "SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\""
     );
     assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -839,6 +839,44 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             }),
             "MATCH (n:`Employee`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`first name` AS `first name`, n.`role` AS `role` LIMIT 100;"
         );
+}
+
+#[test]
+fn oracle_view_first_page_preserves_filter_and_sort_without_rownum() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_JOIN_VIEW".to_string(),
+            table_type: Some("VIEW".to_string()),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            order_by: Some("\"ID\" DESC".to_string()),
+            limit: Some(100),
+            offset: Some(0),
+            where_input: Some("STATUS = 'A'".to_string()),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\" WHERE (STATUS = 'A') ORDER BY \"ID\" DESC"
+    );
+}
+
+#[test]
+fn oracle_view_later_pages_keep_rownum_pagination() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_JOIN_VIEW".to_string(),
+            table_type: Some("VIEW".to_string()),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            limit: Some(100),
+            offset: Some(100),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"ID\", \"NAME\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_JOIN_VIEW\") dbx_inner WHERE ROWNUM <= 200) WHERE \"__dbx_row_num\" > 100"
+    );
 }
 
 #[test]

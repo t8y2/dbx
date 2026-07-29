@@ -123,3 +123,23 @@ export function extractFirstSqlCodeBlock(content: string): string | undefined {
   const sql = match?.[1]?.trim();
   return sql || undefined;
 }
+
+/**
+ * Count SQL code blocks in content. Used to reject ambiguous multi-block
+ * proposals — when a message contains more than one SQL code block, we
+ * cannot determine which one the user intended to confirm.
+ */
+export function countSqlCodeBlocks(content: string): number {
+  const matches = content.match(/```(?:sql|mysql|postgresql|sqlite|tsql|clickhouse)?\s*\n[\s\S]*?```/gi);
+  return matches ? matches.length : 0;
+}
+
+/**
+ * Extract a single SQL code block from content. Returns undefined when the
+ * message has zero or more than one code block — only an unambiguous
+ * single-block proposal yields a confirmed SQL binding.
+ */
+export function extractSingleSqlCodeBlock(content: string): string | undefined {
+  if (countSqlCodeBlocks(content) !== 1) return undefined;
+  return extractFirstSqlCodeBlock(content);
+}

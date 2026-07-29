@@ -1,5 +1,5 @@
 import type { Component } from "vue";
-import { Archive, Braces, Columns3, Database, Eye, FileCode, FolderClosed, FolderOpen, Key, Link, ListTree, Network, Package, Plus, ScrollText, Server, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
+import { Archive, Braces, Columns3, Database, Eye, FileCode, FolderClosed, FolderOpen, Gauge, Key, Link, ListTree, Network, Package, Plus, ScrollText, Server, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
 import type { ColumnInfo, TreeNode } from "@/types/database";
 
 export type TreeNodeIconInfo = {
@@ -30,6 +30,8 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "nacos-namespace":
     case "etcd-root":
       return { icon: FolderOpen, colorClass: "text-sky-500" };
+    case "etcd-dashboard":
+      return { icon: Gauge, colorClass: "text-sky-500" };
     case "zookeeper-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "table":

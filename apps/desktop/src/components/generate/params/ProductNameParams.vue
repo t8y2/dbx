@@ -5,8 +5,11 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 import CommonOptions from "./CommonOptions.vue";
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{ params: GeneratorParams }>();
+
+const { t } = useI18n();
 
 if (!props.params.productKeywords) {
   props.params.productKeywords = "Apple\nCherry\nOrange\nMango\nBanana\nLemon\nGrape\nPeach\nPear\nMelon";
@@ -32,7 +35,7 @@ const previewVal = computed(() => {
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean);
-  if (keywords.length === 0) return "(无)";
+  if (keywords.length === 0) return t("dataGenerate.noValue");
   const mode = Math.random();
   if (mode < 0.4) {
     return pick(keywords);
@@ -51,12 +54,12 @@ function refresh() {
 <template>
   <div class="space-y-3">
     <div class="rounded-md border bg-muted/10 p-3">
-      <Label class="text-xs text-muted-foreground mb-1 block">使用关键字生成</Label>
-      <textarea v-model="params.productKeywords" rows="6" class="w-full rounded border bg-background px-2 py-1 text-xs font-mono resize-y" placeholder="每行一个关键字&#10;Apple&#10;Cherry&#10;Orange" />
+      <Label class="text-xs text-muted-foreground mb-1 block">{{ t("dataGenerate.useKeywords") }}</Label>
+      <textarea v-model="params.productKeywords" rows="6" class="w-full rounded border bg-background px-2 py-1 text-xs font-mono resize-y" :placeholder="t('dataGenerate.placeholders.keywords')" />
     </div>
     <div class="rounded-md border bg-muted/10 p-3">
       <div class="flex items-center gap-2 text-xs">
-        <span class="text-muted-foreground shrink-0">预览</span>
+        <span class="text-muted-foreground shrink-0">{{ t("dataGenerate.preview") }}</span>
         <span :key="previewKey" class="font-mono text-sm">{{ previewVal }}</span>
         <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="refresh">
           <RefreshCw class="h-3 w-3" />

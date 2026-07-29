@@ -46,6 +46,7 @@ function metrics(starLabel: string) {
 const databaseSupport = [
   { name: "MySQL", icon: "/icons/database/mysql.svg", tone: "#4479a1" },
   { name: "PostgreSQL", icon: "/icons/database/postgres.svg", tone: "#4169e1" },
+  { name: "Cloudberry", icon: "/icons/database/cloudberry.svg", tone: "#ff5900" },
   { name: "SQLite", icon: "/icons/database/sqlite.svg", tone: "#5aa6d6" },
   { name: "Redis", icon: "/icons/database/redis.svg", tone: "#ff4438" },
   { name: "DuckDB", icon: "/icons/database/duckdb.svg", tone: "#fff000" },
@@ -56,9 +57,9 @@ const databaseSupport = [
   { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
   { name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
   { name: "Milvus", icon: "/icons/database/milvus.png", tone: "#00a1ea" },
-  { name: "Weaviate", icon: "/icons/database/weaviate.png", tone: "#00b894" },
-  { name: "ChromaDB", shortLabel: "CH", tone: "#ff7a59" },
-  { name: "Cloudflare D1", shortLabel: "D1", tone: "#f6821f" },
+  { name: "Weaviate", icon: "/icons/database/weaviate.svg", tone: "#00b894" },
+  { name: "ChromaDB", icon: "/icons/database/chromadb.svg", tone: "#ff7a59" },
+  { name: "Cloudflare D1", icon: "/icons/database/cloudflare-d1.svg", tone: "#f6821f" },
   { name: "MariaDB", icon: "/icons/database/mariadb.svg", tone: "#003545" },
   { name: "Doris", icon: "/icons/database/doris.svg", tone: "#5b7cfa" },
   { name: "StarRocks", icon: "/icons/database/starrocks.svg", tone: "#6750ff" },
@@ -69,9 +70,10 @@ const databaseSupport = [
   { name: "openGauss", icon: "/icons/database/opengauss.svg", tone: "#1488c9" },
   { name: "KingBase", icon: "/icons/database/kingbase.svg", tone: "#e1212d" },
   { name: "HighGo", icon: "/icons/database/highgo.png", tone: "#005bac" },
+  { name: "UXDB", icon: "/icons/database/uxdb.svg", tone: "#142b8c" },
   { name: "TiDB", icon: "/icons/database/tidb.svg", tone: "#e60012" },
   { name: "OceanBase", icon: "/icons/database/oceanbase.svg", tone: "#2285ff" },
-  { name: "TDSQL", icon: "/icons/database/tdsql.webp", tone: "#0080ff" },
+  { name: "TDSQL", icon: "/icons/database/tdsql.svg", tone: "#0080ff" },
   { name: "PolarDB", icon: "/icons/database/polardb.webp", tone: "#1890ff" },
   { name: "GreatSQL", icon: "/icons/database/greatsql.webp", tone: "#0066b3" },
   { name: "SelectDB", icon: "/icons/database/selectdb.svg", tone: "#22c1c3" },
@@ -80,45 +82,48 @@ const databaseSupport = [
   { name: "RQLite", icon: "/icons/database/rqlite.png", tone: "#5a67d8" },
   { name: "Turso", icon: "/icons/database/turso.png", tone: "#10b981" },
   { name: "Databend", icon: "/icons/database/databend.svg", tone: "#f59e0b" },
-  { name: "Databricks", icon: "/icons/database/databricks.webp", tone: "#ff5a1f" },
+  { name: "Databricks", icon: "/icons/database/databricks.svg", tone: "#ff5a1f" },
   { name: "Snowflake", icon: "/icons/database/snowflake.svg", tone: "#29b5e8" },
   { name: "BigQuery", icon: "/icons/database/bigquery.svg", tone: "#4285f4" },
   { name: "Trino", icon: "/icons/database/trino.svg", tone: "#dd00a1" },
   { name: "PrestoSQL", icon: "/icons/database/presto.svg", tone: "#5890ff" },
   { name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },
-  { name: "Apache Spark", shortLabel: "SP", tone: "#e25a1c" },
+  { name: "HBase", icon: "/icons/database/hbase.svg", tone: "#ba160c" },
+  { name: "Spark", icon: "/icons/database/spark-logo.png", tone: "#e25a1c" },
   { name: "DB2", icon: "/icons/database/db2.svg", tone: "#054ada" },
-  { name: "SAP HANA", icon: "/icons/database/saphana.webp", tone: "#008fd3" },
-  { name: "Teradata", icon: "/icons/database/teradata.webp", tone: "#f37440" },
+  { name: "SAP HANA", icon: "/icons/database/saphana.svg", tone: "#008fd3" },
+  { name: "Teradata", icon: "/icons/database/teradata.svg", tone: "#f37440" },
   { name: "Vertica", icon: "/icons/database/vertica.webp", tone: "#007dc5" },
-  { name: "Exasol", icon: "/icons/database/exasol.webp", tone: "#002b45" },
-  { name: "Firebird", icon: "/icons/database/firebird.webp", tone: "#e17000" },
+  { name: "Exasol", icon: "/icons/database/exasol.svg", tone: "#002b45" },
+  { name: "Firebird", icon: "/icons/database/firebird.svg", tone: "#e17000" },
   { name: "Informix", icon: "/icons/database/informix.svg", tone: "#0178c8" },
   { name: "Neo4j", icon: "/icons/database/neo4j.svg", tone: "#018bff" },
   { name: "Cassandra", icon: "/icons/database/cassandra.svg", tone: "#1287b1" },
   { name: "Kylin", icon: "/icons/database/apache_kylin.svg", tone: "#fb8c00" },
-  { name: "Dremio", shortLabel: "DR", tone: "#30bdbe" },
-  { name: "OSCAR", shortLabel: "OS", tone: "#1b8dff" },
+  { name: "Dremio", icon: "/icons/database/dremio.svg", tone: "#30bdbe" },
+  { name: "OSCAR", icon: "/icons/database/oscar.png", tone: "#1b8dff" },
   { name: "InfluxDB", icon: "/icons/database/influxdb.svg", tone: "#22adf6" },
   { name: "QuestDB", icon: "/icons/database/questdb.svg", tone: "#dc2626" },
   { name: "IoTDB", icon: "/icons/database/iotdb.svg", tone: "#3cb371" },
   { name: "KWDB", icon: "/icons/database/kwdb.svg", tone: "#6366f1" },
-  { name: "Vastbase", icon: "/icons/database/vastbase.png", tone: "#2563eb" },
+  { name: "Vastbase", icon: "/icons/database/vastbase.svg", tone: "#2563eb" },
   { name: "GoldenDB", icon: "/icons/database/goldendb.png", tone: "#eab308" },
   { name: "YashanDB", icon: "/icons/database/yashandb.png", tone: "#dc2626" },
   { name: "SunDB", icon: "/icons/database/sundb.svg", tone: "#f97316" },
   { name: "XuguDB", icon: "/icons/database/xugu.png", tone: "#84cc16" },
-  { name: "GBase", icon: "/icons/database/gbase.webp", tone: "#06b6d4" },
+  { name: "GBase", icon: "/icons/database/gbase.png", tone: "#06b6d4" },
   { name: "Access", icon: "/icons/database/access.png", tone: "#a53346" },
   { name: "H2", icon: "/icons/database/h2.svg", tone: "#f7a81b" },
   { name: "Etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
   { name: "ZooKeeper", icon: "/icons/database/zookeeper.svg", tone: "#3b82f6" },
   { name: "Pulsar", icon: "/icons/database/pulsar.svg", tone: "#188fff" },
-  { name: "Apache Kafka", shortLabel: "KF", tone: "#231f20" },
+  { name: "Kafka", icon: "/icons/database/kafka.svg", tone: "#231f20" },
+  { name: "RocketMQ", icon: "/icons/database/rocketmq.svg", tone: "#f97316" },
+  { name: "RabbitMQ", icon: "/icons/database/rabbitmq.svg", tone: "#f97316" },
   { name: "Nacos", icon: "/icons/database/nacos.png", tone: "#2f80ed" },
-  { name: "IRIS", icon: "/icons/database/iris.png", tone: "#0085ca" },
-  { name: "JDBC", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff" },
-  { name: "Your DB?", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions", cta: true },
+  { name: "IRIS", icon: "/icons/database/iris.svg", tone: "#0085ca" },
+  { name: "JDBC", icon: "/icons/database/jdbcx.svg", tone: "#6ea8ff" },
+  { name: "Your DB?", icon: "/icons/database/jdbcx.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions", cta: true },
 ];
 
 const workflows = {
@@ -369,8 +374,9 @@ const i18nText = {
     docsStartDesc: "Install DBX, create your first connection, and learn the main workflow.",
     workflowsTitle: "Core workflows",
     workflowsDesc: "The docs are organized around what you actually do in a database client.",
-    supportTitle: "Supports many databases",
-    supportDesc: "Connect and manage SQL, NoSQL, embedded databases, and MySQL/PostgreSQL-compatible engines without switching tools.",
+    supportTitle: "Supports 70+ databases",
+    supportDesc: "Connect SQL, NoSQL, vector, time-series, and embedded databases, message queues, and compatible engines in one place.",
+    supportLink: "View all",
     testimonialsTitle: "What DBX is good at",
     testimonialsDesc: "A closer look at the everyday database workflows DBX is built to make smoother.",
     capabilitiesTitle: "Built for real database work",
@@ -394,8 +400,9 @@ const i18nText = {
     docsStartDesc: "安装 DBX、创建第一个连接，并了解主要工作流。",
     workflowsTitle: "核心工作流",
     workflowsDesc: "文档围绕数据库客户端里的真实任务组织，而不是堆功能清单。",
-    supportTitle: "支持多种数据库",
-    supportDesc: "告别频繁切换工具的烦恼。DBX 可以连接和管理多种数据库类型，让你更专注于查询、分析和数据本身。",
+    supportTitle: "支持70+种数据库",
+    supportDesc: "统一连接和管理 SQL、NoSQL、向量、时序、嵌入式数据库、消息队列及兼容引擎。",
+    supportLink: "查看全部",
     testimonialsTitle: "DBX 适合什么样的工作",
     testimonialsDesc: "从连接管理、数据浏览到 AI 辅助，DBX 围绕高频数据库工作流打磨体验。",
     capabilitiesTitle: "面向真实数据库工作的能力",
@@ -526,7 +533,13 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       <RevealSection className="relative max-w-[1180px] mx-auto px-7 pt-[70px] pb-1 max-[760px]:px-[18px]">
         <div className="grid grid-cols-[minmax(260px,0.28fr)_minmax(0,0.72fr)] gap-9 items-end mb-[30px] max-[760px]:block">
           <h2 className="m-0 text-[25px] font-[720] text-landing-ink">{t.supportTitle}</h2>
-          <p className="mt-2 max-w-[760px] text-landing-muted text-sm leading-[1.65] justify-self-end text-right max-[760px]:max-w-none max-[760px]:text-left">{t.supportDesc}</p>
+          <div className="flex items-center justify-end gap-5 justify-self-end max-w-[760px] text-right max-[760px]:block max-[760px]:max-w-none max-[760px]:text-left">
+            <p className="m-0 text-landing-muted text-sm leading-[1.65]">{t.supportDesc}</p>
+            <Link href={`/${l}/databases`} className="landing-inline-link inline-flex shrink-0 items-center gap-[7px] text-sm font-[650] max-[760px]:mt-3">
+              {t.supportLink}
+              <ArrowRight size={15} />
+            </Link>
+          </div>
         </div>
         <div className="grid grid-cols-9 gap-3 max-[1240px]:grid-cols-7 max-[960px]:grid-cols-5 max-[640px]:grid-cols-3 max-[440px]:grid-cols-2 max-[760px]:gap-2.5">
           {databaseSupport.map((db) => {
@@ -543,10 +556,8 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
               <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px]">
                 {isCta ? (
                   <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
-                ) : db.icon ? (
-                  <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
                 ) : (
-                  <span className="grid place-items-center min-w-[46px] h-8 rounded-lg px-2 text-xs font-[780] text-white" style={{ backgroundColor: db.tone }}>{db.shortLabel ?? db.name.slice(0, 2).toUpperCase()}</span>
+                  <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
                 )}
               </div>
               <strong className={`text-sm font-[650] leading-[1.2] text-center ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
@@ -588,9 +599,6 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
         <ContributorsWallContent contributors={contributors} title={t.contributorsTitle} desc={t.contributorsDesc} lang={l} />
       </RevealSection>
 
-      {/* Updates */}
-      <LandingLatestUpdates lang={l} fallbackVersion={appVersion} initialRelease={initialChangelog.releases[0]} initialLatestRelease={initialLatestRelease} />
-
       {/* Sponsor */}
       <RevealSection className="max-w-[1180px] mx-auto px-7 mt-10 max-[760px]:px-[18px]">
         <div className="flex items-center justify-between gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 max-[760px]:block">
@@ -606,6 +614,9 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           </Link>
         </div>
       </RevealSection>
+
+      {/* Updates */}
+      <LandingLatestUpdates lang={l} fallbackVersion={appVersion} initialRelease={initialChangelog.releases[0]} initialLatestRelease={initialLatestRelease} />
 
       {/* Final CTA */}
       <RevealSection className="flex items-center justify-between gap-6 max-w-[1180px] mx-auto px-7 border border-landing-line rounded-[10px] bg-landing-panel mt-[72px] mb-14 py-[30px] max-[760px]:block max-[760px]:px-[18px]">

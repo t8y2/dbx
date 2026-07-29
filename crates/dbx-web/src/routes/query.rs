@@ -250,6 +250,12 @@ pub struct PrepareDataGridSaveRequest {
     pub options: dbx_core::data_grid_sql::DataGridSaveStatementOptions,
 }
 
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractDataGridSelectionRequest {
+    pub request: dbx_core::data_grid_extractors::DataGridExtractRequest,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildDataGridCopyUpdateStatementsRequest {
@@ -508,6 +514,23 @@ pub async fn execute_in_transaction(
     Ok(Json(result))
 }
 
+pub async fn execute_script_with_2pc(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ExecuteBatchRequest>,
+) -> Result<Json<dbx_core::query::SchemaDiffDeployResult>, AppError> {
+    tracing::debug!(connection_id = %req.connection_id, "execute_script_with_2pc");
+    // Single-connection real transaction (not per-statement auto-commit 2PC).
+    let result = dbx_core::query::execute_schema_diff_deploy(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        &req.statements,
+        req.schema.as_deref(),
+    )
+    .await;
+    Ok(Json(result))
+}
+
 pub async fn analyze_sql_references(
     Json(req): Json<AnalyzeSqlReferencesRequest>,
 ) -> Result<Json<dbx_core::sql_analysis::SqlReferenceAnalysis>, AppError> {
@@ -757,6 +780,38 @@ pub async fn prepare_data_grid_save(
     Json(dbx_core::data_grid_sql::prepare_data_grid_save(req.options))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/query/extract-data-grid-selection",
+    request_body = ExtractDataGridSelectionRequest,
+    responses(
+        (status = 200, description = "Selection extracted successfully", body = dbx_core::data_grid_extractors::DataGridExtractResult),
+        (status = 400, description = "Invalid selection or extractor configuration", body = dbx_core::data_grid_extractors::DataGridExtractError),
+        (status = 413, description = "Request body exceeds the extractor upload limit"),
+        (status = 422, description = "Request body does not match the extractor contract"),
+        (status = 500, description = "Extractor worker failed", body = dbx_core::data_grid_extractors::DataGridExtractError)
+    ),
+    tag = "data-grid"
+)]
+pub async fn extract_data_grid_selection(
+    Json(req): Json<ExtractDataGridSelectionRequest>,
+) -> Result<
+    Json<dbx_core::data_grid_extractors::DataGridExtractResult>,
+    (axum::http::StatusCode, Json<dbx_core::data_grid_extractors::DataGridExtractError>),
+> {
+    tokio::task::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(req.request))
+        .await
+        .map_err(|error| {
+            let error = dbx_core::data_grid_extractors::DataGridExtractError::new(
+                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+                format!("Data grid extractor worker failed: {error}"),
+            );
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(error))
+        })?
+        .map(Json)
+        .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, Json(error)))
+}
+
 pub async fn build_data_grid_copy_update_statements(
     Json(req): Json<BuildDataGridCopyUpdateStatementsRequest>,
 ) -> Json<Vec<String>> {
@@ -844,4 +899,87 @@ pub async fn build_database_sql_export(
         }
     }
     dbx_core::database_export::build_database_sql_export(options).map(Json).map_err(AppError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::WebState;
+    use axum::extract::State as AxumState;
+    use dbx_core::connection::AppState;
+    use dbx_core::storage::Storage;
+
+    async fn test_web_state() -> (Arc<WebState>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dbx-web-query-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+        let state = Arc::new(WebState::for_tests(app, dir.clone()));
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_returns_structured_result() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "conn-1".to_string(),
+            database: "testdb".to_string(),
+            statements: vec!["SELECT 1".to_string()],
+            schema: None,
+            timeout_secs: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req))
+            .await
+            .expect("execute_script_with_2pc should return Ok(Json(...))");
+        let log = result.0;
+        assert!(!log.transaction_id.is_empty());
+        assert!(!log.participants.is_empty());
+        assert_eq!(log.status, "rolled_back");
+        assert!(log.error.as_ref().is_some_and(|e| !e.is_empty()));
+        assert_eq!(log.statement_count, 1);
+        assert_eq!(log.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_empty_statements_succeeds() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "conn-empty".to_string(),
+            database: "testdb".to_string(),
+            statements: vec![],
+            schema: None,
+            timeout_secs: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req)).await.expect("empty deploy should succeed");
+        let log = result.0;
+        assert_eq!(log.status, "committed");
+        assert_eq!(log.statement_count, 0);
+        assert_eq!(log.executed_count, 0);
+        assert!(log.error.is_none());
+        assert_eq!(log.participants.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_propagates_structured_failure_fields() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "missing-conn".to_string(),
+            database: "testdb".to_string(),
+            statements: vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
+            schema: None,
+            timeout_secs: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req))
+            .await
+            .expect("deploy endpoint should return structured JSON even on failure");
+        let log = result.0;
+        assert!(log.status == "rolled_back" || log.status == "mixed", "status={}", log.status);
+        assert_eq!(log.statement_count, 2);
+        assert!(log.error.as_ref().is_some_and(|e| !e.is_empty()));
+        // Missing connection cannot have applied statements.
+        assert_eq!(log.executed_count, 0);
+    }
 }

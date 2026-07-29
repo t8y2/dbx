@@ -1,4 +1,4 @@
-export const DATA_GRID_COMPACT_TOPBAR_WIDTH = 900;
+export const DATA_GRID_COMPACT_TOPBAR_WIDTH = 1050;
 
 export type DataGridReloadIntent = "refresh";
 
@@ -29,6 +29,17 @@ export interface DataGridToolbarExportCapability {
   visible?: boolean;
   disabled?: boolean;
   items: readonly DataGridToolbarMenuItem[];
+  onSelect: (value: string) => void | Promise<void>;
+}
+
+export interface DataGridToolbarCopyCapability {
+  label: string;
+  tooltip?: string;
+  visible?: boolean;
+  disabled?: boolean;
+  currentValue: string;
+  items: readonly DataGridToolbarMenuItem[];
+  onCopy: () => void | Promise<void>;
   onSelect: (value: string) => void | Promise<void>;
 }
 
@@ -81,6 +92,20 @@ export async function selectDataGridToolbarAutoRefreshInterval(capability: DataG
 
 export async function selectDataGridToolbarExportItem(capability: DataGridToolbarExportCapability | undefined, value: string): Promise<boolean> {
   if (!capability || !isDataGridToolbarCapabilityVisible(capability) || capability.disabled) return false;
+  const item = capability.items.find((candidate) => candidate.value === value);
+  if (!item || item.disabled) return false;
+  await capability.onSelect(value);
+  return true;
+}
+
+export async function triggerDataGridToolbarCopy(capability: DataGridToolbarCopyCapability | undefined): Promise<boolean> {
+  if (!capability || !isDataGridToolbarCapabilityVisible(capability) || capability.disabled) return false;
+  await capability.onCopy();
+  return true;
+}
+
+export async function selectDataGridToolbarCopyItem(capability: DataGridToolbarCopyCapability | undefined, value: string): Promise<boolean> {
+  if (!capability || !isDataGridToolbarCapabilityVisible(capability)) return false;
   const item = capability.items.find((candidate) => candidate.value === value);
   if (!item || item.disabled) return false;
   await capability.onSelect(value);

@@ -129,7 +129,7 @@ export function createDataGridCellContextMenuItems(options: {
   actions: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", () => void>;
   downloadItem?: DataGridContextMenuItem | null;
   copySubmenu: DataGridContextMenuItem;
-  selectionSubmenu: DataGridContextMenuItem;
+  clearSelectionItem?: DataGridContextMenuItem;
   generateSubmenu?: DataGridContextMenuItem;
 }): DataGridContextMenuItem[] {
   const items: DataGridContextMenuItem[] = [];
@@ -148,7 +148,7 @@ export function createDataGridCellContextMenuItems(options: {
     if (options.generateSubmenu) items.push(options.generateSubmenu);
   }
   if (options.hasCell) items.push({ label: options.labels.transpose, action: options.actions.transpose, icon: options.icons.transpose });
-  if (options.hasSelection) items.push(options.selectionSubmenu);
+  if (options.hasSelection && options.clearSelectionItem) items.push(options.clearSelectionItem);
   return items;
 }
 

@@ -8,6 +8,7 @@ import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcAgentProfile;
+import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
@@ -19,6 +20,7 @@ import com.dbx.agent.TriggerInfo;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -75,6 +77,19 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         // session variable, so synchronize both limits before every execution.
         try (var stmt = connection.createStatement()) {
             stmt.execute(queryTimeoutSql(timeoutSecs));
+        }
+    }
+
+    @Override
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
+        switch (sqlType) {
+            case Types.BINARY:
+            case Types.VARBINARY:
+            case Types.LONGVARBINARY:
+            case Types.BLOB:
+                return unchecked(() -> JdbcExecutor.stringResultValue(rs, index, sqlType));
+            default:
+                return super.resultValue(rs, index, sqlType);
         }
     }
 

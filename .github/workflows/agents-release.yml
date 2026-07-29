@@ -214,7 +214,7 @@ jobs:
         include:
           - jre-key: "21"
             java-version: "21"
-            modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.security.auth,jdk.security.jgss,jdk.charsets,jdk.unsupported,java.scripting,java.compiler"
+            modules: "java.base,java.sql,java.sql.rowset,java.naming,java.management,java.desktop,java.security.jgss,java.security.sasl,jdk.security.auth,jdk.security.jgss,jdk.charsets,jdk.unsupported,java.scripting,java.compiler,jdk.crypto.ec"
     steps:
       - uses: actions/setup-java@v4
         with:
@@ -236,6 +236,7 @@ jobs:
             ["macos-aarch64"]="mac/aarch64"
             ["macos-x64"]="mac/x64"
             ["linux-aarch64"]="linux/aarch64"
+            ["windows-aarch64"]="windows/aarch64"
             ["windows-x64"]="windows/x64"
           )
           for platform in "${!PLATFORMS[@]}"; do
@@ -453,7 +454,7 @@ jobs:
           {
             "jres": {
               "21": {
-                "version": "21.0.12+kerberos.1",
+                "version": "21.0.12+kerberos.ec.2",
                 "platforms": {
           ${JRE21_PLATFORMS}
                 }

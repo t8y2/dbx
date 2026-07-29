@@ -1,0 +1,97 @@
+dialect:
+  name: "GBase"
+  display_name: "GBase 8a"
+  versions:
+    - version: "8a"
+      status: "RECOMMENDED"
+
+types:
+  - name: "TINYINT"
+    category: "INTEGER"
+  - name: "SMALLINT"
+    category: "INTEGER"
+  - name: "INT"
+    category: "INTEGER"
+  - name: "BIGINT"
+    category: "INTEGER"
+  - name: "FLOAT"
+    category: "FLOAT"
+  - name: "DOUBLE"
+    category: "FLOAT"
+  - name: "DECIMAL"
+    category: "DECIMAL"
+    has_precision: true
+  - name: "VARCHAR"
+    category: "STRING"
+    has_length: true
+  - name: "CHAR"
+    category: "STRING"
+    has_length: true
+  - name: "TEXT"
+    category: "STRING"
+  - name: "BLOB"
+    category: "BINARY"
+  - name: "DATE"
+    category: "DATE"
+  - name: "DATETIME"
+    category: "DATETIME"
+  - name: "TIMESTAMP"
+    category: "DATETIME"
+
+ddl_capabilities:
+  add_column: true
+  drop_column: true
+  rename_column: true
+  alter_column_type: true
+  create_index: true
+  drop_index: true
+  create_table: true
+  drop_table: true
+  truncate_table: true
+  if_not_exists: true
+  auto_increment: true
+  templates:
+    add_column: "ALTER TABLE {table} ADD COLUMN {column} {type}"
+    drop_column: "ALTER TABLE {table} DROP COLUMN {column}"
+    rename_column: "ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+    modify_column: "ALTER TABLE {table} MODIFY COLUMN {column} {type}"
+    create_table: "CREATE TABLE IF NOT EXISTS {table} ({columns})"
+    drop_table: "DROP TABLE IF EXISTS {table}"
+
+rollback_templates:
+  add_column: "ALTER TABLE {table} DROP COLUMN {column}"
+  drop_column: "ALTER TABLE {table} ADD COLUMN {column} {original_type}"
+  rename_column: "ALTER TABLE {table} RENAME COLUMN {new} TO {old}"
+
+online_safety:
+  add_column:
+    level: "BLOCKING_SHORT"
+    cost: "LOW"
+
+destruction_level:
+  drop_table: "FATAL"
+  truncate: "DANGEROUS"
+
+structural_capabilities:
+  max_columns_per_table: 4096
+  max_indexes_per_table: 64
+  max_query_size_bytes: 16777216
+  supports_full_text_index: true
+  supports_partitioning: true
+
+identifier_rules:
+  quote_char: "`"
+  case_sensitive: false
+  max_length: 64
+
+metadata_queries:
+  list_tables:
+    sql: "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}' AND TABLE_TYPE = 'BASE TABLE'"
+    performance_profile: "LIGHT"
+  list_columns:
+    sql: "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION"
+    performance_profile: "MEDIUM"
+  dependencies:
+    sql: "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema}'"
+    depth_support: 1
+    performance_profile: "MEDIUM"

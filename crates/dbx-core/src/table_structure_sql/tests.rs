@@ -2757,6 +2757,61 @@ fn mysql_create_table_with_auto_increment() {
 }
 
 #[test]
+fn mysql_create_table_keeps_column_charset_collation_and_comment() {
+    let mut name = column("name");
+    name.data_type = "varchar(255)".to_string();
+    name.character_set = "gbk".to_string();
+    name.collation = "gbk_bin".to_string();
+    name.comment = "测试".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("User accounts".to_string()),
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE `users` (\n  `name` varchar(255) CHARACTER SET `gbk` COLLATE `gbk_bin` COMMENT '测试'\n) COMMENT = 'User accounts';"
+        ]
+    );
+}
+
+#[test]
+fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
+    for database_type in [DatabaseType::StarRocks, DatabaseType::Databend, DatabaseType::Gbase] {
+        let mut name = column("name");
+        name.data_type = "varchar(255)".to_string();
+        name.character_set = "utf8mb4".to_string();
+        name.collation = "utf8mb4_bin".to_string();
+
+        let result = build_create_table_sql(TableStructureSqlOptions {
+            database_type: Some(database_type),
+            schema: None,
+            table_name: "users".to_string(),
+            columns: vec![name],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            table_comment: None,
+            original_table_comment: None,
+        });
+
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert!(!result.statements[0].contains("CHARACTER SET"));
+        assert!(!result.statements[0].contains("COLLATE"));
+    }
+}
+
+#[test]
 fn mysql_create_table_with_on_update_current_timestamp() {
     let mut col = column("updated_at");
     col.data_type = "timestamp".to_string();
@@ -3269,7 +3324,7 @@ fn builds_mysql_trigger_changes() {
 }
 
 #[test]
-fn builds_oracle_multi_event_row_trigger_change() {
+fn rejects_editing_existing_oracle_trigger_without_complete_source() {
     let mut existing = trigger(
         "DBX_TRIGGER_4320_AUDIT",
         "AFTER EACH ROW",
@@ -3295,12 +3350,10 @@ fn builds_oracle_multi_event_row_trigger_change() {
         original_table_comment: None,
     });
 
-    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements.is_empty());
     assert_eq!(
-        result.statements,
-        vec![
-            "CREATE OR REPLACE TRIGGER \"APP\".\"DBX_TRIGGER_4320_AUDIT\" AFTER INSERT OR UPDATE OR DELETE ON \"APP\".\"DBX_TRIGGER_4320\"\nFOR EACH ROW\nDECLARE\n  v_event VARCHAR2(10);\nBEGIN\n  v_event := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\nEND;",
-        ]
+        result.warnings,
+        vec!["Editing existing Oracle trigger \"DBX_TRIGGER_4320_AUDIT\" requires its complete source definition."]
     );
 }
 
@@ -3328,14 +3381,15 @@ fn builds_oracle_statement_trigger_without_row_clause() {
 }
 
 #[test]
-fn renaming_oracle_trigger_drops_old_name_before_create() {
-    let mut existing = trigger("ORDERS_AUDIT_V2", "AFTER EACH ROW", "INSERT", "BEGIN\n  NULL;\nEND;");
+fn drops_existing_oracle_trigger_without_reconstructing_it() {
+    let mut existing = trigger("ORDERS_AUDIT", "AFTER EACH ROW", "INSERT", "BEGIN\n  NULL;\nEND;");
     existing.original = Some(TriggerInfo {
         name: "ORDERS_AUDIT".to_string(),
         event: "INSERT".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
     });
+    existing.marked_for_drop = true;
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::Oracle),
@@ -3350,13 +3404,7 @@ fn renaming_oracle_trigger_drops_old_name_before_create() {
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
-    assert_eq!(
-        result.statements,
-        vec![
-            "DROP TRIGGER \"APP\".\"ORDERS_AUDIT\";",
-            "CREATE OR REPLACE TRIGGER \"APP\".\"ORDERS_AUDIT_V2\" AFTER INSERT ON \"APP\".\"ORDERS\"\nFOR EACH ROW\nBEGIN\n  NULL;\nEND;",
-        ]
-    );
+    assert_eq!(result.statements, vec!["DROP TRIGGER \"APP\".\"ORDERS_AUDIT\";"]);
 }
 
 #[test]

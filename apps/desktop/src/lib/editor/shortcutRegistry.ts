@@ -2,6 +2,7 @@ import { isMacShortcutPlatform, parseShortcutStrokes, shortcutDisplayParts } fro
 
 export type ShortcutActionId =
   | "executeSql"
+  | "executeSqlInNewResultTab"
   | "formatSql"
   | "toggleLineComment"
   | "saveSql"
@@ -20,6 +21,7 @@ export type ShortcutActionId =
   | "uppercaseSelection"
   | "lowercaseSelection"
   | "exPasteSqlInCondition"
+  | "toggleFold"
   | "copyCurrentRow"
   | "deleteCurrentRow"
   | "newQuery"
@@ -86,6 +88,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutExecuteSql",
     scope: "editor",
     defaultShortcut: "Mod+Enter",
+  },
+  {
+    id: "executeSqlInNewResultTab",
+    labelKey: "settings.shortcutExecuteSqlInNewResultTab",
+    scope: "editor",
+    defaultShortcut: "Mod+\\",
   },
   {
     id: "formatSql",
@@ -194,6 +202,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutExPasteSqlInCondition",
     scope: "editor",
     defaultShortcut: "",
+  },
+  {
+    id: "toggleFold",
+    labelKey: "settings.shortcutToggleFold",
+    scope: "editor",
+    defaultShortcut: "Mod+.",
   },
   {
     id: "copyCurrentRow",

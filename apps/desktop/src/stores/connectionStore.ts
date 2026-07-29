@@ -1908,7 +1908,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await ensureConnected(parent.connectionId);
     const config = getConfig(parent.connectionId);
     const querySchema = connectionObjectTreeQuerySchema(config, parent.database, parent.schema);
-    const objectTypes = parent.type === "group-tables" ? objectTypesForGroupNode(parent.type) : undefined;
+    const objectTypes = parent.type === "group-tables" ? (objectTypesForGroupNode(parent.type) ?? undefined) : undefined;
     const pageSize = sidebarObjectGroupPageSize();
     const entries: TableInfo[] = [];
     for (let offset = 0; ; offset += pageSize) {

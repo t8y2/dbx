@@ -7,9 +7,9 @@ exclude = ["vendor/ctor"]
 # Tauri 2.11 uses ctor 0.8, which excludes Rust's win7 vendor. This vendors
 # upstream rust-ctor#443 until tauri-utils moves to ctor 1.x.
 ctor = { path = "vendor/ctor" }
-tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }
-postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }
-postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", branch = "master" }
+tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
+postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
+postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "115f9fef10f0fc3669b5337955e4eb461fc349a6" }
 # Temporary compatibility patch for MySQL accounts using the deprecated
 # sha256_password auth plugin. Remove after upstream support lands.
 mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec" }

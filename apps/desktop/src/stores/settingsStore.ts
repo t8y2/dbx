@@ -180,6 +180,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: false,
   },
+  "anthropic-compatible": {
+    label: "Anthropic Compatible",
+    iconSlug: "anthropic",
+    provider: "anthropic-compatible",
+    endpoint: "",
+    model: "",
+    apiStyle: "anthropic-messages",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "openai-compatible": {
     label: "OpenAI Compatible",
     iconSlug: "openai",
@@ -393,7 +403,14 @@ export interface CustomTheme {
   ddlColors: CustomThemeDdlColors;
 }
 
-export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [{ id: "default", name: "Custom", colors: { ...DEFAULT_CUSTOM_THEME_COLORS }, ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS } }];
+export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [
+  {
+    id: "default",
+    name: "Custom",
+    colors: { ...DEFAULT_CUSTOM_THEME_COLORS },
+    ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
+  },
+];
 
 export type SidebarObjectInfoMode = "comment-inline" | "comment-aligned" | "comment-right" | "size" | "hidden";
 
@@ -458,6 +475,7 @@ export interface EditorSettings {
   sidebarActivation: SidebarActivation;
   sidebarConnectionSortMode: ConnectionListSortMode;
   sidebarObjectDisplay: "grouped" | "simple";
+  routineSourceOpenMode: "query-tab" | "dialog";
   sidebarTableSearchEnabled: boolean;
   autoSelectActiveSidebarNode: boolean;
   openTabsRestoreMode: OpenTabsRestoreMode;
@@ -538,7 +556,11 @@ export function enforceRightSidebarPanelExclusivity(current: RightSidebarPanelSt
   return transitionRightSidebarPanels(current, panelToKeep, true, true);
 }
 
-export const EDITOR_THEMES: { value: EditorTheme; label: string; dark: boolean }[] = [
+export const EDITOR_THEMES: {
+  value: EditorTheme;
+  label: string;
+  dark: boolean;
+}[] = [
   { value: "app", label: "Follow app theme", dark: false },
   { value: "one-dark", label: "One Dark", dark: true },
   { value: "vscode-dark", label: "VS Dark+", dark: true },
@@ -626,6 +648,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarActivation: "single",
   sidebarConnectionSortMode: "manual",
   sidebarObjectDisplay: "grouped",
+  routineSourceOpenMode: "query-tab",
   sidebarTableSearchEnabled: false,
   autoSelectActiveSidebarNode: false,
   openTabsRestoreMode: "all",
@@ -790,7 +813,13 @@ function normalizeSqlSnippets(value: unknown, existing?: SqlSnippet[]): SqlSnipp
     if (seenPrefixes.has(item.prefix)) continue;
     seenPrefixes.add(item.prefix);
     // Older settings do not have this field; only an explicit false disables a snippet.
-    valid.push({ id: item.id, label: item.label, prefix: item.prefix, body: item.body, enabled: item.enabled !== false });
+    valid.push({
+      id: item.id,
+      label: item.label,
+      prefix: item.prefix,
+      body: item.body,
+      enabled: item.enabled !== false,
+    });
   }
   if (valid.length === 0) return existing ?? DEFAULT_SQL_SNIPPETS;
   return valid;
@@ -845,7 +874,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
           return {
             ...renamed,
             colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...renamed.colors },
-            ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS, ...(renamed as any).ddlColors },
+            ddlColors: {
+              ...DEFAULT_CUSTOM_THEME_DDL_COLORS,
+              ...(renamed as any).ddlColors,
+            },
           };
         });
       }
@@ -854,7 +886,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
             {
               id: "migrated",
               name: "Migrated",
-              colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...settings.customThemeColors },
+              colors: {
+                ...DEFAULT_CUSTOM_THEME_COLORS,
+                ...settings.customThemeColors,
+              },
               ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
             },
           ]
@@ -913,19 +948,46 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
+    routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
-    openTabsRestoreMode: normalizeOpenTabsRestoreMode((settings as Partial<EditorSettings>).openTabsRestoreMode, (settings as Partial<EditorSettings> & { restoreOpenTabsOnLaunch?: boolean }).restoreOpenTabsOnLaunch),
-    disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode((settings as Partial<EditorSettings>).disconnectTabHandlingMode, (settings as Partial<EditorSettings> & { closeQueryTabsOnDisconnect?: boolean }).closeQueryTabsOnDisconnect),
+    openTabsRestoreMode: normalizeOpenTabsRestoreMode(
+      (settings as Partial<EditorSettings>).openTabsRestoreMode,
+      (
+        settings as Partial<EditorSettings> & {
+          restoreOpenTabsOnLaunch?: boolean;
+        }
+      ).restoreOpenTabsOnLaunch,
+    ),
+    disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode(
+      (settings as Partial<EditorSettings>).disconnectTabHandlingMode,
+      (
+        settings as Partial<EditorSettings> & {
+          closeQueryTabsOnDisconnect?: boolean;
+        }
+      ).closeQueryTabsOnDisconnect,
+    ),
     reuseDataTab: settings.reuseDataTab ?? DEFAULT_EDITOR_SETTINGS.reuseDataTab,
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
     sidebarObjectInfoMode: normalizeSidebarObjectInfoMode(
       settings.sidebarObjectInfoMode,
-      (settings as Partial<EditorSettings> & { sidebarTableCommentLayout?: string }).sidebarTableCommentLayout,
-      (settings as Partial<EditorSettings> & { sidebarHideTableComments?: boolean }).sidebarHideTableComments,
-      (settings as Partial<EditorSettings> & { sidebarShowDatabaseSizes?: boolean }).sidebarShowDatabaseSizes,
+      (
+        settings as Partial<EditorSettings> & {
+          sidebarTableCommentLayout?: string;
+        }
+      ).sidebarTableCommentLayout,
+      (
+        settings as Partial<EditorSettings> & {
+          sidebarHideTableComments?: boolean;
+        }
+      ).sidebarHideTableComments,
+      (
+        settings as Partial<EditorSettings> & {
+          sidebarShowDatabaseSizes?: boolean;
+        }
+      ).sidebarShowDatabaseSizes,
     ),
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
@@ -996,7 +1058,9 @@ export const useSettingsStore = defineStore("settings", () => {
   const isAiConfigLoaded = ref(false);
   const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
-  const mcpGlobalPolicy = ref<McpGlobalPolicy>({ ...DEFAULT_MCP_GLOBAL_POLICY });
+  const mcpGlobalPolicy = ref<McpGlobalPolicy>({
+    ...DEFAULT_MCP_GLOBAL_POLICY,
+  });
   const isDesktopSettingsLoaded = ref(false);
   const isMcpGlobalPolicyLoaded = ref(false);
   const isEditorSettingsLoaded = ref(false);
@@ -1119,7 +1183,10 @@ export const useSettingsStore = defineStore("settings", () => {
     const savedActive = savedSelection?.active;
     const savedConfig = savedActive ? aiConfigs.value.find((config) => config.id === savedActive.configId) : undefined;
     if (savedConfig && savedActive?.modelId.trim()) {
-      activeModel.value = { configId: savedConfig.id, modelId: savedActive.modelId.trim() };
+      activeModel.value = {
+        configId: savedConfig.id,
+        modelId: savedActive.modelId.trim(),
+      };
     } else {
       const fallback = aiConfigs.value.find((config) => config.isDefault) || aiConfigs.value[0];
       activeModel.value = fallback?.model.trim() ? { configId: fallback.id, modelId: fallback.model.trim() } : null;
@@ -1175,7 +1242,10 @@ export const useSettingsStore = defineStore("settings", () => {
     await api.saveAiConfigItem(normalized);
     aiConfigs.value.push(normalized);
     if (aiConfigs.value.length === 1 && normalized.model.trim()) {
-      activeModel.value = { configId: normalized.id, modelId: normalized.model };
+      activeModel.value = {
+        configId: normalized.id,
+        modelId: normalized.model,
+      };
       persistAiChatSelection();
     }
   }
@@ -1214,7 +1284,10 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   function updateActiveModel(model: { configId: string; modelId: string }) {
-    activeModel.value = { configId: model.configId, modelId: model.modelId.trim() };
+    activeModel.value = {
+      configId: model.configId,
+      modelId: model.modelId.trim(),
+    };
     persistAiChatSelection();
   }
 
@@ -1354,6 +1427,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
+    if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
@@ -1412,7 +1486,9 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   function deleteCustomColumnFormatter(id: string) {
-    const customColumnFormatters = { ...editorSettings.value.customColumnFormatters };
+    const customColumnFormatters = {
+      ...editorSettings.value.customColumnFormatters,
+    };
     delete customColumnFormatters[id];
     const columnFormatters = Object.fromEntries(
       Object.entries(editorSettings.value.columnFormatters).filter(([, formatter]) => {

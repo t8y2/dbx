@@ -20,3 +20,23 @@ describe("DataTransferDialog layout", () => {
     expect(dialogSource).toContain('class="min-h-0 max-h-[200px] overflow-y-auto rounded-md border"');
   });
 });
+
+describe("DataTransferDialog transfer prefill", () => {
+  it("accepts source, target, schema, and selected-table prefills", () => {
+    expect(dialogSource).toContain("prefillSchema?: string;");
+    expect(dialogSource).toContain("prefillTables?: string[];");
+    expect(dialogSource).toContain("prefillTargetConnectionId?: string;");
+    expect(dialogSource).toContain("prefillTargetDatabase?: string;");
+    expect(dialogSource).toContain("prefillTargetSchema?: string;");
+  });
+
+  it("keeps only copied tables selected after loading the source list", () => {
+    expect(dialogSource).toContain("function applyPendingTableSelection()");
+    expect(dialogSource).toContain("new Set(sourceTables.value.filter((table) => pending.includes(table)))");
+  });
+
+  it("allows a transfer between different schemas in the same database", () => {
+    expect(dialogSource).toContain("const sameSourceAndTarget = sourceConnectionId.value === targetConnectionId.value");
+    expect(dialogSource).toContain("effectiveSourceSchema === effectiveTargetSchema");
+  });
+});

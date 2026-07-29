@@ -29,6 +29,7 @@ const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
+const MAX_RETRIES_KEY: &str = "max_retries";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const USER_DATA_TABLES: &[&str] = &[
@@ -1387,18 +1388,23 @@ impl Storage {
     ) -> Result<(), String> {
         let mut settings = settings.clone();
         self.with_conn(move |conn| {
-            // The dedicated policy writer is the only owner of this key. Keep
-            // its latest value across overlapping legacy settings saves.
+            // Dedicated writers are the only owners of these keys. Keep their
+            // latest values across overlapping legacy settings saves.
             let current: Option<String> = conn
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
-            settings.remove(MCP_GLOBAL_POLICY_KEY);
+            let dedicated_keys = [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY];
+            for key in dedicated_keys {
+                settings.remove(key);
+            }
             if let Some(current) = current {
                 let current = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&current)
                     .map_err(|e| format!("invalid app settings JSON: {e}"))?;
-                if let Some(policy) = current.get(MCP_GLOBAL_POLICY_KEY) {
-                    settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), policy.clone());
+                for key in dedicated_keys {
+                    if let Some(value) = current.get(key) {
+                        settings.insert(key.to_string(), value.clone());
+                    }
                 }
             }
             let json = serde_json::Value::Object(settings).to_string();
@@ -1808,6 +1814,37 @@ impl Storage {
             .and_then(serde_json::Value::as_u64)
             .map(|value| crate::agent_loop::clamp_max_agent_turns(value.min(u32::MAX as u64) as u32))
             .unwrap_or(crate::agent_loop::DEFAULT_MAX_AGENT_TURNS))
+    }
+
+    pub async fn save_max_retries(&self, max_retries: u32) -> Result<(), String> {
+        let max_retries = crate::ai::clamp_max_retries(max_retries);
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut settings = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            settings
+                .insert(MAX_RETRIES_KEY.to_string(), serde_json::Value::Number(serde_json::Number::from(max_retries)));
+            let json = serde_json::Value::Object(settings).to_string();
+            conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_max_retries(&self) -> Result<u32, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings
+            .get(MAX_RETRIES_KEY)
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| crate::ai::clamp_max_retries(value.min(u32::MAX as u64) as u32))
+            .unwrap_or(crate::ai::DEFAULT_MAX_RETRIES))
     }
 }
 
@@ -3941,6 +3978,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -4004,6 +4042,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -4715,6 +4754,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn max_retries_defaults_and_persists_clamped() {
+        let path = temp_db_path("max-retries");
+        let storage = Storage::open(&path).await.unwrap();
+
+        assert_eq!(storage.load_max_retries().await.unwrap(), crate::ai::DEFAULT_MAX_RETRIES);
+
+        storage.save_max_retries(5).await.unwrap();
+        assert_eq!(storage.load_max_retries().await.unwrap(), 5);
+
+        storage.save_max_retries(0).await.unwrap();
+        assert_eq!(storage.load_max_retries().await.unwrap(), 0);
+
+        // Values above the cap are clamped so raw DB edits cannot bypass the limit.
+        storage.save_max_retries(u32::MAX).await.unwrap();
+        assert_eq!(storage.load_max_retries().await.unwrap(), crate::ai::MAX_MAX_RETRIES);
+    }
+
+    #[tokio::test]
+    async fn max_retries_survives_stale_app_settings_save() {
+        let path = temp_db_path("max-retries-stale-save");
+        let storage = Storage::open(&path).await.unwrap();
+        let stale_settings = storage.load_app_settings_json().await.unwrap();
+
+        storage.save_max_retries(7).await.unwrap();
+        storage.save_app_settings_json(&stale_settings).await.unwrap();
+
+        assert_eq!(storage.load_max_retries().await.unwrap(), 7);
+    }
+
+    #[tokio::test]
     async fn password_hash_preserves_existing_desktop_settings() {
         let path = temp_db_path("password-preserve-desktop-settings");
         let storage = Storage::open(&path).await.unwrap();
@@ -5040,6 +5109,7 @@ mod tests {
                 reasoning_level: AiReasoningLevel::Default,
                 runtime_effort: None,
                 context_window: None,
+                max_retries: None,
                 codex_cli_path: None,
                 codex_cli_env: std::collections::HashMap::new(),
                 claude_code_cli_path: None,
@@ -5079,6 +5149,32 @@ mod tests {
             loaded[0].config.models[0].supported_effort_levels,
             vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh]
         );
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_ai_config_roundtrip() {
+        let db = temp_db_path("anthropic-compatible-ai-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut cfg = make_ai_config("anthropic-compatible", true);
+        cfg.config.provider = AiProvider::AnthropicCompatible;
+        cfg.config.api_key = String::new();
+        cfg.config.auth_method = AiAuthMethod::Bearer;
+        cfg.config.endpoint = "https://gateway.example.com/anthropic/v1/messages".to_string();
+        cfg.config.model = "vendor/future-model".to_string();
+        cfg.config.api_style = AiApiStyle::AnthropicMessages;
+        storage.save_ai_config_item(&cfg).await.unwrap();
+
+        let loaded = storage.load_ai_configs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(loaded[0].config.provider, AiProvider::AnthropicCompatible));
+        assert_eq!(loaded[0].config.auth_method, AiAuthMethod::Bearer);
+        assert_eq!(loaded[0].config.api_style, AiApiStyle::AnthropicMessages);
+        assert_eq!(loaded[0].config.endpoint, "https://gateway.example.com/anthropic/v1/messages");
+        assert_eq!(loaded[0].config.model, "vendor/future-model");
+        assert!(loaded[0].config.api_key.is_empty());
 
         std::fs::remove_file(&db).ok();
     }

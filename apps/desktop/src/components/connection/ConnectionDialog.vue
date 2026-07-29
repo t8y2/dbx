@@ -3254,6 +3254,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.redis_cluster_nodes = undefined;
     config.redis_key_separator = undefined;
     config.redis_scan_page_size = undefined;
+    config.redis_database_aliases = undefined;
   } else if (config.redis_connection_mode === "sentinel") {
     config.redis_sentinel_master = config.redis_sentinel_master?.trim() || "";
     config.redis_sentinel_nodes = normalizeRedisSentinelNodes(config.redis_sentinel_nodes || "");

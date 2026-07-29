@@ -719,6 +719,10 @@ async fn main() {
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
         )
+        .route(
+            "/app-settings/max-retries",
+            get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
+        )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync
         .route("/cloud-sync/webdav/test", post(routes::cloud_sync::webdav_sync_test))

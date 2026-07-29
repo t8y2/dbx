@@ -190,7 +190,7 @@
           cargoDeps = pkgs.rustPlatform.importCargoLock {
             lockFile = ./Cargo.lock;
             outputHashes = {
-                "tokio-postgres-0.7.18" = "sha256-jsPQ1+kfUaUAn7r4ZCYlu1zc3sNOMOyh2SFroRNp+PE=";
+                "tokio-postgres-0.7.18" = "sha256-HRbYVSD7iIwG3m1tOGoIZy0xAZwALWIpTtakVSYPIYI=";
                 "mysql-common-derive-0.32.2" = "sha256-8lWgsdTuLTgOmzP7tXmA9LnomOE0wjxXsCBw9NEMt2o=";
                 "mysql_async-0.37.0" = "sha256-tMFvmypIBh1GHg3cLFWmLf6N1wrwKPlzx2G/MHwtlFM=";
             };

@@ -97,6 +97,9 @@ export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
 export const dropAllMongoIndexesLoading = ref(false);
 export const showFlushRedisDbConfirm = ref(false);
+export const showRedisDatabaseAliasDialog = ref(false);
+export const redisDatabaseAliasInput = ref("");
+export const redisDatabaseAliasSaving = ref(false);
 export const showCreateSchemaDialog = ref(false);
 export const createSchemaName = ref("");
 export const showDropSchemaConfirm = ref(false);
@@ -139,6 +142,7 @@ const openFlags = [
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showFlushRedisDbConfirm,
+  showRedisDatabaseAliasDialog,
   showCreateSchemaDialog,
   showDropSchemaConfirm,
   showEditDatabasePropertiesDialog,
@@ -156,6 +160,8 @@ export function resetSidebarTreeDialogState() {
   createDatabasePreviewSql.value = "";
   createDatabaseAuthorizationResults.value = [];
   createDatabaseAuthorizationApplying.value = false;
+  redisDatabaseAliasInput.value = "";
+  redisDatabaseAliasSaving.value = false;
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;

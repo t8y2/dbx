@@ -82,6 +82,16 @@ fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
     oceanbase_mysql_query_timeout_sql(config, config.query_timeout_secs).into_iter().collect()
 }
 
+fn mysql_pool_setup_queries(config: &ConnectionConfig, url: &str) -> Vec<String> {
+    let mut queries = oceanbase_mysql_setup_queries(config);
+    if let Some(dialect) = db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()) {
+        if let Some(query) = db::mysql::catalog_setup_query_for_url(dialect, url) {
+            queries.push(query);
+        }
+    }
+    queries
+}
+
 pub enum PoolKind {
     Mysql(db::mysql::MySqlPool, MysqlMode),
     Postgres(deadpool_postgres::Pool),
@@ -363,7 +373,7 @@ pub async fn connect_mysql_metadata_pool(
 ) -> Result<(db::mysql::MySqlPool, MysqlMode), String> {
     let url = connection_url_for_endpoint(db_config, host, port);
     let idle_timeout_secs = Some(db_config.idle_timeout_secs);
-    let extra_setup_queries = oceanbase_mysql_setup_queries(db_config);
+    let extra_setup_queries = mysql_pool_setup_queries(db_config, &url);
     if db_config.needs_bare_mysql() {
         return match connect_bare_mysql_pool_with_setup(
             db_config,
@@ -475,7 +485,7 @@ pub async fn connect_bare_metadata_pool(
     max_connections: usize,
 ) -> Result<db::mysql::MySqlPool, String> {
     let url = connection_url_for_endpoint(db_config, host, port);
-    let extra_setup_queries = oceanbase_mysql_setup_queries(db_config);
+    let extra_setup_queries = mysql_pool_setup_queries(db_config, &url);
     if db_config.effective_database().is_none() {
         return connect_bare_mysql_pool_with_setup(
             db_config,
@@ -1220,7 +1230,7 @@ impl AppState {
                         &url,
                         connect_timeout,
                         mysql_pool_max_connections,
-                        &oceanbase_mysql_setup_queries(&db_config),
+                        &mysql_pool_setup_queries(&db_config, &url),
                     )
                     .await?
                 };
@@ -3872,12 +3882,12 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 mod tests {
     use super::{
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
-        metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_query_timeout_sql,
-        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
-        redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        PRESTOSQL_JDBC_DRIVER_CLASS,
+        metadata_connection_config, mysql_metadata_fallback_url, mysql_pool_setup_queries,
+        oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
+        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
+        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
+        task_client_session_id, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3937,6 +3947,7 @@ mod tests {
             redis_cluster_nodes: String::new(),
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -4179,6 +4190,28 @@ mod tests {
         config.query_timeout_secs = 30;
 
         assert!(oceanbase_mysql_setup_queries(&config).is_empty());
+    }
+
+    #[test]
+    fn doris_pool_setup_uses_switch_for_configured_catalog() {
+        let mut config = mysql_config(Some("bi"));
+        config.db_type = DatabaseType::Doris;
+
+        assert_eq!(
+            mysql_pool_setup_queries(&config, "mysql://root:secret@localhost:9030/bi?catalog=paimon%5Fcatalog"),
+            vec!["SWITCH `paimon_catalog`"]
+        );
+    }
+
+    #[test]
+    fn starrocks_pool_setup_uses_set_catalog_for_configured_catalog() {
+        let mut config = mysql_config(Some("bi"));
+        config.db_type = DatabaseType::StarRocks;
+
+        assert_eq!(
+            mysql_pool_setup_queries(&config, "mysql://root:secret@localhost:9030/bi?catalog=paimon%5Fcatalog"),
+            vec!["SET CATALOG `paimon_catalog`"]
+        );
     }
 
     #[test]

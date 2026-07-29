@@ -57,6 +57,7 @@ fn live_postgres_config(
         redis_cluster_nodes: String::new(),
         redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
         redis_scan_page_size: None,
+        redis_database_aliases: Default::default(),
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),

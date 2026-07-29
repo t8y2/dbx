@@ -102,6 +102,7 @@ import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/metadata/completionTreeIndex";
 import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
+import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
@@ -286,11 +287,6 @@ type BeforeConnectHandler = (config: ConnectionConfig) => Promise<void>;
 
 export const CONNECTION_ATTEMPT_CANCELLED_MESSAGE = "Connection attempt was cancelled";
 
-function redisDbLabel(db: number, _loadedKeyCount?: number, totalKeyCount?: number): string {
-  if (totalKeyCount == null) return `db${db}`;
-  return `db${db} (${totalKeyCount})`;
-}
-
 function metadataDriverProfile(config?: ConnectionConfig): string | undefined {
   return config?.driver_profile || config?.db_type;
 }
@@ -359,7 +355,15 @@ export const useConnectionStore = defineStore("connection", () => {
   const completionMetadataLimiter = new MetadataTaskLimiter(COMPLETION_METADATA_CONCURRENCY, (event) => {
     console.debug("[DBX][completion-metadata:limit]", event);
   });
-  const transferSource = ref<{ connectionId: string; database: string } | null>(null);
+  const transferSource = ref<{
+    connectionId: string;
+    database: string;
+    schema?: string;
+    tables?: string[];
+    targetConnectionId?: string;
+    targetDatabase?: string;
+    targetSchema?: string;
+  } | null>(null);
   const schemaDiffSource = ref<{ connectionId: string; database: string; schema?: string } | null>(null);
   const dataCompareSource = ref<{
     connectionId: string;
@@ -1033,6 +1037,7 @@ export const useConnectionStore = defineStore("connection", () => {
       query_timeout_secs: config.query_timeout_secs ?? 30,
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
       keepalive_interval_secs: config.keepalive_interval_secs ?? DEFAULT_KEEPALIVE_INTERVAL_SECS,
+      redis_database_aliases: normalizeRedisDatabaseAliases(config.redis_database_aliases),
       database_info: normalizeDatabaseConnectionInfo(config.database_info),
     };
   }
@@ -2389,6 +2394,37 @@ export const useConnectionStore = defineStore("connection", () => {
     return config?.database === database && database !== "";
   }
 
+  function getRedisDatabaseAlias(connectionId: string, database: string | number): string | undefined {
+    return redisDatabaseAlias(getConfig(connectionId)?.redis_database_aliases, database);
+  }
+
+  async function setRedisDatabaseAlias(connectionId: string, database: string | number, alias?: string) {
+    const index = typeof database === "number" ? database : Number(database);
+    const configIndex = connections.value.findIndex((connection) => connection.id === connectionId);
+    const config = connections.value[configIndex];
+    if (!config || config.db_type !== "redis" || !Number.isInteger(index) || index < 0) return;
+
+    const key = String(index);
+    const aliases = { ...(config.redis_database_aliases || {}) };
+    const normalizedAlias = alias?.trim() || "";
+    if (normalizedAlias) aliases[key] = normalizedAlias;
+    else delete aliases[key];
+
+    const redisDatabaseAliases = normalizeRedisDatabaseAliases(aliases);
+    const nextConnections = [...connections.value];
+    nextConnections[configIndex] = {
+      ...config,
+      redis_database_aliases: redisDatabaseAliases,
+    };
+    await persistConnections(nextConnections);
+    connections.value = nextConnections;
+
+    const node = findNode(treeNodes.value, `${connectionId}:db${key}`);
+    if (node?.type === "redis-db") {
+      node.label = redisDatabaseLabel(index, redisDatabaseAliases, node.totalKeyCount);
+    }
+  }
+
   async function setVisibleDatabases(connectionId: string, databaseNames: string[]) {
     const config = getConfig(connectionId);
     if (!config) return;
@@ -3041,7 +3077,7 @@ export const useConnectionStore = defineStore("connection", () => {
             .filter((db) => visibleNameSet.has(String(db.db)))
             .map((db) => ({
               id: `${connectionId}:db${db.db}`,
-              label: redisDbLabel(db.db, 0, db.keys),
+              label: redisDatabaseLabel(db.db, config?.redis_database_aliases, db.keys),
               type: "redis-db" as const,
               connectionId,
               database: String(db.db),
@@ -3251,7 +3287,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (stats.totalDelta != null && node.totalKeyCount != null) {
       node.totalKeyCount = Math.max(0, node.totalKeyCount + stats.totalDelta);
     }
-    node.label = redisDbLabel(db, node.loadedKeyCount, node.totalKeyCount);
+    node.label = redisDatabaseLabel(db, getConfig(connectionId)?.redis_database_aliases, node.totalKeyCount);
   }
 
   // Re-fetch the authoritative per-db key counts (INFO keyspace, lightweight) and update
@@ -5890,7 +5926,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function persistConnections(nextConnections: ConnectionConfig[] = connections.value) {
-    await api.saveConnections(nextConnections);
+    await api.saveConnections(nextConnections.filter((connection) => connection.one_time !== true));
   }
 
   function persistSidebarLayoutDebounced() {
@@ -6462,6 +6498,8 @@ export const useConnectionStore = defineStore("connection", () => {
     setDefaultDatabase,
     clearDefaultDatabase,
     isDefaultDatabase,
+    getRedisDatabaseAlias,
+    setRedisDatabaseAlias,
     setVisibleDatabases,
     clearVisibleDatabases,
     ensureVisibleDatabase,

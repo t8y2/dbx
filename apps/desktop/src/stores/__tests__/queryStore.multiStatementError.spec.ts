@@ -338,6 +338,16 @@ describe("queryStore multi-statement errors", () => {
 
     expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT 1", undefined, expect.any(String), expect.objectContaining({ continueOnError: false }));
   });
+  it("passes the selected external catalog to query execution", async () => {
+    mocks.executeMulti.mockResolvedValue([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "bi", "Query", "query", undefined, undefined, "paimon_catalog");
+
+    await store.executeTabSql(tabId, "SELECT * FROM events");
+
+    expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "bi", "SELECT * FROM events", undefined, expect.any(String), expect.objectContaining({ catalog: "paimon_catalog" }));
+  });
 
   it("keeps old and new executions as result runs, then lets normal execution replace the active run", async () => {
     mocks.executeMulti

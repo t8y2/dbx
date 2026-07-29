@@ -14,7 +14,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
-import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget, type SidebarNodeScrollAlign } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { createFlatTreeIndex, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
@@ -62,6 +62,10 @@ const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarHorizontalScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarContextMenuRef = ref<{ close: () => void } | null>(null);
 const sidebarContextMenuItems = ref<ContextMenuItem[]>([]);
+const emit = defineEmits<{
+  "open-settings": [initialTab: string];
+}>();
+
 const sidebarContextMenuTarget = ref<SidebarActionTarget | null>(null);
 const sidebarDangerDialogRequest = ref<SidebarDangerDialogRequest | null>(null);
 const sidebarDangerDialogOpen = ref(false);
@@ -1219,6 +1223,10 @@ function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
     });
 }
 
+function openSidebarSettings(initialTab: string) {
+  emit("open-settings", initialTab);
+}
+
 function openSidebarProcedure(node: TreeNode) {
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
   beginSidebarAction();
@@ -1316,14 +1324,14 @@ function clearSidebarTableNameFilters() {
 function openSidebarProcedureSql(sql: string) {
   const target = sidebarProcedureTarget.value;
   if (!target?.connectionId || !target.database || !sql) return;
-  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema);
+  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog);
   queryStore.updateSql(tabId, sql);
 }
 
 async function executeSidebarProcedureSql(sql: string) {
   const target = sidebarProcedureTarget.value;
   if (!target?.connectionId || !target.database || !sql) return;
-  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema);
+  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog);
   queryStore.updateSql(tabId, sql);
   await queryStore.executeTabSql(tabId, sql);
 }
@@ -1528,7 +1536,7 @@ function copySelectedSidebarNames(): boolean {
           tables: tableNodes.map((node) => ({
             connectionId: node.connectionId!,
             database: node.database!,
-            schema: node.schema,
+            schema: connectionObjectTreeNodeSchema(store.getConfig(node.connectionId!), node.database!, node.schema),
             tableName: node.label,
           })),
         }
@@ -1605,6 +1613,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-ddl="openSidebarDdl"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"
+      @open-settings="openSidebarSettings"
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"
       @open-visible-schemas="openSidebarVisibleSchemas"

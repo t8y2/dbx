@@ -174,7 +174,16 @@ watch(
     @update:open="emit('update:showSqlParameterDialog', $event)"
     @execute="emit('sqlParametersConfirm', $event)"
   />
-  <DataTransferDialog v-model:open="dialogs.showTransferDialog.value" :prefill-connection-id="dialogs.transferPrefillConnectionId.value" :prefill-database="dialogs.transferPrefillDatabase.value" />
+  <DataTransferDialog
+    v-model:open="dialogs.showTransferDialog.value"
+    :prefill-connection-id="dialogs.transferPrefillConnectionId.value"
+    :prefill-database="dialogs.transferPrefillDatabase.value"
+    :prefill-schema="dialogs.transferPrefillSchema.value"
+    :prefill-tables="dialogs.transferPrefillTables.value"
+    :prefill-target-connection-id="dialogs.transferPrefillTargetConnectionId.value"
+    :prefill-target-database="dialogs.transferPrefillTargetDatabase.value"
+    :prefill-target-schema="dialogs.transferPrefillTargetSchema.value"
+  />
   <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
   <DataCompareDialog
     v-if="dialogs.showDataCompareDialog.value"

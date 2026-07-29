@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
 type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info">>;
 
@@ -125,9 +126,11 @@ export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" 
   return "mysql";
 }
 
-export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): "mysql" | "postgres" | "sqlserver" {
+export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): CodeMirrorSqlDialectName {
   if (isJdbcAseProfile(connection)) return "sqlserver";
-  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connection));
+  const databaseType = effectiveDatabaseTypeForConnection(connection);
+  if (databaseType === "clickhouse") return "clickhouse";
+  return codeMirrorSqlDialect(databaseType);
 }
 
 function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {

@@ -55,7 +55,6 @@ import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
-  aiListModels,
   aiTestConnection,
   checkMcpServerStatus,
   installMcpServer,
@@ -65,6 +64,8 @@ import {
   getAppSupportInfo,
   loadMaxAgentTurns,
   saveMaxAgentTurns,
+  loadMaxRetries,
+  saveMaxRetries,
   saveWebdavSyncSecretsPreference,
   saveWebdavSavedPassword,
   saveSnippetSavedToken,
@@ -148,12 +149,28 @@ const selectedLocaleOption = computed(() => LOCALE_OPTIONS.find((locale) => loca
 const appThemeModeOptions = computed(() => [
   { value: "light" as AppThemeMode, label: t("toolbar.themeLight"), icon: Sun },
   { value: "dark" as AppThemeMode, label: t("toolbar.themeDark"), icon: Moon },
-  { value: "system" as AppThemeMode, label: t("toolbar.themeSystem"), icon: SunMoon },
+  {
+    value: "system" as AppThemeMode,
+    label: t("toolbar.themeSystem"),
+    icon: SunMoon,
+  },
 ]);
 const appCornerStyleOptions = computed(() => [
-  { value: "none" as AppCornerStyle, label: t("settings.cornerStyleNone"), previewRadius: "0px" },
-  { value: "small" as AppCornerStyle, label: t("settings.cornerStyleSmall"), previewRadius: "4px" },
-  { value: "large" as AppCornerStyle, label: t("settings.cornerStyleLarge"), previewRadius: "10px" },
+  {
+    value: "none" as AppCornerStyle,
+    label: t("settings.cornerStyleNone"),
+    previewRadius: "0px",
+  },
+  {
+    value: "small" as AppCornerStyle,
+    label: t("settings.cornerStyleSmall"),
+    previewRadius: "4px",
+  },
+  {
+    value: "large" as AppCornerStyle,
+    label: t("settings.cornerStyleLarge"),
+    previewRadius: "10px",
+  },
 ]);
 
 const props = defineProps<{
@@ -333,7 +350,9 @@ function setSqlVariableSyntaxToggle(key: keyof SqlVariableSyntaxToggles, value: 
     ...editSqlVariableSyntaxOverrides.value[dbType],
     [key]: value,
   };
-  const next: SqlVariableSyntaxOverrides = { ...editSqlVariableSyntaxOverrides.value };
+  const next: SqlVariableSyntaxOverrides = {
+    ...editSqlVariableSyntaxOverrides.value,
+  };
   // Keep storage sparse: an all-enabled type has no entry; otherwise persist only the disabled syntaxes.
   if (SQL_VARIABLE_SYNTAX_KEYS.every((toggleKey) => merged[toggleKey])) {
     delete next[dbType];
@@ -356,6 +375,7 @@ const editingShortcutId = ref<ShortcutActionId | null>(null);
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
+const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
@@ -459,6 +479,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
@@ -490,13 +511,19 @@ const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
 const snippetForm = ref({ label: "", prefix: "", body: "" });
 const snippetFormPrefixError = ref("");
-const iconThemeDescTruncated = { default: ref<boolean>(false), black: ref<boolean>(false) };
+const iconThemeDescTruncated = {
+  default: ref<boolean>(false),
+  black: ref<boolean>(false),
+};
 const iconThemeDescRef = {
   default: ref<HTMLElement | null>(null),
   black: ref<HTMLElement | null>(null),
 };
 const iconThemeBlackDescriptionText = computed(() => (isMacOS() ? t("settings.iconThemeBlackDescriptionMac") : t("settings.iconThemeBlackDescription")));
-const layoutDescTruncated = { separated: ref<boolean>(false), classic: ref<boolean>(false) };
+const layoutDescTruncated = {
+  separated: ref<boolean>(false),
+  classic: ref<boolean>(false),
+};
 const layoutDescRefs = {
   separated: ref<HTMLElement | null>(null),
   classic: ref<HTMLElement | null>(null),
@@ -580,7 +607,11 @@ function openAddSnippetDialog() {
 
 function openEditSnippetDialog(snippet: SqlSnippet) {
   snippetEditingId.value = snippet.id;
-  snippetForm.value = { label: snippet.label, prefix: snippet.prefix, body: snippet.body };
+  snippetForm.value = {
+    label: snippet.label,
+    prefix: snippet.prefix,
+    body: snippet.body,
+  };
   snippetFormPrefixError.value = "";
   snippetDialogOpen.value = true;
 }
@@ -713,6 +744,7 @@ function syncEditorSettingsDraftFromStore() {
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+  editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
@@ -791,6 +823,7 @@ const formatterEditorShortcutIds: ShortcutActionId[] = [
   "selectAll",
   "uppercaseSelection",
   "lowercaseSelection",
+  "toggleFold",
 ];
 const formatterEditorShortcutDefinitions = computed(() => formatterEditorShortcutIds.map((id) => SHORTCUT_DEFINITIONS.find((definition) => definition.id === id)).filter((definition): definition is (typeof SHORTCUT_DEFINITIONS)[number] => !!definition));
 const filteredShortcutDefinitions = computed(() => {
@@ -914,6 +947,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -1002,6 +1036,7 @@ function resetAllDefaults() {
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
@@ -1226,6 +1261,10 @@ function setSidebarObjectDisplay(value: "grouped" | "simple") {
   editSidebarObjectDisplay.value = value;
 }
 
+function setRoutineSourceOpenMode(value: "query-tab" | "dialog") {
+  editRoutineSourceOpenMode.value = value;
+}
+
 function setIconTheme(value: DesktopIconTheme) {
   editIconTheme.value = value;
 }
@@ -1275,7 +1314,10 @@ function cancelShortcutEdit() {
 function resetShortcut(actionId: ShortcutActionId) {
   const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
   if (!definition) return;
-  editShortcuts.value = { ...editShortcuts.value, [actionId]: definition.defaultShortcut };
+  editShortcuts.value = {
+    ...editShortcuts.value,
+    [actionId]: definition.defaultShortcut,
+  };
 }
 
 function clearShortcut(actionId: ShortcutActionId) {
@@ -1685,7 +1727,10 @@ async function uploadSnippetSnapshot() {
     const summary = await snippetSyncUpload(currentSnippetConfig(), settingsStore.editorSettings, webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
     snippetId.value = summary.snippetId;
     localStorage.setItem(`dbx-snippet-id-${snippetProvider.value}`, summary.snippetId);
-    return t("settings.syncSnippetUploadSuccess", { bytes: summary.bytes, id: summary.snippetId });
+    return t("settings.syncSnippetUploadSuccess", {
+      bytes: summary.bytes,
+      id: summary.snippetId,
+    });
   });
 }
 
@@ -1701,7 +1746,10 @@ async function downloadSnippetSnapshot() {
     // the already-loaded Pinia store instead of leaving the UI stale.
     await tunnelProfileStore.refresh();
     await settingsStore.reloadAiConfigs();
-    let message = t("settings.syncSnippetDownloadSuccess", { bytes: result.summary.bytes, id: result.summary.snippetId });
+    let message = t("settings.syncSnippetDownloadSuccess", {
+      bytes: result.summary.bytes,
+      id: result.summary.snippetId,
+    });
     if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsSkipped")}`;
     if (result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsApplied")}`;
     return message;
@@ -1823,7 +1871,10 @@ async function testWebDav() {
 async function uploadWebDavSnapshot() {
   await runWebDavAction("upload", async () => {
     const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
-    return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
+    return t("settings.syncUploadSuccess", {
+      bytes: summary.bytes,
+      path: summary.remotePath,
+    });
   });
 }
 
@@ -1864,7 +1915,10 @@ const changingPassword = ref(false);
 async function scrollToInitialSettingsSection() {
   await nextTick();
   if (props.initialSection === "tableColumnTemplates") {
-    tableColumnTemplateSectionRef.value?.scrollIntoView({ block: "center", behavior: "smooth" });
+    tableColumnTemplateSectionRef.value?.scrollIntoView({
+      block: "center",
+      behavior: "smooth",
+    });
   }
 }
 
@@ -1896,7 +1950,12 @@ watch(
         localStorage.removeItem(MCP_SCOPE_CONNECTION_STORAGE_KEY);
       } catch (e: any) {
         mcpPolicyLoadError.value = e?.message || String(e);
-        toast(t("settings.mcpPolicyLoadFailed", { error: mcpPolicyLoadError.value }), 5000);
+        toast(
+          t("settings.mcpPolicyLoadFailed", {
+            error: mcpPolicyLoadError.value,
+          }),
+          5000,
+        );
       } finally {
         mcpPolicyLoading.value = false;
       }
@@ -1969,6 +2028,7 @@ watch(activeSettingsTab, async (tab) => {
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "ai") {
     void loadMaxAgentTurnsSetting();
+    void loadMaxRetriesSetting();
     // Await completion so we don't snapshot an empty default when the store
     // is still loading its first payload (init via App.vue is fire-and-forget).
     await promptTemplateStore.ensureLoaded();
@@ -2017,7 +2077,10 @@ async function changePassword() {
     const res = await fetch(apiUrl("/api/auth/change-password"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ old_password: oldPassword.value, new_password: newPassword.value }),
+      body: JSON.stringify({
+        old_password: oldPassword.value,
+        new_password: newPassword.value,
+      }),
     });
     if (res.ok) {
       passwordMessage.value = t("auth.passwordChanged");
@@ -2049,7 +2112,10 @@ const globalInstructionsSaving = ref(false);
 // Prompt Templates Management
 const templateEditing = ref<PromptTemplate | null>(null);
 const templateFormOpen = ref(false);
-const templateForm = ref<{ name: string; content: string }>({ name: "", content: "" });
+const templateForm = ref<{ name: string; content: string }>({
+  name: "",
+  content: "",
+});
 const templateFormIsNew = ref(true);
 const templateSaving = ref(false);
 const templateDeleteConfirm = ref<PromptTemplate | null>(null);
@@ -2191,6 +2257,54 @@ async function saveMaxAgentTurnsSetting() {
   }
 }
 
+// Max Retries (global). Default 2, range 0–10. Applied to all API-backed
+// AI providers.  CLI providers (claude-code, codex, pi) are unaffected
+// because they use their own retry logic.
+const editMaxRetries = ref<number | undefined>(undefined);
+const maxRetriesSaving = ref(false);
+const maxRetriesLoaded = ref(false);
+const maxRetriesLoading = ref(false);
+const maxRetriesLoadError = ref("");
+
+async function loadMaxRetriesSetting() {
+  if (maxRetriesLoaded.value || maxRetriesLoading.value) return;
+  maxRetriesLoading.value = true;
+  maxRetriesLoadError.value = "";
+  try {
+    editMaxRetries.value = await loadMaxRetries();
+    maxRetriesLoaded.value = true;
+  } catch (e: any) {
+    maxRetriesLoadError.value = e?.message || String(e);
+    toast(maxRetriesLoadError.value, 5000);
+  } finally {
+    maxRetriesLoading.value = false;
+  }
+}
+
+async function saveMaxRetriesSetting() {
+  if (!maxRetriesLoaded.value) return;
+  const clamped = normalizeMaxRetries(editMaxRetries.value);
+  maxRetriesSaving.value = true;
+  try {
+    await saveMaxRetries(clamped);
+    editMaxRetries.value = clamped;
+    toast(t("ai.maxRetriesSaved"));
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
+  } finally {
+    maxRetriesSaving.value = false;
+  }
+}
+
+function maxRetriesOutOfRange(value: number | undefined): boolean {
+  return typeof value === "number" && (value < 0 || value > 10);
+}
+
+function normalizeMaxRetries(value: number | undefined): number {
+  const rounded = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 2;
+  return Math.min(10, Math.max(0, rounded));
+}
+
 // AI Config Delete Confirmation
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
@@ -2233,6 +2347,7 @@ const aiTestErrorCategoryKeys: Record<string, string> = {
   tokenLimit: "ai.testErrorTokenLimit",
   safety: "ai.testErrorSafety",
   emptyResponse: "ai.testErrorEmptyResponse",
+  modelDiscoveryUnsupported: "ai.modelListUnsupported",
   network: "ai.testErrorNetwork",
   unknown: "ai.testErrorUnknown",
 };
@@ -2283,7 +2398,9 @@ watch(aiIsCliProvider, (isCliProvider) => {
   if (isCliProvider) void ensureCliMcpStatus();
 });
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
-const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiUsesConfigurableAnthropicAuth = computed(() => aiEditProvider.value === "claude" || aiEditProvider.value === "anthropic-compatible" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiUsesCompatibleAnthropicApi = computed(() => aiEditProvider.value === "anthropic-compatible" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
+const aiSupportsAuthMethod = computed(() => aiUsesConfigurableAnthropicAuth.value);
 const aiCredentialLabel = computed(() => (aiSupportsAuthMethod.value && aiEditAuthMethod.value === "bearer" ? "Auth Token" : "API Key"));
 const aiCredentialPlaceholder = computed(() => {
   if (!aiRequiresApiKey.value) return "Optional";
@@ -2291,7 +2408,7 @@ const aiCredentialPlaceholder = computed(() => {
   return "";
 });
 const aiEndpointPlaceholder = computed(() => {
-  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+  if (aiUsesCompatibleAnthropicApi.value) {
     return "https://api.example.com/v1/messages";
   }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
@@ -2300,7 +2417,7 @@ const aiEndpointPlaceholder = computed(() => {
   return "https://api.openai.com/v1";
 });
 const aiEndpointHint = computed(() => {
-  if (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value) {
+  if (aiUsesCompatibleAnthropicApi.value) {
     return t("ai.anthropicMessagesHint");
   }
   if (aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom") {
@@ -2329,7 +2446,11 @@ const aiCliPathError = computed(() => {
 const aiCliValidationError = computed(() => (aiIsCliProvider.value ? aiCliPathError.value || aiCliEnvError.value : ""));
 
 function aiEnvRowsFromConfig(env: unknown): AiEnvRow[] {
-  return Object.entries(normalizeAiEnv(env)).map(([key, value]) => ({ id: uuid(), key, value }));
+  return Object.entries(normalizeAiEnv(env)).map(([key, value]) => ({
+    id: uuid(),
+    key,
+    value,
+  }));
 }
 
 function cliEnvFromRows(rows = aiEditCliEnvRows.value): Record<string, string> {
@@ -2559,14 +2680,12 @@ async function aiTestConn() {
   aiTestErrorCopied.value = false;
   try {
     const config = currentAiEditConfig();
-    if (aiIsCliProvider.value) {
-      const result = await aiTestConnection(config);
-      aiTestLatency.value = result.latencyMs ?? null;
-    } else {
-      const startedAt = performance.now();
-      await aiListModels(config);
-      aiTestLatency.value = Math.round(performance.now() - startedAt);
+    const activeModel = settingsStore.activeModel;
+    if (aiEditConfigId.value && activeModel?.configId === aiEditConfigId.value) {
+      config.model = activeModel.modelId;
     }
+    const result = await aiTestConnection(config);
+    aiTestLatency.value = result.latencyMs ?? null;
     aiTestResult.value = "success";
   } catch (e: any) {
     aiTestResult.value = "error";
@@ -2647,7 +2766,12 @@ let diagnosticComp: import("@codemirror/state").Compartment | null = null;
 let previewRunGutterComp: import("@codemirror/state").Compartment | null = null;
 let currentStatementFrameComp: import("@codemirror/state").Compartment | null = null;
 let setPreviewDiagnosticsEffect: import("@codemirror/state").StateEffectType<PreviewSqlDiagnostic[]> | null = null;
-let setPreviewRunHighlightEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
+let setPreviewRunHighlightEffect:
+  | import("@codemirror/state").StateEffectType<{
+      from: number;
+      to: number;
+    } | null>
+  | null = null;
 let editorViewModule: typeof import("@codemirror/view") | null = null;
 let previewSqlDiagnostics: PreviewSqlDiagnostic[] = [];
 let previewExecutableCache: ExecutableStatementRangeCache | null = null;
@@ -2691,14 +2815,18 @@ function previewExecutableStatementRangeStartingAt(currentView: EditorViewType, 
 function clearPreviewRunHighlight() {
   previewRunHighlightRange = null;
   if (previewView.value && setPreviewRunHighlightEffect) {
-    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(null) });
+    previewView.value.dispatch({
+      effects: setPreviewRunHighlightEffect.of(null),
+    });
   }
 }
 
 function flashPreviewRunHighlight(range: { from: number; to: number }, event: Event) {
   previewRunHighlightRange = range;
   if (previewView.value && setPreviewRunHighlightEffect) {
-    previewView.value.dispatch({ effects: setPreviewRunHighlightEffect.of(range) });
+    previewView.value.dispatch({
+      effects: setPreviewRunHighlightEffect.of(range),
+    });
   }
   if (event.target instanceof Element) {
     const marker = event.target.closest(".cm-run-statement-marker");
@@ -2780,7 +2908,14 @@ function buildPreviewCurrentStatementFrameExtension(viewModule: Pick<typeof impo
           const classes = ["cm-db-current-statement-line"];
           if (lineNumber === startLine.number) classes.push("cm-db-current-statement-line--first");
           if (lineNumber === endLine.number) classes.push("cm-db-current-statement-line--last");
-          deco.push(Decoration.line({ class: classes.join(" "), attributes: { style: `--dbx-current-statement-frame-width: ${frameWidth};` } }).range(line.from));
+          deco.push(
+            Decoration.line({
+              class: classes.join(" "),
+              attributes: {
+                style: `--dbx-current-statement-frame-width: ${frameWidth};`,
+              },
+            }).range(line.from),
+          );
         }
         return Decoration.set(deco);
       }
@@ -2856,14 +2991,21 @@ watch(previewRef, async (el) => {
 
   const [{ EditorView, Decoration, ViewPlugin, gutter, GutterMarker }, { EditorState, Compartment, StateEffect, StateField }, { sql, MySQL }, { basicSetup }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror")]);
 
-  editorViewModule = { Decoration, EditorView, ViewPlugin } as typeof import("@codemirror/view");
+  editorViewModule = {
+    Decoration,
+    EditorView,
+    ViewPlugin,
+  } as typeof import("@codemirror/view");
   fontThemeComp = new Compartment();
   themeComp = new Compartment();
   diagnosticComp = new Compartment();
   previewRunGutterComp = new Compartment();
   currentStatementFrameComp = new Compartment();
   setPreviewDiagnosticsEffect = StateEffect.define<PreviewSqlDiagnostic[]>();
-  setPreviewRunHighlightEffect = StateEffect.define<{ from: number; to: number } | null>();
+  setPreviewRunHighlightEffect = StateEffect.define<{
+    from: number;
+    to: number;
+  } | null>();
   previewSqlDiagnostics = previewDiagnosticsForSql(currentPreviewSql());
 
   const ss = previewSettings.value;
@@ -2921,7 +3063,17 @@ watch(previewRef, async (el) => {
 
   const buildPreviewRunHighlightExtension = () => {
     const highlightEffect = setPreviewRunHighlightEffect;
-    const buildDecorations = () => (previewRunHighlightRange ? Decoration.set([Decoration.mark({ class: "cm-settings-preview-run-highlight" }).range(previewRunHighlightRange.from, previewRunHighlightRange.to)], true) : Decoration.none);
+    const buildDecorations = () =>
+      previewRunHighlightRange
+        ? Decoration.set(
+            [
+              Decoration.mark({
+                class: "cm-settings-preview-run-highlight",
+              }).range(previewRunHighlightRange.from, previewRunHighlightRange.to),
+            ],
+            true,
+          )
+        : Decoration.none;
     const field = StateField.define({
       create: buildDecorations,
       update(value, transaction) {
@@ -3010,7 +3162,11 @@ onUnmounted(cleanupPreviewEditor);
                     </template>
                     <template #custom-option-label="{ value }">
                       <span class="truncate" :style="{ fontFamily: value }">
-                        {{ t("settings.useCustomFont", { font: readableFontFamily(value) }) }}
+                        {{
+                          t("settings.useCustomFont", {
+                            font: readableFontFamily(value),
+                          })
+                        }}
                       </span>
                     </template>
                   </SearchableSelect>
@@ -3074,7 +3230,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-show-execution-target-picker">{{ t("settings.showExecutionTargetPicker") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.showExecutionTargetPickerDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showExecutionTargetPickerDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-show-execution-target-picker" v-model="editShowExecutionTargetPicker" class="mt-0.5" />
                 </div>
@@ -3082,7 +3240,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-show-statement-run-buttons">{{ t("settings.showStatementRunButtons") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.showStatementRunButtonsDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showStatementRunButtonsDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" class="mt-0.5" />
                 </div>
@@ -3090,7 +3250,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-show-current-statement-frame">{{ t("settings.showCurrentStatementFrame") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.showCurrentStatementFrameDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showCurrentStatementFrameDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-show-current-statement-frame" v-model="editShowCurrentStatementFrame" class="mt-0.5" />
                 </div>
@@ -3098,7 +3260,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-show-insert-value-hints">{{ t("settings.showInsertValueHints") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.showInsertValueHintsDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.showInsertValueHintsDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-show-insert-value-hints" v-model="editShowInsertValueHints" class="mt-0.5" />
                 </div>
@@ -3106,7 +3270,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-word-wrap">{{ t("settings.wordWrap") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.wordWrapDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.wordWrapDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-word-wrap" v-model="editWordWrap" class="mt-0.5" />
                 </div>
@@ -3114,7 +3280,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-vim-mode">{{ t("settings.vimMode") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.vimModeDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.vimModeDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-vim-mode" v-model="editVimModeEnabled" class="mt-0.5" />
                 </div>
@@ -3122,7 +3290,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.autoCloseBracketsDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.autoCloseBracketsDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
                 </div>
@@ -3130,7 +3300,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-insert-space-after-completion">{{ t("settings.insertSpaceAfterCompletion") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.insertSpaceAfterCompletionDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.insertSpaceAfterCompletionDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
                 </div>
@@ -3138,7 +3310,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-auto-alias-tables">{{ t("settings.autoAliasTables") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.autoAliasTablesDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.autoAliasTablesDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
                 </div>
@@ -3188,7 +3362,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-prefill-new-query">{{ t("settings.prefillNewQueryWithSelect") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.prefillNewQueryWithSelectDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.prefillNewQueryWithSelectDescription") }}
+                    </p>
                   </div>
                   <Switch id="editor-prefill-new-query" v-model="editPrefillNewQueryWithSelect" class="mt-0.5" />
                 </div>
@@ -3199,8 +3375,12 @@ onUnmounted(cleanupPreviewEditor);
               <div class="space-y-3">
                 <div class="flex flex-wrap items-start justify-between gap-3">
                   <div class="space-y-1">
-                    <div class="text-sm font-medium text-muted-foreground">{{ t("settings.sqlVariableSyntax") }}</div>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.sqlVariableSyntaxDescription") }}</p>
+                    <div class="text-sm font-medium text-muted-foreground">
+                      {{ t("settings.sqlVariableSyntax") }}
+                    </div>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.sqlVariableSyntaxDescription") }}
+                    </p>
                   </div>
                   <Select v-model="editSqlVariableSyntaxDatabaseType">
                     <SelectTrigger class="h-8 w-44 px-2 text-xs">
@@ -3220,7 +3400,9 @@ onUnmounted(cleanupPreviewEditor);
                         <span class="font-mono text-xs text-primary">{{ SQL_VARIABLE_SYNTAX_TOKENS[key] }}</span>
                         <span>{{ t(`settings.sqlVariableSyntax_${key}`) }}</span>
                       </Label>
-                      <p class="text-xs text-muted-foreground">{{ t(`settings.sqlVariableSyntax_${key}Description`) }}</p>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t(`settings.sqlVariableSyntax_${key}Description`) }}
+                      </p>
                     </div>
                     <Switch :id="`sql-var-syntax-${key}`" :model-value="sqlVariableSyntaxToggle(key)" class="mt-0.5 shrink-0" @update:model-value="(value) => setSqlVariableSyntaxToggle(key, value as boolean)" />
                   </div>
@@ -3240,7 +3422,9 @@ onUnmounted(cleanupPreviewEditor);
 
             <section v-else-if="activeSettingsTab === 'formatter'" class="flex flex-col gap-5 py-2">
               <div class="space-y-3 rounded-md border border-border/70 bg-muted/10 p-3">
-                <div class="text-sm font-medium">{{ t("settings.sqlFormatterEditorShortcuts") }}</div>
+                <div class="text-sm font-medium">
+                  {{ t("settings.sqlFormatterEditorShortcuts") }}
+                </div>
                 <div class="overflow-hidden rounded-md border border-border/70 bg-background">
                   <div v-for="definition in formatterEditorShortcutDefinitions" :key="definition.id" class="group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                     <div class="min-w-0">
@@ -3347,7 +3531,12 @@ onUnmounted(cleanupPreviewEditor);
                     <SelectTrigger class="h-8 w-full gap-1">
                       <SelectValue :placeholder="t('settings.selectColorTheme')">
                         <span v-if="selectedThemePaletteOption" class="flex min-w-0 items-center gap-1">
-                          <span class="h-3 w-3 shrink-0 rounded-full border border-border shadow-xs" :style="{ background: selectedThemePaletteOption.previewColor }" />
+                          <span
+                            class="h-3 w-3 shrink-0 rounded-full border border-border shadow-xs"
+                            :style="{
+                              background: selectedThemePaletteOption.previewColor,
+                            }"
+                          />
                           <span class="truncate">{{ selectedThemePaletteOption.label }}</span>
                         </span>
                       </SelectValue>
@@ -3425,7 +3614,11 @@ onUnmounted(cleanupPreviewEditor);
                     </template>
                     <template #custom-option-label="{ value }">
                       <span class="truncate" :style="{ fontFamily: value }">
-                        {{ t("settings.useCustomFont", { font: readableFontFamily(value) }) }}
+                        {{
+                          t("settings.useCustomFont", {
+                            font: readableFontFamily(value),
+                          })
+                        }}
                       </span>
                     </template>
                   </SearchableSelect>
@@ -3464,7 +3657,11 @@ onUnmounted(cleanupPreviewEditor);
                     </template>
                     <template #custom-option-label="{ value }">
                       <span class="truncate" :style="{ fontFamily: value }">
-                        {{ t("settings.useCustomFont", { font: readableFontFamily(value) }) }}
+                        {{
+                          t("settings.useCustomFont", {
+                            font: readableFontFamily(value),
+                          })
+                        }}
                       </span>
                     </template>
                   </SearchableSelect>
@@ -3512,8 +3709,12 @@ onUnmounted(cleanupPreviewEditor);
                       <Tooltip>
                         <TooltipTrigger as-child>
                           <div class="w-full min-w-0 text-left">
-                            <div class="text-sm font-medium">{{ t("settings.appLayoutSeparated") }}</div>
-                            <div :ref="(el) => setLayoutDescRef('separated', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutSeparatedDescription") }}</div>
+                            <div class="text-sm font-medium">
+                              {{ t("settings.appLayoutSeparated") }}
+                            </div>
+                            <div :ref="(el) => setLayoutDescRef('separated', el)" class="text-xs text-muted-foreground truncate">
+                              {{ t("settings.appLayoutSeparatedDescription") }}
+                            </div>
                           </div>
                         </TooltipTrigger>
                         <TooltipContent v-if="layoutDescTruncated.separated.value" class="max-w-[320px] text-xs leading-relaxed">
@@ -3527,8 +3728,12 @@ onUnmounted(cleanupPreviewEditor);
                       <Tooltip>
                         <TooltipTrigger as-child>
                           <div class="w-full min-w-0 text-left">
-                            <div class="text-sm font-medium">{{ t("settings.appLayoutClassic") }}</div>
-                            <div :ref="(el) => setLayoutDescRef('classic', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.appLayoutClassicDescription") }}</div>
+                            <div class="text-sm font-medium">
+                              {{ t("settings.appLayoutClassic") }}
+                            </div>
+                            <div :ref="(el) => setLayoutDescRef('classic', el)" class="text-xs text-muted-foreground truncate">
+                              {{ t("settings.appLayoutClassicDescription") }}
+                            </div>
                           </div>
                         </TooltipTrigger>
                         <TooltipContent v-if="layoutDescTruncated.classic.value" class="max-w-[320px] text-xs leading-relaxed">
@@ -3547,14 +3752,22 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="settings-appearance-choice-grid">
                   <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'scroll' ? 'dbx-choice-selected' : ''" @click="setTabLayout('scroll')">
                     <div class="w-full min-w-0 text-left">
-                      <div class="text-sm font-medium">{{ t("settings.tabLayoutScroll") }}</div>
-                      <div class="text-xs text-muted-foreground">{{ t("settings.tabLayoutScrollDescription") }}</div>
+                      <div class="text-sm font-medium">
+                        {{ t("settings.tabLayoutScroll") }}
+                      </div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.tabLayoutScrollDescription") }}
+                      </div>
                     </div>
                   </Button>
                   <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editTabLayout === 'wrap' ? 'dbx-choice-selected' : ''" @click="setTabLayout('wrap')">
                     <div class="w-full min-w-0 text-left">
-                      <div class="text-sm font-medium">{{ t("settings.tabLayoutWrap") }}</div>
-                      <div class="text-xs text-muted-foreground">{{ t("settings.tabLayoutWrapDescription") }}</div>
+                      <div class="text-sm font-medium">
+                        {{ t("settings.tabLayoutWrap") }}
+                      </div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.tabLayoutWrapDescription") }}
+                      </div>
                     </div>
                   </Button>
                 </div>
@@ -3571,8 +3784,12 @@ onUnmounted(cleanupPreviewEditor);
                         <Tooltip>
                           <TooltipTrigger as-child>
                             <div class="w-full min-w-0 text-left">
-                              <div class="text-sm font-medium">{{ t("settings.iconThemeDefault") }}</div>
-                              <div :ref="(el) => setIconThemeDescRef('default', el)" class="text-xs text-muted-foreground truncate">{{ t("settings.iconThemeDefaultDescription") }}</div>
+                              <div class="text-sm font-medium">
+                                {{ t("settings.iconThemeDefault") }}
+                              </div>
+                              <div :ref="(el) => setIconThemeDescRef('default', el)" class="text-xs text-muted-foreground truncate">
+                                {{ t("settings.iconThemeDefaultDescription") }}
+                              </div>
                             </div>
                           </TooltipTrigger>
                           <TooltipContent v-if="iconThemeDescTruncated.default.value" class="max-w-[320px] text-xs leading-relaxed">
@@ -3589,8 +3806,12 @@ onUnmounted(cleanupPreviewEditor);
                         <Tooltip>
                           <TooltipTrigger as-child>
                             <div class="w-full min-w-0 text-left">
-                              <div class="text-sm font-medium">{{ t("settings.iconThemeBlack") }}</div>
-                              <div :ref="(el) => setIconThemeDescRef('black', el)" class="text-xs text-muted-foreground truncate">{{ iconThemeBlackDescriptionText }}</div>
+                              <div class="text-sm font-medium">
+                                {{ t("settings.iconThemeBlack") }}
+                              </div>
+                              <div :ref="(el) => setIconThemeDescRef('black', el)" class="text-xs text-muted-foreground truncate">
+                                {{ iconThemeBlackDescriptionText }}
+                              </div>
                             </div>
                           </TooltipTrigger>
                           <TooltipContent v-if="iconThemeDescTruncated.black.value" class="max-w-[320px] text-xs leading-relaxed">
@@ -3606,7 +3827,9 @@ onUnmounted(cleanupPreviewEditor);
               <div v-if="!isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="show-tray-icon">{{ t("settings.showTrayIcon") }}</Label>
-                  <p class="text-xs text-muted-foreground">{{ t("settings.showTrayIconDescription") }}</p>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.showTrayIconDescription") }}
+                  </p>
                 </div>
                 <Switch id="show-tray-icon" v-model="editShowTrayIcon" />
               </div>
@@ -3614,7 +3837,9 @@ onUnmounted(cleanupPreviewEditor);
               <div v-if="!isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="quit-on-close">{{ t("settings.quitOnClose") }}</Label>
-                  <p class="text-xs text-muted-foreground">{{ t("settings.quitOnCloseDescription") }}</p>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.quitOnCloseDescription") }}
+                  </p>
                 </div>
                 <Switch id="quit-on-close" v-model="editQuitOnClose" />
               </div>
@@ -3766,15 +3991,23 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4 rounded-md border border-border/60 p-3">
                   <div class="space-y-1">
                     <Label for="exclusive-right-sidebar-panels" class="text-sm cursor-pointer">{{ t("settings.exclusiveRightSidebarPanels") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.exclusiveRightSidebarPanelsDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.exclusiveRightSidebarPanelsDescription") }}
+                    </p>
                   </div>
                   <Switch id="exclusive-right-sidebar-panels" v-model="editToolbarItems.exclusiveRightSidebarPanels" />
                 </div>
                 <div class="grid grid-cols-3 gap-2 mt-2">
                   <div
                     v-for="item in [
-                      { key: 'dataTransfer', label: t('transfer.dataTransfer') },
-                      { key: 'driverManager', label: t('toolbar.driverManager') },
+                      {
+                        key: 'dataTransfer',
+                        label: t('transfer.dataTransfer'),
+                      },
+                      {
+                        key: 'driverManager',
+                        label: t('toolbar.driverManager'),
+                      },
                       { key: 'sqlFile', label: t('sqlFile.title') },
                       { key: 'schemaDiff', label: t('diff.title') },
                       { key: 'dataCompare', label: t('dataCompare.title') },
@@ -3802,7 +4035,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="grid grid-cols-2 gap-2">
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('single')">
                     <div class="text-left">
-                      <div class="text-sm font-medium">{{ t("settings.sidebarActivationSingle") }}</div>
+                      <div class="text-sm font-medium">
+                        {{ t("settings.sidebarActivationSingle") }}
+                      </div>
                       <div class="text-xs text-muted-foreground">
                         {{ t("settings.sidebarActivationSingleDescription") }}
                       </div>
@@ -3810,7 +4045,9 @@ onUnmounted(cleanupPreviewEditor);
                   </Button>
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('double')">
                     <div class="text-left">
-                      <div class="text-sm font-medium">{{ t("settings.sidebarActivationDouble") }}</div>
+                      <div class="text-sm font-medium">
+                        {{ t("settings.sidebarActivationDouble") }}
+                      </div>
                       <div class="text-xs text-muted-foreground">
                         {{ t("settings.sidebarActivationDoubleDescription") }}
                       </div>
@@ -3833,7 +4070,9 @@ onUnmounted(cleanupPreviewEditor);
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'grouped' ? 'dbx-choice-selected' : ''" @click="setSidebarObjectDisplay('grouped')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
-                        <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplayGrouped") }}</div>
+                        <div class="text-sm font-medium">
+                          {{ t("settings.sidebarObjectDisplayGrouped") }}
+                        </div>
                         <Tooltip :open="sidebarObjectDisplayHelp === 'grouped'">
                           <TooltipTrigger as-child>
                             <span class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground" @click.stop @pointerdown.stop @mouseenter="sidebarObjectDisplayHelp = 'grouped'" @mouseleave="sidebarObjectDisplayHelp = null">
@@ -3850,7 +4089,9 @@ onUnmounted(cleanupPreviewEditor);
                   <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarObjectDisplay === 'simple' ? 'dbx-choice-selected' : ''" @click="setSidebarObjectDisplay('simple')">
                     <div class="text-left">
                       <div class="flex items-center gap-2">
-                        <div class="text-sm font-medium">{{ t("settings.sidebarObjectDisplaySimple") }}</div>
+                        <div class="text-sm font-medium">
+                          {{ t("settings.sidebarObjectDisplaySimple") }}
+                        </div>
                         <Tooltip :open="sidebarObjectDisplayHelp === 'simple'">
                           <TooltipTrigger as-child>
                             <span class="inline-flex shrink-0 cursor-help text-muted-foreground hover:text-foreground" @click.stop @pointerdown.stop @mouseenter="sidebarObjectDisplayHelp = 'simple'" @mouseleave="sidebarObjectDisplayHelp = null">
@@ -3861,6 +4102,32 @@ onUnmounted(cleanupPreviewEditor);
                             {{ t("settings.sidebarObjectDisplaySimpleDescription") }}
                           </TooltipContent>
                         </Tooltip>
+                      </div>
+                    </div>
+                  </Button>
+                </div>
+              </div>
+              <div class="space-y-2">
+                <div class="flex items-center gap-2">
+                  <Label>{{ t("settings.routineSourceOpenMode") }}</Label>
+                  <HelpTooltip :label="t('settings.routineSourceOpenMode')">
+                    {{ t("settings.routineSourceOpenModeQueryTabDescription") }}
+                  </HelpTooltip>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editRoutineSourceOpenMode === 'query-tab' ? 'dbx-choice-selected' : ''" @click="setRoutineSourceOpenMode('query-tab')">
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.routineSourceOpenModeQueryTab") }}</div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.routineSourceOpenModeQueryTabDescription") }}
+                      </div>
+                    </div>
+                  </Button>
+                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editRoutineSourceOpenMode === 'dialog' ? 'dbx-choice-selected' : ''" @click="setRoutineSourceOpenMode('dialog')">
+                    <div class="text-left">
+                      <div class="text-sm font-medium">{{ t("settings.routineSourceOpenModeDialog") }}</div>
+                      <div class="text-xs text-muted-foreground">
+                        {{ t("settings.routineSourceOpenModeDialogDescription") }}
                       </div>
                     </div>
                   </Button>
@@ -4001,7 +4268,9 @@ onUnmounted(cleanupPreviewEditor);
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" class="flex flex-col gap-5 py-2">
               <div class="space-y-3">
-                <div class="text-sm font-medium text-muted-foreground">{{ t("settings.dataGridDisplay") }}</div>
+                <div class="text-sm font-medium text-muted-foreground">
+                  {{ t("settings.dataGridDisplay") }}
+                </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="table-open-page-size">
@@ -4067,11 +4336,15 @@ onUnmounted(cleanupPreviewEditor);
               </template>
 
               <div class="space-y-3">
-                <div class="text-sm font-medium text-muted-foreground">{{ t("settings.dateTimeSection") }}</div>
+                <div class="text-sm font-medium text-muted-foreground">
+                  {{ t("settings.dateTimeSection") }}
+                </div>
                 <div class="grid gap-3 rounded-md border bg-muted/20 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(220px,0.8fr)] sm:items-center">
                   <div>
                     <Label>{{ t("settings.globalDateTimeDisplayFormat") }}</Label>
-                    <p class="mt-1 text-xs text-muted-foreground">{{ t("settings.globalDateTimeDisplayFormatDescription") }}</p>
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      {{ t("settings.globalDateTimeDisplayFormatDescription") }}
+                    </p>
                   </div>
                   <SearchableSelect
                     v-model="editGlobalDateTimeDisplayFormat"
@@ -4088,7 +4361,9 @@ onUnmounted(cleanupPreviewEditor);
                   />
                   <div>
                     <Label>{{ t("settings.globalDateTimeExportFormat") }}</Label>
-                    <p class="mt-1 text-xs text-muted-foreground">{{ t("settings.globalDateTimeExportFormatDescription") }}</p>
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      {{ t("settings.globalDateTimeExportFormatDescription") }}
+                    </p>
                   </div>
                   <SearchableSelect
                     v-model="editGlobalDateTimeExportFormat"
@@ -4105,7 +4380,9 @@ onUnmounted(cleanupPreviewEditor);
                   />
                   <div>
                     <Label>{{ t("settings.globalDateTimeImportFormat") }}</Label>
-                    <p class="mt-1 text-xs text-muted-foreground">{{ t("settings.globalDateTimeImportFormatDescription") }}</p>
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      {{ t("settings.globalDateTimeImportFormatDescription") }}
+                    </p>
                   </div>
                   <SearchableSelect
                     v-model="editGlobalDateTimeImportFormat"
@@ -4126,7 +4403,9 @@ onUnmounted(cleanupPreviewEditor);
               <Separator />
 
               <div class="space-y-3">
-                <div class="text-sm font-medium text-muted-foreground">{{ t("settings.exportSection") }}</div>
+                <div class="text-sm font-medium text-muted-foreground">
+                  {{ t("settings.exportSection") }}
+                </div>
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
                   <div class="flex items-center gap-3">
@@ -4144,7 +4423,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-start justify-between gap-3">
                   <div class="space-y-0.5">
                     <Label for="export-row-limit-enabled">{{ t("settings.exportRowLimitEnabled") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.exportRowLimitEnabledDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.exportRowLimitEnabledDescription") }}
+                    </p>
                   </div>
                   <Switch id="export-row-limit-enabled" v-model="editExportRowLimitEnabled" class="mt-0.5" />
                 </div>
@@ -4160,7 +4441,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-start justify-between gap-3">
                   <div class="space-y-0.5">
                     <Label for="query-export-keyset-enabled">{{ t("settings.queryExportKeysetOptimizationEnabled") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.queryExportKeysetOptimizationEnabledDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.queryExportKeysetOptimizationEnabledDescription") }}
+                    </p>
                   </div>
                   <Switch id="query-export-keyset-enabled" v-model="editQueryExportKeysetOptimizationEnabled" class="mt-0.5" />
                 </div>
@@ -4169,12 +4452,16 @@ onUnmounted(cleanupPreviewEditor);
               <Separator />
 
               <div class="space-y-3">
-                <div class="text-sm font-medium text-muted-foreground">{{ t("settings.tableStructureSection") }}</div>
+                <div class="text-sm font-medium text-muted-foreground">
+                  {{ t("settings.tableStructureSection") }}
+                </div>
                 <div ref="tableColumnTemplateSectionRef" class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="flex items-start justify-between gap-3">
                     <div class="space-y-1">
                       <Label>{{ t("settings.tableColumnTemplateFields") }}</Label>
-                      <p class="text-xs text-muted-foreground">{{ t("settings.tableColumnTemplateFieldsDescription") }}</p>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.tableColumnTemplateFieldsDescription") }}
+                      </p>
                     </div>
                     <div class="flex items-center gap-2">
                       <Select v-model="editTableColumnTemplateDatabaseType">
@@ -4197,12 +4484,24 @@ onUnmounted(cleanupPreviewEditor);
                       <thead class="bg-muted/50 text-muted-foreground">
                         <tr>
                           <th class="w-8 border-b px-2 py-1.5" />
-                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateColumn") }}</th>
-                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateType") }}</th>
-                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateLength") }}</th>
-                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateDefault") }}</th>
-                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateRequired") }}</th>
-                          <th class="border-b px-2 py-1.5 text-left font-medium">{{ t("settings.tableColumnTemplateComment") }}</th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">
+                            {{ t("settings.tableColumnTemplateColumn") }}
+                          </th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">
+                            {{ t("settings.tableColumnTemplateType") }}
+                          </th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">
+                            {{ t("settings.tableColumnTemplateLength") }}
+                          </th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">
+                            {{ t("settings.tableColumnTemplateDefault") }}
+                          </th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">
+                            {{ t("settings.tableColumnTemplateRequired") }}
+                          </th>
+                          <th class="border-b px-2 py-1.5 text-left font-medium">
+                            {{ t("settings.tableColumnTemplateComment") }}
+                          </th>
                           <th class="w-10 border-b px-2 py-1.5" />
                         </tr>
                       </thead>
@@ -4341,7 +4640,9 @@ onUnmounted(cleanupPreviewEditor);
             <!-- Snippets Tab -->
             <section v-else-if="activeSettingsTab === 'snippets'" class="flex flex-col gap-4 py-2">
               <div class="flex items-center justify-between">
-                <p class="text-sm text-muted-foreground">{{ t("settings.snippetsDescription") }}</p>
+                <p class="text-sm text-muted-foreground">
+                  {{ t("settings.snippetsDescription") }}
+                </p>
                 <Button variant="outline" size="sm" @click="openAddSnippetDialog">
                   <Plus class="mr-2 h-4 w-4" />
                   {{ t("settings.snippetsAdd") }}
@@ -4419,7 +4720,9 @@ onUnmounted(cleanupPreviewEditor);
                       <Cloud class="h-4 w-4 text-muted-foreground" />
                       {{ t("settings.syncWebDavTitle") }}
                     </div>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.syncWebDavDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.syncWebDavDescription") }}
+                    </p>
                   </div>
 
                   <div class="grid gap-4 md:grid-cols-2">
@@ -4466,7 +4769,9 @@ onUnmounted(cleanupPreviewEditor);
                     <div class="space-y-2 md:col-span-2">
                       <Label for="webdav-remote-path">{{ t("settings.syncRemotePath") }}</Label>
                       <Input id="webdav-remote-path" v-model="webdavRemotePath" autocomplete="off" />
-                      <p class="text-xs text-muted-foreground">{{ t("settings.syncRemotePathDescription") }}</p>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.syncRemotePathDescription") }}
+                      </p>
                     </div>
                     <div class="space-y-2 md:col-span-2 rounded-md border bg-muted/20 px-3 py-3">
                       <label class="flex items-center gap-2 text-xs">
@@ -4478,7 +4783,9 @@ onUnmounted(cleanupPreviewEditor);
                         <Input id="webdav-auto-upload-interval" v-model.number="webdavAutoUploadIntervalMinutes" type="number" min="1" max="1440" step="1" class="h-7 w-24 text-xs" :disabled="!webdavAutoUploadEnabled" />
                         <span class="text-xs text-muted-foreground">{{ t("settings.syncAutoUploadMinutes") }}</span>
                       </div>
-                      <p class="text-xs text-muted-foreground">{{ t("settings.syncAutoUploadDescription") }}</p>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.syncAutoUploadDescription") }}
+                      </p>
                     </div>
                   </div>
 
@@ -4515,7 +4822,9 @@ onUnmounted(cleanupPreviewEditor);
                         {{ t("settings.syncSnippetGuide") }}
                       </Button>
                     </div>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.syncSnippetDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.syncSnippetDescription") }}
+                    </p>
                   </div>
 
                   <div class="grid gap-4 rounded-md border p-4 md:grid-cols-2">
@@ -4556,7 +4865,9 @@ onUnmounted(cleanupPreviewEditor);
                         <input v-model="snippetRememberToken" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
                         <span>{{ t("settings.syncSnippetRememberToken") }}</span>
                       </label>
-                      <p class="text-xs text-muted-foreground">{{ t("settings.syncSnippetTokenDescription") }}</p>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.syncSnippetTokenDescription") }}
+                      </p>
                     </div>
                     <div class="flex flex-wrap items-center justify-between gap-3 md:col-span-2">
                       <div v-if="snippetMessage" class="min-w-0 flex-1 text-xs" :class="snippetError ? 'text-destructive' : 'text-green-600 dark:text-green-400'">
@@ -4588,7 +4899,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex items-center justify-between gap-4">
                   <div class="space-y-1">
                     <Label for="sync-secrets">{{ t("settings.syncSecrets") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsSharedDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.syncSecretsSharedDescription") }}
+                    </p>
                   </div>
                   <Switch id="sync-secrets" v-model="webdavSyncSecrets" />
                 </div>
@@ -4612,7 +4925,9 @@ onUnmounted(cleanupPreviewEditor);
                       <X class="size-3.5" />
                     </Button>
                   </div>
-                  <p class="text-xs text-muted-foreground">{{ t("settings.syncSecretsPassphraseDescription") }}</p>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.syncSecretsPassphraseDescription") }}
+                  </p>
                 </div>
               </div>
             </section>
@@ -4630,7 +4945,9 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <div v-if="settingsStore.aiConfigs.length === 0" class="rounded-md border border-dashed p-6 text-center">
-                  <p class="text-sm text-muted-foreground">{{ t("ai.noAiConfigs") }}</p>
+                  <p class="text-sm text-muted-foreground">
+                    {{ t("ai.noAiConfigs") }}
+                  </p>
                   <Button type="button" size="sm" class="mt-2" @click="aiEnterEditMode()">
                     <Plus class="mr-1 h-3.5 w-3.5" />
                     {{ t("ai.addConfig") }}
@@ -4644,35 +4961,27 @@ onUnmounted(cleanupPreviewEditor);
                       <div>
                         <div class="flex items-center gap-2">
                           <span class="text-sm font-medium">{{ config.name }}</span>
-                          <Badge v-if="config.isDefault" variant="default" class="h-5 text-[10px]"> {{ t("ai.default") }} </Badge>
+                          <Badge v-if="config.isDefault" variant="default" class="h-5 text-[10px]">
+                            {{ t("ai.default") }}
+                          </Badge>
                         </div>
-                        <div class="text-xs text-muted-foreground">{{ AI_PROVIDER_PRESETS[config.provider].label }}</div>
+                        <div class="text-xs text-muted-foreground">
+                          {{ AI_PROVIDER_PRESETS[config.provider].label }}
+                        </div>
                       </div>
                     </div>
                     <div class="flex items-center gap-1">
-                      <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" @click="aiSetDefaultConfig(config.id)"> {{ t("ai.setDefault") }} </Button>
-                      <Button type="button" size="sm" variant="ghost" @click="aiEnterEditMode(config.id)"> {{ t("common.edit") }} </Button>
-                      <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" class="text-destructive" @click="aiDeleteConfig(config.id)"> {{ t("common.delete") }} </Button>
+                      <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" @click="aiSetDefaultConfig(config.id)">
+                        {{ t("ai.setDefault") }}
+                      </Button>
+                      <Button type="button" size="sm" variant="ghost" @click="aiEnterEditMode(config.id)">
+                        {{ t("common.edit") }}
+                      </Button>
+                      <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" class="text-destructive" @click="aiDeleteConfig(config.id)">
+                        {{ t("common.delete") }}
+                      </Button>
                     </div>
                   </div>
-                </div>
-              </div>
-
-              <!-- Global Custom Instructions (list mode) -->
-              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
-                <Separator />
-                <div>
-                  <h3 class="text-sm font-medium">{{ t("ai.globalInstructions") }}</h3>
-                  <p class="text-xs text-muted-foreground">{{ t("ai.globalInstructionsDescription") }}</p>
-                </div>
-                <textarea v-model="editGlobalInstructions" class="w-full rounded-md border bg-background px-3 py-2 text-xs font-mono resize-y min-h-[80px]" rows="4" :placeholder="t('ai.globalInstructionsDescription')"></textarea>
-                <div class="flex items-center justify-between">
-                  <span class="text-xs" :class="globalInstructionsTooLong() ? 'text-destructive' : 'text-muted-foreground'">
-                    {{ t("ai.globalInstructionsCharCount", { count: promptTemplateCharacterCount(editGlobalInstructions), max: GLOBAL_INSTRUCTIONS_MAX }) }}
-                  </span>
-                  <Button type="button" size="sm" :disabled="!promptTemplateStore.isLoaded || globalInstructionsTooLong() || globalInstructionsSaving" @click="saveGlobalInstructions">
-                    {{ globalInstructionsSaving ? t("common.processing") : t("ai.globalInstructionsSave") }}
-                  </Button>
                 </div>
               </div>
 
@@ -4680,13 +4989,23 @@ onUnmounted(cleanupPreviewEditor);
               <div v-if="aiConfigListMode === 'list'" class="space-y-3">
                 <Separator />
                 <div>
-                  <h3 class="text-sm font-medium">{{ t("ai.maxAgentTurns") }}</h3>
-                  <p class="text-xs text-muted-foreground">{{ t("ai.maxAgentTurnsDescription") }}</p>
+                  <h3 class="text-sm font-medium">
+                    {{ t("ai.maxAgentTurns") }}
+                  </h3>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("ai.maxAgentTurnsDescription") }}
+                  </p>
                 </div>
                 <div class="flex items-center gap-2">
                   <Input v-model.number="editMaxAgentTurns" type="number" :min="MAX_AGENT_TURNS_MIN" :max="MAX_AGENT_TURNS_MAX" step="1" class="h-8 w-32 text-xs" :placeholder="String(MAX_AGENT_TURNS_DEFAULT)" :disabled="!maxAgentTurnsLoaded || maxAgentTurnsSaving" />
                   <span class="text-xs" :class="maxAgentTurnsOutOfRange(editMaxAgentTurns) ? 'text-destructive' : 'text-muted-foreground'">
-                    {{ t("ai.maxAgentTurnsRange", { min: MAX_AGENT_TURNS_MIN, max: MAX_AGENT_TURNS_MAX, default: MAX_AGENT_TURNS_DEFAULT }) }}
+                    {{
+                      t("ai.maxAgentTurnsRange", {
+                        min: MAX_AGENT_TURNS_MIN,
+                        max: MAX_AGENT_TURNS_MAX,
+                        default: MAX_AGENT_TURNS_DEFAULT,
+                      })
+                    }}
                   </span>
                   <div class="flex-1"></div>
                   <Button v-if="maxAgentTurnsLoadError" type="button" size="sm" variant="outline" :disabled="maxAgentTurnsLoading" @click="loadMaxAgentTurnsSetting">
@@ -4698,13 +5017,70 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
               </div>
 
+              <!-- Max Retries (list mode, global) -->
+              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
+                <Separator />
+                <div>
+                  <h3 class="text-sm font-medium">
+                    {{ t("ai.maxRetriesGlobal") }}
+                  </h3>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("ai.maxRetriesGlobalDescription") }}
+                  </p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <Input v-model.number="editMaxRetries" type="number" min="0" max="10" step="1" class="h-8 w-32 text-xs" placeholder="2" :disabled="!maxRetriesLoaded || maxRetriesSaving" />
+                  <span class="text-xs" :class="maxRetriesOutOfRange(editMaxRetries) ? 'text-destructive' : 'text-muted-foreground'">
+                    {{ t("ai.maxRetriesRange", { min: 0, max: 10, default: 2 }) }}
+                  </span>
+                  <div class="flex-1"></div>
+                  <Button v-if="maxRetriesLoadError" type="button" size="sm" variant="outline" :disabled="maxRetriesLoading" @click="loadMaxRetriesSetting">
+                    {{ t("common.retry") }}
+                  </Button>
+                  <Button type="button" size="sm" :disabled="!maxRetriesLoaded || maxRetriesSaving || maxRetriesOutOfRange(editMaxRetries)" @click="saveMaxRetriesSetting">
+                    {{ maxRetriesSaving ? t("common.processing") : t("common.save") }}
+                  </Button>
+                </div>
+              </div>
+
+              <!-- Global Custom Instructions (list mode) -->
+              <div v-if="aiConfigListMode === 'list'" class="space-y-3">
+                <Separator />
+                <div>
+                  <h3 class="text-sm font-medium">
+                    {{ t("ai.globalInstructions") }}
+                  </h3>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("ai.globalInstructionsDescription") }}
+                  </p>
+                </div>
+                <textarea v-model="editGlobalInstructions" class="w-full rounded-md border bg-background px-3 py-2 text-xs font-mono resize-y min-h-[80px]" rows="4" :placeholder="t('ai.globalInstructionsDescription')"></textarea>
+                <div class="flex items-center justify-between">
+                  <span class="text-xs" :class="globalInstructionsTooLong() ? 'text-destructive' : 'text-muted-foreground'">
+                    {{
+                      t("ai.globalInstructionsCharCount", {
+                        count: promptTemplateCharacterCount(editGlobalInstructions),
+                        max: GLOBAL_INSTRUCTIONS_MAX,
+                      })
+                    }}
+                  </span>
+                  <Button type="button" size="sm" :disabled="!promptTemplateStore.isLoaded || globalInstructionsTooLong() || globalInstructionsSaving" @click="saveGlobalInstructions">
+                    {{ globalInstructionsSaving ? t("common.processing") : t("ai.globalInstructionsSave") }}
+                  </Button>
+                </div>
+              </div>
+
               <!-- Prompt Templates Management (list mode) -->
               <div v-if="aiConfigListMode === 'list'" class="space-y-3">
                 <Separator />
                 <div class="flex items-center justify-between">
                   <div>
-                    <h3 class="text-sm font-medium">{{ t("ai.promptTemplates") }}</h3>
-                    <p class="text-xs text-muted-foreground">{{ t("ai.promptTemplatesDescription") }}</p>
+                    <h3 class="text-sm font-medium">
+                      {{ t("ai.promptTemplates") }}
+                    </h3>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("ai.promptTemplatesDescription") }}
+                    </p>
                   </div>
                   <Button v-if="!templateFormOpen" type="button" size="sm" @click="openNewTemplate">
                     <Plus class="mr-1 h-3.5 w-3.5" />
@@ -4716,7 +5092,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div v-if="!templateFormOpen && promptTemplateStore.templates.length > 0" class="space-y-1.5">
                   <div v-for="tpl in promptTemplateStore.templates" :key="tpl.id" class="flex items-center justify-between rounded-md border p-3">
                     <div class="min-w-0 flex-1">
-                      <div class="text-sm font-medium truncate">{{ tpl.name }}</div>
+                      <div class="text-sm font-medium truncate">
+                        {{ tpl.name }}
+                      </div>
                       <div class="text-xs text-muted-foreground truncate">{{ tpl.content.slice(0, 100) }}{{ tpl.content.length > 100 ? "..." : "" }}</div>
                     </div>
                     <div class="flex items-center gap-1 shrink-0 ml-2">
@@ -4727,13 +5105,17 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <div v-if="!templateFormOpen && promptTemplateStore.templates.length === 0" class="rounded-md border border-dashed p-6 text-center">
-                  <p class="text-sm text-muted-foreground">{{ t("ai.promptTemplateNoTemplates") }}</p>
+                  <p class="text-sm text-muted-foreground">
+                    {{ t("ai.promptTemplateNoTemplates") }}
+                  </p>
                 </div>
 
                 <!-- Template Edit Form -->
                 <div v-if="templateFormOpen" class="rounded-md border p-4 space-y-3">
                   <div class="flex items-center justify-between">
-                    <h4 class="text-sm font-medium">{{ templateFormIsNew ? t("ai.promptTemplateNew") : t("ai.promptTemplateEdit") }}</h4>
+                    <h4 class="text-sm font-medium">
+                      {{ templateFormIsNew ? t("ai.promptTemplateNew") : t("ai.promptTemplateEdit") }}
+                    </h4>
                     <Button type="button" variant="ghost" size="sm" @click="closeTemplateForm">
                       <X class="h-3.5 w-3.5" />
                     </Button>
@@ -4742,8 +5124,20 @@ onUnmounted(cleanupPreviewEditor);
                     <Label class="text-xs">{{ t("ai.promptTemplateName") }}</Label>
                     <Input v-model="templateForm.name" class="mt-1 h-8 text-xs" :placeholder="t('ai.promptTemplateNamePlaceholder')" />
                     <div class="flex justify-between mt-0.5">
-                      <p v-if="templateNameTooLong()" class="text-xs text-destructive">{{ t("ai.promptTemplateNameTooLong", { max: PROMPT_TEMPLATE_NAME_MAX }) }}</p>
-                      <p v-else-if="localNameDuplicate()" class="text-xs text-destructive">{{ t("ai.promptTemplateNameExists", { name: templateForm.name.trim() }) }}</p>
+                      <p v-if="templateNameTooLong()" class="text-xs text-destructive">
+                        {{
+                          t("ai.promptTemplateNameTooLong", {
+                            max: PROMPT_TEMPLATE_NAME_MAX,
+                          })
+                        }}
+                      </p>
+                      <p v-else-if="localNameDuplicate()" class="text-xs text-destructive">
+                        {{
+                          t("ai.promptTemplateNameExists", {
+                            name: templateForm.name.trim(),
+                          })
+                        }}
+                      </p>
                       <span v-else></span>
                       <span class="text-xs" :class="templateNameTooLong() ? 'text-destructive' : 'text-muted-foreground'">{{ promptTemplateCharacterCount(templateForm.name) }}/{{ PROMPT_TEMPLATE_NAME_MAX }}</span>
                     </div>
@@ -4752,7 +5146,13 @@ onUnmounted(cleanupPreviewEditor);
                     <Label class="text-xs">{{ t("ai.promptTemplateContent") }}</Label>
                     <textarea v-model="templateForm.content" class="mt-1 w-full rounded-md border bg-background px-3 py-2 text-xs font-mono resize-y min-h-[80px]" rows="4" :placeholder="t('ai.promptTemplateContentPlaceholder')"></textarea>
                     <div class="flex justify-between mt-0.5">
-                      <p v-if="templateContentTooLong()" class="text-xs text-destructive">{{ t("ai.promptTemplateTooLong", { max: PROMPT_TEMPLATE_CONTENT_MAX }) }}</p>
+                      <p v-if="templateContentTooLong()" class="text-xs text-destructive">
+                        {{
+                          t("ai.promptTemplateTooLong", {
+                            max: PROMPT_TEMPLATE_CONTENT_MAX,
+                          })
+                        }}
+                      </p>
                       <span v-else></span>
                       <span class="text-xs" :class="templateContentTooLong() ? 'text-destructive' : 'text-muted-foreground'">{{ promptTemplateCharacterCount(templateForm.content) }}/{{ PROMPT_TEMPLATE_CONTENT_MAX }}</span>
                     </div>
@@ -4773,7 +5173,9 @@ onUnmounted(cleanupPreviewEditor);
                     <ArrowLeft class="mr-1 h-3.5 w-3.5" />
                     {{ t("common.back") }}
                   </Button>
-                  <h3 class="text-sm font-medium">{{ aiEditConfigId ? t("ai.editConfig") : t("ai.addConfig") }}</h3>
+                  <h3 class="text-sm font-medium">
+                    {{ aiEditConfigId ? t("ai.editConfig") : t("ai.addConfig") }}
+                  </h3>
                 </div>
 
                 <!-- Config Name Input -->
@@ -4821,7 +5223,11 @@ onUnmounted(cleanupPreviewEditor);
                         </Badge>
                       </div>
                       <p class="leading-relaxed">
-                        {{ t("ai.cliMcpRequiredDescription", { provider: aiCliProviderLabel }) }}
+                        {{
+                          t("ai.cliMcpRequiredDescription", {
+                            provider: aiCliProviderLabel,
+                          })
+                        }}
                       </p>
                       <p v-if="mcpStatus?.error || mcpStatusError" class="select-text leading-relaxed">
                         {{ mcpStatusError || mcpStatus?.error }}
@@ -4866,7 +5272,9 @@ onUnmounted(cleanupPreviewEditor);
                   <Label class="pt-2 text-right text-xs">Endpoint</Label>
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditEndpoint" :placeholder="aiEndpointPlaceholder" autocomplete="off" class="h-8 text-xs" />
-                    <p v-if="aiEndpointHint" class="text-[11px] text-muted-foreground">{{ aiEndpointHint }}</p>
+                    <p v-if="aiEndpointHint" class="text-[11px] text-muted-foreground">
+                      {{ aiEndpointHint }}
+                    </p>
                   </div>
                 </div>
 
@@ -4875,8 +5283,17 @@ onUnmounted(cleanupPreviewEditor);
                   <Label class="pt-2 text-right text-xs">{{ t("ai.cliPath", { provider: aiCliProviderLabel }) }}</Label>
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditCliPath" autocomplete="off" class="h-8 text-xs" :placeholder="aiCliCommandName" />
-                    <p class="text-[11px] text-muted-foreground">{{ t("ai.cliPathHint", { command: aiCliCommandName, loginCommand: aiCliLoginCommand }) }}</p>
-                    <p v-if="aiCliPathError" class="text-[11px] text-destructive">{{ aiCliPathError }}</p>
+                    <p class="text-[11px] text-muted-foreground">
+                      {{
+                        t("ai.cliPathHint", {
+                          command: aiCliCommandName,
+                          loginCommand: aiCliLoginCommand,
+                        })
+                      }}
+                    </p>
+                    <p v-if="aiCliPathError" class="text-[11px] text-destructive">
+                      {{ aiCliPathError }}
+                    </p>
                   </div>
                 </div>
 
@@ -4897,8 +5314,12 @@ onUnmounted(cleanupPreviewEditor);
                       <Plus class="mr-1 h-3.5 w-3.5" />
                       {{ t("ai.cliEnvAdd") }}
                     </Button>
-                    <p v-if="aiCliEnvError" class="text-[11px] text-destructive">{{ aiCliEnvError }}</p>
-                    <p v-else class="text-[11px] text-muted-foreground">{{ t("ai.cliEnvHint", { provider: aiCliProviderLabel }) }}</p>
+                    <p v-if="aiCliEnvError" class="text-[11px] text-destructive">
+                      {{ aiCliEnvError }}
+                    </p>
+                    <p v-else class="text-[11px] text-muted-foreground">
+                      {{ t("ai.cliEnvHint", { provider: aiCliProviderLabel }) }}
+                    </p>
                   </div>
                 </div>
 
@@ -4906,9 +5327,37 @@ onUnmounted(cleanupPreviewEditor);
                 <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">API</Label>
                   <div class="col-span-2 flex gap-2">
-                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'completions' }" @click="aiSelectApiStyle('completions')">/chat/completions</Button>
-                    <Button size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'responses' }" @click="aiSelectApiStyle('responses')">/responses</Button>
-                    <Button v-if="aiSupportsAnthropicApiStyle" size="sm" variant="outline" class="h-8 flex-1 text-xs" :class="{ 'dbx-choice-selected': aiEditApiStyle === 'anthropic-messages' }" @click="aiSelectApiStyle('anthropic-messages')">/messages</Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      class="h-8 flex-1 text-xs"
+                      :class="{
+                        'dbx-choice-selected': aiEditApiStyle === 'completions',
+                      }"
+                      @click="aiSelectApiStyle('completions')"
+                      >/chat/completions</Button
+                    >
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      class="h-8 flex-1 text-xs"
+                      :class="{
+                        'dbx-choice-selected': aiEditApiStyle === 'responses',
+                      }"
+                      @click="aiSelectApiStyle('responses')"
+                      >/responses</Button
+                    >
+                    <Button
+                      v-if="aiSupportsAnthropicApiStyle"
+                      size="sm"
+                      variant="outline"
+                      class="h-8 flex-1 text-xs"
+                      :class="{
+                        'dbx-choice-selected': aiEditApiStyle === 'anthropic-messages',
+                      }"
+                      @click="aiSelectApiStyle('anthropic-messages')"
+                      >/messages</Button
+                    >
                   </div>
                 </div>
 
@@ -4917,7 +5366,9 @@ onUnmounted(cleanupPreviewEditor);
                   <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
                   <div class="col-span-2">
                     <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
-                    <p class="mt-1 text-xs text-muted-foreground">{{ t("ai.contextWindowHint") }}</p>
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      {{ t("ai.contextWindowHint") }}
+                    </p>
                   </div>
                 </div>
 
@@ -4961,13 +5412,17 @@ onUnmounted(cleanupPreviewEditor);
 
               <div v-if="!isWeb" class="grid gap-3 sm:grid-cols-2">
                 <div class="rounded-md border p-3">
-                  <div class="text-xs font-medium uppercase text-muted-foreground">{{ t("settings.mcpCurrent") }}</div>
+                  <div class="text-xs font-medium uppercase text-muted-foreground">
+                    {{ t("settings.mcpCurrent") }}
+                  </div>
                   <div class="mt-2 font-mono text-sm">
                     {{ mcpStatus?.current_version ? `v${mcpStatus.current_version}` : t("settings.mcpVersionMissing") }}
                   </div>
                 </div>
                 <div class="rounded-md border p-3">
-                  <div class="text-xs font-medium uppercase text-muted-foreground">{{ t("settings.mcpLatest") }}</div>
+                  <div class="text-xs font-medium uppercase text-muted-foreground">
+                    {{ t("settings.mcpLatest") }}
+                  </div>
                   <div class="mt-2 font-mono text-sm">
                     {{ mcpStatus?.latest_version ? `v${mcpStatus.latest_version}` : t("settings.mcpVersionUnknown") }}
                   </div>
@@ -5018,13 +5473,23 @@ onUnmounted(cleanupPreviewEditor);
               </div>
 
               <div class="space-y-2">
-                <p class="text-xs text-muted-foreground">{{ t("settings.mcpConfigOptionsHint") }}</p>
-                <p v-if="mcpPolicyLoadError" class="rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ t("settings.mcpPolicyLoadFailed", { error: mcpPolicyLoadError }) }}</p>
+                <p class="text-xs text-muted-foreground">
+                  {{ t("settings.mcpConfigOptionsHint") }}
+                </p>
+                <p v-if="mcpPolicyLoadError" class="rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-600 dark:text-red-400">
+                  {{
+                    t("settings.mcpPolicyLoadFailed", {
+                      error: mcpPolicyLoadError,
+                    })
+                  }}
+                </p>
                 <McpConnectionScopePicker :connections="mcpSelectableConnections" :allowed-connection-ids="mcpAllowedConnectionIds" :disabled="mcpPolicyControlsDisabled" :busy="mcpPolicyLoading || mcpPolicySaving" @update:allowed-connection-ids="onMcpAllowedConnectionIdsChange" />
                 <div class="space-y-3 rounded-md border bg-muted/20 p-3">
                   <div class="space-y-1">
                     <Label id="mcp-execution-mode-label">{{ t("settings.mcpExecutionMode") }}</Label>
-                    <p class="text-xs text-muted-foreground">{{ t("settings.mcpExecutionModeDescription") }}</p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.mcpExecutionModeDescription") }}
+                    </p>
                   </div>
                   <div class="grid grid-cols-1 p-1 sm:grid-cols-3 gap-2.5" role="radiogroup" aria-labelledby="mcp-execution-mode-label">
                     <Button
@@ -5089,14 +5554,20 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                   <div class="space-y-1.5">
                     <div class="space-y-0.5">
-                      <p class="text-xs font-medium">{{ t("settings.mcpCapabilityTitle") }}</p>
-                      <p class="text-[11px] text-muted-foreground">{{ t("settings.mcpCapabilityDescription") }}</p>
+                      <p class="text-xs font-medium">
+                        {{ t("settings.mcpCapabilityTitle") }}
+                      </p>
+                      <p class="text-[11px] text-muted-foreground">
+                        {{ t("settings.mcpCapabilityDescription") }}
+                      </p>
                     </div>
                     <div class="overflow-x-auto rounded-md border bg-background">
                       <table class="w-full min-w-[36rem] table-fixed text-xs">
                         <thead class="bg-muted/50 text-muted-foreground">
                           <tr>
-                            <th scope="col" class="w-[46%] px-3 py-2 text-left font-medium">{{ t("settings.mcpCapabilityOperation") }}</th>
+                            <th scope="col" class="w-[46%] px-3 py-2 text-left font-medium">
+                              {{ t("settings.mcpCapabilityOperation") }}
+                            </th>
                             <th v-for="column in MCP_EXECUTION_MODE_COLUMNS" :key="column.mode" scope="col" class="px-2 py-2 text-center font-medium">
                               {{ t(column.labelKey) }}
                             </th>
@@ -5104,7 +5575,9 @@ onUnmounted(cleanupPreviewEditor);
                         </thead>
                         <tbody class="divide-y">
                           <tr v-for="row in MCP_CAPABILITY_ROWS" :key="row.labelKey">
-                            <th scope="row" class="px-3 py-2 text-left font-normal leading-relaxed">{{ t(row.labelKey) }}</th>
+                            <th scope="row" class="px-3 py-2 text-left font-normal leading-relaxed">
+                              {{ t(row.labelKey) }}
+                            </th>
                             <td v-for="column in MCP_EXECUTION_MODE_COLUMNS" :key="column.mode" class="px-2 py-2 text-center">
                               <span class="inline-flex items-center justify-center" :class="row[column.mode] ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground/60'">
                                 <Check v-if="row[column.mode]" class="h-4 w-4" aria-hidden="true" />
@@ -5116,7 +5589,9 @@ onUnmounted(cleanupPreviewEditor);
                         </tbody>
                       </table>
                     </div>
-                    <p class="text-[11px] leading-relaxed text-muted-foreground">{{ t("settings.mcpCapabilityAlwaysEnforced") }}</p>
+                    <p class="text-[11px] leading-relaxed text-muted-foreground">
+                      {{ t("settings.mcpCapabilityAlwaysEnforced") }}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -5265,7 +5740,9 @@ onUnmounted(cleanupPreviewEditor);
             <section v-else-if="activeSettingsTab === 'security' && isWeb" class="flex flex-col gap-5 py-2">
               <div class="space-y-3">
                 <Label class="text-base">{{ t("auth.changePassword") }}</Label>
-                <p class="text-sm text-muted-foreground">{{ t("auth.changePasswordDescription") }}</p>
+                <p class="text-sm text-muted-foreground">
+                  {{ t("auth.changePasswordDescription") }}
+                </p>
                 <PasswordInput v-model="oldPassword" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="off" />
                 <PasswordInput v-model="newPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="off" />
                 <PasswordInput v-model="confirmNewPassword" :placeholder="t('auth.confirmPassword')" inputClass="h-9" autocomplete="off" />
@@ -5284,7 +5761,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div class="min-w-0 space-y-1">
                     <Label>{{ t("settings.supportInfoTitle") }}</Label>
-                    <p class="text-sm text-muted-foreground">{{ t("settings.supportInfoDescription") }}</p>
+                    <p class="text-sm text-muted-foreground">
+                      {{ t("settings.supportInfoDescription") }}
+                    </p>
                   </div>
                   <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="appSupportInfoLoading && !appSupportInfo" @click="copyAppSupportInfo">
                     <Loader2 v-if="appSupportInfoLoading && !appSupportInfo" class="mr-1 h-3.5 w-3.5 animate-spin" />
@@ -5295,12 +5774,24 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
                 <div v-if="appSupportInfoRows.length" class="mt-4 grid gap-3 sm:grid-cols-2">
                   <div v-for="row in appSupportInfoRows" :key="row.key" class="min-w-0 rounded-md bg-muted/30 px-3 py-2">
-                    <div class="text-xs font-medium text-muted-foreground">{{ row.label }}</div>
-                    <div class="mt-1 min-w-0 select-text break-words font-mono text-xs text-foreground">{{ row.value }}</div>
+                    <div class="text-xs font-medium text-muted-foreground">
+                      {{ row.label }}
+                    </div>
+                    <div class="mt-1 min-w-0 select-text break-words font-mono text-xs text-foreground">
+                      {{ row.value }}
+                    </div>
                   </div>
                 </div>
-                <p v-else class="mt-4 text-sm text-muted-foreground">{{ t("settings.supportInfoLoading") }}</p>
-                <p v-if="appSupportInfoError" class="mt-3 text-xs text-destructive">{{ t("settings.supportInfoLoadFailed", { message: appSupportInfoError }) }}</p>
+                <p v-else class="mt-4 text-sm text-muted-foreground">
+                  {{ t("settings.supportInfoLoading") }}
+                </p>
+                <p v-if="appSupportInfoError" class="mt-3 text-xs text-destructive">
+                  {{
+                    t("settings.supportInfoLoadFailed", {
+                      message: appSupportInfoError,
+                    })
+                  }}
+                </p>
               </div>
 
               <ChangelogPanel />
@@ -5309,7 +5800,9 @@ onUnmounted(cleanupPreviewEditor);
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div class="min-w-0 space-y-1">
                     <Label>{{ t("settings.updateDownloadSource") }}</Label>
-                    <p class="text-sm text-muted-foreground">{{ t("settings.updateDownloadSourceDescription") }}</p>
+                    <p class="text-sm text-muted-foreground">
+                      {{ t("settings.updateDownloadSourceDescription") }}
+                    </p>
                   </div>
                   <Select :model-value="editUpdateDownloadSource" @update:model-value="onUpdateDownloadSourceChange">
                     <SelectTrigger class="h-9 w-full sm:w-[180px]">
@@ -5365,7 +5858,9 @@ onUnmounted(cleanupPreviewEditor);
                     {{ t("settings.wechatGroup") }}
                     <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
                   </div>
-                  <div class="mt-1 text-sm text-primary">{{ t("settings.wechatGroupInvite") }}</div>
+                  <div class="mt-1 text-sm text-primary">
+                    {{ t("settings.wechatGroupInvite") }}
+                  </div>
                 </button>
                 <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://github.com/t8y2/dbx')">
                   <div class="text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -5517,7 +6012,9 @@ onUnmounted(cleanupPreviewEditor);
           <div class="flex flex-col gap-1.5">
             <Label for="snippet-prefix">{{ t("settings.snippetsPrefix") }}</Label>
             <Input id="snippet-prefix" v-model="snippetForm.prefix" :placeholder="t('settings.snippetsPrefixPlaceholder')" />
-            <p v-if="snippetFormPrefixError" class="text-xs text-destructive">{{ snippetFormPrefixError }}</p>
+            <p v-if="snippetFormPrefixError" class="text-xs text-destructive">
+              {{ snippetFormPrefixError }}
+            </p>
           </div>
           <div class="flex flex-col gap-1.5">
             <Label for="snippet-body">{{ t("settings.snippetsBody") }}</Label>
@@ -5542,7 +6039,11 @@ onUnmounted(cleanupPreviewEditor);
     <DangerConfirmDialog
       v-model:open="templateDeleteConfirmOpen"
       :title="t('ai.promptTemplateDeleteTitle')"
-      :message="t('ai.promptTemplateDeleteConfirm', { name: templateDeleteConfirm?.name ?? '' })"
+      :message="
+        t('ai.promptTemplateDeleteConfirm', {
+          name: templateDeleteConfirm?.name ?? '',
+        })
+      "
       :confirm-label="t('common.delete')"
       @confirm="templateDeleteConfirm && confirmDeleteTemplate(templateDeleteConfirm)"
     />

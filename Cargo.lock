@@ -724,6 +724,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1881,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.44"
+version = "0.4.45"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -1914,6 +1920,7 @@ dependencies = [
  "flate2",
  "font-kit",
  "futures",
+ "httpdate",
  "iana-time-zone",
  "insta",
  "json5",
@@ -1964,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.44"
+version = "0.4.45"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -5978,16 +5985,18 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?branch=master#6bf367c3ac9552f5fcba95659b6ffc1a8a35f494"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.0",
  "byteorder",
  "bytes",
  "fallible-iterator 0.2.0",
  "hmac 0.13.0",
  "md-5",
  "memchr",
+ "pbkdf2 0.12.2",
  "rand 0.10.2",
+ "sha1 0.10.7",
  "sha2 0.11.0",
  "stringprep",
 ]
@@ -5995,7 +6004,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?branch=master#6bf367c3ac9552f5fcba95659b6ffc1a8a35f494"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6"
 dependencies = [
  "bytes",
  "chrono",
@@ -8873,7 +8882,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?branch=master#6bf367c3ac9552f5fcba95659b6ffc1a8a35f494"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6"
 dependencies = [
  "async-trait",
  "byteorder",

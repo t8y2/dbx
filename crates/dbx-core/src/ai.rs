@@ -676,6 +676,29 @@ pub fn stream_data_payload(line: &str) -> Option<&str> {
     None
 }
 
+fn stream_event_name(line: &str) -> Option<&str> {
+    line.trim().strip_prefix("event:").map(str::trim).filter(|event| !event.is_empty())
+}
+
+fn anthropic_stream_error(event_name: Option<&str>, event: &serde_json::Value) -> Option<String> {
+    if event_name != Some("error") && event["type"].as_str() != Some("error") {
+        return None;
+    }
+
+    let error = event.get("error").unwrap_or(event);
+    let error_type = error["type"].as_str().filter(|value| !value.trim().is_empty());
+    let message =
+        error["message"].as_str().or_else(|| event["message"].as_str()).filter(|value| !value.trim().is_empty());
+    let detail = match (error_type, message) {
+        (Some(error_type), Some(message)) => format!("{error_type}: {message}"),
+        (Some(error_type), None) => error_type.to_string(),
+        (None, Some(message)) => message.to_string(),
+        (None, None) => truncate_diagnostic(&event.to_string(), 500),
+    };
+    let category = classify_error(&detail);
+    Some(format!("[{category}] Anthropic stream error ({detail})"))
+}
+
 fn drain_next_stream_line(buffer: &mut Vec<u8>) -> Result<Option<String>, String> {
     let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') else {
         return Ok(None);
@@ -1228,28 +1251,53 @@ fn parse_gemini_model_list_response(data: &serde_json::Value) -> Result<Vec<AiMo
 
 async fn list_claude_models(client: &reqwest::Client, config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
     let endpoint = resolve_model_list_endpoint(config)?;
-    let res = client
-        .get(&endpoint)
-        .headers(claude_headers(config)?)
-        .send()
-        .await
-        .map_err(|e| format!("Claude model list request failed: {e}"))?;
+    let headers = claude_headers(config)?;
+    let mut after_id: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut seen_models = HashSet::new();
+    let mut models = Vec::new();
 
-    let status = res.status();
-    if !status.is_success() {
-        if matches!(config.provider, AiProvider::AnthropicCompatible | AiProvider::Custom)
-            && matches!(status, reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED)
-        {
-            return Err(format!(
-                "[modelDiscoveryUnsupported] The provider does not expose a model list at {endpoint}. Save the provider and enter a model ID manually."
-            ));
+    loop {
+        let mut request = client.get(&endpoint).headers(headers.clone());
+        if let Some(after_id) = after_id.as_deref() {
+            request = request.query(&[("after_id", after_id)]);
         }
-        return Err(categorized_http_error(res, "Claude model list", &config.api_key).await);
+        let res = request.send().await.map_err(|e| format!("Claude model list request failed: {e}"))?;
+
+        let status = res.status();
+        if !status.is_success() {
+            if matches!(config.provider, AiProvider::AnthropicCompatible | AiProvider::Custom)
+                && matches!(status, reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED)
+            {
+                return Err(format!(
+                    "[modelDiscoveryUnsupported] The provider does not expose a model list at {endpoint}. Save the provider and enter a model ID manually."
+                ));
+            }
+            return Err(categorized_http_error(res, "Claude model list", &config.api_key).await);
+        }
+
+        let data: serde_json::Value =
+            res.json().await.map_err(|e| format!("Claude model list returned invalid JSON (HTTP {status}): {e}"))?;
+        for model in parse_model_list_response(&data)? {
+            if seen_models.insert(model.id.clone()) {
+                models.push(model);
+            }
+        }
+
+        if data["has_more"].as_bool() != Some(true) {
+            break;
+        }
+        let next_cursor = data["last_id"]
+            .as_str()
+            .filter(|cursor| !cursor.trim().is_empty())
+            .ok_or_else(|| "Claude model list response has_more=true but last_id is missing".to_string())?;
+        if !seen_cursors.insert(next_cursor.to_string()) {
+            return Err(format!("Claude model list returned repeated last_id cursor: {next_cursor}"));
+        }
+        after_id = Some(next_cursor.to_string());
     }
 
-    let data: serde_json::Value =
-        res.json().await.map_err(|e| format!("Claude model list returned invalid JSON (HTTP {status}): {e}"))?;
-    parse_model_list_response(&data)
+    Ok(models)
 }
 
 async fn list_gemini_models(client: &reqwest::Client, config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
@@ -1787,6 +1835,7 @@ fn collect_gemini_safety_ratings(ratings: Option<&[serde_json::Value]>, output: 
 
 fn probe_stream_payload(
     data: &str,
+    event_name: Option<&str>,
     is_claude: bool,
     is_gemini: bool,
     diagnostics: &mut StreamProbeDiagnostics,
@@ -1799,6 +1848,11 @@ fn probe_stream_payload(
     let parsed: serde_json::Value = serde_json::from_str(data)
         .map_err(|e| format!("AI stream JSON parse error: {e}; payload={}", truncate_diagnostic(data, 240)))?;
     diagnostics.json_events += 1;
+    if is_claude {
+        if let Some(error) = anthropic_stream_error(event_name, &parsed) {
+            return Err(error);
+        }
+    }
     if is_gemini {
         diagnostics.observe_gemini(&parsed);
     }
@@ -1889,18 +1943,29 @@ async fn measure_first_stream_chunk(
 ) -> Result<(u64, String), String> {
     let mut buf = Vec::new();
     let mut diagnostics = StreamProbeDiagnostics::default();
+    let mut event_name: Option<String> = None;
     while let Some(chunk) = byte_stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream read error: {}", e.without_url()))?;
         diagnostics.bytes_received += chunk.len();
         buf.extend_from_slice(&chunk);
 
         while let Some(line) = drain_next_stream_line(&mut buf)? {
+            if line.trim().is_empty() {
+                event_name = None;
+                continue;
+            }
+            if let Some(name) = stream_event_name(&line) {
+                event_name = Some(name.to_string());
+                continue;
+            }
             let Some(data) = stream_data_payload(&line) else { continue };
             if data == "[DONE]" {
                 diagnostics.data_events += 1;
                 return Err(diagnostics.empty_stream_error(is_gemini));
             }
-            if let Some(text) = probe_stream_payload(data, is_claude, is_gemini, &mut diagnostics)? {
+            if let Some(text) =
+                probe_stream_payload(data, event_name.as_deref(), is_claude, is_gemini, &mut diagnostics)?
+            {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
             }
@@ -1910,7 +1975,9 @@ async fn measure_first_stream_chunk(
     if !buf.is_empty() {
         let line = String::from_utf8(buf).map_err(|e| format!("AI stream returned invalid UTF-8: {e}"))?;
         if let Some(data) = stream_data_payload(&line) {
-            if let Some(text) = probe_stream_payload(data, is_claude, is_gemini, &mut diagnostics)? {
+            if let Some(text) =
+                probe_stream_payload(data, event_name.as_deref(), is_claude, is_gemini, &mut diagnostics)?
+            {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
             }
@@ -2075,7 +2142,12 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 }),
                 Err(e) => {
                     let category = classify_error(&e);
-                    Err(format!("[{category}] {e}"))
+                    let category_prefix = format!("[{category}]");
+                    if e.starts_with(&category_prefix) {
+                        Err(e)
+                    } else {
+                        Err(format!("{category_prefix} {e}"))
+                    }
                 }
             }
         }
@@ -2095,6 +2167,8 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("incorrect api key")
         || lower.contains("api key not valid")
         || lower.contains("api_key_invalid")
+        || lower.contains("authentication_error")
+        || lower.contains("permission_error")
     {
         "auth"
     } else if lower.contains("404")
@@ -2102,6 +2176,7 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("model not found")
         || lower.contains("model does not exist")
         || lower.contains("not supported for generatecontent")
+        || lower.contains("not_found_error")
     {
         "modelNotFound"
     } else if lower.contains("429")
@@ -2109,11 +2184,15 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("too many requests")
         || lower.contains("resource_exhausted")
         || lower.contains("quota exceeded")
+        || lower.contains("rate_limit_error")
     {
         "rateLimit"
     } else if lower.contains("timeout") || lower.contains("timed out") || lower.contains("504") {
         "timeout"
-    } else if lower.contains("finishreason=max_tokens") || lower.contains("thinking tokens") {
+    } else if lower.contains("finishreason=max_tokens")
+        || lower.contains("thinking tokens")
+        || lower.contains("request_too_large")
+    {
         "tokenLimit"
     } else if lower.contains("safety filter") || lower.contains("prompt was blocked") {
         "safety"
@@ -2128,6 +2207,8 @@ fn classify_error(msg: &str) -> &'static str {
         || lower.contains("resolve")
         || lower.contains("502")
         || lower.contains("503")
+        || lower.contains("api_error")
+        || lower.contains("overloaded_error")
     {
         "network"
     } else {
@@ -2422,6 +2503,7 @@ async fn stream_claude(
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
+            let mut event_name: Option<String> = None;
 
             loop {
                 tokio::select! {
@@ -2432,6 +2514,14 @@ async fn stream_claude(
 
                         let mut finished = false;
                         while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            if line.trim().is_empty() {
+                                event_name = None;
+                                continue;
+                            }
+                            if let Some(name) = stream_event_name(&line) {
+                                event_name = Some(name.to_string());
+                                continue;
+                            }
                             let Some(data) = stream_data_payload(&line) else { continue };
                             if data == "[DONE]" {
                                 finished = true;
@@ -2439,6 +2529,9 @@ async fn stream_claude(
                             }
 
                             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event) {
+                                    return Err(error);
+                                }
                                 if let Some(text) = claude_stream_text(&event) {
                                     emitted.store(true, std::sync::atomic::Ordering::Relaxed);
                                     on_chunk(AiStreamChunk {
@@ -2959,6 +3052,7 @@ async fn stream_claude_with_tools(
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
+            let mut event_name: Option<String> = None;
             // Track the current content block index and type for tool_use blocks
             let mut current_block_index: Option<u32> = None;
             let mut current_block_type: Option<String> = None;
@@ -2973,6 +3067,14 @@ async fn stream_claude_with_tools(
 
                         let mut finished = false;
                         while let Some(line) = drain_next_stream_line(&mut buf)? {
+                            if line.trim().is_empty() {
+                                event_name = None;
+                                continue;
+                            }
+                            if let Some(name) = stream_event_name(&line) {
+                                event_name = Some(name.to_string());
+                                continue;
+                            }
                             let Some(data) = stream_data_payload(&line) else { continue };
                             if data == "[DONE]" {
                                 finished = true;
@@ -2980,6 +3082,9 @@ async fn stream_claude_with_tools(
                             }
 
                             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event) {
+                                    return Err(error);
+                                }
                                 let event_type = event["type"].as_str().unwrap_or("");
 
                                 match event_type {
@@ -3820,6 +3925,42 @@ mod tests {
         (format!("http://{address}"), server)
     }
 
+    async fn spawn_paginated_model_server() -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let responses = [
+                r#"{"data":[{"id":"vendor/first"},{"id":"vendor/shared"}],"has_more":true,"last_id":"cursor-1"}"#,
+                r#"{"data":[{"id":"vendor/shared"},{"id":"vendor/second"}],"has_more":false,"last_id":"vendor/second"}"#,
+            ];
+            let mut requests = Vec::new();
+
+            for response_body in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let bytes_read = socket.read(&mut chunk).await.unwrap();
+                    assert!(bytes_read > 0, "request ended before headers were complete");
+                    request.extend_from_slice(&chunk[..bytes_read]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+
+            requests
+        });
+
+        (format!("http://{address}"), server)
+    }
+
     async fn spawn_model_discovery_and_stream_server() -> (String, tokio::task::JoinHandle<CapturedJsonRequest>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -3979,6 +4120,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_compatible_connection_test_surfaces_stream_error_once() {
+        let response = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut config = anthropic_compatible_test_request(endpoint).config;
+        config.max_retries = Some(0);
+
+        let error = test_connection_core(&config).await.unwrap_err();
+
+        assert!(error.starts_with("[network] Anthropic stream error"));
+        assert_eq!(error.matches("[network]").count(), 1);
+        assert!(error.contains("overloaded_error: Overloaded"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn anthropic_compatible_connection_test_discovers_a_model_before_messages() {
         let (endpoint, server) = spawn_model_discovery_and_stream_server().await;
         let mut config = anthropic_compatible_test_request(endpoint).config;
@@ -4011,6 +4170,27 @@ mod tests {
         assert!(chunks.last().unwrap().done);
         let captured = server.await.unwrap();
         assert_eq!(captured.body["model"], "gateway-model");
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_stream_surfaces_sse_error_event() {
+        let response = concat!(
+            "event: error\n",
+            "data: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Too many requests\"}}\n\n"
+        );
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut request = anthropic_compatible_test_request(endpoint);
+        request.config.max_retries = Some(0);
+        let chunks = RefCell::new(Vec::new());
+
+        let error = stream("compatible-session", &request, &Notify::new(), |chunk| chunks.borrow_mut().push(chunk))
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with("[rateLimit]"));
+        assert!(error.contains("rate_limit_error: Too many requests"));
+        assert!(chunks.into_inner().is_empty());
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -4047,6 +4227,23 @@ mod tests {
         assert_eq!(calls[0].arguments["schema"], "public");
         assert_eq!(usage.unwrap().input_tokens, 4);
         assert_eq!(server.await.unwrap().body["tools"][0]["name"], "get_tables");
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_tool_stream_surfaces_json_error_event() {
+        let response =
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}\n\n";
+        let (endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
+        let mut request = anthropic_compatible_test_request(endpoint);
+        request.config.max_retries = Some(0);
+
+        let error = stream_with_tools(&request.config, &request, "compatible-session", &[], &Notify::new(), |_| {})
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with("[auth]"));
+        assert!(error.contains("authentication_error: invalid x-api-key"));
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -5375,6 +5572,23 @@ mod tests {
         let request = server.await.unwrap().to_ascii_lowercase();
         assert!(request.starts_with("get /v1/models "));
         assert!(request.contains("authorization: bearer secret"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_compatible_model_list_paginates_and_deduplicates() {
+        let (origin, server) = spawn_paginated_model_server().await;
+        let config = anthropic_compatible_test_request(format!("{origin}/v1/messages")).config;
+
+        let models = list_models_core(&config).await.unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["vendor/first", "vendor/shared", "vendor/second",]
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /v1/models "));
+        assert!(requests[1].starts_with("GET /v1/models?after_id=cursor-1 "));
     }
 
     #[tokio::test]

@@ -1809,6 +1809,24 @@ impl Storage {
             .map(|value| crate::agent_loop::clamp_max_agent_turns(value.min(u32::MAX as u64) as u32))
             .unwrap_or(crate::agent_loop::DEFAULT_MAX_AGENT_TURNS))
     }
+
+    pub async fn save_max_retries(&self, max_retries: u32) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.insert(
+            "max_retries".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(crate::ai::clamp_max_retries(max_retries))),
+        );
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_max_retries(&self) -> Result<u32, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings
+            .get("max_retries")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| crate::ai::clamp_max_retries(value.min(u32::MAX as u64) as u32))
+            .unwrap_or(crate::ai::DEFAULT_MAX_RETRIES))
+    }
 }
 
 // AI Conversations
@@ -4715,6 +4733,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn max_retries_defaults_and_persists_clamped() {
+        let path = temp_db_path("max-retries");
+        let storage = Storage::open(&path).await.unwrap();
+
+        assert_eq!(storage.load_max_retries().await.unwrap(), crate::ai::DEFAULT_MAX_RETRIES);
+
+        storage.save_max_retries(5).await.unwrap();
+        assert_eq!(storage.load_max_retries().await.unwrap(), 5);
+
+        storage.save_max_retries(0).await.unwrap();
+        assert_eq!(storage.load_max_retries().await.unwrap(), 0);
+
+        // Values above the cap are clamped so raw DB edits cannot bypass the limit.
+        storage.save_max_retries(u32::MAX).await.unwrap();
+        assert_eq!(storage.load_max_retries().await.unwrap(), crate::ai::MAX_MAX_RETRIES);
+    }
+
+    #[tokio::test]
     async fn password_hash_preserves_existing_desktop_settings() {
         let path = temp_db_path("password-preserve-desktop-settings");
         let storage = Storage::open(&path).await.unwrap();
@@ -5040,6 +5076,7 @@ mod tests {
                 reasoning_level: AiReasoningLevel::Default,
                 runtime_effort: None,
                 context_window: None,
+                max_retries: None,
                 codex_cli_path: None,
                 codex_cli_env: std::collections::HashMap::new(),
                 claude_code_cli_path: None,

@@ -748,6 +748,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::High,
             runtime_effort: Some(AiEffortSelection::Enum("high".to_string())),
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: HashMap::new(),
             claude_code_cli_path: None,

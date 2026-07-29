@@ -1,4 +1,5 @@
 use crate::token_usage::TokenUsage;
+use chrono::Utc;
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,17 @@ use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{Notify, RwLock};
 use uuid::Uuid;
+
+/// Default number of automatic retries on transient API errors
+/// (rate limits, timeouts, network blips). Users can adjust the limit in
+/// Settings → AI. Set to 0 to disable automatic retries entirely.
+pub const DEFAULT_MAX_RETRIES: u32 = 2;
+pub const MAX_MAX_RETRIES: u32 = 10;
+
+/// Clamp a user-provided max-retries value into the supported range.
+pub fn clamp_max_retries(value: u32) -> u32 {
+    value.clamp(0, MAX_MAX_RETRIES)
+}
 
 // ---------------------------------------------------------------------------
 // Stream cancel registry
@@ -2101,8 +2113,22 @@ fn is_retryable_error(error: &str) -> bool {
 }
 
 /// Extract Retry-After seconds from HTTP response headers.
+///
+/// Supports both integer seconds and HTTP-date (RFC 9110 §10.2.3) formats.
+/// Returns `None` for missing or unparseable values, and 0 for dates in the past.
 fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers.get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok())
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    // Integer seconds (most common in practice).
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(secs);
+    }
+    // HTTP-date (RFC 2822 / IMF-fixdate), e.g. "Wed, 21 Oct 2015 07:28:00 GMT".
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(value) {
+        let now = Utc::now();
+        let delay = dt.signed_duration_since(now).num_seconds().max(0);
+        return Some(delay as u64);
+    }
+    None
 }
 
 /// Parse a Retry-After duration from an error string.
@@ -2127,15 +2153,16 @@ fn maybe_tag_retry_after(headers: &reqwest::header::HeaderMap, mut error: String
 
 /// Execute an async operation with automatic retry on transient errors.
 ///
-/// Uses the `max_retries` field from `config` (defaults to 2 when `None`,
-/// capped at 10).  Exponential back-off starts at 500 ms and doubles each
+/// Uses the `max_retries` field from `config` (defaults to
+/// [`DEFAULT_MAX_RETRIES`] when `None`, capped at [`MAX_MAX_RETRIES`]).
+/// Exponential back-off starts at 500 ms and doubles each
 /// attempt, with a small jitter to spread retries across concurrent tasks.
 async fn with_retry<F, Fut, T>(config: &AiConfig, mut op: F) -> Result<T, String>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
-    let max = config.max_retries.unwrap_or(2).min(10);
+    let max = config.max_retries.unwrap_or(DEFAULT_MAX_RETRIES).min(MAX_MAX_RETRIES);
     let mut last_err: Option<String> = None;
 
     for attempt in 0..=max {
@@ -2188,7 +2215,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
-    let max = config.max_retries.unwrap_or(2).min(10);
+    let max = config.max_retries.unwrap_or(DEFAULT_MAX_RETRIES).min(MAX_MAX_RETRIES);
     let mut last_err: Option<String> = None;
 
     for attempt in 0..=max {
@@ -3699,15 +3726,6 @@ mod tests {
         });
 
         (format!("http://{address}/v1/messages"), server)
-    }
-
-    /// Spawn an HTTP server that returns an error response with a specific
-    /// status code, optional `Retry-After` header, and body.
-    ///
-    /// Returns the URL and the join handle (await it to guarantee the request
-    /// was received before the test ends).
-    async fn spawn_error_server(status: u16, reason: &'static str) -> (String, tokio::task::JoinHandle<()>) {
-        spawn_error_server_with_body(status, reason, "", None).await
     }
 
     async fn spawn_error_server_with_body(
@@ -5639,8 +5657,27 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         assert_eq!(retry_after_secs(&headers), None);
 
+        // Integer seconds (most common).
         headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_static("42"));
         assert_eq!(retry_after_secs(&headers), Some(42));
+
+        // HTTP-date in the future → positive delay.
+        let future = Utc::now() + chrono::Duration::seconds(90);
+        let rfc2822 = future.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_str(&rfc2822).unwrap());
+        let delay = retry_after_secs(&headers).unwrap();
+        // Allow a small clock-drift window.
+        assert!(delay >= 88 && delay <= 92, "expected ~90, got {delay}");
+
+        // HTTP-date in the past → 0.
+        let past = Utc::now() - chrono::Duration::seconds(60);
+        let past_rfc2822 = past.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_str(&past_rfc2822).unwrap());
+        assert_eq!(retry_after_secs(&headers), Some(0));
+
+        // Unparseable value → None.
+        headers.insert(reqwest::header::RETRY_AFTER, reqwest::header::HeaderValue::from_static("not-a-number"));
+        assert_eq!(retry_after_secs(&headers), None);
     }
 
     #[test]

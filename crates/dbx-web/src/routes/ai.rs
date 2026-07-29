@@ -269,9 +269,15 @@ pub async fn delete_ai_conversation(
 // AI complete (non-streaming)
 // ---------------------------------------------------------------------------
 
-pub async fn ai_complete(Json(body): Json<AiCompleteRequest>) -> Result<Json<String>, AppError> {
+pub async fn ai_complete(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<AiCompleteRequest>,
+) -> Result<Json<String>, AppError> {
     reject_web_unsupported_ai_provider(&body.request.config)?;
-    let result = dbx_core::ai::complete(&body.request).await.map_err(AppError::from)?;
+    let mut request = body.request;
+    request.config.max_retries =
+        Some(state.app.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES));
+    let result = dbx_core::ai::complete(&request).await.map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -280,10 +286,15 @@ pub async fn ai_complete(Json(body): Json<AiCompleteRequest>) -> Result<Json<Str
 // ---------------------------------------------------------------------------
 
 pub async fn ai_test_connection(
+    State(state): State<Arc<WebState>>,
     Json(body): Json<AiTestConnectionRequest>,
 ) -> Result<Json<AiTestConnectionResult>, AppError> {
-    reject_web_unsupported_ai_provider(&body.config)?;
-    let result = dbx_core::ai::test_connection_core(&body.config).await.map_err(AppError::from)?;
+    let mut config = body.config;
+    reject_web_unsupported_ai_provider(&config)?;
+    // Merge global max_retries for API-backed providers (CLI providers are
+    // already rejected by reject_web_unsupported_ai_provider).
+    config.max_retries = Some(state.app.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES));
+    let result = dbx_core::ai::test_connection_core(&config).await.map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -315,11 +326,14 @@ pub async fn ai_cancel_stream(Json(body): Json<AiCancelStreamRequest>) -> Result
 // ---------------------------------------------------------------------------
 
 pub async fn ai_stream(
+    State(state): State<Arc<WebState>>,
     Json(body): Json<AiStreamRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
     let session_id = body.session_id;
-    let request = body.request;
+    let mut request = body.request;
     reject_web_unsupported_ai_provider(&request.config)?;
+    request.config.max_retries =
+        Some(state.app.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES));
 
     let cancelled = dbx_core::ai::register_stream(&session_id).await;
     let (tx, rx) = tokio::sync::broadcast::channel::<String>(256);
@@ -380,6 +394,10 @@ pub async fn ai_agent_stream(
         log::warn!("Failed to load max_agent_turns setting, using default: {err}");
         dbx_core::agent_loop::DEFAULT_MAX_AGENT_TURNS
     });
+    let max_retries = state.app.storage.load_max_retries().await.unwrap_or_else(|err| {
+        log::warn!("Failed to load max_retries setting, using default: {err}");
+        dbx_core::ai::DEFAULT_MAX_RETRIES
+    });
     // Reject the confirmed-write grant when the connection or database changed
     // between the user's confirmation and this backend request (defense-in-depth).
     let (allow_write_sql, confirmed_write_sql) = dbx_core::agent_tools::verify_confirmed_target(
@@ -409,7 +427,8 @@ pub async fn ai_agent_stream(
     };
 
     let sid = session_id.clone();
-    let req_config = request.config;
+    let mut req_config = request.config;
+    req_config.max_retries = Some(max_retries);
     let req_system_prompt = request.system_prompt;
     let req_messages = request.messages;
     let req_task_contract = request.task_contract;
@@ -475,6 +494,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,

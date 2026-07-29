@@ -1815,6 +1815,10 @@ export default withEnglishFallback({
     contextWindow: "Ventana de contexto",
     contextWindowAuto: "Auto (detectar desde el nombre del modelo)",
     contextWindowHint: "Tokens. Déjalo vacío para detección automática. Configúralo manualmente para modelos locales/personalizados.",
+    maxRetriesGlobal: "Reintentos máximos",
+    maxRetriesGlobalDescription: "Número de reintentos automáticos en errores transitorios de API (límite de tasa, timeout, fallos de red). Se aplica a todos los proveedores de IA por API. Los proveedores CLI (claude-code, codex, pi) no se ven afectados.",
+    maxRetriesRange: "{min}–{max}, predeterminado {default}",
+    maxRetriesSaved: "Reintentos máximos guardados",
     codexCliPath: "Ruta de Codex CLI",
     codexCliPathHint: "Déjalo vacío para usar codex desde PATH. Inicia sesión por separado con codex login.",
     actions: {

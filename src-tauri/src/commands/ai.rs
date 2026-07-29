@@ -6,8 +6,17 @@ use super::connection::AppState;
 pub use dbx_core::ai::*;
 
 #[tauri::command]
-pub async fn ai_test_connection(config: AiConfig) -> Result<AiTestConnectionResult, String> {
-    let config = resolve_cli_provider_config(config);
+pub async fn ai_test_connection(
+    state: State<'_, Arc<AppState>>,
+    config: AiConfig,
+) -> Result<AiTestConnectionResult, String> {
+    let mut config = resolve_cli_provider_config(config);
+    // Merge global max_retries for API-backed providers.  CLI providers are
+    // unaffected because they go through their own executable, not
+    // with_retry / with_stream_retry.
+    if !is_cli_provider(&config.provider) {
+        config.max_retries = Some(state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES));
+    }
     dbx_core::ai::test_connection_core(&config).await
 }
 
@@ -67,12 +76,31 @@ pub async fn load_ai_chat_selection(state: State<'_, Arc<AppState>>) -> Result<O
 }
 
 #[tauri::command]
-pub async fn ai_complete(request: AiCompletionRequest) -> Result<String, String> {
+pub async fn ai_complete(state: State<'_, Arc<AppState>>, request: AiCompletionRequest) -> Result<String, String> {
+    let mut request = request;
+    // Merge global max_retries for API-backed providers.
+    if !is_cli_provider(&request.config.provider) {
+        request.config.max_retries =
+            Some(state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES));
+    }
     dbx_core::ai::complete(&request).await
 }
 
 #[tauri::command]
-pub async fn ai_stream(app: AppHandle, session_id: String, request: AiCompletionRequest) -> Result<(), String> {
+pub async fn ai_stream(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    request: AiCompletionRequest,
+) -> Result<(), String> {
+    let mut request = request;
+    // Merge global max_retries for API-backed providers.  CLI providers are
+    // unaffected because they go through their own executable, not
+    // with_retry / with_stream_retry.
+    if !is_cli_provider(&request.config.provider) {
+        request.config.max_retries =
+            Some(state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES));
+    }
     let cancelled = dbx_core::ai::register_stream(&session_id).await;
 
     let result = dbx_core::ai::stream(&session_id, &request, &cancelled, |chunk| {
@@ -110,7 +138,14 @@ pub async fn ai_agent_stream(
     confirmed_connection_id: Option<String>,
     confirmed_database: Option<String>,
 ) -> Result<String, String> {
-    let request = resolve_cli_provider_request(request);
+    let mut request = resolve_cli_provider_request(request);
+    // Merge global max_retries for API-backed providers.  CLI providers are
+    // unaffected because they go through their own executable, not
+    // with_retry / with_stream_retry.
+    if !is_cli_provider(&request.config.provider) {
+        request.config.max_retries =
+            Some(state.storage.load_max_retries().await.unwrap_or(dbx_core::ai::DEFAULT_MAX_RETRIES));
+    }
 
     let parsed_db_type: DatabaseType =
         serde_json::from_str(&format!("\"{}\"", db_type)).map_err(|_| format!("Unknown database type: {db_type}"))?;

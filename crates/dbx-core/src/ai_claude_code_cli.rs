@@ -573,6 +573,7 @@ mod tests {
             reasoning_level: AiReasoningLevel::Default,
             runtime_effort: None,
             context_window: None,
+            max_retries: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
             claude_code_cli_path: None,

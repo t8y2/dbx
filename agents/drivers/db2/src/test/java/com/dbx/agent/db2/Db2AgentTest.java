@@ -3,6 +3,8 @@ package com.dbx.agent.db2;
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
 import com.dbx.agent.test.JdbcMetadataSqlFake;
 import com.dbx.agent.test.TestSupport;
@@ -12,6 +14,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.Arrays;
@@ -91,6 +94,70 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals(Arrays.asList("param:1=APP", "param:2=%S%Y%N%C%"), JdbcMetadataSqlFake.statements.subList(1, 3));
     }
 
+    @Test
+    void constrainedTableMetadataPassesRemarks() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            row("TABNAME", "MY_TABLE", "TYPE", "T", "REMARKS", "Test table comment")
+        ));
+
+        List<TableInfo> tables = agent.listTables("APP",
+            new MetadataListConstraints(null, 25, null, List.of("TABLE")));
+
+        assertEquals(1, tables.size());
+        assertEquals("MY_TABLE", tables.get(0).getName());
+        assertEquals("TABLE", tables.get(0).getTable_type());
+        assertEquals("Test table comment", tables.get(0).getComment());
+    }
+
+    @Test
+    void constrainedObjectMetadataPassesRemarks() {
+        Db2Agent agent = new Db2Agent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            row("OBJECT_NAME", "MY_VIEW", "OBJECT_TYPE", "VIEW", "OBJECT_COMMENT", "Test view comment")
+        ));
+
+        List<ObjectInfo> objects = agent.listObjects("APP",
+            new MetadataListConstraints("my", 10, null, List.of("VIEW")));
+
+        assertEquals(1, objects.size());
+        assertEquals("MY_VIEW", objects.get(0).getName());
+        assertEquals("VIEW", objects.get(0).getObject_type());
+        assertEquals("Test view comment", objects.get(0).getComment());
+    }
+
+    private static Connection preparedConnection(Map<String, Object>... rows) {
+        final ResultSet resultSet = rows(rows);
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("prepareStatement".equals(name)) {
+                    return proxy(PreparedStatement.class, new MethodHandler() {
+                        @Override
+                        public Object handle(Method stmtMethod, Object[] stmtArgs) {
+                            String m = stmtMethod.getName();
+                            if ("setString".equals(m) || "setObject".equals(m) || "setInt".equals(m)) {
+                                return null;
+                            }
+                            if ("executeQuery".equals(m)) {
+                                return resultSet;
+                            }
+                            if ("close".equals(m)) {
+                                return null;
+                            }
+                            return defaultValue(stmtMethod.getReturnType());
+                        }
+                    });
+                }
+                if ("isClosed".equals(name)) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
     private static Connection connection(AtomicReference<String> executedSql, ResultSet resultSet) {
         Statement statement = proxy(Statement.class, new MethodHandler() {
             @Override
@@ -131,8 +198,13 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
                     return index < rows.length;
                 }
                 if ("getString".equals(name)) {
-                    Object key = args[0] instanceof Number ? rows[index].keySet().iterator().next() : args[0];
-                    Object value = rows[index].get(key);
+                    if (args[0] instanceof Number) {
+                        int colIndex = ((Number) args[0]).intValue() - 1;
+                        String key = rows[index].keySet().stream().skip(colIndex).findFirst().orElse(null);
+                        Object value = rows[index].get(key);
+                        return value == null ? null : String.valueOf(value);
+                    }
+                    Object value = rows[index].get(args[0]);
                     return value == null ? null : String.valueOf(value);
                 }
                 if ("close".equals(name)) {

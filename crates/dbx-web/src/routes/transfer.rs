@@ -14,6 +14,34 @@ use crate::state::WebState;
 
 const COMPLETED_TRANSFER_CHANNEL_TTL: Duration = Duration::from_secs(60);
 
+/// Resolve the database parameter for pool creation during transfer.
+///
+/// When a Doris/StarRocks external catalog is selected, the database name
+/// lives inside that catalog and does not exist in the default/internal
+/// catalog.  Passing `None` for the database produces a bare MySQL pool
+/// that addresses objects via 3-part qualified names without needing
+/// `USE <database>`.
+///
+/// Returns `None` when the catalog is an external Doris/StarRocks catalog,
+/// and `Some(database)` in all other cases (preserving the original behavior).
+fn transfer_db_for_catalog<'a>(
+    catalog: Option<&'a str>,
+    db_type: &dbx_core::models::connection::DatabaseType,
+    database: &'a str,
+) -> Option<&'a str> {
+    let catalog = catalog?;
+    let catalog = catalog.trim();
+    if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") {
+        return Some(database);
+    }
+    match db_type {
+        dbx_core::models::connection::DatabaseType::Doris | dbx_core::models::connection::DatabaseType::StarRocks => {
+            None
+        }
+        _ => Some(database),
+    }
+}
+
 fn send_transfer_progress(channel: &TransferProgressChannel, progress: &transfer::TransferProgress) {
     if let Ok(json) = serde_json::to_string(progress) {
         let kind = if progress.terminal {
@@ -116,8 +144,14 @@ pub async fn start_transfer(
             }
         };
 
-        let source_pool_key = match app.get_or_create_pool(&req.source_connection_id, Some(&req.source_database)).await
-        {
+        // When a Doris/StarRocks external catalog is selected, the database
+        // belongs to that catalog and may not exist in the default catalog.
+        // Pass None for the database so the pool connects without USE <db>.
+        // All SQL uses 3-part qualified names (catalog.database.table).
+        let source_db = transfer_db_for_catalog(req.source_catalog.as_deref(), &source_db_type, &req.source_database);
+        let target_db = transfer_db_for_catalog(req.target_catalog.as_deref(), &target_db_type, &req.target_database);
+
+        let source_pool_key = match app.get_or_create_pool(&req.source_connection_id, source_db).await {
             Ok(k) => k,
             Err(e) => {
                 send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
@@ -125,8 +159,7 @@ pub async fn start_transfer(
                 return;
             }
         };
-        let target_pool_key = match app.get_or_create_pool(&req.target_connection_id, Some(&req.target_database)).await
-        {
+        let target_pool_key = match app.get_or_create_pool(&req.target_connection_id, target_db).await {
             Ok(k) => k,
             Err(e) => {
                 send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));

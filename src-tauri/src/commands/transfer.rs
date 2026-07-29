@@ -12,6 +12,34 @@ fn emit_progress(app: &AppHandle, progress: TransferProgress) {
     let _ = app.emit("transfer-progress", progress);
 }
 
+/// Resolve the database parameter for pool creation during transfer.
+///
+/// When a Doris/StarRocks external catalog is selected, the database name
+/// lives inside that catalog and does not exist in the default/internal
+/// catalog.  Passing `None` for the database produces a bare MySQL pool
+/// that addresses objects via 3-part qualified names
+/// (`<catalog>.<database>.<table>`) without needing `USE <database>`.
+///
+/// Returns `None` when the catalog is an external Doris/StarRocks catalog,
+/// and `Some(database)` in all other cases (preserving the original behavior).
+fn transfer_db_for_catalog<'a>(
+    catalog: Option<&'a str>,
+    db_type: &dbx_core::models::connection::DatabaseType,
+    database: &'a str,
+) -> Option<&'a str> {
+    let catalog = catalog?;
+    let catalog = catalog.trim();
+    if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") {
+        return Some(database);
+    }
+    match db_type {
+        dbx_core::models::connection::DatabaseType::Doris | dbx_core::models::connection::DatabaseType::StarRocks => {
+            None
+        }
+        _ => Some(database),
+    }
+}
+
 #[tauri::command]
 pub async fn start_transfer(
     app: AppHandle,
@@ -24,16 +52,26 @@ pub async fn start_transfer(
     // Reject transfer early if the target connection is read-only — writing to it is inherently required
     ensure_connection_writable(&state, &request.target_connection_id, "Transfer").await?;
 
+    use dbx_core::models::connection::DatabaseType;
+
     // Validate connections exist
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_target_table_names(&request)?;
 
+    // When a Doris/StarRocks external catalog is selected, the database name
+    // belongs to that catalog and does not exist in the default catalog — so
+    // pass None for the database so the pool connects without USE <database>.
+    // All SQL in the transfer pipeline uses 3-part qualified names
+    // (catalog.database.table) and does not rely on a session default.
+    let source_db =
+        transfer_db_for_catalog(request.source_catalog.as_deref(), &source_db_type, &request.source_database);
+    let target_db =
+        transfer_db_for_catalog(request.target_catalog.as_deref(), &target_db_type, &request.target_database);
+
     // Ensure pools
-    let source_pool_key =
-        state.get_or_create_pool(&request.source_connection_id, Some(&request.source_database)).await?;
-    let target_pool_key =
-        state.get_or_create_pool(&request.target_connection_id, Some(&request.target_database)).await?;
+    let source_pool_key = state.get_or_create_pool(&request.source_connection_id, source_db).await?;
+    let target_pool_key = state.get_or_create_pool(&request.target_connection_id, target_db).await?;
 
     tokio::spawn(async move {
         // Sort tables by FK dependency so referenced tables are transferred first.

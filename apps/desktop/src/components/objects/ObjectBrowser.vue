@@ -55,7 +55,7 @@ import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDia
 import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
-import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
@@ -78,7 +78,7 @@ import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRe
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardSourceContext, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
@@ -1914,12 +1914,39 @@ function canPasteTableClipboard(): boolean {
   return clipboard?.kind === "table-copy" && tableClipboardMatchesTarget(clipboard.tables, pasteTableTargetContext());
 }
 
+function canTransferTableClipboard(): boolean {
+  const clipboard = connectionStore.treeClipboard;
+  const target = pasteTableTargetContext();
+  if (clipboard?.kind !== "table-copy" || clipboard.tables.length === 0 || props.connection.read_only) return false;
+  const source = tableClipboardSourceContext(clipboard.tables);
+  const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
+  return !!source && !!sourceConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(props.connection.db_type) && !tableClipboardMatchesTarget(clipboard.tables, target);
+}
+
 function pasteTableTargetContext(): TableClipboardContext {
   return {
     connectionId: props.connection.id,
     database: props.database,
     schema: selectedSchema.value,
   };
+}
+
+function openTransferFromTableClipboard(): boolean {
+  const clipboard = connectionStore.treeClipboard;
+  const target = pasteTableTargetContext();
+  if (clipboard?.kind !== "table-copy") return false;
+  const source = tableClipboardSourceContext(clipboard.tables);
+  if (!source || tableClipboardMatchesTarget(clipboard.tables, target)) return false;
+  connectionStore.transferSource = {
+    connectionId: source.connectionId,
+    database: source.database,
+    schema: source.schema ?? undefined,
+    tables: clipboard.tables.map((entry) => entry.tableName),
+    targetConnectionId: target.connectionId,
+    targetDatabase: target.database,
+    targetSchema: target.schema ?? undefined,
+  };
+  return true;
 }
 
 function copySingleTableToClipboard(row: ObjectBrowserRow) {
@@ -1939,6 +1966,10 @@ function copySingleTableToClipboard(row: ObjectBrowserRow) {
 
 function openPasteTableDialog() {
   const clipboard = connectionStore.treeClipboard;
+  if (canTransferTableClipboard()) {
+    openTransferFromTableClipboard();
+    return;
+  }
   if (!canPasteTableClipboard() || clipboard?.kind !== "table-copy") {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
@@ -1962,7 +1993,7 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
     return;
   }
   if (eventTargetAllowsAppClipboardShortcut(event, "v")) {
-    if (!canPasteTableClipboard()) return;
+    if (!canPasteTableClipboard() && !canTransferTableClipboard()) return;
     event.preventDefault();
     event.stopPropagation();
     openPasteTableDialog();

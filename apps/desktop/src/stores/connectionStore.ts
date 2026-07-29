@@ -359,7 +359,15 @@ export const useConnectionStore = defineStore("connection", () => {
   const completionMetadataLimiter = new MetadataTaskLimiter(COMPLETION_METADATA_CONCURRENCY, (event) => {
     console.debug("[DBX][completion-metadata:limit]", event);
   });
-  const transferSource = ref<{ connectionId: string; database: string } | null>(null);
+  const transferSource = ref<{
+    connectionId: string;
+    database: string;
+    schema?: string;
+    tables?: string[];
+    targetConnectionId?: string;
+    targetDatabase?: string;
+    targetSchema?: string;
+  } | null>(null);
   const schemaDiffSource = ref<{ connectionId: string; database: string; schema?: string } | null>(null);
   const dataCompareSource = ref<{
     connectionId: string;

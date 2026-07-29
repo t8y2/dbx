@@ -85,6 +85,7 @@ import {
   supportsTableImport,
   supportsTableTruncate,
   supportsTableStructureEditing,
+  supportsTransfer,
   usesTreeSchemaMode,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
@@ -123,7 +124,7 @@ import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFor
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableDataCopyColumnOptions, type TableClipboardContext } from "@/lib/table/tableClipboard";
+import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardSourceContext, tableDataCopyColumnOptions, type TableClipboardContext } from "@/lib/table/tableClipboard";
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { connectionSupportsDatabaseUserAdmin, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
@@ -831,6 +832,34 @@ function canPasteTreeClipboardToCurrentNode(): boolean {
   return clipboard?.kind === "table-copy" && tableClipboardMatchesTarget(clipboard.tables, pasteTableTargetContext());
 }
 
+function canTransferTreeClipboardToCurrentNode(): boolean {
+  const clipboard = connectionStore.treeClipboard;
+  const target = pasteTableTargetContext();
+  if (clipboard?.kind !== "table-copy" || !target || clipboard.tables.length === 0) return false;
+  const source = tableClipboardSourceContext(clipboard.tables);
+  const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
+  const targetConfig = connectionStore.getConfig(target.connectionId);
+  return !!source && !!sourceConfig && !!targetConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(targetConfig.db_type) && !targetConfig.read_only && !tableClipboardMatchesTarget(clipboard.tables, target);
+}
+
+function openTransferFromTreeClipboard(): boolean {
+  const clipboard = connectionStore.treeClipboard;
+  const target = pasteTableTargetContext();
+  if (clipboard?.kind !== "table-copy" || !target) return false;
+  const source = tableClipboardSourceContext(clipboard.tables);
+  if (!source || tableClipboardMatchesTarget(clipboard.tables, target)) return false;
+  connectionStore.transferSource = {
+    connectionId: source.connectionId,
+    database: source.database,
+    schema: source.schema ?? undefined,
+    tables: clipboard.tables.map((entry) => entry.tableName),
+    targetConnectionId: target.connectionId,
+    targetDatabase: target.database,
+    targetSchema: target.schema ?? undefined,
+  };
+  return true;
+}
+
 function requestPasteTreeClipboard(): boolean {
   claimTreeItemDialogOwnership();
   ensureDangerDialogRouting();
@@ -846,7 +875,9 @@ function requestPasteTreeClipboard(): boolean {
       .catch((e: any) => toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000));
     return true;
   }
-  if (clipboard?.kind !== "table-copy" || !canPasteTreeClipboardToCurrentNode()) return false;
+  if (clipboard?.kind !== "table-copy") return false;
+  if (canTransferTreeClipboardToCurrentNode()) return openTransferFromTreeClipboard();
+  if (!canPasteTreeClipboardToCurrentNode()) return false;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
     sourceName: entry.tableName,
@@ -2944,7 +2975,15 @@ async function confirmPasteTable() {
 
 function openPasteTableDialog() {
   const clipboard = connectionStore.treeClipboard;
-  if (clipboard?.kind !== "table-copy" || !canPasteTreeClipboardToCurrentNode()) {
+  if (clipboard?.kind !== "table-copy") {
+    toast(t("contextMenu.noTableToPaste"), 2000);
+    return;
+  }
+  if (canTransferTreeClipboardToCurrentNode()) {
+    openTransferFromTreeClipboard();
+    return;
+  }
+  if (!canPasteTreeClipboardToCurrentNode()) {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
   }
@@ -4282,7 +4321,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
       if (canOpenTableImport.value) {
         items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
       }
-      if (canPasteTreeClipboardToCurrentNode()) {
+      if (canPasteTreeClipboardToCurrentNode() || canTransferTreeClipboardToCurrentNode()) {
         items.push({ label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard });
       }
     }

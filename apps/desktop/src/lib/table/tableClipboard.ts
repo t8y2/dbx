@@ -26,6 +26,20 @@ export function tableClipboardMatchesTarget(entries: TableClipboardContext[], ta
   return !!target && entries.length > 0 && entries.every((entry) => tableClipboardEntryMatchesTarget(entry, target));
 }
 
+/**
+ * Returns the common source context for a copied table collection. Cross-database
+ * transfer can only use one source connection/database/schema per request.
+ */
+export function tableClipboardSourceContext(entries: TableClipboardContext[]): TableClipboardContext | null {
+  const source = entries[0];
+  if (!source || !entries.every((entry) => tableClipboardEntryMatchesTarget(entry, source))) return null;
+  return {
+    connectionId: source.connectionId,
+    database: source.database,
+    schema: source.schema,
+  };
+}
+
 export function supportsWholeRowTableDataCopy(databaseType: DatabaseType | undefined): boolean {
   return !!databaseType;
 }

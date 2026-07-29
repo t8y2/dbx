@@ -118,6 +118,26 @@ pub fn quote_identifier(name: &str, db_type: &DatabaseType) -> String {
     quote_transfer_identifier(name, db_type)
 }
 
+/// Resolve an optional catalog for external-catalog routing in the transfer
+/// pipeline.  Returns `Some(catalog)` only when:
+///   - the catalog is non-empty and not `"internal"`, AND
+///   - the database type is Doris/StarRocks (the only engines that support
+///     external catalogs).
+/// Used by `resolve_transfer_target_table_name` and the source-DDL path
+/// to dispatch to the 3-part catalog-aware metadata functions instead of
+/// the default-catalog lookup.
+fn resolve_external_transfer_catalog<'a>(catalog: Option<&'a str>, db_type: &DatabaseType) -> Option<&'a str> {
+    let catalog = catalog?;
+    let catalog = catalog.trim();
+    if catalog.is_empty() || catalog.eq_ignore_ascii_case("internal") {
+        return None;
+    }
+    match db_type {
+        DatabaseType::Doris | DatabaseType::StarRocks => Some(catalog),
+        _ => None,
+    }
+}
+
 pub fn qualified_table(table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> String {
     // Only use 3-part catalog-qualified names for Doris/StarRocks external catalogs.
     let effective_catalog = catalog.and_then(|c| {
@@ -211,7 +231,7 @@ async fn resolve_transfer_target_table_name(
     target_pool_key: &str,
     target_db_type: &DatabaseType,
     _source_catalog: Option<&str>,
-    _target_catalog: Option<&str>,
+    target_catalog: Option<&str>,
 ) -> ResolvedTransferTargetTable {
     let requested_name = request.target_table_name(source_table);
     if is_mongodb_transfer_type(target_db_type) {
@@ -220,22 +240,45 @@ async fn resolve_transfer_target_table_name(
 
     let allow_case_insensitive_match =
         target_table_lookup_is_case_insensitive(state, target_pool_key, target_db_type).await;
-    let tables = crate::schema::list_tables_core(
-        state,
-        &request.target_connection_id,
-        &request.target_database,
-        &request.target_schema,
-        Some(&requested_name),
-        Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap_or_else(|error| {
-        log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
-        Vec::new()
-    });
+
+    // Route through the catalog-aware path when targeting an external
+    // Doris/StarRocks catalog — otherwise the lookup runs against the
+    // default / internal catalog and can miss or misidentify the table.
+    let tables = if let Some(catalog) = resolve_external_transfer_catalog(target_catalog, target_db_type) {
+        crate::schema::list_doris_catalog_tables_core(
+            state,
+            &request.target_connection_id,
+            &catalog,
+            &request.target_database,
+            Some(&requested_name),
+            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            log::debug!("[transfer] failed to resolve target table metadata for {requested_name} in catalog '{catalog}': {error}");
+            Vec::new()
+        })
+    } else {
+        crate::schema::list_tables_core(
+            state,
+            &request.target_connection_id,
+            &request.target_database,
+            &request.target_schema,
+            Some(&requested_name),
+            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
+            Vec::new()
+        })
+    };
 
     if let Some(existing_name) =
         existing_transfer_target_table_name(&requested_name, &tables, allow_case_insensitive_match)
@@ -4288,22 +4331,44 @@ where
     log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
 
     // Fetch source table comment
-    let table_comment: Option<String> = crate::schema::list_tables_core(
-        state,
-        &request.source_connection_id,
-        &request.source_database,
-        &request.source_schema,
-        Some(table),
-        Some(1),
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .next()
-    .and_then(|t| t.comment);
+    // Route through the catalog-aware path for Doris/StarRocks external catalogs
+    // so the comment comes from the selected catalog, not the default one.
+    let table_comment: Option<String> =
+        if let Some(catalog) = resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type) {
+            crate::schema::list_doris_catalog_tables_core(
+                state,
+                &request.source_connection_id,
+                catalog,
+                &request.source_database,
+                Some(table),
+                Some(1),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .and_then(|t| t.comment)
+        } else {
+            crate::schema::list_tables_core(
+                state,
+                &request.source_connection_id,
+                &request.source_database,
+                &request.source_schema,
+                Some(table),
+                Some(1),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .and_then(|t| t.comment)
+        };
 
     let source_indexes =
         if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
@@ -4362,27 +4427,58 @@ where
             let can_reuse_source_ddl =
                 can_reuse_source_table_ddl(source_db_type, target_db_type, preserves_target_table_name);
             let ddl = if can_reuse_source_ddl {
-                let source_ddl = crate::schema::get_table_ddl_core(
-                    state,
-                    &request.source_connection_id,
-                    &request.source_database,
-                    &request.source_schema,
-                    table,
-                    None,
-                )
-                .await
-                .unwrap_or_else(|_| {
-                    generate_create_table_ddl(
-                        &columns,
-                        &target_table,
+                let source_ddl = if let Some(catalog) =
+                    resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type)
+                {
+                    // Doris/StarRocks external catalog: read DDL directly via
+                    // SHOW CREATE TABLE catalog.database.table using the
+                    // existing source pool (bare MySQL — addresses any catalog).
+                    let pool = {
+                        let connections = state.connections.read().await;
+                        let pool =
+                            connections.get(source_pool_key).ok_or_else(|| "Source pool not found".to_string())?;
+                        let PoolKind::Mysql(p, _) = pool else {
+                            return Err("Source pool must be MySQL-family for catalog DDL".to_string());
+                        };
+                        p.clone()
+                    };
+                    db::doris::get_catalog_table_ddl(&pool, catalog, &request.source_database, table).await
+                        .unwrap_or_else(|err| {
+                            log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
+                            generate_create_table_ddl(
+                                &columns,
+                                &target_table,
+                                &request.source_schema,
+                                &request.target_schema,
+                                target_db_type,
+                                source_db_type,
+                                table_comment.as_deref(),
+                                request.target_catalog.as_deref(),
+                            )
+                        })
+                } else {
+                    crate::schema::get_table_ddl_core(
+                        state,
+                        &request.source_connection_id,
+                        &request.source_database,
                         &request.source_schema,
-                        &request.target_schema,
-                        target_db_type,
-                        source_db_type,
-                        table_comment.as_deref(),
-                        request.target_catalog.as_deref(),
+                        table,
+                        None,
                     )
-                });
+                    .await
+                    .unwrap_or_else(|_| {
+                        generate_create_table_ddl(
+                            &columns,
+                            &target_table,
+                            &request.source_schema,
+                            &request.target_schema,
+                            target_db_type,
+                            source_db_type,
+                            table_comment.as_deref(),
+                            request.target_catalog.as_deref(),
+                        )
+                    })
+                };
                 rewrite_transfer_source_table_ddl(
                     &source_ddl,
                     &request.source_schema,

@@ -288,6 +288,11 @@ test("defaults sidebar table search to disabled and preserves saved booleans", (
   assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: true }).sidebarTableSearchEnabled, true);
   assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: false }).sidebarTableSearchEnabled, false);
   assert.equal(normalizeEditorSettings({ sidebarTableSearchEnabled: "yes" as any }).sidebarTableSearchEnabled, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal, true);
+  assert.equal(normalizeEditorSettings({}).sidebarTableSearchLocal, true);
+  assert.equal(normalizeEditorSettings({ sidebarTableSearchLocal: false }).sidebarTableSearchLocal, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal, false);
+  assert.equal(normalizeEditorSettings({ sidebarGlobalSearchLocal: true }).sidebarGlobalSearchLocal, true);
 });
 
 test("defaults shortcut settings", () => {

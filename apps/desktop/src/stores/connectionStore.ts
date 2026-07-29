@@ -1877,13 +1877,79 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[]) {
-    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(children)).catch(() => undefined);
+    const existing = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
+    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(children, Date.now(), existing?.tableSearchIndex)).catch(() => undefined);
+  }
+
+  function sidebarTableSearchCacheKey(parent: TreeNode): string | null {
+    if (!parent.connectionId || !parent.database) return null;
+    if (parent.type === "group-tables") return objectGroupCacheKey(parent);
+    if (parent.type !== "database" && parent.type !== "schema" && parent.type !== "linked-server-schema") return null;
+    const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
+    return schemaCacheKey(parent.connectionId, parent.database, parent.schema || "", simpleObjectDisplay ? "objects-simple-v6" : "objects-grouped-v7");
+  }
+
+  async function loadSidebarTableSearchIndex(parentNodeId: string): Promise<TableInfo[] | null> {
+    const parent = findNode(treeNodes.value, parentNodeId);
+    if (!parent) return null;
+    const cacheKey = sidebarTableSearchCacheKey(parent);
+    if (!cacheKey) return null;
+    const decoded = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
+    const index = decoded?.tableSearchIndex;
+    if (!index) return null;
+    return index.entries.map((entry) => ({ name: entry.name, table_type: entry.tableType }));
+  }
+
+  async function refreshSidebarTableSearchIndex(parentNodeId: string): Promise<TableInfo[]> {
+    const parent = findNode(treeNodes.value, parentNodeId);
+    if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return [];
+    const cacheKey = sidebarTableSearchCacheKey(parent);
+    if (!cacheKey) return [];
+    await ensureConnected(parent.connectionId);
+    const config = getConfig(parent.connectionId);
+    const querySchema = connectionObjectTreeQuerySchema(config, parent.database, parent.schema);
+    const objectTypes = parent.type === "group-tables" ? objectTypesForGroupNode(parent.type) : undefined;
+    const pageSize = sidebarObjectGroupPageSize();
+    const entries: TableInfo[] = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await listTablesWithOptionalTableNameFilter(parent.connectionId, parent.database, querySchema, undefined, pageSize, offset, objectTypes, parent.catalog);
+      entries.push(...page);
+      if (page.length < pageSize) break;
+    }
+    const deduped = [...new Map(entries.map((entry) => [`${entry.table_type}\0${entry.name}`, entry])).values()];
+    const existing = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
+    const tableSearchIndex = { complete: true as const, indexedAt: new Date().toISOString(), entries: deduped.map((entry) => ({ name: entry.name, tableType: entry.table_type })) };
+    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(existing?.children ?? [], Date.now(), tableSearchIndex));
+    return deduped;
   }
 
   async function savePersistedConnectionTreeChildren(cacheKey: string, children: TreeNode[]) {
     const metadataChildren = connectionMetadataChildren(children);
     if (metadataChildren.length === 0) return;
     await savePersistedTreeChildren(cacheKey, metadataChildren);
+  }
+
+  function connectionRootCacheKey(connectionId: string, config: ConnectionConfig | undefined): string | null {
+    if (!config || connectionIsDorisFamilyCatalogCapable(config)) return null;
+    if (config.db_type === "duckdb") return schemaCacheKey(connectionId, "duckdb-root");
+    if (connectionUsesVisibleSchemaFilter(config)) {
+      return schemaCacheKey(connectionId, config.database || "", config.db_type === "oracle" ? "schemas-v2" : "schemas", config.show_system_schemas === true ? "show-system" : "hide-system");
+    }
+    return schemaCacheKey(connectionId, "databases-v2");
+  }
+
+  async function hydrateTreeNodeFromCache(node: TreeNode | null, cacheKey: string | null): Promise<boolean> {
+    if (!node || !cacheKey || loadedTreeNodeChildrenIds.value.has(node.id)) return false;
+    const load = beginTreeNodeLoad(node);
+    try {
+      return (await loadPersistedTreeChildren(node, cacheKey, load)).hit;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function hydrateConnectionRootFromCache(connectionId: string, config: ConnectionConfig | undefined): Promise<boolean> {
+    return hydrateTreeNodeFromCache(findConnectionNode(connectionId), connectionRootCacheKey(connectionId, config));
   }
 
   function isTreeNodeLoadedChildrenUsable(node: TreeNode): boolean {
@@ -2018,7 +2084,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return current;
   }
 
-  function clearLoadedChildrenCache(prefix: string) {
+  function clearLoadedChildrenCache(prefix: string, options?: { deletePersisted?: boolean }) {
     for (const id of loadedTreeNodeChildrenIds.value) {
       if (id === prefix || id.startsWith(`${prefix}:`)) {
         loadedTreeNodeChildrenIds.value.delete(id);
@@ -2030,6 +2096,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     }
     invalidateMetadataCachesByTreePrefix(prefix);
+    if (options?.deletePersisted === false) return;
     const rawPrefix = `${prefix}:`;
     const encodedPrefix = `${schemaCacheKey(prefix)}:`;
     if (rawPrefix === encodedPrefix) {
@@ -2598,7 +2665,9 @@ export const useConnectionStore = defineStore("connection", () => {
       node.children = [];
     }
     clearConnectionRootMetadataLoad(connectionId);
-    clearLoadedChildrenCache(connectionId);
+    // Disconnecting only tears down the live session. Keep the schema snapshot so
+    // reconnecting can render databases and table names before the remote refresh.
+    clearLoadedChildrenCache(connectionId, { deletePersisted: false });
     if (activeConnectionId.value === connectionId) {
       activeConnectionId.value = null;
     }
@@ -2832,6 +2901,16 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadDatabases(connectionId: string, options?: LoadTreeOptions) {
     const configForScope = getConfig(connectionId);
+    const searchFilter = activeTreeLoadSearchFilter(options);
+    if (!options?.force && !options?.connectedOnly && !searchFilter) {
+      const cacheHit = await hydrateConnectionRootFromCache(connectionId, configForScope);
+      if (cacheHit) {
+        // Render the last known metadata immediately; network validation and refresh
+        // continue in the background so opening a connection never waits on them.
+        void loadDatabases(connectionId, { ...options, force: true }).catch((error) => recordMetadataLoadError(connectionId, error));
+        return;
+      }
+    }
     return runTreeMetadataLoad(
       {
         kind: "connection-databases",
@@ -3861,6 +3940,23 @@ export const useConnectionStore = defineStore("connection", () => {
     const configForScope = getConfig(connectionId);
     const simpleObjectDisplayForScope = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
     const objectTypesForScope = simpleObjectDisplayForScope ? supportedSidebarObjectTypes(configForScope) : undefined;
+    const searchFilter = activeTreeLoadSearchFilter(options);
+    const querySchemaForScope = connectionObjectTreeQuerySchema(configForScope, database, schema);
+    const effectiveSchemaForScope = connectionObjectTreeNodeSchema(configForScope, database, schema);
+    const tableNameFilterForScope = activeTableNameFilterForScope({
+      connectionId,
+      database,
+      schema: effectiveSchemaForScope ?? querySchemaForScope,
+      nodeKind: simpleObjectDisplayForScope ? "simple-tables" : "group-tables",
+    });
+    if (!options?.force && simpleObjectDisplayForScope && !searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilterForScope) {
+      const nodeId = schema ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
+      const cacheKey = schemaCacheKey(connectionId, database, schema || "", "objects-simple-v6");
+      if (await hydrateTreeNodeFromCache(findNode(treeNodes.value, nodeId), cacheKey)) {
+        void loadTables(connectionId, database, schema, { ...options, force: true }).catch((error) => recordMetadataLoadError(connectionId, error));
+        return;
+      }
+    }
     return runTreeMetadataLoad(
       {
         kind: "schema-tables",
@@ -3976,6 +4072,24 @@ export const useConnectionStore = defineStore("connection", () => {
     const configForScope = node.connectionId ? getConfig(node.connectionId) : undefined;
     const objectTypesForScope = objectTypesForGroupNode(node.type);
     const pageSizeForScope = sidebarObjectGroupPageSize();
+    const searchFilter = activeTreeLoadSearchFilter(options);
+    const querySchemaForScope = connectionObjectTreeQuerySchema(configForScope, node.database || "", node.schema);
+    const effectiveSchemaForScope = connectionObjectTreeNodeSchema(configForScope, node.database || "", node.schema);
+    const tableNameFilterForScope = activeTableNameFilterForScope({
+      connectionId: node.connectionId,
+      database: node.database,
+      schema: effectiveSchemaForScope ?? querySchemaForScope,
+      nodeKind: node.type,
+      catalog: node.catalog,
+    });
+    if (!options?.force && !searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilterForScope) {
+      if (await hydrateTreeNodeFromCache(node, objectGroupCacheKey(node))) {
+        void loadObjectGroupChildren(node, { ...options, force: true }).catch((error) => {
+          if (node.connectionId) recordMetadataLoadError(node.connectionId, error);
+        });
+        return;
+      }
+    }
     return runTreeMetadataLoad(
       {
         kind: "object-group",
@@ -6571,6 +6685,8 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshTreeNodeForTableNameFilter,
     setSidebarTableSearchQuery,
     refreshSidebarTableSearch,
+    loadSidebarTableSearchIndex,
+    refreshSidebarTableSearchIndex,
     createConnectionGroup(name: string, parentGroupId?: string | null) {
       const result = createGroupOp(sidebarLayout.value, name, parentGroupId);
       updateLayoutAndRebuild(result.layout);

@@ -459,6 +459,8 @@ export interface EditorSettings {
   sidebarConnectionSortMode: ConnectionListSortMode;
   sidebarObjectDisplay: "grouped" | "simple";
   sidebarTableSearchEnabled: boolean;
+  sidebarTableSearchLocal: boolean;
+  sidebarGlobalSearchLocal: boolean;
   autoSelectActiveSidebarNode: boolean;
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
@@ -627,6 +629,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarConnectionSortMode: "manual",
   sidebarObjectDisplay: "grouped",
   sidebarTableSearchEnabled: false,
+  sidebarTableSearchLocal: true,
+  sidebarGlobalSearchLocal: false,
   autoSelectActiveSidebarNode: false,
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
@@ -914,6 +918,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
+    sidebarTableSearchLocal: typeof settings.sidebarTableSearchLocal === "boolean" ? settings.sidebarTableSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal,
+    sidebarGlobalSearchLocal: typeof settings.sidebarGlobalSearchLocal === "boolean" ? settings.sidebarGlobalSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
     openTabsRestoreMode: normalizeOpenTabsRestoreMode((settings as Partial<EditorSettings>).openTabsRestoreMode, (settings as Partial<EditorSettings> & { restoreOpenTabsOnLaunch?: boolean }).restoreOpenTabsOnLaunch),
     disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode((settings as Partial<EditorSettings>).disconnectTabHandlingMode, (settings as Partial<EditorSettings> & { closeQueryTabsOnDisconnect?: boolean }).closeQueryTabsOnDisconnect),
@@ -1355,6 +1361,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
+    if (partial.sidebarTableSearchLocal !== undefined) editorSettings.value.sidebarTableSearchLocal = partial.sidebarTableSearchLocal;
+    if (partial.sidebarGlobalSearchLocal !== undefined) editorSettings.value.sidebarGlobalSearchLocal = partial.sidebarGlobalSearchLocal;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);

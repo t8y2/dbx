@@ -6,8 +6,10 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import type { ObjectSourceKind, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
+import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, resolveSidebarFilterGuards } from "@/lib/sidebar/sidebarSearchTree";
+import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
+import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -29,6 +31,8 @@ import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { Switch } from "@/components/ui/switch";
 import { cancelPendingSidebarDataOpen, runSidebarDataOpenImmediately, type SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Button } from "@/components/ui/button";
@@ -107,6 +111,7 @@ const tableSearchTimers = new Map<string, number>();
 const tableSearchFocusRestoreTokens = new Map<string, number>();
 let tableSearchFocusRestoreTokenSeq = 0;
 let latestTableSearchInteractionParentId: string | null = null;
+let localTableSearchFocusPending = false;
 
 watch(
   searchQuery,
@@ -153,6 +158,10 @@ watch(
 
 watch(deferredSearchQuery, (newQuery, oldQuery) => {
   store.sidebarSearchQuery = newQuery;
+  if (settingsStore.editorSettings.sidebarGlobalSearchLocal) {
+    if (!newQuery && oldQuery) searchRefreshedNodeIds.clear();
+    return;
+  }
   const tasks: Promise<void>[] = [];
   for (const root of store.treeNodes) {
     collectExpandedObjectSearchTargets(root, tasks, newQuery ? searchRefreshedNodeIds : undefined);
@@ -353,12 +362,44 @@ function focusTableSearchInput(parentNodeId: string) {
 }
 
 const displayedTreeNodes = computed(() => sortConnectionListForDisplay(store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode));
+const localTableSearchResults = ref<Record<string, TableInfo[] | null>>({});
+
+const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
+const localTableSearchChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
+
+function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
+  return nodes.map((node) => {
+    const children = node.children ? filterLocallySearchedTables(node.children) : undefined;
+    const query = settingsStore.editorSettings.sidebarTableSearchLocal && localTableSearchParentTypes.has(node.type) ? store.sidebarTableSearchQueries[node.id]?.trim() : "";
+    if (!query || !children) return children === node.children ? node : { ...node, children };
+
+    const indexed = localTableSearchResults.value[node.id];
+    const matchingChildren =
+      indexed === null
+        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()))
+        : indexed
+          ? buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) })
+          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()));
+    return { ...node, children: matchingChildren, isExpanded: true };
+  });
+}
+
+async function loadLocalTableSearchResults(parentNodeId: string, refresh = false) {
+  try {
+    const entries = refresh ? await store.refreshSidebarTableSearchIndex(parentNodeId) : await store.loadSidebarTableSearchIndex(parentNodeId);
+    localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: entries };
+  } finally {
+    if (latestTableSearchInteractionParentId === parentNodeId) focusTableSearchInput(parentNodeId);
+  }
+}
 
 const filteredNodes = computed(() => {
   let nodes = displayedTreeNodes.value;
   if (showConnectedConnectionsOnly.value) {
     nodes = filterSidebarTreeToConnectedConnections(nodes, store.connectedIds);
   }
+
+  nodes = filterLocallySearchedTables(nodes);
 
   const q = deferredSearchQuery.value;
   nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value);
@@ -622,7 +663,10 @@ watch(flatNodes, (nodes) => {
     }
   }
   stickyScrollTop.value = 0;
-  void nextTick(scheduleSidebarScrollMetricsUpdate);
+  void nextTick(() => {
+    treeScrollerRef.value?.forceUpdate(true);
+    scheduleSidebarScrollMetricsUpdate();
+  });
 });
 
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
@@ -793,11 +837,19 @@ const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
 provide(sidebarTreeContextKey, {
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
-  setTableSearchQuery: (parentNodeId, query) => {
+  setTableSearchQuery: (parentNodeId, query, local) => {
     latestTableSearchInteractionParentId = parentNodeId;
     store.setSidebarTableSearchQuery(parentNodeId, query);
-    scheduleSidebarTableSearchRefresh(parentNodeId, { restoreFocus: true });
+    if (local) {
+      localTableSearchFocusPending = true;
+      void nextTick(() => {
+        focusTableSearchInput(parentNodeId);
+        localTableSearchFocusPending = false;
+      });
+      void loadLocalTableSearchResults(parentNodeId);
+    } else scheduleSidebarTableSearchRefresh(parentNodeId, { restoreFocus: true });
   },
+  refreshTableSearchIndex: (parentNodeId) => void loadLocalTableSearchResults(parentNodeId, true),
   registerPasteHandler: pasteHandlerRegistry.register,
 });
 provide(sidebarTreeRuntimeKey, sidebarTreeRuntime);
@@ -1441,6 +1493,7 @@ function focusSearchAtEnd() {
 
 function onWindowKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
+  if (localTableSearchFocusPending) return;
   if (sidebarShortcutTargetIsActive(event.target)) {
     if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isEditConnectionShortcut(event)) {
       if (requestSelectedConnectionEdit()) {
@@ -1632,6 +1685,9 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             <X class="h-3 w-3" />
           </button>
         </div>
+        <LightTooltip :text="t('sidebar.globalLocalSearchTooltip')" side="top" :delay="300">
+          <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarGlobalSearchLocal" :aria-label="t('sidebar.globalLocalSearch')" @update:model-value="settingsStore.updateEditorSettings({ sidebarGlobalSearchLocal: Boolean($event) })" />
+        </LightTooltip>
         <button class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
           <Crosshair class="h-3.5 w-3.5" />
         </button>

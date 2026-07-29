@@ -1849,6 +1849,8 @@ export default withEnglishFallback({
     editResend: "再送信",
     editCancel: "キャンセル",
     cannotDeleteActiveConfig: "現在アクティブな設定は削除できません。先に他の設定に切り替えてください。",
+    maxRetries: "最大リトライ回数",
+    maxRetriesHint: "レート制限、タイムアウト、または一時的なネットワークエラーが発生した場合に自動的にリトライします。0 = リトライなし、最大10。",
   },
   contextMenu: {
     openConnection: "接続を開く",

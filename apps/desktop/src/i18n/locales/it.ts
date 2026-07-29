@@ -1848,6 +1848,8 @@ export default withEnglishFallback({
     editResend: "Invia di nuovo",
     editCancel: "Annulla",
     cannotDeleteActiveConfig: "Non è possibile eliminare la configurazione attualmente attiva. Passa a un'altra configurazione prima.",
+    maxRetries: "Numero massimo di tentativi",
+    maxRetriesHint: "Riprova automaticamente in caso di limitazione, timeout o errore di rete temporaneo. 0 = nessun tentativo, massimo 10.",
   },
   contextMenu: {
     openConnection: "Apri Connessione",

@@ -1850,6 +1850,8 @@ export default withEnglishFallback({
     editResend: "Reenviar",
     editCancel: "Cancelar",
     cannotDeleteActiveConfig: "Não é possível excluir a configuração ativa atual. Mude para outra configuração primeiro.",
+    maxRetries: "Número máximo de tentativas",
+    maxRetriesHint: "Tente novamente automaticamente ao encontrar limitação de taxa, tempo limite ou erro de rede temporário. 0 = não tentar novamente, máximo 10.",
   },
   contextMenu: {
     openConnection: "Abrir Conexão",

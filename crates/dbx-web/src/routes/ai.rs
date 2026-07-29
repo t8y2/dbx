@@ -611,11 +611,8 @@ mod tests {
         let result = super::ai_test_connection(State(web_state), axum::Json(body)).await;
 
         // 429 → should NOT succeed (no retry).
-        match result {
-            Ok(axum::Json(resp)) => {
-                assert!(!resp.success, "429 with max_retries=0 must fail, got success");
-            }
-            Err(_) => {} // Also acceptable: error propagation path.
+        if let Ok(axum::Json(resp)) = result {
+            assert!(!resp.success, "429 with max_retries=0 must fail, got success");
         }
 
         srv.abort();

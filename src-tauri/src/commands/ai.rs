@@ -274,10 +274,9 @@ mod tests {
 
     use tauri::Manager;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use uuid::Uuid;
 
     use super::super::connection::AppState;
-    use dbx_core::ai::{merge_global_max_retries, AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
+    use dbx_core::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
 
     /// Spawn a TCP server that returns 429 and counts connections.
     async fn counting_429_server() -> (String, Arc<AtomicU32>, tokio::task::JoinHandle<()>) {
@@ -409,7 +408,7 @@ mod tests {
         let (url, count, srv) = counting_429_server().await;
 
         let app_state = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
-        let app = tauri::test::mock_app(tauri::test::noop_assets());
+        let app = tauri::test::mock_app();
         app.manage(app_state);
 
         let state: tauri::State<'_, Arc<AppState>> = app.state();

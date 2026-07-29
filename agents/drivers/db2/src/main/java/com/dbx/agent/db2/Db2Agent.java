@@ -97,7 +97,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
     public List<TableInfo> listTables(String schema) {
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            String sql = "SELECT TABNAME, TYPE FROM SYSCAT.TABLES WHERE TABSCHEMA = ? AND TYPE IN ('T','V') ORDER BY TABNAME";
+            String sql = "SELECT TABNAME, TYPE, REMARKS FROM SYSCAT.TABLES WHERE TABSCHEMA = ? AND TYPE IN ('T','V') ORDER BY TABNAME";
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, schema);
                 try (ResultSet rs = stmt.executeQuery()) {
@@ -108,7 +108,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
                             case "V" -> "VIEW";
                             default -> db2Type;
                         };
-                        result.add(new TableInfo(rs.getString(1).trim(), type, null));
+                        result.add(new TableInfo(rs.getString(1).trim(), type, rs.getString(3)));
                     }
                 }
             }
@@ -269,7 +269,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
 
             List<ColumnInfo> result = new ArrayList<>();
             String colSql = """
-                SELECT COLNAME, TYPENAME, NULLS, DEFAULT, LENGTH, SCALE
+                SELECT COLNAME, TYPENAME, NULLS, DEFAULT, LENGTH, SCALE, REMARKS
                 FROM SYSCAT.COLUMNS
                 WHERE TABSCHEMA = ? AND TABNAME = ?
                 ORDER BY COLNO
@@ -292,7 +292,7 @@ public final class Db2Agent extends BaseDatabaseAgent {
                             trimNullable(rs.getString("DEFAULT")),
                             pkColumns.contains(name),
                             null,
-                            null,
+                            rs.getString("REMARKS"),
                             NUMERIC_PRECISION_TYPES.contains(typeName) ? length : null,
                             NUMERIC_SCALE_TYPES.contains(typeName) ? scale : null,
                             CHARACTER_LENGTH_TYPES.contains(typeName) ? length : null

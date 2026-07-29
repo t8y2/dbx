@@ -415,16 +415,12 @@ pub async fn preview_transfer_ownership(
     transfer::validate_transfer_target_table_names(&req).map_err(AppError::from)?;
     let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
     let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
-    let source_pool_key = state
-        .app
-        .get_or_create_pool(&req.source_connection_id, Some(&req.source_database))
-        .await
-        .map_err(AppError::from)?;
-    let target_pool_key = state
-        .app
-        .get_or_create_pool(&req.target_connection_id, Some(&req.target_database))
-        .await
-        .map_err(AppError::from)?;
+    let source_db = transfer_db_for_catalog(req.source_catalog.as_deref(), &source_db_type, &req.source_database);
+    let target_db = transfer_db_for_catalog(req.target_catalog.as_deref(), &target_db_type, &req.target_database);
+    let source_pool_key =
+        state.app.get_or_create_pool(&req.source_connection_id, source_db).await.map_err(AppError::from)?;
+    let target_pool_key =
+        state.app.get_or_create_pool(&req.target_connection_id, target_db).await.map_err(AppError::from)?;
     let preview = transfer::preview_transfer_ownership(
         &state.app,
         &req,

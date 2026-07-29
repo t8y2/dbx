@@ -338,10 +338,12 @@ pub async fn preview_transfer_ownership(
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_target_table_names(&request)?;
-    let source_pool_key =
-        state.get_or_create_pool(&request.source_connection_id, Some(&request.source_database)).await?;
-    let target_pool_key =
-        state.get_or_create_pool(&request.target_connection_id, Some(&request.target_database)).await?;
+    let source_db =
+        transfer_db_for_catalog(request.source_catalog.as_deref(), &source_db_type, &request.source_database);
+    let target_db =
+        transfer_db_for_catalog(request.target_catalog.as_deref(), &target_db_type, &request.target_database);
+    let source_pool_key = state.get_or_create_pool(&request.source_connection_id, source_db).await?;
+    let target_pool_key = state.get_or_create_pool(&request.target_connection_id, target_db).await?;
 
     dbx_core::transfer::preview_transfer_ownership(
         &state,
